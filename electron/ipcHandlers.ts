@@ -19640,6 +19640,9 @@ export function initializeIpcHandlers(appState: AppState): void {
         const { generateMode } = require('./services/ModeGenerator');
         const llmHelper = appState.processingHelper?.getLLMHelper?.();
         if (!llmHelper) return { success: false, error: 'llm_unavailable' };
+        if (typeof llmHelper.hasAnyConfiguredProvider === 'function' && !llmHelper.hasAnyConfiguredProvider()) {
+          return { success: false, error: 'llm_not_configured' };
+        }
 
         // Injected LLM entry: raw system-prompt override, no active-mode injection,
         // no knowledge-mode intercept — a clean generation call that routes through
@@ -19689,14 +19692,23 @@ export function initializeIpcHandlers(appState: AppState): void {
       try {
         const { ModesManager } = require('./services/ModesManager');
         const mgr = ModesManager.getInstance();
+        if (id === '__profile_okf__') {
+          return { success: false, error: 'reserved_mode' };
+        }
+        if (updates.name !== undefined && !updates.name.trim()) {
+          return { success: false, error: 'empty_name' };
+        }
+        const existing = mgr.getModes().find((m: any) => m.id === id);
+        if (!existing) {
+          return { success: false, error: 'mode_not_found' };
+        }
         // Gate: changing templateType to a non-general template requires pro.
         // Also gate if the existing mode is already non-general (editing a pro mode requires pro).
         if (!isProOrTrialActive()) {
           if (updates.templateType && updates.templateType !== 'general') {
             return { success: false, error: 'pro_required' };
           }
-          const existing = mgr.getModes().find((m: any) => m.id === id);
-          if (existing && existing.templateType !== 'general') {
+          if (existing.templateType !== 'general') {
             return { success: false, error: 'pro_required' };
           }
         }
@@ -19742,6 +19754,9 @@ export function initializeIpcHandlers(appState: AppState): void {
     hasLiveTranscriptCapable?: boolean;
   }) => {
     try {
+      if (!input || !input.templateType) {
+        return null;
+      }
       // Source Contract Builder is a Phase-7 pro feature: the panel renders
       // for any non-general mode and gates on pro via the surrounding UI,
       // but the IPC must enforce the same gate so a hand-crafted payload
@@ -19877,8 +19892,25 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('modes:delete', async (_, id: string) => {
     try {
       if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+      if (id === '__profile_okf__') return { success: false, error: 'reserved_mode' };
       const { ModesManager } = require('./services/ModesManager');
-      ModesManager.getInstance().deleteMode(id);
+      const mgr = ModesManager.getInstance();
+      const targetMode = mgr.getModes().find((m: any) => m.id === id);
+      if (!targetMode) return { success: false, error: 'mode_not_found' };
+      if (targetMode.templateType === 'general' && targetMode.isBuiltin) {
+        return { success: false, error: 'cannot_delete_general' };
+      }
+      const activeMode = mgr.getActiveMode();
+      const wasActive = activeMode?.id === id;
+      mgr.deleteMode(id);
+      if (wasActive) {
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (!win.isDestroyed()) {
+            win.webContents.send('mode-changed', { id: null, name: null, fileCount: 0, indexedCount: 0 });
+            win.webContents.send('modes-active-cleared');
+          }
+        });
+      }
       return { success: true };
     } catch (e: any) {
       console.error('[IPC] modes:delete error:', e);
@@ -19890,11 +19922,17 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       // Allow clearing (null) or setting general mode without pro; all other modes require pro
       if (id !== null) {
+        if (id === '__profile_okf__') {
+          return { success: false, error: 'reserved_mode' };
+        }
         const { ModesManager } = require('./services/ModesManager');
         const targetMode = ModesManager.getInstance()
           .getModes()
           .find((m: any) => m.id === id);
-        if (targetMode && targetMode.templateType !== 'general' && !isProOrTrialActive()) {
+        if (!targetMode) {
+          return { success: false, error: 'mode_not_found' };
+        }
+        if (targetMode.templateType !== 'general' && !isProOrTrialActive()) {
           return { success: false, error: 'pro_required' };
         }
       }
@@ -19973,6 +20011,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('mode-changed', { id, name: activeName, fileCount, indexedCount });
       });
+      if (!id) {
+        BrowserWindow.getAllWindows().forEach((win) => {
+          if (!win.isDestroyed()) win.webContents.send('modes-active-cleared');
+        });
+      }
       // Phase 3 — re-bind dynamic action engine so the new mode's trigger pack
       // takes effect immediately. New (sessionId, modeId) pair flushes the per-
       // session store inside DynamicActionEngine, killing any old-mode candidates.
@@ -20031,6 +20074,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // PI v3 (W3): per-file index status for the Modes Manager UI badges.
   safeHandle('modes:get-reference-file-status', async (_, modeId: string) => {
     try {
+      if (!modeId || modeId === '__profile_okf__') return { success: true, statuses: [] };
       const { ModesManager } = require('./services/ModesManager');
       return { success: true, statuses: ModesManager.getInstance().getReferenceFileIndexStatuses(modeId) };
     } catch (e: any) {
@@ -20041,6 +20085,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('modes:get-reference-files', async (_, modeId: string) => {
     try {
+      if (!modeId || modeId === '__profile_okf__') return [];
       const { ModesManager } = require('./services/ModesManager');
       return ModesManager.getInstance().getReferenceFiles(modeId);
     } catch (e: any) {
@@ -20049,7 +20094,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle('modes:upload-reference-file', async (_, modeId: string) => {
+  safeHandle('modes:upload-reference-file', async (event, modeId: string) => {
     // Bug fix 2026-07-28 (code review): the .doc friendly-message check
     // below used to read the thrown error's own path field, but the Error
     // thrown by SafeDocumentTextExtractor's extension whitelist never sets
@@ -20059,7 +20104,16 @@ export function initializeIpcHandlers(appState: AppState): void {
     let selectedPath: string | undefined;
     try {
       if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
-      const result: any = await dialog.showOpenDialog({
+      if (!modeId || modeId === '__profile_okf__') return { success: false, error: 'invalid_mode' };
+      const { ModesManager } = require('./services/ModesManager');
+      const targetMode = ModesManager.getInstance().getModes().find((m: any) => m.id === modeId);
+      if (!targetMode) return { success: false, error: 'mode_not_found' };
+
+      const { dialog, BrowserWindow } = require('electron');
+      const parent = (event?.sender ? BrowserWindow.fromWebContents(event.sender) : null)
+        ?? BrowserWindow.getFocusedWindow()
+        ?? BrowserWindow.getAllWindows()[0];
+      const dialogOptions = {
         properties: ['openFile'],
         filters: [
           // One source of truth with the extractor: a hand-copied list here
@@ -20067,7 +20121,10 @@ export function initializeIpcHandlers(appState: AppState): void {
           { name: 'Text, Documents & Code', extensions: [...SAFE_DOCUMENT_EXTENSIONS].map(extension => extension.slice(1)) },
           { name: 'All Files', extensions: ['*'] },
         ],
-      });
+      };
+      const result: any = parent
+        ? await dialog.showOpenDialog(parent, dialogOptions)
+        : await dialog.showOpenDialog(dialogOptions);
       if (result.canceled || !result.filePaths?.[0]) return { success: false, cancelled: true };
       selectedPath = result.filePaths[0];
       const { ingestModeReferenceFile } = require('./services/ModeReferenceFileIngestion') as typeof import('./services/ModeReferenceFileIngestion');
@@ -20460,7 +20517,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     async (_, modeId: string, title: string, description: string) => {
       try {
         if (!isProOrTrialActive()) return { success: false, error: 'pro_required' };
+        if (!modeId || modeId === '__profile_okf__') return { success: false, error: 'invalid_mode' };
         const { ModesManager } = require('./services/ModesManager');
+        const targetMode = ModesManager.getInstance().getModes().find((m: any) => m.id === modeId);
+        if (!targetMode) return { success: false, error: 'mode_not_found' };
         const section = ModesManager.getInstance().addNoteSection({ modeId, title, description });
         return { success: true, section };
       } catch (e: any) {

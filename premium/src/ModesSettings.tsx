@@ -386,7 +386,8 @@ const TEMPLATE_MAP = Object.fromEntries(TEMPLATES.map(t => [t.type, t]));
 
 // xl() from bundle — only the default General mode is "locked" (no template change, shown differently)
 function isLockedGeneral(mode: Mode): boolean {
-  return mode.templateType === 'general' && mode.name === 'General';
+  return Boolean(mode.isBuiltin && mode.templateType === 'general' && mode.name === 'General')
+    || mode.id === 'mode_general_default';
 }
 
 function contextPlaceholder(templateType: string): string {
@@ -1359,12 +1360,13 @@ export default function ModesSettings({
   };
 
   // ── Load modes ──────────────────────────────────────────────────────────────
-  const loadModes = useCallback(async () => {
+  const loadModes = useCallback(async (preferredId?: string) => {
     try {
       const all: Mode[] = (await api()?.modesGetAll?.()) ?? [];
       setModes(all);
       setSelectedId(prev => {
-        if (prev && all.find(m => m.id === prev)) return prev;
+        const target = preferredId ?? prev;
+        if (target && all.find(m => m.id === target)) return target;
         return all.find(m => m.isActive)?.id ?? all[0]?.id ?? null;
       });
     } catch (err: any) {
@@ -1539,7 +1541,14 @@ export default function ModesSettings({
   const saveContext = async (): Promise<boolean> => {
     if (!selectedId) return false;
     try {
-      await api()?.modesUpdate?.(selectedId, { customContext: context });
+      const res = await api()?.modesUpdate?.(selectedId, { customContext: context });
+      if (res && res.success === false) {
+        setSaveFailed(true);
+        setError(res.error === 'pro_required'
+          ? 'Editing this mode requires Natively Pro.'
+          : res.error ? `Failed to save instructions: ${res.error}` : 'Failed to save instructions.');
+        return false;
+      }
       setContextSaved(true);
       setSaveFailed(false);
       setSavePulsing(true);
@@ -1571,10 +1580,14 @@ export default function ModesSettings({
       const result = await api()?.modesCreate?.({ name, templateType: type });
       if (result?.success && result.mode) {
         setFreshFiles(s => new Set(s).add(result.mode.id));
-        await loadModes();
+        await loadModes(result.mode.id);
         setSelectedId(result.mode.id);
         setShowTemplates(false);
         setError(null);
+      } else {
+        setError(result?.error === 'pro_required'
+          ? 'Creating custom modes requires Natively Pro.'
+          : result?.error ? `Failed to create mode: ${result.error}` : 'Failed to create mode.');
       }
     } catch (err: any) {
       console.error('[ModesSettings] createMode failed:', err);
@@ -1588,10 +1601,14 @@ export default function ModesSettings({
       if (result?.success && result.mode) {
         setAutoEditId(result.mode.id);
         setFreshFiles(s => new Set(s).add(result.mode.id));
-        await loadModes();
+        await loadModes(result.mode.id);
         setSelectedId(result.mode.id);
         setShowTemplates(false);
         setError(null);
+      } else {
+        setError(result?.error === 'pro_required'
+          ? 'Creating custom modes requires Natively Pro.'
+          : result?.error ? `Failed to create mode: ${result.error}` : 'Failed to create mode.');
       }
     } catch (err: any) {
       console.error('[ModesSettings] createEmptyMode failed:', err);
@@ -1602,7 +1619,14 @@ export default function ModesSettings({
   // ── Rename ──────────────────────────────────────────────────────────────────
   const renameMode = async (id: string, name: string) => {
     try {
-      await api()?.modesUpdate?.(id, { name });
+      const res = await api()?.modesUpdate?.(id, { name });
+      if (res && res.success === false) {
+        setError(res.error === 'pro_required'
+          ? 'Renaming this mode requires Natively Pro.'
+          : res.error ? `Failed to rename mode: ${res.error}` : 'Failed to rename mode.');
+        void loadModes();
+        return;
+      }
       setModes(prev => prev.map(m => m.id === id ? { ...m, name } : m));
     } catch (err: any) {
       console.error('[ModesSettings] renameMode failed:', err);
@@ -1617,7 +1641,14 @@ export default function ModesSettings({
     setModes(remaining);
     if (selectedId === id) setSelectedId(remaining[0]?.id ?? null);
     try {
-      await api()?.modesDelete?.(id);
+      const res = await api()?.modesDelete?.(id);
+      if (res && res.success === false) {
+        setError(res.error === 'pro_required'
+          ? 'Deleting this mode requires Natively Pro.'
+          : res.error ? `Failed to delete mode: ${res.error}` : 'Failed to delete mode.');
+        void loadModes();
+        return;
+      }
     } catch (err: any) {
       console.error('[ModesSettings] deleteMode failed:', err);
       setError('Failed to delete mode.');
@@ -1668,6 +1699,10 @@ export default function ModesSettings({
           ? { ...m, referenceFileCount: m.referenceFileCount + 1 } : m));
         setError(null);
         setFileStatuses(p => ({ ...p, [result.file.id]: 'pending' }));
+        // Refresh source contract in case authority migrated (e.g. general mode with first file)
+        api()?.modesGetSourceContract?.(selectedId)
+          .then((c: any) => { if (c) setSourceContract(c); })
+          .catch(() => {});
       } else if (result && !result.cancelled) {
         setError(result.error === 'pro_required'
           ? 'Reference files require Pro.'
@@ -1686,7 +1721,23 @@ export default function ModesSettings({
     setModes(prev => prev.map(m => m.id === selectedId
       ? { ...m, referenceFileCount: Math.max(0, m.referenceFileCount - 1) } : m));
     try {
-      await api()?.modesDeleteReferenceFile?.(fileId);
+      const res = await api()?.modesDeleteReferenceFile?.(fileId);
+      if (res && res.success === false) {
+        setError(res.error === 'pro_required'
+          ? 'Deleting reference files requires Natively Pro.'
+          : res.error ? `Failed to delete file: ${res.error}` : 'Failed to delete file.');
+        if (selectedId) {
+          const files = await api()?.modesGetReferenceFiles?.(selectedId);
+          setRefFiles(files ?? []);
+        }
+        void loadModes();
+        return;
+      }
+      if (selectedId) {
+        api()?.modesGetSourceContract?.(selectedId)
+          .then((c: any) => { if (c) setSourceContract(c); })
+          .catch(() => {});
+      }
     } catch (err: any) {
       console.error('[ModesSettings] deleteFile failed:', err);
       setError('Failed to delete file.');
@@ -1701,6 +1752,10 @@ export default function ModesSettings({
     if (result?.success && result.section) {
       setNoteSections(prev => [...prev, result.section]);
       setFreshSections(s => new Set(s).add(result.section.id));
+    } else {
+      setError(result?.error === 'pro_required'
+        ? 'Custom note sections require Natively Pro.'
+        : result?.error ? `Failed to add section: ${result.error}` : 'Failed to add section.');
     }
     setAddingSection(false);
   };
@@ -1708,7 +1763,16 @@ export default function ModesSettings({
   const updateSectionTitle = async (id: string, title: string) => {
     setNoteSections(prev => prev.map(s => s.id === id ? { ...s, title } : s));
     try {
-      await api()?.modesUpdateNoteSection?.(id, { title });
+      const res = await api()?.modesUpdateNoteSection?.(id, { title });
+      if (res && res.success === false) {
+        setError(res.error === 'pro_required'
+          ? 'Editing note sections requires Natively Pro.'
+          : res.error ? `Failed to update section: ${res.error}` : 'Failed to update section.');
+        if (selectedId) {
+          const fresh = await api()?.modesGetNoteSections?.(selectedId);
+          setNoteSections(fresh ?? []);
+        }
+      }
     } catch (err: any) {
       console.error('[ModesSettings] updateSectionTitle failed:', err);
       setError('Failed to update section.');
@@ -1718,7 +1782,16 @@ export default function ModesSettings({
   const updateSectionDesc = async (id: string, description: string) => {
     setNoteSections(prev => prev.map(s => s.id === id ? { ...s, description } : s));
     try {
-      await api()?.modesUpdateNoteSection?.(id, { description });
+      const res = await api()?.modesUpdateNoteSection?.(id, { description });
+      if (res && res.success === false) {
+        setError(res.error === 'pro_required'
+          ? 'Editing note sections requires Natively Pro.'
+          : res.error ? `Failed to update section: ${res.error}` : 'Failed to update section.');
+        if (selectedId) {
+          const fresh = await api()?.modesGetNoteSections?.(selectedId);
+          setNoteSections(fresh ?? []);
+        }
+      }
     } catch (err: any) {
       console.error('[ModesSettings] updateSectionDesc failed:', err);
       setError('Failed to update section.');
@@ -1728,7 +1801,16 @@ export default function ModesSettings({
   const deleteSection = async (id: string) => {
     setNoteSections(prev => prev.filter(s => s.id !== id));
     try {
-      await api()?.modesDeleteNoteSection?.(id);
+      const res = await api()?.modesDeleteNoteSection?.(id);
+      if (res && res.success === false) {
+        setError(res.error === 'pro_required'
+          ? 'Deleting note sections requires Natively Pro.'
+          : res.error ? `Failed to delete section: ${res.error}` : 'Failed to delete section.');
+        if (selectedId) {
+          const fresh = await api()?.modesGetNoteSections?.(selectedId);
+          setNoteSections(fresh ?? []);
+        }
+      }
     } catch (err: any) {
       console.error('[ModesSettings] deleteSection failed:', err);
       setError('Failed to delete section.');
@@ -2099,8 +2181,19 @@ export default function ModesSettings({
                           const result = await api()?.modesUpdate?.(mode.id, { templateType: type });
                           if (result?.success) {
                             setModes(prev => prev.map(m => m.id === mode.id ? { ...m, templateType: type } : m));
+                            const freshContract = await api()?.modesGetSourceContract?.(mode.id);
+                            if (freshContract) setSourceContract(freshContract);
+                            loadAnswerPolicy(mode.id, type);
+                          } else {
+                            setError(result?.error === 'pro_required'
+                              ? 'Changing template requires Natively Pro.'
+                              : 'Failed to change template.');
+                            void loadModes();
                           }
-                        } catch (err) { console.error('[ModesSettings] template change failed:', err); }
+                        } catch (err) {
+                          console.error('[ModesSettings] template change failed:', err);
+                          void loadModes();
+                        }
                       }}
                       style={{ background: 'transparent', border: 'none', borderBottom: '1px solid var(--mm-input-border)', color: 'var(--mm-text-tertiary)', fontSize: 11, cursor: 'pointer', outline: 'none', fontFamily: 'inherit' }}
                     >

@@ -472,8 +472,18 @@ export class ModesManager {
         // L1: id is the secondary sort key for stable ordering when two modes
         // share createdAt to the millisecond.
         modes.sort((a, b) => {
-            if (a.templateType === 'general') return -1;
-            if (b.templateType === 'general') return 1;
+            const aGeneral = a.templateType === 'general';
+            const bGeneral = b.templateType === 'general';
+            if (aGeneral !== bGeneral) {
+                return aGeneral ? -1 : 1;
+            }
+            if (aGeneral && bGeneral) {
+                const aCanonical = a.isBuiltin && a.name === 'General';
+                const bCanonical = b.isBuiltin && b.name === 'General';
+                if (aCanonical !== bCanonical) {
+                    return aCanonical ? -1 : 1;
+                }
+            }
             const ta = new Date(a.createdAt).getTime();
             const tb = new Date(b.createdAt).getTime();
             if (ta !== tb) return ta - tb;
@@ -778,6 +788,13 @@ export class ModesManager {
     }
 
     public updateMode(id: string, updates: { name?: string; templateType?: ModeTemplateType; customContext?: string; sourceContract?: ModeSourceContract }): void {
+        if (id === PROFILE_OKF_RESERVED_MODE_ID) {
+            console.warn('[ModesManager] updateMode: refusing to update the reserved profile OKF mode');
+            return;
+        }
+        if (updates.name !== undefined && !updates.name.trim()) {
+            throw new Error('updateMode: name cannot be empty');
+        }
         // Reject an unusable template BEFORE it reaches the row (2026-08-09).
         // Persisting one is not a harmless typo: read-time resolution silently
         // degrades it to `general`, which has NO profile sources, so the mode
@@ -1031,6 +1048,14 @@ export class ModesManager {
     }
 
     public deleteMode(id: string): void {
+        if (id === PROFILE_OKF_RESERVED_MODE_ID) {
+            console.warn('[ModesManager] deleteMode: refusing to delete the reserved profile OKF mode');
+            return;
+        }
+        const current = this.resolveMode(id);
+        if (current && current.templateType === 'general' && current.isBuiltin) {
+            throw new Error('deleteMode: built-in General mode cannot be deleted');
+        }
         // PI v3 (W3): mode_reference_files rows go via FK CASCADE, but the
         // persisted chunk vectors (mode_reference_chunks / index_state) have no
         // FK on purpose (the table is owned by the retriever) — drop them
