@@ -20132,7 +20132,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         modeId,
         filePath: selectedPath!,  // guarded + assigned on the straight line above
         onIndexStatus: (status, fileId) => {
-          BrowserWindow.getAllWindows().forEach((win) => {
+          BrowserWindow.getAllWindows().forEach((win: any) => {
             if (!win.isDestroyed()) win.webContents.send('mode-file-index-status', { modeId, fileId, phase: status });
           });
         },

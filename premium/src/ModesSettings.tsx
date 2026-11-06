@@ -2280,20 +2280,42 @@ export default function ModesSettings({
                       <span style={{ flex: 1, fontSize: 12, color: 'var(--mm-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {f.fileName}
                       </span>
-                      <span style={{ fontSize: 11, color: 'var(--mm-text-tertiary)', flexShrink: 0 }}>
-                        {fileStatuses[f.id] === 'indexing' ? (
-                          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <Loader2 size={10} className="animate-spin" /> Indexing
-                          </span>
-                        ) : fileStatuses[f.id] === 'ready' ? (
-                          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <Check size={10} style={{ color: 'var(--mm-active-blue)' }} /> Ready
-                          </span>
-                        ) : (
-                          <span style={{ color: 'var(--mm-text-tertiary)', fontSize: 10 }}>
-                            {((f.content?.length ?? 0) / 1000).toFixed(1)}k
-                          </span>
-                        )}
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                        <span style={{ fontSize: 11, color: 'var(--mm-text-tertiary)' }}>
+                          {fileStatuses[f.id] === 'indexing' ? (
+                            <span role="status" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <Loader2 size={10} className="animate-spin" /> Indexing
+                            </span>
+                          ) : fileStatuses[f.id] === 'ready' ? (
+                            <span
+                              role="status"
+                              aria-label="Semantic search ready"
+                              title="Semantic search ready"
+                              style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 12px', borderRadius: 999, background: 'rgba(34,197,94,0.14)', color: '#22c55e', fontSize: 11, fontWeight: 600, letterSpacing: '0.04em' }}
+                            >
+                              INDEXED
+                            </span>
+                          ) : fileStatuses[f.id] === 'lexical_only' ? (
+                            <span role="status" title="Semantic indexing is unavailable. Keyword search can still find text in this file; Natively will retry indexing when possible." style={{ color: '#fbbf24', fontSize: 10 }}>
+                              TEXT SEARCH ONLY
+                            </span>
+                          ) : fileStatuses[f.id] === 'failed' ? (
+                            <span role="status" title="Indexing failed. Natively will retry when possible." style={{ color: '#f87171', fontSize: 10 }}>
+                              INDEX FAILED
+                            </span>
+                          ) : fileStatuses[f.id] === 'ocr_required' ? (
+                            <span role="status" title="No readable text was extracted. Run OCR on this scanned file, then upload it again." style={{ color: '#fbbf24', fontSize: 10 }}>
+                              OCR REQUIRED
+                            </span>
+                          ) : fileStatuses[f.id] === 'pending' ? (
+                            <span role="status" title="This file is waiting to be indexed." style={{ color: 'var(--mm-text-tertiary)', fontSize: 10 }}>
+                              PENDING
+                            </span>
+                          ) : null}
+                        </span>
+                        <span style={{ color: 'var(--mm-text-tertiary)', fontSize: 10 }}>
+                          {((f.content?.length ?? 0) / 1000).toFixed(1)}k
+                        </span>
                       </span>
                       <button
                         onClick={() => deleteFile(f.id)}
