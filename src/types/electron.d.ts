@@ -513,6 +513,15 @@ export interface ElectronAPI {
   e2eInvoke: (channel: string, ...args: any[]) => Promise<any>
   modesUpdate: (id: string, updates: { name?: string; templateType?: string; customContext?: string; sourceContract?: any }) => Promise<{ success: boolean; error?: string }>
   modesGetSourceContract: (modeId: string) => Promise<any>
+  modesBuildUserSourceContract?: (input: {
+    modeId: string;
+    templateType: string;
+    switches: string[];
+    hasLiveTranscriptCapable?: boolean;
+  }) => Promise<any>
+  answerPolicyGet?: (input: { modeId?: string; templateType?: string }) => Promise<any>
+  answerPolicySet?: (input: { modeId?: string; templateType?: string; policy?: string | null }) => Promise<{ success: boolean; error?: string }>
+  onModesActiveCleared?: (callback: () => void) => () => void
   modesDelete: (id: string) => Promise<{ success: boolean; error?: string }>
   modesSetActive: (id: string | null) => Promise<{ success: boolean; error?: string }>
   modesGetReferenceFiles: (modeId: string) => Promise<Array<{ id: string; modeId: string; fileName: string; content: string; createdAt: string }>>
@@ -1229,6 +1238,44 @@ export interface ElectronAPI {
   profileGetProfile: () => Promise<any>
   profileGetCompanyDossier: () => Promise<any | null>
   profileSelectFile: () => Promise<{ success?: boolean; cancelled?: boolean; filePath?: string; error?: string }>
+
+  // Role Insight — mirrors the preload bridge; report/status shapes stay owned by premium.
+  roleInsightGetStatus: () => Promise<any>;
+  roleInsightGetReport: (analysisId?: string) => Promise<{ success: boolean; report?: any; error?: string }>;
+  roleInsightListHistory: () => Promise<{ success: boolean; history: any[]; error?: string }>;
+  roleInsightAnalyse: (options?: { jobUrl?: string; skipExternalVerification?: boolean }) => Promise<{
+    success: boolean;
+    report?: any;
+    error?: string;
+    cancelled?: boolean;
+    missingSources?: string[];
+    diagnosticId?: string;
+  }>;
+  roleInsightCancel: () => Promise<{ success: boolean; error?: string }>;
+  roleInsightApplyCorrection: (args: {
+    analysisId: string;
+    requirementId?: string | null;
+    kind: string;
+    detail?: string;
+    evidenceText?: string;
+    priority?: string;
+    mandatory?: boolean;
+    evidenceId?: string;
+  }) => Promise<{ success: boolean; report?: any; error?: string }>;
+  roleInsightAnswerClarification: (args: {
+    analysisId: string;
+    requirementId: string;
+    answer: string;
+    detail?: string;
+  }) => Promise<{ success: boolean; report?: any; error?: string }>;
+  roleInsightSaveToProfile: (args: {
+    analysisId: string;
+    requirementId: string;
+    claim: string;
+  }) => Promise<{ success: boolean; error?: string }>;
+  roleInsightPasteJd: (text: string) => Promise<{ success: boolean; error?: string }>;
+  roleInsightImportJdUrl: (url: string) => Promise<{ success: boolean; error?: string; sourceUrl?: string }>;
+  onRoleInsightProgress: (callback: (payload: { stage: string | null; analysing: boolean }) => void) => () => void;
 
   // JD & Research API
   profileUploadJD: (filePath: string) => Promise<{ success: boolean; error?: string }>

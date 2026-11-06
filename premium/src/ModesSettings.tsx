@@ -572,6 +572,7 @@ function InlineEdit({
   disabled = false,
   autoEdit = false,
   onEditEnd,
+  ariaLabel,
 }: {
   value: string;
   onCommit: (v: string) => void;
@@ -580,6 +581,7 @@ function InlineEdit({
   disabled?: boolean;
   autoEdit?: boolean;
   onEditEnd?: () => void;
+  ariaLabel?: string;
 }) {
   const [editing, setEditing] = useState(autoEdit && !disabled);
   const [draft, setDraft] = useState(value);
@@ -604,6 +606,7 @@ function InlineEdit({
         value={draft}
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
+        aria-label={ariaLabel || value || 'Edit text'}
         onKeyDown={e => {
           if (e.key === 'Enter') commit();
           if (e.key === 'Escape') {
@@ -1013,7 +1016,7 @@ function NotesTemplatePicker({ currentTitles, modeDefault, onPick }: {
 
   return (
     <div ref={ref} style={{ position: 'relative' }}>
-      <button onClick={() => setOpen(o => !o)} className="mm-press mm-pill mm-pill--ghost" style={{ gap: 4 }}>
+      <button onClick={() => setOpen(o => !o)} className="mm-press mm-pill mm-pill--ghost" style={{ gap: 4 }} aria-label="Use a template">
         {loading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : null}
         Use template
       </button>
@@ -1144,6 +1147,7 @@ function NewSectionForm({ onConfirm, onCancel }: {
         onChange={e => setTitle(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConfirm(title, desc); } else esc(e); }}
         placeholder="Section title"
+        aria-label="Section title"
         style={{
           display: 'block', width: '100%', background: 'transparent',
           border: 'none', outline: 'none', fontSize: 15, fontWeight: 700,
@@ -1155,6 +1159,7 @@ function NewSectionForm({ onConfirm, onCancel }: {
         onChange={e => setDesc(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConfirm(title, desc); } else esc(e); }}
         placeholder="Instructions for Natively"
+        aria-label="Instructions for Natively"
         style={{
           display: 'block', width: '100%', background: 'transparent',
           border: 'none', outline: 'none', fontSize: 12,
@@ -1208,6 +1213,7 @@ function SectionCard({ section, fresh, onUpdateTitle, onUpdateDesc, onDelete }: 
         <button
           onClick={() => onDelete(section.id)}
           className="mm-press-soft"
+          aria-label={`Delete section ${section.title || ''}`}
           style={{
             background: 'none', border: 'none', cursor: 'pointer',
             color: 'var(--mm-text-tertiary)', padding: 2, display: 'flex', flexShrink: 0,
@@ -1243,7 +1249,7 @@ function ProGate({ onOpenNativelyAPI, onClose }: {
     }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', padding: '16px 20px', flexShrink: 0 }}>
         {onClose && (
-          <button onClick={onClose} style={{ ...S.dotsBtn, background: 'none' }}>
+          <button onClick={onClose} style={{ ...S.dotsBtn, background: 'none' }} aria-label="Close">
             <X size={14} strokeWidth={2.5} />
           </button>
         )}
@@ -1379,8 +1385,12 @@ export default function ModesSettings({
   useEffect(() => { void loadModes(); }, [loadModes]);
 
   useEffect(() => {
-    const unsub = api()?.onModesActiveCleared?.(() => loadModes());
-    return () => unsub?.();
+    const unsubCleared = api()?.onModesActiveCleared?.(() => loadModes());
+    const unsubChanged = api()?.onModeChanged?.(() => loadModes());
+    return () => {
+      unsubCleared?.();
+      unsubChanged?.();
+    };
   }, [loadModes]);
 
   // ── Sync context when selected mode changes ─────────────────────────────────
@@ -2072,6 +2082,7 @@ export default function ModesSettings({
                     <button
                       onClick={() => setDotsOpen(d => !d)}
                       className="mm-press-soft"
+                      aria-label="Mode options"
                       style={{ ...S.dotsBtn, background: dotsOpen ? 'var(--mm-btn-bg-hover)' : 'var(--mm-btn-bg)' }}
                       onMouseEnter={e => (e.currentTarget.style.background = 'var(--mm-btn-bg-hover)')}
                       onMouseLeave={e => { if (!dotsOpen) e.currentTarget.style.background = 'var(--mm-btn-bg)'; }}
@@ -2115,6 +2126,7 @@ export default function ModesSettings({
                   onFocus={() => { setContextFocused(true); setPendingSwitch(null); }}
                   onBlur={() => setContextFocused(false)}
                   placeholder={contextPlaceholder(mode.templateType)}
+                  aria-label="Real-time prompt instructions"
                   style={{ ...S.textarea, flex: 1, minHeight: 120, background: 'rgba(255,255,255,0.02)' }}
                 />
                 <div style={{ display: 'grid', alignItems: 'center', padding: '10px 12px', borderTop: '1px solid var(--mm-input-border)', width: '100%', boxSizing: 'border-box' }}>
@@ -2286,6 +2298,7 @@ export default function ModesSettings({
                       <button
                         onClick={() => deleteFile(f.id)}
                         className="mm-press-soft"
+                        aria-label={`Delete file ${f.fileName || ''}`}
                         style={{ ...S.iconBtn, color: 'var(--mm-text-tertiary)' }}
                         onMouseEnter={e => (e.currentTarget.style.color = 'var(--mm-danger)')}
                         onMouseLeave={e => (e.currentTarget.style.color = 'var(--mm-text-tertiary)')}

@@ -19,14 +19,14 @@ export function calculateDurationMonths(startDate: string | null, endDate: strin
         const startParts = startDate.split('-').map(Number);
         const startYear = startParts[0];
         const startMonth = Number.isFinite(startParts[1]) ? startParts[1] : 1;
-        if (!Number.isFinite(startYear)) return 0;
+        if (!Number.isInteger(startYear) || !Number.isInteger(startMonth) || startMonth < 1 || startMonth > 12) return 0;
 
         let endYear: number, endMonth: number;
         if (endDate) {
             const endParts = endDate.split('-').map(Number);
             endYear = endParts[0];
             endMonth = Number.isFinite(endParts[1]) ? endParts[1] : 12;
-            if (!Number.isFinite(endYear)) return 0;
+            if (!Number.isInteger(endYear) || !Number.isInteger(endMonth) || endMonth < 1 || endMonth > 12) return 0;
         } else {
             const now = new Date();
             endYear = now.getFullYear();

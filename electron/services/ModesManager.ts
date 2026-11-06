@@ -501,9 +501,37 @@ export class ModesManager {
         }
     }
 
+    /** Finds or establishes the built-in Technical Interview fallback. */
+    public getBuiltinTechnicalInterviewMode(): Mode | null {
+        const modes = this.getModes();
+        const builtin = modes.find(m => m.templateType === 'technical-interview' && m.isBuiltin);
+        if (builtin) return builtin;
+        const existing = modes.find(m => m.templateType === 'technical-interview');
+        if (existing) return existing;
+        try {
+            const created = this.createMode({ name: BUILTIN_MODE_LABELS['technical-interview'], templateType: 'technical-interview' });
+            const db = DatabaseManager.getInstance();
+            db.setModeBuiltin(created.id, true);
+            return this.getModes().find(m => m.id === created.id) ?? { ...created, isBuiltin: true };
+        } catch (e) {
+            console.error('[ModesManager] Failed to create built-in Technical Interview mode:', e);
+            return null;
+        }
+    }
+
     public getActiveMode(): Mode | null {
         const row = DatabaseManager.getInstance().getActiveMode();
-        return row ? rowToMode(row) : null;
+        if (row && row.id !== PROFILE_OKF_RESERVED_MODE_ID
+            && ModesManager.isKnownTemplateType(row.template_type)) return rowToMode(row);
+        const fallback = this.getBuiltinTechnicalInterviewMode();
+        if (!fallback) return null;
+        try {
+            this.setActiveMode(fallback.id);
+        } catch (e) {
+            console.warn('[ModesManager] Failed to persist fallback active mode:', e);
+        }
+        const activeRow = DatabaseManager.getInstance().getActiveMode();
+        return activeRow?.id === fallback.id ? rowToMode(activeRow) : fallback;
     }
 
     // ── Pinned-mode resolution (audit finding #6) ─────────────────

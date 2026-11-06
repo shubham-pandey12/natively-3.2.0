@@ -250,7 +250,11 @@ describe('the Privacy panel\'s "local vision available" indicator', () => {
 
 // ── 2. The Ollama model writes the after-the-answer screen record ────────────
 
-const { getScreenUnderstandingService, OLLAMA_RECORD_BUDGET_MS } = require(dist('services/screen/ScreenUnderstandingService.js'));
+const {
+  getScreenUnderstandingService,
+  OLLAMA_RECORD_BUDGET_MS,
+  CLOUD_RECORD_PER_PROVIDER_MS,
+} = require(dist('services/screen/ScreenUnderstandingService.js'));
 const { composeScreenDescription } = require(dist('services/screen/screenDescription.js'));
 const SYSTEM = 'Extract what is on the screen.';
 
@@ -373,10 +377,9 @@ describe('the screen record through the service', () => {
       await ollama.stop(); ollama = null; svc.rungHealth.clear();
     }
   });
-  test('a record that failed or was cancelled is tried again for the same screen; a failed PRE-PASS is still remembered', async () => {
-    // The service remembers its last result per image for 5 minutes. A failure
-    // remembered for the RECORD meant a screen whose record was cancelled by a
-    // quick follow-up was never recorded, however often it was captured again.
+  test('a cancelled record is retried for the same screen; a failed PRE-PASS is still remembered', async () => {
+    // This service does not cache record transcriptions; screenTranscription
+    // owns dedupe so a direct retry can recover a cancelled record.
     await boot({ 'llava:7b': true }, { reply: 'FATAL E4012' }, 'llava:7b');
     const shot = path.join(userData, 'same-screen.png');
     fs.writeFileSync(shot, renderDigitsPng('7777'));
@@ -390,7 +393,7 @@ describe('the screen record through the service', () => {
     assert.match(composeScreenDescription(again), /E4012/);
     const chatsAfterRecord = ollama.chats().length;
     assert.equal((await ask('transcribe')).status, 'available');
-    assert.equal(ollama.chats().length, chatsAfterRecord, 'a record that SUCCEEDED is remembered: no second request for the same screen');
+    assert.equal(ollama.chats().length, chatsAfterRecord + 1, 'record transcriptions are read again by this service');
     // The pre-pass keeps remembering a failure: retrying it would add its wait to every answer.
     cloudKeys(['gemini']);
     let cloudCalls = 0;
@@ -408,8 +411,8 @@ describe('the screen record through the service', () => {
   test('the record gets its own time limit, far longer than the pre-pass', async () => {
     assert.ok(OLLAMA_RECORD_BUDGET_MS >= 30_000 && OLLAMA_RECORD_BUDGET_MS <= 60_000, String(OLLAMA_RECORD_BUDGET_MS));
     // …and the second stage is really GIVEN it (the constant alone proves
-    // nothing): the timers the chain arms are observed. A cloud rung fails
-    // inside the pre-pass's 6 s; then Ollama's attempt is armed with 45 s.
+    // nothing): the timers the chain arms are observed. Record stages have
+    // their own 25 s cloud and 45 s Ollama budgets.
     await boot({ 'qwen2.5:4b': false, 'llava:7b': true }, { reply: 'A terminal.' });
     cloudKeys(['gemini']);
     const real = h.runVisionRequest;
@@ -420,10 +423,9 @@ describe('the screen record through the service', () => {
     let result;
     try { result = await understand('transcribe'); } finally { globalThis.setTimeout = realSetTimeout; }
     assert.equal(result.providerUsed, 'ollama');
+    assert.ok(armed.some((ms) => ms > 6000 && ms <= CLOUD_RECORD_PER_PROVIDER_MS), `no cloud record rung received its own time budget: ${armed}`);
     // (A few milliseconds short of the full 45 s: what is left of the stage's deadline.)
     assert.ok(armed.some((ms) => ms > 40_000 && ms <= OLLAMA_RECORD_BUDGET_MS), `no attempt was armed with the record budget: ${armed}`);
-    const cloudAttempts = armed.filter((ms) => ms <= 40_000);
-    assert.ok(cloudAttempts.length > 0 && cloudAttempts.every((ms) => ms <= 6000), `a cloud attempt was armed past the 6 s pre-pass budget: ${armed}`);
   });
   test('an Ollama ANSWER cancels a record still in flight: the answer is not queued behind it, and nothing is kept', async () => {
     // The fake serves one chat at a time, as a daemon does for one model: while

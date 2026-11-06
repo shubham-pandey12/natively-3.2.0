@@ -19344,7 +19344,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       const os = require('os');
       const fsp = require('fs/promises');
-      tempPath = path.join(os.tmpdir(), `natively-jd-${Date.now()}.txt`);
+      tempPath = path.join(os.tmpdir(), `natively-jd-${crypto.randomUUID()}.txt`);
       await fsp.writeFile(tempPath, text, 'utf8');
       registerSelectedProfilePath(tempPath);
 
@@ -19409,7 +19409,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       const os = require('os');
       const fsp = require('fs/promises');
-      tempPath = path.join(os.tmpdir(), `natively-jd-${Date.now()}.txt`);
+      tempPath = path.join(os.tmpdir(), `natively-jd-${crypto.randomUUID()}.txt`);
       await fsp.writeFile(tempPath, resolvedJd.text, 'utf8');
       registerSelectedProfilePath(tempPath);
       const staged = consumeSelectedProfilePath(tempPath);
