@@ -19897,8 +19897,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const mgr = ModesManager.getInstance();
       const targetMode = mgr.getModes().find((m: any) => m.id === id);
       if (!targetMode) return { success: false, error: 'mode_not_found' };
-      if (targetMode.templateType === 'general' && targetMode.isBuiltin) {
-        return { success: false, error: 'cannot_delete_general' };
+      if (targetMode.isBuiltin) {
+        return { success: false, error: 'cannot_delete_builtin' };
       }
       const activeMode = mgr.getActiveMode();
       const wasActive = activeMode?.id === id;

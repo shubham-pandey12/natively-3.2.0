@@ -78,6 +78,13 @@ describe('ModesManager comparator & guard hardening', () => {
     mgr.setActiveMode('__profile_okf__');
   });
 
+  test('ModesManager refuses deleting every built-in, not only General', () => {
+    const mgr = ModesManager.getInstance();
+    const builtin = mgr.getModes().find(mode => mode.isBuiltin && mode.templateType !== 'general');
+    assert.ok(builtin, 'the built-in Technical Interview template should be seeded');
+    assert.throws(() => mgr.deleteMode(builtin.id), /built-in modes cannot be deleted/);
+  });
+
   test('ModeGenerator includes seminar and call-center template types', () => {
     // Both types should be valid in ModeGenerator
     const brief = {
@@ -101,15 +108,15 @@ describe('Modes IPC handlers contracts', () => {
     assert.match(handler, /if \(!id\)\s*\{\s*BrowserWindow\.getAllWindows\(\)\.forEach/);
   });
 
-  test('modes:delete rejects reserved mode, general mode and non-existent mode', () => {
+  test('modes:delete rejects reserved mode, every built-in, and non-existent mode', () => {
     const handler = ipcSource.slice(
       ipcSource.indexOf("safeHandle('modes:delete'"),
       ipcSource.indexOf("safeHandle('modes:set-active'"),
     );
     assert.match(handler, /if \(id === '__profile_okf__'\)\s*return \{ success: false, error: 'reserved_mode' \};/);
     assert.match(handler, /if \(!targetMode\)\s*return \{ success: false, error: 'mode_not_found' \};/);
-    assert.match(handler, /if \(targetMode\.templateType === 'general' && targetMode\.isBuiltin\)/);
-    assert.match(handler, /return \{ success: false, error: 'cannot_delete_general' \};/);
+    assert.match(handler, /if \(targetMode\.isBuiltin\)/);
+    assert.match(handler, /return \{ success: false, error: 'cannot_delete_builtin' \};/);
   });
 
   test('modes:upload-reference-file anchors to parent window and validates modeId', () => {

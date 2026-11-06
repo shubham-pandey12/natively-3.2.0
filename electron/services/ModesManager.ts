@@ -1081,8 +1081,8 @@ export class ModesManager {
             return;
         }
         const current = this.resolveMode(id);
-        if (current && current.templateType === 'general' && current.isBuiltin) {
-            throw new Error('deleteMode: built-in General mode cannot be deleted');
+        if (current?.isBuiltin) {
+            throw new Error('deleteMode: built-in modes cannot be deleted');
         }
         // PI v3 (W3): mode_reference_files rows go via FK CASCADE, but the
         // persisted chunk vectors (mode_reference_chunks / index_state) have no

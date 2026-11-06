@@ -127,7 +127,7 @@ describe('Modes Manager Recovered Source Audit Parity', () => {
     const uiPath = path.join(repoRoot, 'premium/src/ModesSettings.tsx');
     const content = fs.readFileSync(uiPath, 'utf8');
 
-    assert.match(content, /aria-label="Real-time prompt instructions"/);
+    assert.match(content, /aria-label="System Instructions & Context"/);
     assert.match(content, /aria-label="Section title"/);
     assert.match(content, /aria-label="Instructions for Natively"/);
     assert.match(content, /aria-label="Mode options"/);
