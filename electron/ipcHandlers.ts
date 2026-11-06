@@ -18811,9 +18811,9 @@ export function initializeIpcHandlers(appState: AppState): void {
   // renderer had no way to learn that dossier had landed, so it showed the
   // "Research Now" CTA, and the CTA bought the identical dossier a second time.
   // Only the explicit "Refresh" pill passes true now.
-  safeHandle('profile:research-company', async (_, companyName: string, forceRefresh: boolean = false) => {
+  safeHandle('profile:research-company', async (_, requestedCompanyName?: string, forceRefresh: boolean = false) => {
     try {
-      console.log(`[CompanyIntel-research] invoked for companyName="${companyName}" forceRefresh=${forceRefresh}`);
+      console.log(`[CompanyIntel-research] invoked for companyName="${requestedCompanyName}" forceRefresh=${forceRefresh}`);
       // Premium gate
       if (!isProOrTrialActive()) {
         return {
@@ -18825,6 +18825,12 @@ export function initializeIpcHandlers(appState: AppState): void {
       const orchestrator = appState.getKnowledgeOrchestrator();
       if (!orchestrator) {
         return { success: false, error: 'Knowledge engine not initialized' };
+      }
+      const profileData = orchestrator.getProfileData();
+      const activeJD = profileData?.activeJD;
+      const companyName = requestedCompanyName?.trim() || activeJD?.company?.trim();
+      if (!companyName) {
+        return { success: false, error: 'Upload a job description with a company name first.' };
       }
       const engine = orchestrator.getCompanyResearchEngine();
 
@@ -18838,8 +18844,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       engine.setSearchProvider(resolveCompanySearchProvider());
 
       // Build full JD context so the dossier is tailored to the exact role
-      const profileData = orchestrator.getProfileData();
-      const activeJD = profileData?.activeJD;
       const jdCtx = activeJD
         ? {
             title: activeJD.title,

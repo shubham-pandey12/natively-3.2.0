@@ -2144,6 +2144,7 @@ export function ProfileIntelligenceSettings({
     const [companyResearching, setCompanyResearching] = useState(false);
     const [companyDossier, setCompanyDossier] = useState<any>(null);
     const [companySearchQuotaExhausted, setCompanySearchQuotaExhausted] = useState(false);
+    const [companyResearchError, setCompanyResearchError] = useState('');
 
     // Apply the dossier carried by a getProfileData() payload (2026-09-21).
     // getProfileData returns the wrapper { dossier, sources, last_checked } from
@@ -2483,12 +2484,15 @@ export function ProfileIntelligenceSettings({
     const doCompanyResearch = async (forceRefresh: boolean) => {
         const company = profileData?.activeJD?.company;
         if (!company) return;
-        setCompanyResearching(true); setCompanySearchQuotaExhausted(false);
+        setCompanyResearching(true); setCompanySearchQuotaExhausted(false); setCompanyResearchError('');
         try {
             const result = await window.electronAPI?.profileResearchCompany?.(company, forceRefresh);
             if (result?.success && result.dossier) setCompanyDossier(result.dossier);
+            else setCompanyResearchError(result?.error || 'Company research could not produce a dossier. Check that an AI provider is configured and try again.');
             if (result?.searchQuotaExhausted) setCompanySearchQuotaExhausted(true);
-        } catch { /**/ }
+        } catch (error) {
+            setCompanyResearchError(error instanceof Error ? error.message : String(error));
+        }
         finally { setCompanyResearching(false); }
     };
 
@@ -3238,6 +3242,11 @@ export function ProfileIntelligenceSettings({
                     <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', marginBottom: 12, fontSize: 11, color: '#f59e0b', lineHeight: 1.5 }}>
                         <span style={{ flexShrink: 0 }}>⚠</span>
                         Web search credits exhausted — showing AI-only research.
+                    </div>
+                )}
+                {companyResearchError && (
+                    <div role="alert" style={{ padding: '9px 12px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', marginBottom: 12, fontSize: 11, color: '#f87171', lineHeight: 1.5 }}>
+                        {companyResearchError}
                     </div>
                 )}
                 {!companyDossier && !companyResearching && !aotResearching && companyName && (

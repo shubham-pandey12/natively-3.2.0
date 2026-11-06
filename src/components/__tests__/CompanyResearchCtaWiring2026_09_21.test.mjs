@@ -206,3 +206,31 @@ describe('Defect 3 — the CTA no longer re-buys a cached dossier', () => {
     );
   });
 });
+
+describe('Company research IPC handles a missing company argument', () => {
+  const handlers = readStripped('electron/ipcHandlers.ts');
+
+  test('uses the active JD company when omitted and returns a clear error when unavailable', () => {
+    const idx = handlers.indexOf("safeHandle('profile:research-company'");
+    assert.notEqual(idx, -1, 'profile:research-company handler not found');
+    const region = handlers.slice(idx, idx + 4000);
+    assert.match(region, /requestedCompanyName\?\.trim\(\)\s*\|\|\s*activeJD\?\.company\?\.trim\(\)/);
+    assert.match(region, /if \(!companyName\)\s*\{[\s\S]{0,180}success: false/);
+  });
+});
+
+describe('Company Intel renderer consumes the CompanyDossier contract', () => {
+  const renderer = readStripped('src/components/ProfileIntelligenceSettings.tsx');
+
+  test('renders the dossier fields produced by CompanyResearchEngine', () => {
+    for (const field of ['culture_ratings', 'salary_estimates', 'hiring_strategy', 'interview_focus', 'benefits', 'core_values', 'critics', 'recent_news', 'sources']) {
+      assert.ok(renderer.includes(`companyDossier.${field}`), `renderer should consume ${field}`);
+    }
+  });
+
+  test('shows IPC and runtime failures instead of silently returning to the CTA', () => {
+    assert.match(renderer, /companyResearchError/);
+    assert.match(renderer, /role="alert"/);
+    assert.match(renderer, /setCompanyResearchError\(result\?\.error/);
+  });
+});

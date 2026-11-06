@@ -93,6 +93,30 @@ export class KnowledgeDatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_aot_results_doc ON aot_results(document_id, result_type);
         `);
 
+        // Older builds stored dossier timestamps and sources under different
+        // column names. CREATE TABLE IF NOT EXISTS leaves that table untouched.
+        const dossierColumns = new Set(
+            (this.db.prepare('PRAGMA table_info(company_dossiers)').all() as Array<{ name: string }>).map(({ name }) => name)
+        );
+        if (!dossierColumns.has('last_checked')) {
+            this.db.exec('ALTER TABLE company_dossiers ADD COLUMN last_checked DATETIME');
+            dossierColumns.add('last_checked');
+        }
+        if (!dossierColumns.has('source_trace')) {
+            this.db.exec('ALTER TABLE company_dossiers ADD COLUMN source_trace TEXT');
+            dossierColumns.add('source_trace');
+        }
+        if (!dossierColumns.has('ttl_hours')) {
+            this.db.exec('ALTER TABLE company_dossiers ADD COLUMN ttl_hours INTEGER DEFAULT 24');
+            dossierColumns.add('ttl_hours');
+        }
+        const legacyUpdatedAt = dossierColumns.has('updated_at') ? 'updated_at' : 'CURRENT_TIMESTAMP';
+        this.db.exec(`UPDATE company_dossiers SET last_checked = COALESCE(last_checked, ${legacyUpdatedAt}, CURRENT_TIMESTAMP)`);
+        if (dossierColumns.has('sources_json')) {
+            this.db.exec('UPDATE company_dossiers SET source_trace = COALESCE(source_trace, sources_json)');
+        }
+        this.db.exec('UPDATE company_dossiers SET ttl_hours = 24 WHERE ttl_hours IS NULL');
+
         // Additive migration for DBs created before embedding_space existed. SQLite has
         // no ADD COLUMN IF NOT EXISTS, so guard with a try/catch (re-run is a no-op).
         // Legacy rows keep embedding_space=NULL → treated as stale and re-embedded on the
