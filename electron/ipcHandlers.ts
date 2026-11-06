@@ -18453,10 +18453,26 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('profile:get-status', async () => {
+    const defaultStatus = {
+      hasProfile: false,
+      profileMode: false,
+      name: undefined,
+      role: undefined,
+      totalExperienceYears: undefined as number | undefined,
+      resume_structured_extraction_complete: false,
+      resume_profile_facts_ready: false,
+      profileFactsReady: false,
+      jd_structured_extraction_complete: false,
+      jdFactsReady: false,
+      aot_pipeline_running: false,
+      resume_indexing_in_flight: false,
+      jd_indexing_in_flight: false,
+      extractionMode: 'none' as const,
+    };
     try {
       const orchestrator = appState.getKnowledgeOrchestrator();
       if (!orchestrator) {
-        return { hasProfile: false, profileMode: false };
+        return defaultStatus;
       }
       // Map new KnowledgeStatus back to legacy UI shape temporarily, plus explicit
       // readiness flags used by eval/UI polling. profileFactsReady is true as soon
@@ -18474,10 +18490,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       // deliberately excluded from the resume readiness signal.
       const { DocType: StatusDocType } = require('../premium/electron/knowledge/types');
       return {
-        hasProfile: status.hasResume,
-        profileMode: status.activeMode,
-        name: status.resumeSummary?.name,
-        role: status.resumeSummary?.role,
+        hasProfile: Boolean(status.hasResume),
+        profileMode: Boolean(status.activeMode),
+        name: status.resumeSummary?.name ?? (activeResume as any)?.identity?.name,
+        role: status.resumeSummary?.role ?? (activeResume as any)?.experience?.[0]?.role,
         totalExperienceYears: status.resumeSummary?.totalExperienceYears,
         resume_structured_extraction_complete: Boolean(activeResume),
         resume_profile_facts_ready: profileFactsReady(activeResume),
@@ -18494,7 +18510,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           : 'none',
       };
     } catch (error: any) {
-      return { hasProfile: false, profileMode: false };
+      return defaultStatus;
     }
   });
 

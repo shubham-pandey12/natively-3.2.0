@@ -2048,8 +2048,19 @@ export function ProfileIntelligenceSettings({
 
     // Profile
     const [profileStatus, setProfileStatus] = useState<{
-        hasProfile: boolean; profileMode: boolean; name?: string; role?: string;
-        totalExperienceYears?: number; profileFactsReady?: boolean;
+        hasProfile: boolean;
+        profileMode: boolean;
+        name?: string;
+        role?: string;
+        totalExperienceYears?: number;
+        resume_structured_extraction_complete?: boolean;
+        resume_profile_facts_ready?: boolean;
+        profileFactsReady?: boolean;
+        jd_structured_extraction_complete?: boolean;
+        jdFactsReady?: boolean;
+        aot_pipeline_running?: boolean;
+        resume_indexing_in_flight?: boolean;
+        jd_indexing_in_flight?: boolean;
         extractionMode?: 'llm' | 'heuristic' | 'none';
     }>({ hasProfile: false, profileMode: false });
     const [profileUploading, setProfileUploading] = useState(false);
@@ -2409,9 +2420,13 @@ export function ProfileIntelligenceSettings({
             const result = await window.electronAPI?.profileUploadJD?.(filePath);
             if (token.cancelled) return;
             if (result?.success) {
-                const data = await window.electronAPI?.profileGetProfile?.();
+                const [data, status] = await Promise.all([
+                    window.electronAPI?.profileGetProfile?.(),
+                    window.electronAPI?.profileGetStatus?.(),
+                ]);
                 if (token.cancelled) return;
                 if (data) setProfileData(data);
+                if (status) setProfileStatus(status);
                 // Clear the previous company's dossier and pick up the new one if
                 // it somehow already exists (cached from an earlier session at the
                 // same company). Usually it does NOT: ingest fires the AOT pipeline
@@ -2593,9 +2608,16 @@ export function ProfileIntelligenceSettings({
                                 if (!(await askConfirm({ title: 'Delete your resume and its extracted data?', confirmLabel: 'Delete' }))) return;
                                 try {
                                     await window.electronAPI?.profileDelete?.();
-                                    setProfileStatus({ hasProfile: false, profileMode: false });
-                                    const freshData = await window.electronAPI?.profileGetProfile?.();
+                                    const [freshData, freshStatus] = await Promise.all([
+                                        window.electronAPI?.profileGetProfile?.(),
+                                        window.electronAPI?.profileGetStatus?.(),
+                                    ]);
                                     setProfileData(freshData ?? null);
+                                    if (freshStatus) {
+                                        setProfileStatus(freshStatus);
+                                    } else {
+                                        setProfileStatus({ hasProfile: false, profileMode: false });
+                                    }
                                 } catch { /**/ }
                             }}
                         >
@@ -2702,8 +2724,12 @@ export function ProfileIntelligenceSettings({
                                 if (jdUploading) return;
                                 try {
                                     await window.electronAPI?.profileDeleteJD?.();
-                                    const data = await window.electronAPI?.profileGetProfile?.();
+                                    const [data, status] = await Promise.all([
+                                        window.electronAPI?.profileGetProfile?.(),
+                                        window.electronAPI?.profileGetStatus?.(),
+                                    ]);
                                     setProfileData(data ?? null);
+                                    if (status) setProfileStatus(status);
                                     setCompanyDossier(null);
                                 } catch { /**/ }
                             }}

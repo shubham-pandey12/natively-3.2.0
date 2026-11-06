@@ -314,7 +314,7 @@ const parseExperience = (sectionLines: string[]): ExperienceEntry[] => {
     if (cur && cur.role && cur.company) {
       push();
     }
-    const e = ensure();
+    const e = (cur = ensure());
     if (lineRole && !e.role) e.role = lineRole;
     if (lineCompany && !e.company) e.company = lineCompany;
     // A line that matched neither heuristic cleanly (bare company.co or a
@@ -452,7 +452,7 @@ const parseEducation = (sectionLines: string[]): EducationEntry[] => {
       const segs = line.split('|').map((s) => s.trim()).filter(Boolean);
       const dm2 = line.match(DATE_RANGE_RE);
       if (cur && cur.degree) flush();
-      const e = ensure();
+      const e = (cur = ensure());
       const degSeg = segs.find((s) => DEGREE_RE.test(s)) || segs[0];
       const instSeg = segs.find((s) => INSTITUTION_RE.test(s)) || '';
       const dParts = degSeg.replace(HONORS_RE, '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -478,7 +478,7 @@ const parseEducation = (sectionLines: string[]): EducationEntry[] => {
     // GPA line → attach to current entry, don't create a new one.
     const gpaM = head.match(GPA_RE);
     if (gpaM && head.replace(GPA_RE, '').replace(/[|,;\s]/g, '').length < 4) {
-      const e = ensure(); e.gpa = gpaM[1].trim();
+      const e = (cur = ensure()); e.gpa = gpaM[1].trim();
       if (start) e.start_date ||= start; if (end) e.end_date ??= end;
       continue;
     }
@@ -503,7 +503,7 @@ const parseEducation = (sectionLines: string[]): EducationEntry[] => {
     if (isDegreeLine) {
       // A new degree starts a new entry only if the current one already has a degree.
       if (cur && cur.degree) flush();
-      const e = ensure();
+      const e = (cur = ensure());
       // "Degree in Field[, Institution]"
       const inMatch = cleanHead.match(/^(.*?)\bin\b\s+(.*?)(?:,\s*(.*))?$/i);
       if (inMatch) {
@@ -534,7 +534,7 @@ const parseEducation = (sectionLines: string[]): EducationEntry[] => {
     } else if (isInstLine || (!cur?.institution && /^[A-Z]/.test(cleanHead) && cleanHead.split(',').length <= 3 && !DEGREE_RE.test(cleanHead))) {
       // Institution line ("University of Washington, Seattle") → the FIRST comma
       // segment is the school; the rest (city) is dropped.
-      const e = ensure();
+      const e = (cur = ensure());
       if (!e.institution) e.institution = cleanHead.split(',')[0].trim();
       if (start) e.start_date ||= start; if (end) e.end_date ??= end;
     } else if (cur) {

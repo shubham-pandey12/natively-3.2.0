@@ -42,6 +42,10 @@ export class AOTPipeline {
         return { ...this.status };
     }
 
+    isRunning(): boolean {
+        return Object.values(this.status).some(s => s === 'running');
+    }
+
     getCachedDossier(): CompanyDossier | null {
         return this.cachedDossier;
     }

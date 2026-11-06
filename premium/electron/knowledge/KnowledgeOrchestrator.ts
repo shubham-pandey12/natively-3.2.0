@@ -863,15 +863,13 @@ export class KnowledgeOrchestrator {
         let resumeSummary;
         if (hasResume) {
             try {
+                const structured = this.activeResume!.structured_data as StructuredResume;
                 const processed = this.getProcessedResume();
-                if (processed) {
-                    const structured = this.activeResume!.structured_data as StructuredResume;
-                    resumeSummary = {
-                        name: structured.identity.name,
-                        role: structured.experience?.[0]?.role || 'Professional',
-                        totalExperienceYears: processed.totalExperienceYears
-                    };
-                }
+                resumeSummary = {
+                    name: structured?.identity?.name || 'Professional',
+                    role: structured?.experience?.[0]?.role || 'Professional',
+                    totalExperienceYears: processed?.totalExperienceYears ?? 0
+                };
             } catch { /* ignore */ }
         }
 
