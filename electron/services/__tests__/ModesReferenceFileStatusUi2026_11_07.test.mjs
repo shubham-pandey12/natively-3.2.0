@@ -8,8 +8,9 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const source = fs.readFileSync(path.join(repoRoot, 'premium/src/ModesSettings.tsx'), 'utf8');
 
 test('Modes Manager reports semantic readiness and degraded reference-file states', () => {
-  assert.match(source, /aria-label="Semantic search ready"[\s\S]{0,100}title="Semantic search ready"[\s\S]{0,500}INDEXED/);
+  assert.match(source, /ready: \{ label: 'Indexed'[\s\S]*?title: 'Semantic search ready'/);
   for (const status of ['indexing', 'lexical_only', 'failed', 'ocr_required', 'pending']) {
-    assert.ok(source.includes(`fileStatuses[f.id] === '${status}'`), `missing visible ${status} state`);
+    assert.ok(source.includes(`${status}: { label:`), `missing visible ${status} state`);
   }
+  assert.match(source, /<ReferenceFileStatus status=\{fileStatuses\[f.id\]\} fileName=\{f.fileName\}/);
 });

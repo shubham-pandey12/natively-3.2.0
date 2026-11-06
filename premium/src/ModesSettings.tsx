@@ -8,6 +8,7 @@
  * CSS tokens, layout, and interactions are taken verbatim from the bundle.
  * React/TypeScript syntax was necessarily rewritten since the source is compiled JS.
  */
+import { ThinkingOrb } from 'thinking-orbs';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   BookOpen,
@@ -153,7 +154,8 @@ const CSS = `
 .mm-template-row:nth-child(5) { animation-delay: 245ms; }
 .mm-template-row:nth-child(6) { animation-delay: 285ms; }
 .mm-template-row:nth-child(7) { animation-delay: 320ms; }
-.mm-template-row:nth-child(n+8) { animation-delay: 350ms; }
+.mm-template-row:nth-child(8) { animation-delay: 350ms; }
+.mm-template-row:nth-child(n+9) { animation-delay: 375ms; }
 
 .mm-section-card { animation: mm-list-in 420ms var(--mm-ease-expo) backwards; }
 .mm-section-card:nth-child(1) { animation-delay: 0ms; }
@@ -164,6 +166,10 @@ const CSS = `
 .mm-section-card:nth-child(n+6) { animation-delay: 240ms; }
 
 .mm-fresh-row { animation: mm-list-in 420ms var(--mm-ease-expo) backwards; }
+.mm-file-removing { max-height: 80px; pointer-events: none; animation: mm-file-collapse 320ms var(--mm-ease-out) forwards; overflow: hidden; }
+@keyframes mm-file-collapse { to { opacity: 0; transform: translateX(8px); max-height: 0; margin: 0; padding-top: 0; padding-bottom: 0; border-width: 0; } }
+.mm-status { animation: mm-status-in 150ms ease both; }
+@keyframes mm-status-in { from { opacity: 0; filter: blur(2px); } to { opacity: 1; filter: blur(0); } }
 
 @keyframes mm-swap-in {
     from { opacity: 0; filter: blur(2px); }
@@ -292,6 +298,54 @@ interface NoteSection {
   title: string;
   description?: string;
 }
+
+const STATUS_STYLES: Record<string, { label: string; color: string; bg: string; title: string }> = {
+  ready: { label: 'Indexed', color: '#22c55e', bg: 'rgba(34,197,94,0.14)', title: 'Semantic search ready' },
+  indexing: { label: 'Indexing…', color: '#3b82f6', bg: 'rgba(59,130,246,0.14)', title: 'Building the search index' },
+  pending: { label: 'Indexing…', color: '#3b82f6', bg: 'rgba(59,130,246,0.14)', title: 'Queued for indexing' },
+  failed: { label: 'Failed', color: '#ef4444', bg: 'rgba(239,68,68,0.14)', title: 'Indexing failed — keyword search still works; re-activating the mode retries' },
+  lexical_only: { label: 'Keyword', color: '#f59e0b', bg: 'rgba(245,158,11,0.14)', title: 'Keyword search is active; semantic indexing will retry when embeddings are ready' },
+  ocr_required: { label: 'OCR REQUIRED', color: '#f59e0b', bg: 'rgba(245,158,11,0.14)', title: 'No readable text was extracted. Run OCR on this scanned file, then upload it again.' },
+};
+function ReferenceFileStatus({ status, fileName }: { status?: string; fileName: string }) {
+  const [shown, setShown] = useState(status);
+  const started = useRef<number | null>(null);
+  useEffect(() => {
+    const busy = status === 'pending' || status === 'indexing';
+    if (busy) { started.current ??= Date.now(); setShown(status); return; }
+    const remaining = started.current === null ? 0 : Math.max(0, 2000 - (Date.now() - started.current));
+    const timer = setTimeout(() => { setShown(status); started.current = null; }, remaining);
+    return () => clearTimeout(timer);
+  }, [status]);
+  const [display, setDisplay] = useState(shown);
+  const [fading, setFading] = useState(false);
+  useEffect(() => {
+    if (shown === display) return;
+    setFading(true);
+    const timer = setTimeout(() => { setDisplay(shown); setFading(false); }, 150);
+    return () => clearTimeout(timer);
+  }, [shown, display]);
+  const config = display ? STATUS_STYLES[display] : undefined;
+  return <span style={{ display: 'grid', gridTemplateColumns: '20px 12px 72px', width: 104, alignItems: 'center' }}>
+    {config && <span title={config.title} style={{ gridColumn: 3, justifySelf: 'start', fontSize: 9.5, fontWeight: 600, letterSpacing: .2, padding: '2px 6px', borderRadius: 999, color: config.color, background: config.bg, textTransform: 'uppercase', opacity: fading ? 0 : 1, filter: fading ? 'blur(2px)' : 'blur(0px)', transition: 'opacity 150ms ease-in-out, filter 150ms ease-in-out' }}>{config.label}</span>}
+    <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{config ? `${fileName}: ${config.title}` : ''}</span>
+  </span>;
+}
+
+const KnowledgePanel: React.FC<{ file: ReferenceFile; pack: any; loading: boolean; regenerating: boolean; userEditableCardsEnabled: boolean; onApproveCard: (cardId: string) => void; onRejectCard: (cardId: string) => void; onRegenerate: () => void; onExport: () => void; onReview: (cardId: string, action: 'approve' | 'reject') => void }> = ({ file, pack, loading, regenerating, userEditableCardsEnabled, onApproveCard, onRejectCard, onRegenerate, onExport, onReview }) => (
+  <div data-knowledge-panel style={{ ...S.contentBox, padding: 12 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+      <strong style={{ fontSize: 12 }}>Knowledge Pack</strong>
+      <div style={{ display: 'flex', gap: 8 }}><button disabled={loading || regenerating} className="mm-press-soft" style={S.addFileBtn} onClick={onRegenerate}><RefreshCw size={12} /> {regenerating ? 'Regenerating…' : 'Regenerate'}</button><button disabled={!pack} className="mm-press-soft" style={S.addFileBtn} onClick={onExport}>Export</button></div>
+    </div>
+    {loading ? <p role="status">Loading knowledge pack…</p> : !pack ? <p style={{ fontSize: 11, color: 'var(--mm-text-secondary)' }}>No knowledge pack yet for {file.fileName}. Regenerate to create one.</p> : <>
+      <p style={{ fontSize: 11, color: 'var(--mm-text-secondary)' }}>{pack.cards?.length ?? 0} cards · {pack.entities?.length ?? 0} entities · {pack.relations?.length ?? 0} relations</p>
+      {(pack.cards ?? []).map((card: any) => <details key={card.id} style={{ opacity: card.approvalStatus === 'rejected' ? 0.5 : 1, padding: 8, borderTop: '1px solid var(--mm-border)', fontSize: 11 }}><summary style={{ textDecoration: card.approvalStatus === 'rejected' ? 'line-through' : 'none' }}>{card.title ?? card.conceptId} · {card.type} · {card.confidence}</summary><p style={{ whiteSpace: 'pre-wrap' }}>{card.body}</p>{(card.sourceQuotes ?? []).map((quote: string, index: number) => <blockquote key={index}>{quote}</blockquote>)}{userEditableCardsEnabled && (<div style={{ display: 'flex', gap: 8 }}><button style={S.addFileBtn} onClick={() => onApproveCard(card.id)}>Approve</button><button style={S.addFileBtn} onClick={() => onRejectCard(card.id)}>Reject</button></div>)}</details>)}
+      {pack.entities?.length > 0 && <details style={{ fontSize: 11 }}><summary>Entities</summary>{pack.entities.map((entity: any) => <p key={entity.id}>{entity.name} · {entity.type}</p>)}</details>}
+      {pack.relations?.length > 0 && <details style={{ fontSize: 11 }}><summary>Relations</summary>{pack.relations.map((relation: any) => <p key={relation.id}>{relation.sourceEntityId} → {relation.relationType ?? relation.type} → {relation.targetEntityId}</p>)}</details>}
+    </>}
+  </div>
+);
 
 interface WritingSample {
   id: string;
@@ -1334,6 +1388,14 @@ export default function ModesSettings({
   const [fileStatuses, setFileStatuses] = useState<Record<string, string>>({});
   const [freshFiles, setFreshFiles] = useState<Set<string>>(() => new Set());
   const [uploading, setUploading] = useState(false);
+  const [removingFiles, setRemovingFiles] = useState<Set<string>>(() => new Set());
+  const [knowledgePacks, setKnowledgePacks] = useState<Array<{ id: string; sourceId: string; fileName: string; cardCount: number; entityCount: number; relationCount: number; packVersion: number; updatedAt: string }>>([]);
+  const [knowledgeDetails, setKnowledgeDetails] = useState<Record<string, any>>({});
+  const [knowledgeOpen, setKnowledgeOpen] = useState<string | null>(null);
+  const [knowledgeBusy, setKnowledgeBusy] = useState<Set<string>>(() => new Set());
+  const [okfKnowledgeUiEnabled, setOkfKnowledgeUiEnabled] = useState(false);
+  const [editableCards, setEditableCards] = useState(false);
+  const [knowledgeLoading, setKnowledgeLoading] = useState<Set<string>>(() => new Set());
 
   // Source contract + answer policy (gL/xL from bundle)
   const [sourceContract, setSourceContract] = useState<any>(null);
@@ -1383,6 +1445,21 @@ export default function ModesSettings({
   }, []);
 
   useEffect(() => { void loadModes(); }, [loadModes]);
+  useEffect(() => {
+    let cancelled = false;
+    api()?.getIntelligenceFlags?.().then((flags: any[]) => {
+      if (!cancelled) { setOkfKnowledgeUiEnabled(Boolean(flags?.find(f => f.key === 'okfKnowledgeUi')?.enabled)); setEditableCards(Boolean(flags?.find(f => f.key === 'okfUserEditableCards')?.enabled)); }
+    }).catch(() => { if (!cancelled) setOkfKnowledgeUiEnabled(false); });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!selectedId) { setKnowledgePacks([]); return; }
+    let cancelled = false;
+    api()?.knowledgeListPacks?.(selectedId).then((result: any) => {
+      if (!cancelled) setKnowledgePacks(result?.success ? result.packs ?? [] : []);
+    }).catch(() => { if (!cancelled) setKnowledgePacks([]); });
+    return () => { cancelled = true; };
+  }, [selectedId]);
 
   useEffect(() => {
     const unsubCleared = api()?.onModesActiveCleared?.(() => loadModes());
@@ -1727,22 +1804,22 @@ export default function ModesSettings({
   };
 
   const deleteFile = async (fileId: string) => {
-    setRefFiles(prev => prev.filter(f => f.id !== fileId));
-    setModes(prev => prev.map(m => m.id === selectedId
-      ? { ...m, referenceFileCount: Math.max(0, m.referenceFileCount - 1) } : m));
+    if (removingFiles.has(fileId)) return;
+    setRemovingFiles(prev => new Set(prev).add(fileId));
+    await new Promise(resolve => setTimeout(resolve, 320));
     try {
       const res = await api()?.modesDeleteReferenceFile?.(fileId);
       if (res && res.success === false) {
         setError(res.error === 'pro_required'
           ? 'Deleting reference files requires Natively Pro.'
           : res.error ? `Failed to delete file: ${res.error}` : 'Failed to delete file.');
-        if (selectedId) {
-          const files = await api()?.modesGetReferenceFiles?.(selectedId);
-          setRefFiles(files ?? []);
-        }
+        if (selectedId) { const files = await api()?.modesGetReferenceFiles?.(selectedId); setRefFiles(files ?? []); }
         void loadModes();
         return;
       }
+      setRefFiles(prev => prev.filter(f => f.id !== fileId));
+      setModes(prev => prev.map(m => m.id === selectedId ? { ...m, referenceFileCount: Math.max(0, m.referenceFileCount - 1) } : m));
+      setKnowledgePacks(prev => prev.filter(pack => pack.sourceId !== fileId));
       if (selectedId) {
         api()?.modesGetSourceContract?.(selectedId)
           .then((c: any) => { if (c) setSourceContract(c); })
@@ -1752,7 +1829,40 @@ export default function ModesSettings({
       console.error('[ModesSettings] deleteFile failed:', err);
       setError('Failed to delete file.');
       void loadModes();
+    } finally {
+      setRemovingFiles(prev => { const next = new Set(prev); next.delete(fileId); return next; });
     }
+  };
+
+  const loadKnowledgePack = async (fileId: string) => {
+    setKnowledgeOpen(fileId);
+    if (fileId in knowledgeDetails) return;
+    setKnowledgeLoading(prev => new Set(prev).add(fileId));
+    try { const result = await api()?.knowledgeGetPack?.(fileId); setKnowledgeDetails(prev => ({ ...prev, [fileId]: result?.pack ?? null })); }
+    catch { setKnowledgeDetails(prev => ({ ...prev, [fileId]: null })); }
+    finally { setKnowledgeLoading(prev => { const next = new Set(prev); next.delete(fileId); return next; }); }
+  };
+  const exportKnowledgePack = async (fileId: string) => {
+    try { const result = await api()?.knowledgeExportPack?.(fileId); if (result && !result.success && !result.cancelled) setError(result.error ?? 'Failed to export knowledge bundle.'); }
+    catch { setError('Failed to export knowledge bundle.'); }
+  };
+  const reviewKnowledgeCard = async (fileId: string, cardId: string, action: 'approve' | 'reject') => {
+    try {
+      const result = action === 'approve' ? await api()?.knowledgeApproveCard?.(cardId) : await api()?.knowledgeRejectCard?.(cardId);
+      if (!result?.success) { setError(result?.error ?? `Failed to ${action} card.`); return; }
+      setKnowledgeDetails(prev => ({ ...prev, [fileId]: { ...prev[fileId], cards: (prev[fileId]?.cards ?? []).map((card: any) => card.id === cardId ? result.card : card) } }));
+    } catch { setError(`Failed to ${action} card.`); }
+  };
+
+  const regenerateKnowledgePack = async (file: ReferenceFile) => {
+    if (!selectedId) return;
+    setKnowledgeBusy(prev => new Set(prev).add(file.id));
+    try {
+      const result = await api()?.knowledgeRegeneratePack?.({ fileId: file.id, modeId: selectedId, fileName: file.fileName });
+      if (result?.success && result.pack) setKnowledgeDetails(prev => ({ ...prev, [file.id]: result.pack }));
+      else if (result && !result.success) setError(result.error ? `Failed to regenerate knowledge pack: ${result.error}` : 'Failed to regenerate knowledge pack.');
+    } catch { setError('Failed to regenerate knowledge pack.'); }
+    finally { setKnowledgeBusy(prev => { const next = new Set(prev); next.delete(file.id); return next; }); }
   };
 
   // ── Notes sections ──────────────────────────────────────────────────────────
@@ -2245,7 +2355,7 @@ export default function ModesSettings({
                   role="status"
                   key="uploading"
                 >
-                  <Loader2 size={32} className="animate-spin" style={{ color: 'var(--mm-text-tertiary)' }} />
+                  <ThinkingOrb state="composing" size={64} speed={1.10} aria-hidden="true" />
                   <p style={{ fontSize: 12, color: 'var(--mm-text-secondary)', textAlign: 'center', margin: 0 }}>Adding your file…</p>
                 </div>
               ) : refFiles.length === 0 ? (
@@ -2270,53 +2380,21 @@ export default function ModesSettings({
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} key="list">
                   {refFiles.map(f => (
-                    <div
+                    <React.Fragment key={f.id}><div
                       key={f.id}
                       data-file-row
-                      className={freshFiles.has(f.id) ? 'mm-fresh-row' : undefined}
-                      style={S.fileRow}
+                      className={removingFiles.has(f.id) ? 'mm-file-removing' : freshFiles.has(f.id) ? 'mm-fresh-row' : undefined}
+                      style={{ ...S.fileRow, gridTemplateColumns: okfKnowledgeUiEnabled ? '13px minmax(0, 1fr) 104px 42px 20px 20px' : '13px minmax(0, 1fr) 104px 42px 20px' }}
                     >
                       <FileText size={13} style={{ color: 'var(--mm-text-secondary)', flexShrink: 0 }} />
                       <span style={{ flex: 1, fontSize: 12, color: 'var(--mm-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {f.fileName}
                       </span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-                        <span style={{ fontSize: 11, color: 'var(--mm-text-tertiary)' }}>
-                          {fileStatuses[f.id] === 'indexing' ? (
-                            <span role="status" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                              <Loader2 size={10} className="animate-spin" /> Indexing
-                            </span>
-                          ) : fileStatuses[f.id] === 'ready' ? (
-                            <span
-                              role="status"
-                              aria-label="Semantic search ready"
-                              title="Semantic search ready"
-                              style={{ display: 'inline-flex', alignItems: 'center', padding: '4px 12px', borderRadius: 999, background: 'rgba(34,197,94,0.14)', color: '#22c55e', fontSize: 11, fontWeight: 600, letterSpacing: '0.04em' }}
-                            >
-                              INDEXED
-                            </span>
-                          ) : fileStatuses[f.id] === 'lexical_only' ? (
-                            <span role="status" title="Semantic indexing is unavailable. Keyword search can still find text in this file; Natively will retry indexing when possible." style={{ color: '#fbbf24', fontSize: 10 }}>
-                              TEXT SEARCH ONLY
-                            </span>
-                          ) : fileStatuses[f.id] === 'failed' ? (
-                            <span role="status" title="Indexing failed. Natively will retry when possible." style={{ color: '#f87171', fontSize: 10 }}>
-                              INDEX FAILED
-                            </span>
-                          ) : fileStatuses[f.id] === 'ocr_required' ? (
-                            <span role="status" title="No readable text was extracted. Run OCR on this scanned file, then upload it again." style={{ color: '#fbbf24', fontSize: 10 }}>
-                              OCR REQUIRED
-                            </span>
-                          ) : fileStatuses[f.id] === 'pending' ? (
-                            <span role="status" title="This file is waiting to be indexed." style={{ color: 'var(--mm-text-tertiary)', fontSize: 10 }}>
-                              PENDING
-                            </span>
-                          ) : null}
-                        </span>
-                        <span style={{ color: 'var(--mm-text-tertiary)', fontSize: 10 }}>
+                      <ReferenceFileStatus status={fileStatuses[f.id]} fileName={f.fileName} />
+                      <span style={{ color: 'var(--mm-text-tertiary)', fontSize: 10, flexShrink: 0, textAlign: 'right' }}>
                           {((f.content?.length ?? 0) / 1000).toFixed(1)}k
-                        </span>
                       </span>
+                      {okfKnowledgeUiEnabled && <button onClick={() => { if (knowledgeOpen === f.id) setKnowledgeOpen(null); else void loadKnowledgePack(f.id); }} className="mm-press-soft" title="Knowledge Pack" aria-expanded={knowledgeOpen === f.id} aria-label={`Knowledge Pack for ${f.fileName}`} style={S.iconBtn}><BookOpen size={12} /></button>}
                       <button
                         onClick={() => deleteFile(f.id)}
                         className="mm-press-soft"
@@ -2328,6 +2406,8 @@ export default function ModesSettings({
                         <X size={12} />
                       </button>
                     </div>
+                    {okfKnowledgeUiEnabled && knowledgeOpen === f.id && <KnowledgePanel file={f} pack={knowledgeDetails[f.id]} loading={knowledgeLoading.has(f.id)} regenerating={knowledgeBusy.has(f.id)} userEditableCardsEnabled={editableCards} onApproveCard={cardId => void reviewKnowledgeCard(f.id, cardId, 'approve')} onRejectCard={cardId => void reviewKnowledgeCard(f.id, cardId, 'reject')} onRegenerate={() => void regenerateKnowledgePack(f)} onExport={() => void exportKnowledgePack(f.id)} onReview={(cardId, action) => void reviewKnowledgeCard(f.id, cardId, action)} />}
+                    </React.Fragment>
                   ))}
                   <button
                     onClick={uploadFile}
@@ -2338,7 +2418,7 @@ export default function ModesSettings({
                     onMouseLeave={e => (e.currentTarget.style.color = 'var(--mm-text-tertiary)')}
                   >
                     <Plus size={12} />
-                    {uploading ? 'Uploading…' : 'Add file'}
+                    <span style={{ display: 'grid' }}>{['Add file', 'Uploading…'].map((label, index) => <span key={label} aria-hidden={uploading !== Boolean(index)} style={{ gridArea: '1 / 1', opacity: uploading === Boolean(index) ? 1 : 0, filter: uploading === Boolean(index) ? 'blur(0)' : 'blur(2px)', transition: 'opacity 150ms ease, filter 150ms ease' }}>{label}</span>)}</span>
                   </button>
                 </div>
               )}
