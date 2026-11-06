@@ -25,7 +25,7 @@
 
 import { app } from 'electron';
 import { validateImagePath } from '../../utils/curlUtils';
-import { ImageHashService } from './ImageHashService';
+import { hashImageFileAsync } from './ScreenshotDescriptionStore';
 import {
   runVisionFallback,
   VisionFallbackResult,
@@ -158,6 +158,19 @@ export interface ScreenUnderstandingResult {
 export const SCREEN_UNDERSTANDING_TOTAL_BUDGET_MS = 6000;
 
 /**
+ * The time a CLOUD provider gets to write the after-the-answer screen record
+ * (2026-11-06). It used the pre-pass's 6 s envelope, so the first rung was cut
+ * off at 3.6 s (FIRST_RUNG_BUDGET_SHARE): measured live on the Natively API,
+ * whose answer alone takes 3.6–4.5 s to start, the record failed on every
+ * screenshot and follow-ups got only the short backup read. Nobody waits for
+ * the record — the answer is already on screen — so it gets the time a full
+ * transcription of a screen of text takes: PER_PROVIDER per rung, TOTAL for
+ * the whole chain.
+ */
+export const CLOUD_RECORD_BUDGET_MS = 45_000;
+export const CLOUD_RECORD_PER_PROVIDER_MS = 25_000;
+
+/**
  * The time a LOCAL model gets to write the after-the-answer screen record
  * (2026-10-01). Far longer than the budget above: the record runs after the
  * answer has been delivered, and a local vision model needs tens of seconds
@@ -189,7 +202,6 @@ const LATE_RECORD_BUDGETS_MS: Readonly<Record<string, number>> = {
 };
 
 export class ScreenUnderstandingService {
-  private imageHashService: ImageHashService;
   private optimizer: ImageOptimizer;
   private lastResult: ScreenUnderstandingResult | null = null;
   /**
@@ -220,7 +232,6 @@ export class ScreenUnderstandingService {
   private readonly rungLedFor = new Map<string, string>();
 
   constructor(optimizer?: ImageOptimizer) {
-    this.imageHashService = new ImageHashService();
     this.optimizer = optimizer || getImageOptimizer();
   }
 
@@ -282,21 +293,22 @@ export class ScreenUnderstandingService {
       return this.buildUnavailable({ request, warnings, started });
     }
 
-    // Hash for cache.
-    let imageHash: string | undefined;
-    try {
-      imageHash = await this.imageHashService.computeHash(validPaths[validPaths.length - 1]);
-    } catch {
-      try {
-        imageHash = await this.imageHashService.quickHash(validPaths[validPaths.length - 1]);
-      } catch {
-        imageHash = undefined;
-      }
-    }
+    // Hash for cache: the exact bytes of the LATEST image, the one image a
+    // read sends (latestPath below) (2026-11-06). It was that image's
+    // PERCEPTUAL hash (a 16×16 average), so a screen that only LOOKED like the
+    // last one — an editor with one line changed, a page scrolled a little —
+    // matched it: this cache returned the old screen's read, and the image
+    // optimizer (which takes the same key) handed the provider the old screen's
+    // image. Not a key over the whole set: only the latest is read, and a set
+    // key ignores order ([A, B] then [B, A] would reuse B's read for A).
+    const imageHash: string | undefined =
+      (await hashImageFileAsync(validPaths[validPaths.length - 1])) ?? undefined;
 
     // Cache lookup — same image AND same question-kind within 5 min → reuse.
+    // Not for the record: screenTranscription.ts looks the screenshots up in
+    // the description store before it asks for a record at all.
     const resultKind = request.userAction === 'transcribe' ? 'transcribe' : 'answer';
-    if (imageHash) {
+    if (imageHash && resultKind !== 'transcribe') {
       const cached = this.cacheLookup(imageHash, resultKind);
       if (cached) return cached;
     }
@@ -351,8 +363,8 @@ export class ScreenUnderstandingService {
     // Run the chain.
     const latestPath = validPaths[validPaths.length - 1];
     // The Ollama and Codex / Antigravity record rungs run as a SECOND stage with
-    // their own time limits (below), so everything else — the pre-pass, and the
-    // cloud record — keeps the 6 s envelope it always had.
+    // their own time limits (below). The pre-pass keeps the 6 s envelope; the
+    // cloud record has its own, longer one (CLOUD_RECORD_BUDGET_MS).
     const lateRecordRungs = isRecord ? providers.filter(p => p.id in LATE_RECORD_BUDGETS_MS) : [];
     const firstStage = lateRecordRungs.length ? providers.filter(p => !lateRecordRungs.includes(p)) : providers;
     // Only rungs that can run are given a stage. An unconfigured one returns
@@ -385,7 +397,9 @@ export class ScreenUnderstandingService {
       // the budget is not worth delaying the answer for; failing fast to "no
       // screen context" is the cheaper outcome, and the healthy case (a cloud
       // vision rung returning in 2-4s) never reaches this ceiling.
-      totalDeadlineMs: SCREEN_UNDERSTANDING_TOTAL_BUDGET_MS,
+      totalDeadlineMs: isRecord ? CLOUD_RECORD_BUDGET_MS : SCREEN_UNDERSTANDING_TOTAL_BUDGET_MS,
+      // The record is not on the critical path (CLOUD_RECORD_BUDGET_MS).
+      ...(isRecord ? { perProviderTimeoutMs: CLOUD_RECORD_PER_PROVIDER_MS } : {}),
       health: this.rungHealth,
     });
 

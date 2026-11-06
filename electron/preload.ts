@@ -891,6 +891,7 @@ interface ElectronAPI {
   ) => Promise<void>;
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void;
   onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string }) => void) => () => void;
+  onGeminiStreamStarted: (callback: (data: { streamId: number }) => void) => () => void;
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
 
   onUndetectableChanged: (callback: (state: boolean) => void) => () => void;
@@ -1523,6 +1524,9 @@ interface ElectronAPI {
   // Settings → Advanced → "Genie animation", passed to every window the same way.
   setGenieAnimationEnabled: (enabled: boolean) => void;
   onGenieAnimationChanged: (callback: (enabled: boolean) => void) => () => void;
+  // Settings → Advanced → "Keep overlay size", passed to every window the same way.
+  setKeepOverlaySizeEnabled: (enabled: boolean) => void;
+  onKeepOverlaySizeChanged: (callback: (enabled: boolean) => void) => () => void;
   // Settings › Overlay: the meeting overlay's button order, passed to every window the same way.
   setOverlayButtonOrder: (order: string[]) => void;
   onOverlayButtonOrderChanged: (callback: (order: string[]) => void) => () => void;
@@ -2779,6 +2783,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
 
+  onGeminiStreamStarted: (callback: (data: { streamId: number }) => void) => {
+    const subscription = (_: any, data: { streamId: number }) => callback(data);
+    ipcRenderer.on('gemini-stream-started', subscription);
+    return () => {
+      ipcRenderer.removeListener('gemini-stream-started', subscription);
+    };
+  },
   onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string }) => void) => {
     const subscription = (_: any, data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string }) => callback(data);
     ipcRenderer.on('gemini-stream-done', subscription);
@@ -3811,6 +3822,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('genie-animation:changed', handler);
     return () => {
       ipcRenderer.removeListener('genie-animation:changed', handler);
+    };
+  },
+  setKeepOverlaySizeEnabled: (enabled: boolean) => {
+    ipcRenderer.send('keep-overlay-size:set', enabled);
+  },
+  onKeepOverlaySizeChanged: (callback: (enabled: boolean) => void) => {
+    const handler = (_evt: unknown, enabled: boolean) => callback(enabled);
+    ipcRenderer.on('keep-overlay-size:changed', handler);
+    return () => {
+      ipcRenderer.removeListener('keep-overlay-size:changed', handler);
     };
   },
   setOverlayButtonOrder: (order: string[]) => {

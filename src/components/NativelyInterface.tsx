@@ -327,7 +327,7 @@ import {
   pinnedViewportBudget,
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
-import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError } from '../lib/chatStreamGuard.mjs';
+import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent } from '../lib/chatStreamGuard.mjs';
 import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
 import {
@@ -344,6 +344,7 @@ import {
   type DirectAssistFallbackNotice,
 } from '../lib/directAssistFailure.mjs';
 import { addAttachment, revealsOverlay, withoutFormulaImages } from '../lib/attachmentTray.mjs';
+import { createPendingScreenshots } from '../lib/pendingScreenshots.mjs';
 import { imageFilesFromDrop, overlayPasteAction } from '../lib/overlayImageDrop.mjs';
 import { shouldSkipLiveRagForChatFollowUp } from '../lib/liveRagFollowUpGate.mjs';
 import {
@@ -469,6 +470,7 @@ const REMARK_PLUGINS = [remarkGfm, remarkMath];
 const REHYPE_PLUGINS: any[] = [[rehypeKatex, { throwOnError: false, strict: false, errorColor: '#cc0000' }]];
 
 import { DOM_CONTEXT_MAX_CHARS } from '../constants/domCapture';
+import { isKeepOverlaySizeEnabled, subscribeKeepOverlaySize } from '../lib/overlaySizeSetting';
 
 // ── Streaming-height headroom buffer (native OS window resize during token
 // streaming) ─────────────────────────────────────────────────────────────
@@ -2109,6 +2111,24 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleManualSubmitRef = useRef<() => void>(() => {});
   /** Blocks concurrent typed submits (double-click / key repeat) before React state updates. */
   const manualSubmitInFlightRef = useRef(false);
+  // A question typed while the previous answer still streams (2026-11-06). The
+  // flag above used to stay set until that answer FINISHED, so Enter did
+  // nothing and the question sat in the box. It is now released once the
+  // question is sent; main stops the older stream. The older stream's last
+  // tokens, done and error are kept out of the new card: from a send until
+  // main's gemini-stream-started for it, every desktop chat event is an older
+  // stream's, and after it the floor is that stream's id minus one
+  // (isStaleDesktopChatEvent). The sequence number keeps a replaced send's own
+  // error path off the new card.
+  const awaitingChatStreamStartRef = useRef(false);
+  const replacedChatStreamFloorRef = useRef<number | null>(null);
+  const manualSubmitSeqRef = useRef(0);
+  // Refs only, so the stream listeners (mounted once) can call any render's copy.
+  const staleDesktopChatEvent = (streamId: unknown, source: unknown) => isStaleDesktopChatEvent(
+    { awaitingStart: awaitingChatStreamStartRef.current, floor: replacedChatStreamFloorRef.current },
+    typeof streamId === 'number' ? streamId : undefined,
+    typeof source === 'string' ? source : undefined,
+  );
   const lastManualSubmitRef = useRef<{ text: string; atMs: number } | null>(null);
   /** Blocks duplicate quick-action LLM calls (Clarify, Follow-up, Brainstorm, Answer). */
   const overlayActionInFlightRef = useRef(new Set<string>());
@@ -2213,6 +2233,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // handleWhatToSay() can access it even in React 18 concurrent mode (where
   // a plain setTimeout(0) may fire before setAttachedContext flushes).
   const pendingCaptureRef = useRef<{ path: string; preview: string } | null>(null);
+  // ⌘/Ctrl+H captures still in flight. A send pressed in that ~0.5 s gap waits
+  // for them and takes them along (src/lib/pendingScreenshots.mjs).
+  const pendingShotsRef = useRef(createPendingScreenshots<{ path: string; preview: string }>());
 
   // Latent Context State (Screenshots attached but not sent)
   const [attachedContext, setAttachedContext] = useState<
@@ -2880,6 +2903,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // fresh auto-behaviour. NOT cleared on scroll (that would spring it back open
   // the moment the user nudges the wheel — the exact fight we're killing).
   const manualWidthOverrideRef = useRef<number | null>(null);
+  // Settings → Advanced → "Keep overlay size" (overlaySizeSetting.ts), on by
+  // default: the width a code answer opened, a width set with the resize button
+  // and a dragged height all stay for the next answers. Off: the overlay narrows
+  // when no code is in view and each new answer starts from the automatic size.
+  // A ref, read on the token path; a change applies from the next resize.
+  const holdOverlaySizeRef = useRef<boolean>(isKeepOverlaySizeEnabled());
+  useEffect(() => {
+    const follow = () => { holdOverlaySizeRef.current = isKeepOverlaySizeEnabled(); };
+    follow();
+    return subscribeKeepOverlaySize(follow);
+  }, []);
   // `isShellWide` drives the resize button's icon (Maximize2 ↔ Minimize2). It is
   // derived from the live shellWidth motion value crossing the midpoint, so it
   // self-reconciles for BOTH manual toggles and automatic code-expansion — the
@@ -5105,7 +5139,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       stableVisibilityTimerRef.current = null;
       const target = pendingVisibilityRef.current;
       pendingVisibilityRef.current = null;
-      if (target !== null && target !== codeExpandedRef.current) {
+      if (target !== null && target !== codeExpandedRef.current && !(target === false && holdOverlaySizeRef.current)) {
         startTransition(target ? SHELL_WIDTH_EXPANDED : SHELL_WIDTH_COLLAPSED);
       }
     }, STABILITY_MS);
@@ -6629,6 +6663,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // to the auto cap before the token lays out, so the growth is one motion.
     if (
       heightPinIsCeilingRef.current &&
+      !holdOverlaySizeRef.current &&
       streamingMsgIdRef.current !== heightPinStreamIdRef.current
     ) {
       heightPinIsCeilingRef.current = false;
@@ -6690,7 +6725,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // First token of a NEW stream (id not yet reserved) → relinquish any manual
     // width pin so this answer gets fresh auto-resize behaviour. Done before the
     // eager-expand check below so a new coding answer can still grow the shell.
-    if (streamingMsgIdRef.current === null && manualWidthOverrideRef.current !== null) {
+    if (streamingMsgIdRef.current === null && manualWidthOverrideRef.current !== null && !holdOverlaySizeRef.current) {
       manualWidthOverrideRef.current = null;
     }
 
@@ -8217,6 +8252,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       typeof promptInstruction === 'string' ? promptInstruction : undefined;
     setIsExpanded(true);
     setIsProcessing(true);
+    // ⌘H then ⌘Enter in one motion: wait for a screenshot still capturing.
+    const lateShots = await pendingShotsRef.current.settle();
     // Capture and clear attached image context.
     // Also merge in any screenshot from the capture-and-process shortcut that
     // arrived via pendingCaptureRef before the React state flush (React 18 fix).
@@ -8228,6 +8265,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (pending && !currentAttachments.some((s) => s.path === pending.path)) {
       currentAttachments = addAttachment(currentAttachments, pending);
     }
+    for (const shot of lateShots) currentAttachments = addAttachment(currentAttachments, shot);
 
     if (currentAttachments.length > 0) {
       setAttachedContext([]);
@@ -8780,11 +8818,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // streamId guard (audit finding #3): drop tokens from a superseded chat stream so
     // a phone-mirror or stale desktop stream can't bleed into the active bubble. Tokens
     // without a streamId (back-compat) are always accepted.
+    // The id main gave the question just sent: older desktop streams are below it.
+    cleanups.push(
+      window.electronAPI.onGeminiStreamStarted((data) => {
+        if (typeof data?.streamId !== 'number') return;
+        replacedChatStreamFloorRef.current = data.streamId - 1;
+        awaitingChatStreamStartRef.current = false;
+      }),
+    );
     cleanups.push(
       window.electronAPI.onGeminiStreamToken((token, meta) => {
         // Direct Assist owns this overlay row while active. A legacy token that
         // was already queued before cancellation must never be adopted into it.
         if (activeDirectAssistRef.current) return;
+        if (staleDesktopChatEvent(meta?.streamId, (meta as any)?.source)) return;
         const decision = resolveChatStreamToken(
           chatStreamIdRef.current, meta?.streamId,
           chatStreamSourceRef.current, (meta as any)?.source,
@@ -8800,6 +8847,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     cleanups.push(
       window.electronAPI.onGeminiStreamDone((data) => {
         if (activeDirectAssistRef.current) return;
+        // Replaced by a newer typed question: the new question owns the card
+        // and the spinner, so nothing here is released either.
+        if (staleDesktopChatEvent(data?.streamId, (data as any)?.source)) return;
         // Ignore a done from a superseded stream (audit finding #3) so it can't
         // tear down a newer stream's row. A done without a streamId is honored
         // (back-compat). On an honored done we clear the adopted id.
@@ -8975,6 +9025,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           }
           return;
         }
+        if (staleDesktopChatEvent(meta?.streamId, meta?.source)) return;
         if (typeof meta?.streamId === 'number'
           && chatStreamIdRef.current !== null
           && meta.streamId !== chatStreamIdRef.current) return;
@@ -9466,6 +9517,9 @@ Provide only the answer, nothing else.`;
           // surface. The desktop done/error handlers both clear it again.
           chatStreamIdRef.current = null;
           chatStreamSourceRef.current = 'desktop';
+          // As for a typed question: older desktop streams' events are dropped
+          // until main names this one's (isStaleDesktopChatEvent).
+          awaitingChatStreamStartRef.current = true;
           requestStartTimeRef.current = Date.now();
           await window.electronAPI.streamGeminiChat(
             question,
@@ -9481,6 +9535,7 @@ Provide only the answer, nothing else.`;
           // gemini-stream-error follows and nothing else releases the claim we
           // took above. Left set, it would pin the guard to 'desktop' and block
           // every phone turn — the bug this fix removes, inverted.
+          awaitingChatStreamStartRef.current = false;
           chatStreamIdRef.current = null;
           chatStreamSourceRef.current = null;
           setIsProcessing(false);
@@ -9547,7 +9602,7 @@ Provide only the answer, nothing else.`;
     // Timing: the moment this request was accepted (content-free; see diagramTimings).
     diagramRequestAtRef.current = performance.now();
     warmDiagramRendererOnIdle();
-    if (!inputValue.trim() && attachedContext.length === 0) return;
+    if (!inputValue.trim() && attachedContext.length === 0 && !pendingShotsRef.current.inFlight()) return;
 
     const rawUserText = inputValue;
     const userText = inputValue.trim();
@@ -9568,10 +9623,23 @@ Provide only the answer, nothing else.`;
     lastManualSubmitRef.current = { text: userText, atMs: nowMs };
     analytics.trackChatQuestionSent();
 
-    const currentAttachments = attachedContext;
-
-    // Clear inputs immediately
+    // Cleared now, before the wait below (2026-11-06): what is typed during
+    // it is the next question, and clearing after the wait erased it.
     setInputValue('');
+
+    // ⌘H then Enter in one motion: wait for a screenshot still capturing.
+    let currentAttachments = attachedContext;
+    for (const shot of await pendingShotsRef.current.settle()) {
+      currentAttachments = addAttachment(currentAttachments, shot);
+    }
+    if (!userText && currentAttachments.length === 0) {
+      // Empty input sent only for a capture that then failed: nothing to send.
+      manualSubmitInFlightRef.current = false;
+      lastManualSubmitRef.current = last;
+      return;
+    }
+
+    // Clear the tray (the input was cleared before the wait above)
     setAttachedContext([]);
 
     // Seal any in-flight streaming rows from a previous turn before we
@@ -9678,6 +9746,7 @@ Provide only the answer, nothing else.`;
     setIsProcessing(true);
     pinAnswerPanel();
     const conversationContextForSubmit = buildConversationContextFromMessages(messages);
+    const mySubmit = ++manualSubmitSeqRef.current;
 
     try {
       // No RAG pre-flight here (issue #552). It used to intercept every typed
@@ -9692,15 +9761,26 @@ Provide only the answer, nothing else.`;
       // Pass imagePath if attached, AND conversation context
       // R-17: claim the desktop surface before the round-trip (see the note at
       // the other streamGeminiChat call site).
+      // Until main names this question's stream, every desktop chat event is
+      // an older question's and is dropped (isStaleDesktopChatEvent).
+      awaitingChatStreamStartRef.current = true;
       chatStreamIdRef.current = null;
       chatStreamSourceRef.current = 'desktop';
       requestStartTimeRef.current = Date.now();
+      // Sent: the next question may go while this one streams (main stops this
+      // stream for it). The double-press dedupe above still applies.
+      manualSubmitInFlightRef.current = false;
       await window.electronAPI.streamGeminiChat(
         userText || 'Analyze this screenshot',
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
         conversationContextForSubmit, // Pass freshly-derived context so "answer this" works
       );
     } catch (err) {
+      // A newer question replaced this one (main stopped this stream): its card,
+      // claim and spinner belong to that question now.
+      if (mySubmit !== manualSubmitSeqRef.current) return;
+      // No stream will start for a send that failed.
+      awaitingChatStreamStartRef.current = false;
       // R-17: release the claim taken above — see the note at the other call site.
       chatStreamIdRef.current = null;
       chatStreamSourceRef.current = null;
@@ -9725,7 +9805,7 @@ Provide only the answer, nothing else.`;
         ];
       });
     } finally {
-      manualSubmitInFlightRef.current = false;
+      if (mySubmit === manualSubmitSeqRef.current) manualSubmitInFlightRef.current = false;
     }
   };
 
@@ -10682,9 +10762,12 @@ Provide only the answer, nothing else.`;
     },
     takeScreenshot: async () => {
       try {
-        const data = await window.electronAPI.takeScreenshot();
-        if (data && data.path) {
-          handleScreenshotAttach(data as { path: string; preview: string });
+        const data = await pendingShotsRef.current.track(
+          window.electronAPI.takeScreenshot() as Promise<{ path: string; preview: string } | null>,
+        );
+        // A send pressed while this was capturing already took it along.
+        if (data && data.path && !pendingShotsRef.current.claimed(data.path)) {
+          handleScreenshotAttach(data);
         }
       } catch (err) {
         console.error('Error triggering screenshot:', err);
@@ -10723,9 +10806,12 @@ Provide only the answer, nothing else.`;
     },
     takeScreenshot: async () => {
       try {
-        const data = await window.electronAPI.takeScreenshot();
-        if (data && data.path) {
-          handleScreenshotAttach(data as { path: string; preview: string });
+        const data = await pendingShotsRef.current.track(
+          window.electronAPI.takeScreenshot() as Promise<{ path: string; preview: string } | null>,
+        );
+        // A send pressed while this was capturing already took it along.
+        if (data && data.path && !pendingShotsRef.current.claimed(data.path)) {
+          handleScreenshotAttach(data);
         }
       } catch (err) {
         console.error('Error triggering screenshot:', err);

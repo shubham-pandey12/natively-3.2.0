@@ -59,4 +59,5 @@ test('only the user closing the notepad brings the launcher up (mid-meeting: Mee
   assert.match(closeHandler, /const action = planNotesClosed\(this\.isMeetingActive, this\.windowHelper\.isOverlayHeldHidden\(\)\);/);
   assert.match(closeHandler, /if \(action === 'owed-launcher'\) this\.windowHelper\.showOwedLauncher\(inactive\);/);
   assert.match(closeHandler, /else if \(action === 'launcher'\) this\.windowHelper\.setWindowMode\('launcher', inactive\);/);
+  assert.match(mainSource, /onClosedByUser\(\(\) => \{\s*(?:try \{ require\('\.\/services\/FunnelTelemetry'\)[^\n]*\n\s*)?const inactive = this\.isUndetectable \? true : undefined;\s*const action = planNotesClosed\(this\.isMeetingActive, this\.windowHelper\.isOverlayHeldHidden\(\)\);\s*if \(action === 'owed-launcher'\) this\.windowHelper\.showOwedLauncher\(inactive\);/);
 });

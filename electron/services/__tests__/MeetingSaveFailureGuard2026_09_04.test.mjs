@@ -85,13 +85,13 @@ describe('the destructive failure path is gated on the save not having happened'
     assert.ok(!guardsMarker(withoutGuard),
       'the !meetingSaved pin still passes with the guard removed — it is vacuous');
 
-    const save = source.indexOf('DatabaseManager.getInstance().saveMeeting(meetingData');
-    const beforeSave = source.slice(0, save);
-    const afterSave = source.slice(save).replace(
-      /try\s*\{\s*const wins = require\('electron'\)\.BrowserWindow\.getAllWindows\(\);\s*wins\.forEach\(\(w: any\) => w\.webContents\.send\('meetings-updated'\)\);\s*\}\s*catch/,
-      "const wins = require('electron').BrowserWindow.getAllWindows(); wins.forEach((w: any) => w.webContents.send('meetings-updated'));",
+    // The broadcast AFTER the save: the file has other guarded broadcasts
+    // above it, and mutating the first one in the file proved nothing.
+    const saveAt = source.indexOf('DatabaseManager.getInstance().saveMeeting(meetingData');
+    const withoutTry = source.slice(0, saveAt) + source.slice(saveAt).replace(
+      /try\s*\{\s*\n(\s*)const wins = require\('electron'\)\.BrowserWindow\.getAllWindows\(\);/,
+      '$1const wins = require(\'electron\').BrowserWindow.getAllWindows();',
     );
-    const withoutTry = beforeSave + afterSave;
     assert.notEqual(withoutTry, source, 'probe failed to mutate the broadcast guard');
     assert.ok(!guardsBroadcast(withoutTry),
       'the broadcast pin still passes with the try removed — it is vacuous');

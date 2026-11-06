@@ -188,6 +188,9 @@ describe('the engine runs a button on the press, like Define', () => {
   const run = async (fill, imagePaths, readSeconds) => {
     const { IntelligenceEngine } = require(dist('IntelligenceEngine.js'));
     const { SessionTracker } = require(dist('SessionTracker.js'));
+    // A press is recorded in the conversation (2026-11-06), which is process-wide:
+    // each press here starts from an empty one, as a fresh session would.
+    require(dist('context-intelligence/question/conversation-state-store.js')).clearConversationState();
     const session = new SessionTracker();
     fill?.(session);
     const engine = new IntelligenceEngine({ setNegotiationCoachingHandler() {} }, session);
@@ -254,7 +257,7 @@ describe('the engine runs a button on the press, like Define', () => {
   test('main shows it in Recap\'s card and the manager forwards both events', () => {
     const main = read('electron/main.ts');
     assert.match(main, /on\('custom_button_token', \(token: string\) => \{\s*queueBatch\('recap', \{ token \}\);/);
-    assert.match(main, /on\('custom_button', \(text: string\) => \{\s*flushBatchesBeforeFinal\(\);\s*this\.sendToWindow\(mainWindow\(\), 'intelligence-recap', \{ summary: text \}\)/);
+    assert.match(main, /on\('custom_button', \(text: string\) => \{\s*flushBatchesBeforeFinal\(\);\s*this\.sendToWindow\(answerWindow\(\), 'intelligence-recap', \{ summary: text \}\)/);
     assert.match(read('electron/IntelligenceManager.ts'), /'custom_button', 'custom_button_token',/);
   });
 
