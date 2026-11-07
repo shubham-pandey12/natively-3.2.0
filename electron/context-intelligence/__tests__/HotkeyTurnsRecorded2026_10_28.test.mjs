@@ -55,7 +55,7 @@ describe('Cmd+1', () => {
 
   test('records the question the turn actually answered, not the none it was passed', async () => {
     const e = engine({
-      runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.turnOut.question = 'How does a mutex differ from a semaphore?'; return 'A mutex has an owner.'; },
+      runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; opts.turnOut.question = 'How does a mutex differ from a semaphore?'; return 'A mutex has an owner.'; },
     });
     await e.runWhatShouldISay(undefined, 0.8, undefined, {});
     assert.equal(await until(() => turns().length === 1), true);
@@ -64,7 +64,7 @@ describe('Cmd+1', () => {
   });
 
   test('a press on a screenshot with nothing said is recorded, as the user\'s', async () => {
-    const e = engine({ runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.turnOut.question = ''; return 'Use two pointers.'; } });
+    const e = engine({ runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; opts.turnOut.question = ''; return 'Use two pointers.'; } });
     await e.runWhatShouldISay(undefined, 0.8, [MISSING_SHOT], {});
     assert.equal(await until(() => turns().length === 1), true, 'the turn and its screenshot were never recorded');
     assert.equal(turns()[0].q, IntelligenceEngine.SCREENSHOT_TURN_QUESTION);
@@ -74,14 +74,14 @@ describe('Cmd+1', () => {
 
   test('a press on a screenshot is not filed under an earlier, unrelated question', async () => {
     recordAnswerSummary(SESSION, 'Earlier answer.', undefined, 'an earlier unrelated question');
-    const e = engine({ runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.turnOut.question = ''; return 'This is a deadlock.'; } });
+    const e = engine({ runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; opts.turnOut.question = ''; return 'This is a deadlock.'; } });
     await e.runWhatShouldISay(undefined, 0.8, [MISSING_SHOT], {});
     assert.equal(await until(() => turns().length === 2), true);
     assert.equal(turns()[1].q, IntelligenceEngine.SCREENSHOT_TURN_QUESTION);
   });
 
   test('a speculative draft is still never recorded', async () => {
-    const e = engine({ runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.turnOut.question = 'q?'; return 'draft'; } });
+    const e = engine({ runWhatShouldISayInner: async (_q, _c, _imgs, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; opts.turnOut.question = 'q?'; return 'draft'; } });
     await e.runWhatShouldISay(undefined, 0.8, undefined, { speculative: true });
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(turns().length, 0);
@@ -96,8 +96,8 @@ describe('Cmd+1', () => {
     assert.equal(turns().length, 0);
   });
 
-  test('a press WITH a question records as before, early return or not', async () => {
-    const e = engine({ runWhatShouldISayInner: async () => 'An answer.' });
+  test('a successful press with an explicit question records without transcript resolution', async () => {
+    const e = engine({ runWhatShouldISayInner: async (_q, _c, _i, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; return 'An answer.'; } });
     await e.runWhatShouldISay('What is a deadlock?', 0.8, undefined, {});
     assert.equal(await until(() => turns().length === 1), true);
     assert.equal(turns()[0].q, 'What is a deadlock?');
@@ -342,7 +342,7 @@ describe('in a meeting: page captures and every remaining hotkey', () => {
   });
 
   test('a Cmd+1 on a captured browser page records the page\'s text, and the next action reads it', async () => {
-    const e = ctxEngine({ runWhatShouldISayInner: async (_q, _c, _i, opts) => { opts.turnOut.question = ''; return 'Use a set.'; } });
+    const e = ctxEngine({ runWhatShouldISayInner: async (_q, _c, _i, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; opts.turnOut.question = ''; return 'Use a set.'; } });
     await e.runWhatShouldISay(undefined, 0.8, undefined, { domContext: 'Contains Duplicate: return true if any value appears twice. PAGE-ID-217' });
     assert.equal(await until(() => turns().length === 1), true, 'the page press was never recorded');
     assert.equal(turns()[0].q, IntelligenceEngine.PAGE_TURN_QUESTION);
@@ -351,7 +351,7 @@ describe('in a meeting: page captures and every remaining hotkey', () => {
   });
 
   test('a page AND a screenshot: both are kept, the screenshot\'s marker beside the page text', async () => {
-    const e = engine({ runWhatShouldISayInner: async (_q, _c, _i, opts) => { opts.turnOut.question = ''; return 'Answer.'; } });
+    const e = engine({ runWhatShouldISayInner: async (_q, _c, _i, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; opts.turnOut.question = ''; return 'Answer.'; } });
     await e.runWhatShouldISay(undefined, 0.8, [MISSING_SHOT], { domContext: 'PAGE-ID-BOTH' });
     assert.equal(await until(() => turns()[0]?.screen?.includes(SCREEN_NOT_TRANSCRIBED)), true);
     assert.match(turns()[0].screen, /PAGE-ID-BOTH/, 'the transcription result replaced the page text');
@@ -360,7 +360,7 @@ describe('in a meeting: page captures and every remaining hotkey', () => {
 
   test('a Cmd+1 that heard no question and saw nothing is not filed under an earlier question', async () => {
     recordAnswerSummary(SESSION, 'Earlier answer.', undefined, 'an earlier unrelated question');
-    const e = engine({ runWhatShouldISayInner: async (_q, _c, _i, opts) => { opts.turnOut.question = ''; return 'Say you are happy to go on.'; } });
+    const e = engine({ runWhatShouldISayInner: async (_q, _c, _i, opts) => { opts.outcomeOut.value = { status: 'success', retryable: false }; opts.turnOut.question = ''; return 'Say you are happy to go on.'; } });
     await e.runWhatShouldISay(undefined, 0.8, undefined, {});
     assert.equal(await until(() => turns().length === 2), true);
     assert.equal(turns()[1].q, IntelligenceEngine.UNPROMPTED_TURN_QUESTION);

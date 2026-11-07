@@ -1,3 +1,4 @@
+import type { WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 // IntelligenceManager.ts
 // Thin facade that delegates to focused sub-modules.
 // Maintains full backward compatibility — all existing callers continue to work unchanged.
@@ -346,7 +347,7 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.runAssistMode();
     }
 
-    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[], options?: { skipCooldown?: boolean; forceFresh?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; pressedAt?: number }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[], options?: { skipCooldown?: boolean; forceFresh?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         return this.engine.runWhatShouldISay(question, confidence, imagePaths, options);
     }
 

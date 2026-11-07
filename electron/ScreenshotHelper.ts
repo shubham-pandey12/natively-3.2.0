@@ -480,6 +480,10 @@ export async function captureWindowThumbnail(titles: string[], maxEdge: number =
 export class ScreenshotHelper {
   private screenshotQueue: string[] = []
   private extraScreenshotQueue: string[] = []
+  private screenshotRetentions = new Map<string, readonly string[]>()
+  private retainedScreenshotPaths = new Map<string, number>()
+  private deferredScreenshotDeletes = new Set<string>()
+  private deletingScreenshotPaths = new Set<string>()
   private readonly MAX_SCREENSHOTS = 5
   // The extension's formula images (#645), one list per capture, kept apart
   // from the queues so they never push out the user's own screenshots.
@@ -814,6 +818,65 @@ export class ScreenshotHelper {
     }
   }
 
+  /** Retain validated screenshots while an answer or its explicit retry owns them. */
+  public retainScreenshots(paths: readonly string[]): string {
+    const retained = [...new Set(paths.map((imagePath) => path.resolve(imagePath)))]
+    for (const imagePath of retained) {
+      if (this.deletingScreenshotPaths.has(imagePath) || !fs.statSync(imagePath).isFile()) {
+        throw new Error('A screenshot is no longer available. Capture it again.')
+      }
+    }
+    const token = uuidv4()
+    this.screenshotRetentions.set(token, retained)
+    for (const imagePath of retained) {
+      this.retainedScreenshotPaths.set(imagePath, (this.retainedScreenshotPaths.get(imagePath) ?? 0) + 1)
+    }
+    return token
+  }
+
+  public async releaseScreenshots(token: string): Promise<void> {
+    const retained = this.screenshotRetentions.get(token)
+    if (!retained) return
+    this.screenshotRetentions.delete(token)
+    for (const imagePath of retained) {
+      const remaining = (this.retainedScreenshotPaths.get(imagePath) ?? 1) - 1
+      if (remaining > 0) {
+        this.retainedScreenshotPaths.set(imagePath, remaining)
+        continue
+      }
+      this.retainedScreenshotPaths.delete(imagePath)
+      if (!this.deferredScreenshotDeletes.has(imagePath)) continue
+      const queued = this.screenshotQueue.includes(imagePath) || this.extraScreenshotQueue.includes(imagePath)
+        || this.formulaImageCaptures.some((capture) => capture.includes(imagePath))
+      if (queued) {
+        this.deferredScreenshotDeletes.delete(imagePath)
+        continue
+      }
+      try {
+        await this.deleteUnretainedScreenshot(imagePath)
+        this.deferredScreenshotDeletes.delete(imagePath)
+      } catch (error) {
+        // A locked file (Windows) remains tracked so a later reset can retry cleanup.
+        console.warn('[ScreenshotHelper] Retained screenshot cleanup failed:', error)
+      }
+    }
+  }
+
+  private async deleteUnretainedScreenshot(imagePath: string): Promise<void> {
+    if (this.retainedScreenshotPaths.has(imagePath)) {
+      this.deferredScreenshotDeletes.add(imagePath)
+      return
+    }
+    this.deletingScreenshotPaths.add(imagePath)
+    try {
+      await fs.promises.unlink(imagePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    } finally {
+      this.deletingScreenshotPaths.delete(imagePath)
+    }
+  }
+
   /**
    * Add a saved image to its queue, dropping (and deleting) the oldest past
    * MAX_SCREENSHOTS. The one place the cap lives, for captures and for images
@@ -826,7 +889,7 @@ export class ScreenshotHelper {
     const removedPath = queue.shift()
     if (!removedPath) return
     try {
-      await fs.promises.unlink(removedPath)
+      await this.deleteUnretainedScreenshot(removedPath)
       console.log(`[ScreenshotHelper] Removed old ${which === 'queue' ? '' : 'extra '}screenshot: ${removedPath}`)
     } catch (error) {
       console.warn(`[ScreenshotHelper] Failed to remove old ${which === 'queue' ? '' : 'extra '}screenshot: ${removedPath}`, error)
@@ -882,7 +945,7 @@ export class ScreenshotHelper {
     this.formulaImageCaptures.push(paths)
     const removed = this.formulaImageCaptures.splice(0, Math.max(0, this.formulaImageCaptures.length - this.MAX_FORMULA_IMAGE_CAPTURES)).flat()
     removed.forEach((p) => this.formulaImageRanges.delete(p))
-    await Promise.all(removed.map((p) => fs.promises.unlink(p).catch(() => {})))
+    await Promise.all(removed.map((p) => this.deleteUnretainedScreenshot(p).catch(() => {})))
     return paths
   }
 
@@ -908,34 +971,21 @@ export class ScreenshotHelper {
   }
 
   public clearQueues(): void {
-    // Clear screenshotQueue
-    this.screenshotQueue.forEach((screenshotPath) => {
-      fs.unlink(screenshotPath, (err) => {
-        if (err) {
-          // console.error(`Error deleting screenshot at ${screenshotPath}:`, err)
-        }
-      })
-    })
+    // Reset invalidates retry ownership and removes even screenshots already evicted from a queue.
+    const paths = new Set([
+      ...this.screenshotQueue, ...this.extraScreenshotQueue, ...this.formulaImageCaptures.flat(),
+      ...this.deferredScreenshotDeletes,
+    ])
     this.screenshotQueue = []
-
-    // Clear extraScreenshotQueue
-    this.extraScreenshotQueue.forEach((screenshotPath) => {
-      fs.unlink(screenshotPath, (err) => {
-        if (err) {
-          // console.error(
-          //   `Error deleting extra screenshot at ${screenshotPath}:`,
-          //   err
-          // )
-        }
-      })
-    })
     this.extraScreenshotQueue = []
-
-    this.formulaImageCaptures.flat().forEach((imagePath) => {
-      fs.unlink(imagePath, () => {})
-    })
     this.formulaImageCaptures = []
     this.formulaImageRanges.clear()
+    this.screenshotRetentions.clear()
+    this.retainedScreenshotPaths.clear()
+    this.deferredScreenshotDeletes.clear()
+    for (const imagePath of paths) {
+      void this.deleteUnretainedScreenshot(imagePath).catch(() => {})
+    }
   }
 
   /**

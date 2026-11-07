@@ -54,7 +54,7 @@ test('runWhatShouldISay gives an honest fallback for a manual nothing-actionable
   assert.deepEqual(events, [['final', LONGSESSION_NONANSWER_FALLBACK]]);
   assert.deepEqual(session.getFullUsage(), []);
   assert.equal(session.getFullTranscript().some(segment => segment.text.includes('Nothing actionable')), false);
-  assert.equal(session.getFullTranscript().some(segment => segment.text === LONGSESSION_NONANSWER_FALLBACK), true);
+  assert.equal(session.getFullTranscript().some(segment => segment.text === LONGSESSION_NONANSWER_FALLBACK), false);
 });
 
 test('runWhatShouldISay gives an honest fallback for a manual nothing-to-capture sentinel', async () => {
@@ -69,7 +69,7 @@ test('runWhatShouldISay gives an honest fallback for a manual nothing-to-capture
   assert.deepEqual(events, [['final', LONGSESSION_NONANSWER_FALLBACK]]);
   assert.deepEqual(session.getFullUsage(), []);
   assert.equal(session.getFullTranscript().some(segment => segment.text.includes('Nothing to capture')), false);
-  assert.equal(session.getFullTranscript().some(segment => segment.text === LONGSESSION_NONANSWER_FALLBACK), true);
+  assert.equal(session.getFullTranscript().some(segment => segment.text === LONGSESSION_NONANSWER_FALLBACK), false);
 });
 
 test('runWhatShouldISay gives an honest fallback for normalized sentinel variants (manual press)', async () => {

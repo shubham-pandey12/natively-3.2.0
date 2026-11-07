@@ -1,3 +1,4 @@
+import type { WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 // ipcHandlers.ts
 
 import * as crypto from 'crypto';
@@ -1641,6 +1642,40 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true };
   });
 
+  // Leases belong to the requesting renderer; another window cannot release them.
+  const screenshotRetryLeases = new Map<number, Set<string>>();
+  safeHandle('retain-screenshot-retry', async (event, imagePaths: unknown) => {
+    if (event.sender.id !== appState.getWindowHelper().getOverlayWindow()?.webContents.id) {
+      throw new Error('Screenshot retry is only available from the overlay');
+    }
+    if (!Array.isArray(imagePaths) || imagePaths.length === 0 || imagePaths.length > 5
+        || imagePaths.some((item) => typeof item !== 'string')) throw new Error('Invalid screenshot attachments');
+    const { validateImagePath } = require('./utils/curlUtils');
+    for (const imagePath of imagePaths) {
+      if (!validateImagePath(imagePath, app.getPath('userData')).isValid) throw new Error('Screenshot attachment is unavailable');
+    }
+    let leases = screenshotRetryLeases.get(event.sender.id);
+    if (!leases) {
+      leases = new Set<string>();
+      screenshotRetryLeases.set(event.sender.id, leases);
+      const senderId = event.sender.id;
+      event.sender.once('destroyed', () => {
+        for (const lease of screenshotRetryLeases.get(senderId) ?? []) {
+          void appState.getScreenshotHelper().releaseScreenshots(lease).catch(() => {});
+        }
+        screenshotRetryLeases.delete(senderId);
+      });
+    }
+    const lease = appState.getScreenshotHelper().retainScreenshots(imagePaths);
+    leases.add(lease);
+    return lease;
+  });
+  safeHandle('release-screenshot-retry', async (event, lease: unknown) => {
+    const leases = screenshotRetryLeases.get(event.sender.id);
+    if (typeof lease !== 'string' || !leases?.delete(lease)) return;
+    await appState.getScreenshotHelper().releaseScreenshots(lease);
+  });
+
   safeHandle('delete-screenshot', async (event, filePath: string) => {
     // Guard: only allow deletion of files within the app's own userData directory
     const userDataDir = app.getPath('userData');
@@ -2944,7 +2979,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 return null;
               }
             }
-            const v3Truncated = v3Stream.outcome.truncated === true;
+            const v3Truncated = v3Stream.outcome.truncated === true || !finalText.trim();
             if (v3Truncated) {
               console.warn('[IPC] manual chat answer is INCOMPLETE — not storing it as conversation history', {
                 streamId: myStreamId,
@@ -2954,6 +2989,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             }
             event.sender.send('gemini-stream-done', {
               finalText,
+              outcome: { status: v3Truncated ? 'failed' : 'success', retryable: v3Truncated, reason: v3Truncated ? 'incomplete_answer' : undefined },
               streamId: myStreamId,
               incomplete: v3Truncated,
               incompleteReason: v3Truncated ? v3Stream.outcome.reason : undefined,
@@ -7082,7 +7118,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // the streamed answer was already valid, finalText is undefined and the
             // already-streamed tokens stand. streamId (audit finding #3) lets the
             // renderer ignore a stale done from a superseded stream.
-            event.sender.send('gemini-stream-done', { ...(finalText ? { finalText } : {}), streamId: myStreamId });
+            event.sender.send('gemini-stream-done', { ...(finalText ? { finalText } : {}), streamId: myStreamId, outcome: { status: sessionWriteDecision.blockedFromSessionTracker || blockedFromSessionTracker || !(finalText || fullResponse).trim() ? 'failed' : 'success', retryable: sessionWriteDecision.blockedFromSessionTracker || blockedFromSessionTracker || !(finalText || fullResponse).trim(), reason: sessionWriteDecision.reason } });
             // Compile-only syntax check of fenced JavaScript (observe-only).
             try { require('./llm/codeVerification/syntaxCheckReport').observeAnswerJsSyntax(finalText ?? fullResponse, 'manual_chat_legacy'); } catch { /* observe only */ }
             chatTrace.mark('response_completed', { chars: fullResponse.length, repaired: Boolean(finalText) });
@@ -7361,7 +7397,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 criticalViolations: ['provider_error_no_answer'],
               });
               event.sender.send('gemini-stream-token', safe, { streamId: myStreamId });
-              event.sender.send('gemini-stream-done', { finalText: safe, streamId: myStreamId });
+              event.sender.send('gemini-stream-done', { finalText: safe, streamId: myStreamId, outcome: { status: 'failed', retryable: true, reason: 'provider_error_no_answer' } });
               try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), safe); PhoneMirrorService.getInstance().publishDone(String(myStreamId), safe); } catch (_) { /* noop */ }
               intelligenceManager.addAssistantMessage(safe, forThisTurn(sessionWriteDecision), 'manual_chat');
               _emitAttr({ answer_type: answerPlan.answerType, profile_tree_used: false, profile_tree_fast_path_used: false, structured_resume_used: false });
@@ -16364,6 +16400,14 @@ export function initializeIpcHandlers(appState: AppState): void {
                 error: `Invalid image path: ${validation.reason}`,
               };
             }
+            if (!(await fs.promises.stat(imagePath).catch(() => null))?.isFile()) {
+              return {
+                answer: null,
+                outcome: { status: 'failed', retryable: false, reason: 'attachment_unavailable' },
+                error: 'The screenshot is unavailable. Capture it again to retry.',
+                screenContextStatus,
+              };
+            }
             validatedImagePaths!.push(imagePath);
           }
 
@@ -16493,6 +16537,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const phonePress = startPhonePress();
+        const outcomeOut: WhatToSayOutcomeOut = {};
         const effectiveQuestion = (typeof question === 'string' && question.trim().length > 0)
           ? question
           : (validatedImagePaths?.length ? 'What should I say about this?' : question);
@@ -16513,6 +16558,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // gate can otherwise bleed a previous question's answer into the
             // current manual press). See runWhatShouldISay.forceFresh branch.
             forceFresh: true,
+            outcomeOut,
             screenContext,
             pressedAt,
             ...(screenFromImage ? { screenFromImage: true } : {}),
@@ -16535,6 +16581,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         let refusalRetry: { cropped: boolean; improved: boolean } | undefined;
         if (
           answer
+          && outcomeOut.value?.status === 'success'
           && validatedImagePaths?.length
           && process.env.NATIVELY_ASSESSMENT_RETRY !== 'off'
         ) {
@@ -16554,6 +16601,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               );
               if (crop) {
                 const retryPaths = validatedImagePaths.slice(0, -1).concat(croppedImagePath);
+                const retryOutcomeOut: WhatToSayOutcomeOut = {};
                 const retryAnswer = await phonePress.run(() => intelligenceManager.runWhatShouldISay(
                   question,
                   0.8,
@@ -16561,6 +16609,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                   {
                     skipCooldown: true,
                     forceFresh: true,
+                    outcomeOut: retryOutcomeOut,
                     promptInstruction:
                       typeof options?.promptInstruction === 'string'
                         ? options.promptInstruction
@@ -16573,7 +16622,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                     // would re-tell the model what we cropped away.
                   },
                 ));
-                if (retryAnswer) {
+                if (retryAnswer && retryOutcomeOut.value?.status === 'success') {
                   // Both runs recorded a turn, each with the screenshot: the
                   // refusal is dropped from the conversation, so it neither
                   // takes a screen's room nor steers the next follow-up toward
@@ -16598,7 +16647,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             }
           }
         }
-        if (answer) {
+        if (answer && outcomeOut.value?.status === 'success') {
           // The conversation-ring write lives in IntelligenceEngine.runWhatShouldISay
           // now, not here. Placed at this IPC handler it only ever recorded a
           // MANUAL press: Auto Answer calls runWhatShouldISay directly and never
@@ -16616,6 +16665,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
         return {
           answer,
+          outcome: outcomeOut.value ?? { status: 'failed', retryable: true, reason: 'missing_generation_outcome' },
+          ...(outcomeOut.value?.status === 'failed' ? { error: outcomeOut.value.reason || 'generation_failed' } : {}),
           question: question || 'inferred from context',
           screenContextStatus,
           visionProviderUsed,

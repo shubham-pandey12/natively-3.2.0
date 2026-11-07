@@ -131,6 +131,7 @@ test('history preserves a resolved spoken question when a page is attached', asy
   const records = [];
   engine.runWhatShouldISayInner = async (_q, _c, _images, options) => {
     options.turnOut.question = 'Explain database replication';
+    options.outcomeOut.value = { status: 'success', retryable: false };
     return 'Replication copies data.';
   };
   engine.recordLiveTurn = (...args) => records.push(args);
@@ -142,7 +143,10 @@ test('history preserves a resolved spoken question when a page is attached', asy
 test('explicit screenshot requests are recorded as user turns', async () => {
   const { engine } = await makeEngine();
   const records = [];
-  engine.runWhatShouldISayInner = async () => 'The screenshot answer';
+  engine.runWhatShouldISayInner = async (_q, _c, _images, options) => {
+    options.outcomeOut.value = { status: 'success', retryable: false };
+    return 'The screenshot answer';
+  };
   engine.recordLiveTurn = (...args) => records.push(args);
   await engine.runWhatShouldISay('What should I say about this?', 0.8, ['current.png']);
   assert.equal(records[0][2], 'What should I say about this?');

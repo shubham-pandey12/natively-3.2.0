@@ -41,10 +41,13 @@ test('unfinished capture stops submission and preserves completed attachments', 
 });
 test('audio, page and screenshot requests select the intended question independently of action instructions', () => {
   const expression = body.match(/const questionForWta = ([\s\S]*?);/)[1];
-  const select = new Function('currentAttachments', 'domContext', 'dynamicPromptInstruction', `return ${expression}`);
+  const select = new Function('currentAttachments', 'domContext', 'dynamicPromptInstruction', `const retry = null; return ${expression}`);
   assert.equal(select([], undefined, 'Explain the topic plainly'), undefined);
   assert.equal(select([{path: 'new.png'}], undefined, 'Explain plainly'), 'What should I say about this?');
   assert.equal(select([], 'current captured page', undefined), 'What should I say about this?');
   assert.equal(select([], undefined, undefined), undefined);
   assert.ok(!body.includes('phoneMirrorRequestAutoContext'));
+});
+test('retry freshness distinguishes identical speech events by transcript timestamp', () => {
+  assert.match(source, /const speechEvent = speech \? `\$\{transcript\.timestamp \?\? 'unknown'\}\\0\$\{speech\}` : '';/);
 });

@@ -103,7 +103,7 @@ test('What-to-Say forwards recent interviewer STT and never auto-captures a page
   assert.match(body, /const interviewerRequest = directTranscriptSnapshot/);
   assert.match(body, /buildDirectWhatToSayPayload\(\{\s*interviewerRequest,\s*dynamicPromptInstruction,\s*hasScreenshots,/);
   assert.match(body, /source: directWhatToSayPayload\.source/);
-  assert.match(body, /currentRequest: directWhatToSayPayload\.currentRequest/);
+  assert.match(body, /currentRequest: retrySnapshot\?\.question \|\| directWhatToSayPayload\.currentRequest/);
   assert.match(body, /transcript: directWhatToSayPayload\.transcript/);
 
   // Rolling audio may describe an earlier question; it must not become
@@ -206,7 +206,7 @@ test('Direct start tombstones tagged and id-less legacy Intelligence finals beyo
   const finalMarker = 'window.electronAPI.onIntelligenceSuggestedAnswer((data) => {';
   const finalStart = interfaceSource.indexOf(finalMarker);
   assert.ok(finalStart >= 0);
-  const finalHandler = interfaceSource.slice(finalStart, finalStart + 2400);
+  const finalHandler = interfaceSource.slice(finalStart, interfaceSource.indexOf("window.electronAPI.onIntelligenceSuggestedAnswerDiscard", finalStart));
   const tombstoneGuard = finalHandler.indexOf('if (legacyIntelligenceTombstonedRef.current) return;');
   const appendPath = finalHandler.indexOf("finalizeStreamingByIntent('what_to_answer', answerText)");
   assert.ok(tombstoneGuard >= 0 && appendPath > tombstoneGuard);
@@ -360,7 +360,7 @@ test("the provider's own words stay beside the answer: never in its text, never 
     'const buildConversationContextFromMessages = (items: Message[]): string =>',
     '// PERF: HighlightedCode',
   );
-  assert.match(contextBuilder, /m\.text/);
+  assert.match(contextBuilder, /conversationContextFromMessages\(items\)/);
   assert.doesNotMatch(contextBuilder, /\.failure\b|fallbackNotice|\.detail\b/);
 
   const settleFn = section(

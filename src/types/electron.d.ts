@@ -1,3 +1,4 @@
+import type { WhatToSayOutcome } from './whatToSayOutcome';
 import type { AssistCatchUp, AssistDailyBrief, AssistEvent, AssistLiveRecap, AssistMeetingBrief, AssistSender, LiveHelperAction } from './assist'
 // Phase 3 — DynamicActionPayload mirrors electron/services/dynamic-actions/DynamicAction.ts.
 // Kept as a structural interface (not a class import) to preserve the strict main↔renderer
@@ -460,8 +461,11 @@ export interface ElectronAPI {
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>
+  retainScreenshotRetry: (imagePaths: string[]) => Promise<string>;
+  releaseScreenshotRetry: (lease: string) => Promise<void>;
   generateWhatToSay: (question?: string, imagePaths?: string[], options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: ContextEnvelope }) => Promise<{
     answer: string | null;
+    outcome?: WhatToSayOutcome;
     question?: string;
     error?: string;
     /** Vision pipeline outcome — replaces legacy screenContextStatus/ocrTextLength fields */
@@ -875,7 +879,7 @@ export interface ElectronAPI {
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void
   onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => () => void
-  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; generationId?: number; sourceLabel?: string; emittedAt?: number; stopReason?: string }) => void) => () => void
+  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; generationId?: number; sourceLabel?: string; emittedAt?: number; stopReason?: string; outcome?: WhatToSayOutcome }) => void) => () => void
   onIntelligenceSuggestedAnswerDiscard: (callback: (data: { reason: string }) => void) => () => void
   // Verified code execution (background): ✓ badge + corrected message.
   onIntelligenceCodeVerified: (callback: (data: { question: string; passed: number; total: number; language: string }) => void) => () => void
@@ -903,7 +907,7 @@ export interface ElectronAPI {
   // Streaming listeners
   streamGeminiChat: (message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean, liveQuestion?: boolean }) => Promise<void>
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void
-  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string }) => void) => () => void
+  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string; outcome?: WhatToSayOutcome }) => void) => () => void
   onGeminiStreamStarted: (callback: (data: { streamId: number }) => void) => () => void
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
 

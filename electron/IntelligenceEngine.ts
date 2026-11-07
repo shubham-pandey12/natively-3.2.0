@@ -2,6 +2,7 @@
 // LLM mode routing and orchestration.
 // Extracted from IntelligenceManager to decouple LLM logic from state management.
 
+import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 import type { SessionWriteDecision } from './llm/FinalAnswerGenerationPolicy';
 import { LiveHelperLLM, LIVE_HELPER_EMPTY, LIVE_HELPER_WINDOW_SECONDS, catchUpWindowSeconds, liveHelperDisplayKind, type LiveHelperAction } from './llm/liveHelpers';
 import { CustomButtonLLM, CUSTOM_BUTTON_EMPTY, CUSTOM_BUTTON_WINDOW_SECONDS } from './llm/customButtons';
@@ -150,7 +151,7 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
-    'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number) => void;
+    'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => void;
     // generationId (audit finding #3): stamped on every live token so the renderer
     // can drop a batch from an answer that was already superseded. Optional →
     // id-less emits still accepted downstream (backward-compatible).
@@ -1703,7 +1704,10 @@ export class IntelligenceEngine extends EventEmitter {
         } else {
             console.warn(`[IntelligenceEngine] Prefetched answer revealed but not stored (${finished.writeDecision.reason ?? 'do_not_store'})`);
         }
-        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId);
+        const outcome: WhatToSayOutcome = finished.writeDecision?.policy === 'do_not_store'
+            ? { status: 'failed', retryable: true, reason: finished.writeDecision.reason }
+            : { status: 'success', retryable: false };
+        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, undefined, undefined, outcome);
     }
 
     /** Auto Answer V3: identity of the speculative cache, for keyed/embedding reuse. */
@@ -2071,22 +2075,24 @@ export class IntelligenceEngine extends EventEmitter {
         })();
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
         // advanced the state, or, with no state yet, not at all: the turn and
         // its screenshot were simply never recorded.
         const turnOut: { question?: string } = {};
+        const outcomeOut = options?.outcomeOut ?? {};
+        outcomeOut.value = { status: 'failed', retryable: true, reason: 'generation_not_completed' };
         const startedUnder = this.conversationSessionId();
-        const answer = await this.runWhatShouldISayInner(question, confidence, imagePaths, { ...options, turnOut });
+        const answer = await this.runWhatShouldISayInner(question, confidence, imagePaths, { ...options, turnOut, outcomeOut });
         // With no question, the turn is recorded only once the run got as far as
         // resolving one (turnOut is set there). A press that returned earlier
         // ("configure your API keys", "nothing to answer yet") answered nothing,
         // and recording it put that message into the conversation as the reply
         // to the screenshot.
         const answered = Boolean(question?.trim()) || turnOut.question !== undefined;
-        if (!options?.speculative && answered) {
+        if (!options?.speculative && answered && outcomeOut.value?.status === 'success') {
             // A run that resolved no question ('') and saw no screen or page
             // still answered something; filed with no question it took the
             // question of the turn before it.
@@ -2104,7 +2110,11 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; turnOut?: { question?: string } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
+        const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
+            if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
+            return options?.outcomeOut?.value;
+        };
         const now = Date.now();
         // Intelligence OS observe-only trace (Phase 1). Zero-cost NO-OP unless
         // intelligence_trace_enabled is on. Committed at the primary final-answer emit
@@ -2379,6 +2389,7 @@ export class IntelligenceEngine extends EventEmitter {
             modeId: snapshotModeId ?? 'none',
         });
         const recordWtaCancellation = () => {
+            setOutcome('cancelled', 'superseded', false);
             try {
                 const reason = whatToAnswerCancellationToken.signal.reason === 'engine_reset'
                     ? 'engine_reset'
@@ -2424,6 +2435,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (!this.answerLLM) {
                     if (isSpeculative) { this.speculativeText = null; this.speculativeTextExpiry = Infinity; }
                     this.setMode('idle');
+                    setOutcome('failed', 'configuration_required', false);
                     const noKeyMsg = "Please configure your API Keys in Settings to use this feature.";
                     // The renderer renders the answer via the 'suggested_answer'
                     // EVENT (the IPC return value's non-null answer is only used to
@@ -2431,7 +2443,7 @@ export class IntelligenceEngine extends EventEmitter {
                     // string WITHOUT emitting leaves the thinking-dots placeholder
                     // hanging forever — a silent dead-end. Emit so the message is
                     // actually shown. (Speculative runs have no placeholder.)
-                    if (!isSpeculative) this.emit('suggested_answer', noKeyMsg, question || 'inferred', confidence, generationId);
+                    if (!isSpeculative) this.emit('suggested_answer', noKeyMsg, question || 'inferred', confidence, generationId, undefined, undefined, options?.outcomeOut?.value);
                     return noKeyMsg;
                 }
                 const context = this.session.getFormattedContext(180);
@@ -2441,15 +2453,16 @@ export class IntelligenceEngine extends EventEmitter {
                     return null;
                 }
                 if (isSpeculative) {
-                    return this.completeSpeculativeRun(generationId, question, confidence, answer || buildGracefulRetry(question), undefined);
+                    return this.completeSpeculativeRun(generationId, question, confidence, answer || buildGracefulRetry(question), answer ? undefined : decideSessionWritePolicy({ finalGenerationMode: 'provider_error_no_answer' }));
                 }
                 if (answer && IntelligenceEngine.isNonAnswerSentinel(answer)) {
                     this.setMode('idle');
                     return null;
                 }
                 if (answer) {
+                    setOutcome('success');
                     this.session.addAssistantMessage(answer, undefined, 'what_to_answer');
-                    this.emit('suggested_answer', answer, question || 'inferred', confidence, generationId);
+                    this.emit('suggested_answer', answer, question || 'inferred', confidence, generationId, undefined, undefined, options?.outcomeOut?.value);
                     this.setMode('idle');
                     return answer;
                 }
@@ -2614,8 +2627,8 @@ export class IntelligenceEngine extends EventEmitter {
                 if (isSpeculative) return null;
                 this.setMode('idle');
                 const noContextMsg = "I don't have anything to answer yet — no conversation, screen capture, or question has come in. Ask something or start the meeting audio, then press again.";
-                this.session.addAssistantMessage(noContextMsg, undefined, 'what_to_answer');
-                this.emit('suggested_answer', noContextMsg, 'inferred', 1.0, generationId);
+                setOutcome('failed', 'no_context', false);
+                this.emit('suggested_answer', noContextMsg, 'inferred', 1.0, generationId, undefined, undefined, options?.outcomeOut?.value);
                 return noContextMsg;
             }
 
@@ -2727,8 +2740,9 @@ export class IntelligenceEngine extends EventEmitter {
                     }
                     if (fr.isClarification && fr.clarificationText && !isSpeculative && !_wtaHasVisualContext) {
                         piTelemetry.emit('wta_context_free_clarification', { surface: 'what_to_answer', via: (fr as any).resolvedVia ?? 'clarification' });
+                        setOutcome('success');
                         this.session.addAssistantMessage(fr.clarificationText, undefined, 'what_to_answer');
-                        this.emit('suggested_answer', fr.clarificationText, extractedQuestion.latestQuestion || 'inferred', 0.9, generationId);
+                        this.emit('suggested_answer', fr.clarificationText, extractedQuestion.latestQuestion || 'inferred', 0.9, generationId, undefined, undefined, options?.outcomeOut?.value);
                         this.setMode('idle');
                         trace.mark('repair_used', { reason: 'context_free_clarification' });
                         return fr.clarificationText;
@@ -4032,11 +4046,12 @@ export class IntelligenceEngine extends EventEmitter {
                             hasProfileFacts: Boolean((this.llmHelper.getKnowledgeOrchestrator?.() as any)?.activeResume?.structured_data),
                             hasLiveTranscript: true, // WTA is always transcript-driven
                         });
+                    setOutcome('success');
                     this.session.addAssistantMessage(clarify, undefined, 'what_to_answer');
                     // Generation id is minted at request t0, before every
                     // await or early-return branch, so even this clarification
                     // participates in the renderer's newest-wins guard.
-                    this.emit('suggested_answer', clarify, extractedQuestion.latestQuestion || question || 'inferred', 0.9, generationId);
+                    this.emit('suggested_answer', clarify, extractedQuestion.latestQuestion || question || 'inferred', 0.9, generationId, undefined, undefined, options?.outcomeOut?.value);
                     trace.mark('repair_used', { reason: 'context_os_clarification' });
                     if (isIntelligenceFlagEnabled('trace')) {
                         logContextOsTrace(buildContextOsTrace({
@@ -5392,6 +5407,7 @@ export class IntelligenceEngine extends EventEmitter {
                     ? "I don't have enough context from the conversation to answer that yet."
                     : "The model produced an invalid answer artifact, so I won't guess from your profile. Please try again.";
                 trace.mark('fallback_answer_used', { answerType: answerPlan.answerType, reason: 'leaked_schema_stub', finalGenerationMode: 'provider_error_no_answer' });
+                setOutcome('failed', 'leaked_schema_stub');
                 const stubWriteDecision = decideSessionWritePolicy({
                     finalGenerationMode: 'provider_error_no_answer',
                     validationOk: false,
@@ -5400,7 +5416,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (openedStreamRow) emitChunk(stubFallback);
                 this.session.addAssistantMessage(stubFallback, stubWriteDecision, 'what_to_answer');
                 // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
-                this.emit('suggested_answer', stubFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId);
+                this.emit('suggested_answer', stubFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId, undefined, undefined, options?.outcomeOut?.value);
                 this.setMode('idle');
                 return stubFallback;
             }
@@ -5414,6 +5430,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // earlier press caused a LATER, unrelated press to answer as if
                 // resuming mid error-recovery instead of the fresh question).
                 trace.mark('fallback_answer_used', { answerType: answerPlan.answerType, reason: 'provider_transport_error', finalGenerationMode: 'provider_error_no_answer' });
+                setOutcome('failed', 'provider_transport_error');
                 const transportWriteDecision = decideSessionWritePolicy({
                     finalGenerationMode: 'provider_error_no_answer',
                     validationOk: false,
@@ -5454,7 +5471,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
                 // The stop reason rides along so the overlay can say the answer was
                 // cut off (length limit / repetition, 2026-10-04).
-                this.emit('suggested_answer', fullAnswer, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId, _c3SourceLabel, wtaTruncation.truncated ? wtaTruncation.reason : undefined);
+                this.emit('suggested_answer', fullAnswer, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId, _c3SourceLabel, wtaTruncation.truncated ? wtaTruncation.reason : undefined, options?.outcomeOut?.value);
                 this.setMode('idle');
                 return fullAnswer;
             }
@@ -5485,6 +5502,7 @@ export class IntelligenceEngine extends EventEmitter {
                     ? "I don't have enough context from the conversation to answer that yet."
                     : "The model produced an invalid answer artifact, so I won't guess from your profile. Please try again.";
                 trace.mark('fallback_answer_used', { answerType: answerPlan.answerType, reason: 'leaked_internal_tag_block', finalGenerationMode: 'provider_error_no_answer' });
+                setOutcome('failed', 'leaked_internal_tag_block');
                 const tagLeakWriteDecision = decideSessionWritePolicy({
                     finalGenerationMode: 'provider_error_no_answer',
                     validationOk: false,
@@ -5493,7 +5511,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (openedStreamRow) emitChunk(tagLeakFallback);
                 this.session.addAssistantMessage(tagLeakFallback, tagLeakWriteDecision, 'what_to_answer');
                 // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
-                this.emit('suggested_answer', tagLeakFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId);
+                this.emit('suggested_answer', tagLeakFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId, undefined, undefined, options?.outcomeOut?.value);
                 this.setMode('idle');
                 return tagLeakFallback;
             }
@@ -6464,6 +6482,7 @@ export class IntelligenceEngine extends EventEmitter {
                             // fullAnswer as-is; the doc-grounded validators downstream
                             // own this surface, not the profile sanitizer.
                         } else {
+                            wtaWriteDecision = decideSessionWritePolicy({ finalGenerationMode: 'provider_error_no_answer', validationOk: false, criticalViolations: ['invalid_assistant_identity'] });
                             fullAnswer = "The model produced an invalid assistant-identity answer, so I won't guess from your profile. Please try again.";
                             streamedAnswerReplaced = true;
                         }
@@ -6718,9 +6737,11 @@ export class IntelligenceEngine extends EventEmitter {
                     if (openedStreamRow) {
                         emitChunk(honestFallback);
                     }
-                    this.session.addAssistantMessage(honestFallback, undefined, 'what_to_answer');
+                    const nonanswerWriteDecision = decideSessionWritePolicy({ finalGenerationMode: regenerated ? 'jit_llm' : 'provider_error_no_answer' });
+                    setOutcome(regenerated ? 'success' : 'failed', regenerated ? undefined : 'nonanswer_regeneration_failed');
+                    this.session.addAssistantMessage(honestFallback, nonanswerWriteDecision, 'what_to_answer');
                     // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
-                    this.emit('suggested_answer', honestFallback, question || extractedQuestion.latestQuestion || 'inferred', 0.9, generationId);
+                    this.emit('suggested_answer', honestFallback, question || extractedQuestion.latestQuestion || 'inferred', 0.9, generationId, undefined, undefined, options?.outcomeOut?.value);
                     this.setMode('idle');
                     return honestFallback;
                 }
@@ -7235,6 +7256,8 @@ export class IntelligenceEngine extends EventEmitter {
                 }
             } catch { /* normalizer never blocks the answer */ }
 
+            setOutcome(wtaWriteDecision.policy !== 'do_not_store' && finalWtaAnswer.trim() ? 'success' : 'failed',
+                wtaWriteDecision.policy === 'do_not_store' ? wtaWriteDecision.reason : undefined);
             this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer');
 
             // Full-JIT write-gating law (§6): a provider-error/no-answer WTA
@@ -7269,7 +7292,7 @@ export class IntelligenceEngine extends EventEmitter {
             // under the text instead of reading as finished (#644). Not when
             // the cut-off text was replaced: the user reads the replacement.
             const wtaStopReason = wtaTruncation.truncated && !streamedAnswerReplaced ? wtaTruncation.reason : undefined;
-            this.emit('suggested_answer', finalWtaAnswer, question || 'What to Answer', confidence, generationId, undefined, wtaStopReason);
+            this.emit('suggested_answer', finalWtaAnswer, question || 'What to Answer', confidence, generationId, undefined, wtaStopReason, options?.outcomeOut?.value);
             // Compile-only syntax check of fenced JavaScript (observe-only: the
             // turn trace + telemetry record it, the answer is never changed).
             try {
@@ -7412,9 +7435,10 @@ export class IntelligenceEngine extends EventEmitter {
             // (2026-09-07): a dead key, a 429 or an outage read as the app not
             // having heard the question. Name the actual problem; keep the
             // graceful retry for everything that is not a provider failure.
+            setOutcome('failed', 'generation_error');
             const providerMessage = providerFailureUserMessage(error);
             if (providerMessage) {
-                if (!isSpeculative) this.emit('suggested_answer', providerMessage, question || 'inferred', 0.9, generationId);
+                if (!isSpeculative) this.emit('suggested_answer', providerMessage, question || 'inferred', 0.9, generationId, undefined, undefined, options?.outcomeOut?.value);
                 return providerMessage;
             }
             return buildGracefulRetry(question);

@@ -1,3 +1,4 @@
+import type { WhatToSayOutcome } from '../src/types/whatToSayOutcome';
 // ============================================================================
 // NATIVE-ARCH BOOT GATE — see electron/nativeArchGate.ts.
 //
@@ -8540,7 +8541,7 @@ export class AppState {
       } catch { /* non-fatal */ }
     })
 
-    this.intelligenceManager.on('suggested_answer', (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string) => {
+    this.intelligenceManager.on('suggested_answer', (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => {
       // Phase 4 defense-in-depth (forensic-report §6b): forward the optional
       // generationId the engine emits. Id-less emits (legacy answerLLM path,
       // code-hint, brainstorm) continue to ship without it — the renderer
@@ -8557,7 +8558,7 @@ export class AppState {
       // and mode switches, so a minutes-old answer appeared with no marker of
       // what it answered (the live "late CGPA answer" report). The renderer
       // uses this stamp to drop or visibly label stale finals.
-      this.sendToWindow(win, 'intelligence-suggested-answer', { answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', emittedAt: Date.now(), ...(stopReason ? { stopReason } : {}) })
+      this.sendToWindow(win, 'intelligence-suggested-answer', { answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', outcome, emittedAt: Date.now(), ...(stopReason ? { stopReason } : {}) })
 
     })
 

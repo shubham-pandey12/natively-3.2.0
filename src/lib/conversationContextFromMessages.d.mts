@@ -1,0 +1,1 @@
+export function conversationContextFromMessages(items: readonly {role: string; text: string; failure?: unknown; isStreaming?: boolean; hint?: unknown; answerOutcome?: string; note?: {kind: string}; hasScreenshot?: boolean; isQuickActionLabel?: boolean}[]): string;
