@@ -106,8 +106,8 @@ test('What-to-Say forwards recent interviewer STT and never auto-captures a page
   assert.match(body, /currentRequest: directWhatToSayPayload\.currentRequest/);
   assert.match(body, /transcript: directWhatToSayPayload\.transcript/);
 
-  // Screenshot+STT keeps audio out of currentRequest so the IPC transcript
-  // scope can remove it without leaking the same text through another field.
+  // Rolling audio may describe an earlier question; it must not become
+  // current-turn speech when the user submits a new screenshot.
   const interviewer = 'Implement binary search in C++';
   const screenshotPayload = buildDirectWhatToSayPayload({
     interviewerRequest: interviewer,
@@ -115,7 +115,7 @@ test('What-to-Say forwards recent interviewer STT and never auto-captures a page
   });
   assert.equal(screenshotPayload.source, 'screenshot');
   assert.doesNotMatch(screenshotPayload.currentRequest, /binary search/i);
-  assert.equal(screenshotPayload.transcript, interviewer);
+  assert.equal(screenshotPayload.transcript, undefined, 'retained audio must not override a new screenshot');
 });
 
 test('no-screenshot dynamic What-to-Say keeps STT authoritative and appends the output instruction', () => {

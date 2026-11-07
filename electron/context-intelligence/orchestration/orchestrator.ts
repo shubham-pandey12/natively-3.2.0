@@ -22,7 +22,7 @@ import { resolveModePolicy, generalKnowledgeAllowed, type ModePolicy } from '../
 import { resolveAnswerPolicy, type AnswerPolicy } from '../policies/answer-policy';
 import { CLAIM_AUTHORITY, claimAuthority } from '../policies/source-authority-policy';
 import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
-import { classifyTurn, isBareFollowUp, stripSttFillers, isProspectiveJobQuestion } from '../question/turn-classifier';
+import { classifyTurn, isBareFollowUp, isCurrentScreenRequest, stripSttFillers, isProspectiveJobQuestion } from '../question/turn-classifier';
 import type { AnswerTrace, RetrievalAttemptTrace } from '../observability/answer-trace';
 import { mergeRewrittenEvidence, type QueryRewriter, type QueryRewriteOutcome } from '../retrieval/llm-query-rewrite';
 import { SMALL_CORPUS_MAX_TOKENS, WHOLE_PACK_MAX_TOKENS } from '../retrieval/mode-retrieval-port';
@@ -265,12 +265,13 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   }
 
   const q = resolveQuestion(req);
+  const hasScreenContext = Boolean(req.hasScreenContext || req.screenText?.trim());
 
   const cls = classifyTurn({
     resolvedQuestion: q.resolved,
     policy,
     isFollowUp: Boolean(req.isFollowUp),
-    hasScreenContext: req.hasScreenContext,
+    hasScreenContext,
     hasAttachedDocuments: req.hasAttachedDocuments,
     attachedFileNames: req.attachedFileNames,
     corpusAnchored: req.corpusAnchored === true,
@@ -512,7 +513,8 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
 
     rawQuestion: req.manualQuestion ?? req.transcriptQuestion ?? '',
     resolvedQuestion: q.resolved,
-    isFollowUp: Boolean(req.isFollowUp) || cls.questionTypes.includes('FOLLOW_UP'),
+    isFollowUp: !isCurrentScreenRequest(q.resolved, hasScreenContext)
+      && (Boolean(req.isFollowUp) || cls.questionTypes.includes('FOLLOW_UP')),
 
     questionTypes: cls.questionTypes,
     claimRequirements: buildClaimRequirements(policy, cls.claimTypes, cls.claimClauses),

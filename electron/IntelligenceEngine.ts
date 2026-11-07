@@ -2093,7 +2093,7 @@ export class IntelligenceEngine extends EventEmitter {
             const sawScreen = Boolean(imagePaths?.length || options?.screenContext || options?.domContext?.trim());
             const heard = question?.trim() || turnOut.question?.trim();
             this.recordLiveTurn(answer, options?.screenContext,
-                heard || (sawScreen ? IntelligenceEngine.SCREENSHOT_TURN_QUESTION : IntelligenceEngine.UNPROMPTED_TURN_QUESTION),
+                heard || (sawScreen ? undefined : IntelligenceEngine.UNPROMPTED_TURN_QUESTION),
                 imagePaths?.length ?? 0, imagePaths, (question?.trim() || imagePaths?.length) ? 'user' : 'meeting', {
                     page: options?.domContext, startedUnder,
                     // The describe call this press skipped (screenPrepass.ts) runs

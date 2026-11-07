@@ -16,6 +16,7 @@
 // nothing later in the prompt can appear to supersede them, evidence late and
 // explicitly framed as untrusted data.
 
+import { isCurrentScreenRequest } from '../question/turn-classifier';
 import type { TurnDecision, EvidenceItem } from '../contracts/types';
 import type { ModePolicy } from '../policies/mode-policy-registry';
 import { packContext, type PackBudget, type PackedContext } from './context-packer';
@@ -1062,6 +1063,10 @@ function hasPriorConversation(d: Readonly<TurnDecision>, summary: string | undef
 }
 
 function followUpGuidance(d: Readonly<TurnDecision>, fallbackUsed: string | undefined, hasConversation: boolean, hasEvidence = false): string {
+  if (isCurrentScreenRequest(d.resolvedQuestion, d.questionTypes.includes('SCREEN_SPECIFIC'))) {
+    return '# Current screen request\nAnswer the question or task in the current attachment. Earlier conversation is background, not the subject of this request. If the attachment cannot be read, say so; do not substitute a previous answer.';
+  }
+
   const isFollowUp = d.isFollowUp || d.questionTypes.includes('FOLLOW_UP');
   // ALWAYS ANSWER (2026-09-07): a fragment with no earlier turn to refer to
   // ("explain", "why?", "walk me through it") but with material attached

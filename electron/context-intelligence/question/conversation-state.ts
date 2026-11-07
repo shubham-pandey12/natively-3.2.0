@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto';
 import type { EvidenceScope, PriorTurnDecision, SourceType } from '../contracts/types';
 import { scopeKey } from '../contracts/types';
 import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
-import { isBareFollowUp, isResponseRequest, isContinuationFragment } from './turn-classifier';
+import { isBareFollowUp, isResponseRequest, isContinuationFragment, isCurrentScreenRequest } from './turn-classifier';
 import { isRefinementFollowUp } from '../../llm/FollowUpResolver';
 
 export interface ConversationTurn {
@@ -897,7 +897,7 @@ export function resolveReference(
   const q = question.trim();
   if (!state) return { resolved: q, usedState: false, reason: 'NO_CONVERSATION_STATE' };
 
-  if (opts?.hasScreenContext && /^what should i say(?: about this)?[?.!]*$/i.test(q)) {
+  if (isCurrentScreenRequest(q, Boolean(opts?.hasScreenContext))) {
     return { resolved: q, usedState: false, reason: 'SCREEN_CONTEXT_IS_PRIMARY_SUBJECT' };
   }
 

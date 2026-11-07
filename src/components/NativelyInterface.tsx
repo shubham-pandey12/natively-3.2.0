@@ -8357,9 +8357,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           currentRequest: directWhatToSayPayload.currentRequest,
           imagePaths: currentAttachments.map((attachment) => attachment.path),
           pageContext: directPageContext,
-          // When a screenshot is the request surface, retain STT provenance as a
-          // separate untrusted field so main can enforce transcript scope instead
-          // of disguising meeting audio as typed text.
+          // Screenshot requests must not promote the rolling audio from an earlier turn.
           transcript: directWhatToSayPayload.transcript,
           userMessageId: questionCardId,
         });
