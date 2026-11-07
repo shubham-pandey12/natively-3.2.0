@@ -5676,6 +5676,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // shows) without the overlay popping up on the desktop.
     const { quiet, ...item } = data;
     if (revealsOverlay({ quiet })) setIsExpanded(true);
+    attachedContextRef.current = addAttachment(attachedContextRef.current, item);
     setAttachedContext((prev) => addAttachment(prev, item));
   };
 
@@ -8253,29 +8254,42 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     setIsExpanded(true);
     setIsProcessing(true);
     // ⌘H then ⌘Enter in one motion: wait for a screenshot still capturing.
+    const pending = pendingCaptureRef.current;
+    const waitingForCapture = pendingShotsRef.current.inFlight();
     const lateShots = await pendingShotsRef.current.settle();
+    if (pendingShotsRef.current.inFlight() || (waitingForCapture && lateShots.length === 0)) {
+      for (const shot of lateShots) handleScreenshotAttach(shot);
+      setIsProcessing(false);
+      endOverlayAction('what_to_say');
+      setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', text: 'Screenshot capture did not finish. Wait for an attachment or capture again, then press again.' }]);
+      return;
+    }
+
     // Capture and clear attached image context.
     // Also merge in any screenshot from the capture-and-process shortcut that
     // arrived via pendingCaptureRef before the React state flush (React 18 fix).
-    const pending = pendingCaptureRef.current;
     // The question card's id — kept so the "Page attached" line can be stamped
     // onto it below, once we know whether captured page context was consumed.
     const questionCardId = genMessageId();
-    let currentAttachments = attachedContext;
+    let currentAttachments = attachedContextRef.current;
     if (pending && !currentAttachments.some((s) => s.path === pending.path)) {
       currentAttachments = addAttachment(currentAttachments, pending);
     }
     for (const shot of lateShots) currentAttachments = addAttachment(currentAttachments, shot);
 
     if (currentAttachments.length > 0) {
-      setAttachedContext([]);
+      const consumed = new Set(currentAttachments.map((shot) => shot.path));
+      attachedContextRef.current = attachedContextRef.current.filter((shot) => !consumed.has(shot.path));
+      setAttachedContext((shots) => shots.filter((shot) => !consumed.has(shot.path)));
       // Show the attached image in chat FIRST — question card must appear before AI response
       setMessages((prev) => [
         ...prev,
         {
           id: questionCardId,
           role: 'user',
-          text: 'What should I say about this?',
+          text: dynamicPromptInstruction
+            ? (QUICK_ACTION_LABELS[dynamicPromptInstruction] || dynamicPromptInstruction)
+            : 'What should I say about this?',
           hasScreenshot: true,
           screenshotPreview: currentAttachments[0].preview,
           screenshotPreviews: currentAttachments.map((a) => a.preview).filter(Boolean),
@@ -8325,7 +8339,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // while older meeting discussion cannot become the primary request.
         const directTranscriptSnapshot = pendingRollingPartialRef.current
           ? rollingTranscriptWithPartial(rollingCommittedRef.current, pendingRollingPartialRef.current)
-          : rollingTranscript;
+          : rollingCommittedRef.current;
         const interviewerRequest = directTranscriptSnapshot
           .split('  ·  ')
           .slice(-4)
@@ -8352,14 +8366,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         return;
       }
 
-      // Smart Browser Context v2 — just-in-time auto-attach. If NO manual context
-      // is already captured, ask the extension for the best auto context (it only
-      // attaches a high-confidence coding page; sensitive/unknown pages are
-      // skipped). Manual context ALWAYS wins: we only run this when lastCapturedDOM
-      // is empty, and the request resolves quickly with attached:false when there
-      // is nothing to attach, so the answer is never blocked. The captured DOM (if
-      // any) arrives via onDomContextReceived → window.lastCapturedDOM, which we
-      // re-read below — reusing the proven domContext seam.
       // One-motion ⌘Y→Enter: if a manual capture is IN FLIGHT (⌘Y pressed a
       // beat ago, /dom not yet delivered), wait for it — up to the desktop's
       // own capture timeout — instead of racing past it. Delivery or the
@@ -8375,30 +8381,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           await new Promise((r) => setTimeout(r, 100));
         }
       }
-      const hasManualContext =
-        typeof (window as any).lastCapturedDOM === 'string' &&
-        (window as any).lastCapturedDOM.trim().length > 0;
-      // Screenshot wins over AUTOMATIC page capture (2026-08-19): a screenshot
-      // is the user deliberately pointing at something; the auto-attach is a
-      // guess about the active browser tab. When both would ride the same
-      // request they can describe DIFFERENT content (screenshot of app A,
-      // active tab B) and always double-bill the same page when they agree —
-      // so with screenshots attached, skip the auto request entirely. Manual
-      // ⌘/Ctrl+Shift+Y captures are just as deliberate as a screenshot and
-      // still attach alongside (hasManualContext path unchanged).
-      if (!hasManualContext && currentAttachments.length === 0) {
-        try {
-          await window.electronAPI.phoneMirrorRequestAutoContext?.();
-        } catch {
-          /* auto-context is best-effort — never block the answer */
-        }
-      }
-
-      // Safe to read synchronously right after the await above: the extension's
-      // SW awaits the /dom POST (which fires the `dom-context-received` IPC →
-      // sets window.lastCapturedDOM) BEFORE it emits the `done` ack that resolves
-      // phoneMirrorRequestAutoContext(). So by here, an auto-captured DOM has
-      // already landed — no extra settle delay needed.
+      // This button answers the current speech or an explicitly attached capture.
+      // Re-capturing the active browser tab here can override a new spoken question.
       const rawDomContext = (window as any).lastCapturedDOM;
       const domContext =
         typeof rawDomContext === 'string' && rawDomContext.trim().length > 0
@@ -8446,9 +8430,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             }
           : undefined;
 
+      const questionForWta = currentAttachments.length > 0
+        ? 'What should I say about this?'
+        : (domContext ? 'What should I say about this?' : undefined);
+
       // Pass imagePath if attached
       const result = await window.electronAPI.generateWhatToSay(
-        undefined,
+        questionForWta,
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
         options,
       );
@@ -9628,10 +9616,18 @@ Provide only the answer, nothing else.`;
     setInputValue('');
 
     // ⌘H then Enter in one motion: wait for a screenshot still capturing.
-    let currentAttachments = attachedContext;
-    for (const shot of await pendingShotsRef.current.settle()) {
-      currentAttachments = addAttachment(currentAttachments, shot);
+    const waitingForCapture = pendingShotsRef.current.inFlight();
+    const lateShots = await pendingShotsRef.current.settle();
+    if (pendingShotsRef.current.inFlight() || (waitingForCapture && lateShots.length === 0)) {
+      for (const shot of lateShots) handleScreenshotAttach(shot);
+      manualSubmitInFlightRef.current = false;
+      lastManualSubmitRef.current = last;
+      setInputValue((current) => current || userText);
+      setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', text: 'Screenshot capture did not finish. Wait for an attachment or capture again, then send again.' }]);
+      return;
     }
+    let currentAttachments = attachedContextRef.current;
+    for (const shot of lateShots) currentAttachments = addAttachment(currentAttachments, shot);
     if (!userText && currentAttachments.length === 0) {
       // Empty input sent only for a capture that then failed: nothing to send.
       manualSubmitInFlightRef.current = false;
@@ -9640,7 +9636,9 @@ Provide only the answer, nothing else.`;
     }
 
     // Clear the tray (the input was cleared before the wait above)
-    setAttachedContext([]);
+    const consumed = new Set(currentAttachments.map((shot) => shot.path));
+    attachedContextRef.current = attachedContextRef.current.filter((shot) => !consumed.has(shot.path));
+    setAttachedContext((shots) => shots.filter((shot) => !consumed.has(shot.path)));
 
     // Seal any in-flight streaming rows from a previous turn before we
     // append the new user message + placeholder. Without this, the rAF
@@ -10775,8 +10773,11 @@ Provide only the answer, nothing else.`;
     },
     selectiveScreenshot: async () => {
       try {
-        const data = await window.electronAPI.takeSelectiveScreenshot();
-        if (data && !data.cancelled && data.path) {
+        const data = await pendingShotsRef.current.track(
+          window.electronAPI.takeSelectiveScreenshot().then((shot) =>
+            shot && !shot.cancelled && shot.path ? shot as { path: string; preview: string } : null),
+        );
+        if (data && !pendingShotsRef.current.claimed(data.path)) {
           handleScreenshotAttach(data as { path: string; preview: string });
         }
       } catch (err) {
@@ -10819,8 +10820,11 @@ Provide only the answer, nothing else.`;
     },
     selectiveScreenshot: async () => {
       try {
-        const data = await window.electronAPI.takeSelectiveScreenshot();
-        if (data && !data.cancelled && data.path) {
+        const data = await pendingShotsRef.current.track(
+          window.electronAPI.takeSelectiveScreenshot().then((shot) =>
+            shot && !shot.cancelled && shot.path ? shot as { path: string; preview: string } : null),
+        );
+        if (data && !pendingShotsRef.current.claimed(data.path)) {
           handleScreenshotAttach(data as { path: string; preview: string });
         }
       } catch (err) {
@@ -10887,6 +10891,7 @@ Provide only the answer, nothing else.`;
       // The answer can start before the tray effect records this one.
       phoneShotPathsRef.current.set(data.preview, data.path);
 
+      attachedContextRef.current = addAttachment(attachedContextRef.current, data);
       setAttachedContext((prev) => addAttachment(prev, data));
 
       // Use requestAnimationFrame so we wait for at least one paint cycle —
@@ -10894,11 +10899,9 @@ Provide only the answer, nothing else.`;
       // The ref guarantees handleWhatToSay has the screenshot regardless of
       // whether the state update has flushed yet.
       requestAnimationFrame(() => {
-        try {
-          handlersRef.current.handleWhatToSay();
-        } finally {
-          pendingCaptureRef.current = null;
-        }
+        void Promise.resolve(handlersRef.current.handleWhatToSay()).finally(() => {
+          if (pendingCaptureRef.current === data) pendingCaptureRef.current = null;
+        });
       });
     });
     return unsubscribe;

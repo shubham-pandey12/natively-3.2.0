@@ -16493,8 +16493,11 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const phonePress = startPhonePress();
+        const effectiveQuestion = (typeof question === 'string' && question.trim().length > 0)
+          ? question
+          : (validatedImagePaths?.length ? 'What should I say about this?' : question);
         let answer = await phonePress.run(() => intelligenceManager.runWhatShouldISay(
-          question,
+          effectiveQuestion,
           0.8,
           validatedImagePaths,
           {

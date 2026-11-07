@@ -55,8 +55,8 @@ test('runWhatShouldISay passes screenContext and preserves imagePaths', async ()
   });
 
   engine.whatToAnswerLLM = {
-    async *generateStream(cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext) {
-      calls.push({ cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext });
+    async *generateStream(cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext, ...rest) {
+      calls.push({ cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext, question: rest[4]?.question });
       yield 'Use the visible error message to explain the fix.';
     }
   };
@@ -70,6 +70,7 @@ test('runWhatShouldISay passes screenContext and preserves imagePaths', async ()
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].receivedImagePaths, imagePaths);
   assert.equal(calls[0].receivedScreenContext, screenContext);
+  assert.equal(calls[0].question, 'What should I say about this?');
 });
 
 test('runWhatShouldISay forwards dynamic action promptInstruction to WhatToAnswerLLM', async () => {
@@ -84,8 +85,8 @@ test('runWhatShouldISay forwards dynamic action promptInstruction to WhatToAnswe
   });
 
   engine.whatToAnswerLLM = {
-    async *generateStream(cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext, promptInstruction) {
-      calls.push({ cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext, promptInstruction });
+    async *generateStream(cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext, promptInstruction, ...rest) {
+      calls.push({ cleanedTranscript, temporalContext, intentResult, receivedImagePaths, receivedScreenContext, promptInstruction, question: rest[3]?.question });
       yield 'Acknowledge the objection and ask a discovery question.';
     }
   };
@@ -98,6 +99,7 @@ test('runWhatShouldISay forwards dynamic action promptInstruction to WhatToAnswe
   assert.equal(answer, 'Acknowledge the objection and ask a discovery question.');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].promptInstruction, 'DYNAMIC_ACTION_PROMPT_INSTRUCTION_SENTINEL');
+  assert.equal(calls[0].question, 'How should we respond to this objection?');
 });
 
 test('runWhatShouldISay works without screenContext', async () => {
@@ -122,4 +124,27 @@ test('runWhatShouldISay works without screenContext', async () => {
 
   assert.equal(answer, 'Answer from transcript only.');
   assert.equal(receivedScreenContext, undefined);
+});
+
+test('history preserves a resolved spoken question when a page is attached', async () => {
+  const { engine } = await makeEngine();
+  const records = [];
+  engine.runWhatShouldISayInner = async (_q, _c, _images, options) => {
+    options.turnOut.question = 'Explain database replication';
+    return 'Replication copies data.';
+  };
+  engine.recordLiveTurn = (...args) => records.push(args);
+  await engine.runWhatShouldISay(undefined, 0.8, undefined, { domContext: 'A browser page' });
+  assert.equal(records[0][2], 'Explain database replication');
+  assert.equal(records[0][5], 'meeting');
+});
+
+test('explicit screenshot requests are recorded as user turns', async () => {
+  const { engine } = await makeEngine();
+  const records = [];
+  engine.runWhatShouldISayInner = async () => 'The screenshot answer';
+  engine.recordLiveTurn = (...args) => records.push(args);
+  await engine.runWhatShouldISay('What should I say about this?', 0.8, ['current.png']);
+  assert.equal(records[0][2], 'What should I say about this?');
+  assert.equal(records[0][5], 'user');
 });

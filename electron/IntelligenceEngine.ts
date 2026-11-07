@@ -2090,11 +2090,11 @@ export class IntelligenceEngine extends EventEmitter {
             // A run that resolved no question ('') and saw no screen or page
             // still answered something; filed with no question it took the
             // question of the turn before it.
-            const heard = question?.trim() || turnOut.question?.trim();
             const sawScreen = Boolean(imagePaths?.length || options?.screenContext || options?.domContext?.trim());
+            const heard = question?.trim() || turnOut.question?.trim();
             this.recordLiveTurn(answer, options?.screenContext,
-                heard || (sawScreen ? undefined : IntelligenceEngine.UNPROMPTED_TURN_QUESTION),
-                imagePaths?.length ?? 0, imagePaths, 'meeting', {
+                heard || (sawScreen ? IntelligenceEngine.SCREENSHOT_TURN_QUESTION : IntelligenceEngine.UNPROMPTED_TURN_QUESTION),
+                imagePaths?.length ?? 0, imagePaths, (question?.trim() || imagePaths?.length) ? 'user' : 'meeting', {
                     page: options?.domContext, startedUnder,
                     // The describe call this press skipped (screenPrepass.ts) runs
                     // after the answer instead, if the transcription fails.
@@ -2115,6 +2115,10 @@ export class IntelligenceEngine extends EventEmitter {
         const isSpeculative = options?.speculative === true;
         const skipCooldown = options?.skipCooldown === true;
         const forceFresh = options?.forceFresh === true;
+
+        if (!question?.trim() && (imagePaths?.length ?? 0) > 0) {
+            question = 'What should I say about this?';
+        }
 
         // Manual user action (button press / hotkey) MUST start from a clean
         // speculativeText slate. The previous answer arriving on a manual press
@@ -4271,7 +4275,7 @@ export class IntelligenceEngine extends EventEmitter {
                         questionSpeaker: questionSpokenByUser && !question?.trim() ? 'user' : 'other',
                         // Low-confidence query rewrite: the user's fast model, 1.5 s hard cap.
                         queryRewriter: require('./context-intelligence/retrieval/rewriter-binding').bindQueryRewriter(this.llmHelper),
-                        screenText: _screenDescription,
+                        screenText: _screenPortText || _screenDescription,
                         // The chat-history rollback must reach THIS surface too.
                         // ipcHandlers was the only call site passing it, so the
                         // Settings toggle rolled back typed chat while live

@@ -98,7 +98,7 @@ test('What-to-Say forwards recent interviewer STT and never auto-captures a page
   const body = section('const handleWhatToSay = async', 'const handleFollowUp = async');
   const directBranch = body.indexOf('if (directAssistEnabled) {');
   const autoCapture = body.indexOf('phoneMirrorRequestAutoContext');
-  assert.ok(directBranch >= 0 && autoCapture > directBranch, 'Direct WTA must precede legacy auto capture');
+  assert.ok(directBranch >= 0 && autoCapture === -1, 'WTA must not automatically recapture a previous page');
   assert.match(body, /const directTranscriptSnapshot = pendingRollingPartialRef\.current/);
   assert.match(body, /const interviewerRequest = directTranscriptSnapshot/);
   assert.match(body, /buildDirectWhatToSayPayload\(\{\s*interviewerRequest,\s*dynamicPromptInstruction,\s*hasScreenshots,/);

@@ -1057,7 +1057,8 @@ export async function orchestrate(
       // T7: pass this turn's scope so a topic from the PREVIOUS meeting/mode
       // cannot rewrite this question. `advance()` resets on scope change, but it
       // runs AFTER this line -- resetting on write cannot protect a read.
-      const ref = resolveAgainstSession(req.sessionId, rawQ, req.scope);
+      const hasScreen = Boolean(req.hasScreenContext || (typeof req.screenText === 'string' && req.screenText.trim().length > 0));
+      const ref = resolveAgainstSession(req.sessionId, rawQ, req.scope, { hasScreenContext: hasScreen });
       referentResolution = {
         applied: Boolean(ref.usedState && ref.resolved !== rawQ),
         ...(ref.referent ? { referent: ref.referent } : {}),

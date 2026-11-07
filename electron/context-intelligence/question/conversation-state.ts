@@ -835,7 +835,10 @@ export interface ResolvedReference {
     | 'SCOPE_CHANGED'
     // 2026-09-11: "repeat the number" resolved to the most recent answer in the
     // ring that actually carries one, not to the immediately previous answer.
-    | 'VALUE_RECALL_FROM_HISTORY';
+    | 'VALUE_RECALL_FROM_HISTORY'
+    // With screen context present, "What should I say?" / "What should I say about this?"
+    // is a question about what is on screen, not a request to rephrase previous speech.
+    | 'SCREEN_CONTEXT_IS_PRIMARY_SUBJECT';
 }
 
 // "can you repeat the number" / "what was the percentage again" / "remind me
@@ -889,9 +892,14 @@ export function resolveReference(
   question: string,
   state: ConversationState | null,
   scope?: EvidenceScope,
+  opts?: { hasScreenContext?: boolean },
 ): ResolvedReference {
   const q = question.trim();
   if (!state) return { resolved: q, usedState: false, reason: 'NO_CONVERSATION_STATE' };
+
+  if (opts?.hasScreenContext && /^what should i say(?: about this)?[?.!]*$/i.test(q)) {
+    return { resolved: q, usedState: false, reason: 'SCREEN_CONTEXT_IS_PRIMARY_SUBJECT' };
+  }
 
   // T7 (2026-08-28) — SCOPE CHECK. `continuitySourceIds` below has always
   // compared `state.scopeId` before reusing source ids; this function never did,

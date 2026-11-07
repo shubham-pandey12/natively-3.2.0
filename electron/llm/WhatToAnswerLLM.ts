@@ -1150,7 +1150,14 @@ The user triggered this action with a coding problem on screen and NO new questi
             // The V3 composer already rendered the design on the table as its
             // own section; the v2 envelope and the legacy packet get it appended
             // (never twice — see withDiagramTurnBlock).
-            const _wtaUserBase = _v3p?.user ?? _v2TurnUser ?? packet.userMessage;
+            let _wtaUserBase = _v3p?.user ?? _v2TurnUser ?? packet.userMessage;
+            if (_v3p) {
+                if (hasAttachedImages && !_wtaUserBase.includes(SCREEN_DIRECT_VISION_INSTRUCTION)) {
+                    _wtaUserBase = `${SCREEN_DIRECT_VISION_INSTRUCTION}\n\n${_wtaUserBase}`;
+                } else if (hasScreenText && !_wtaUserBase.includes(SCREEN_DOM_INSTRUCTION)) {
+                    _wtaUserBase = `${SCREEN_DOM_INSTRUCTION}\n\n${_wtaUserBase}`;
+                }
+            }
             const _wtaUserMessage = _v3p ? _wtaUserBase : withDiagramTurnBlock(_wtaUserBase, diagramTurn);
             // PR #429 Bug 003: `_v3p?.system ?? finalPromptOverride` discarded the
             // ACTIVE SKILL block on every V3 turn — finalPromptOverride is its only
