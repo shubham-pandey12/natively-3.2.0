@@ -416,9 +416,10 @@ describe('wiring', () => {
     const src = read('electron/ipcHandlers.ts');
     const at = src.indexOf("console.warn('[PhoneMirror] Failed to capture pre-turn context:', ctxErr);");
     assert.ok(at > 0);
-    const after = src.slice(at, at + 1600);
+    const after = src.slice(at, src.indexOf('const llmHelper = appState.processingHelper.getLLMHelper()', at));
     assert.match(after, /if \(!phoneDocGrounded\) \{\s*try \{\s*const history = intelligenceManager\.conversationHistoryBlock\(context \?\? ''\);\s*if \(history\) context = context\?\.trim\(\) \? `\$\{history\}\\n\\n\$\{context\}` : history;/);
-    assert.ok(after.indexOf('conversationHistoryBlock') < after.indexOf('intelligenceManager.addTranscript('),
+    const addTranscript = after.indexOf('intelligenceManager.addTranscript(');
+    assert.ok(addTranscript > after.indexOf('conversationHistoryBlock'),
       'read before the phone\'s question is added, as the 100 s snapshot is');
   });
 
@@ -426,7 +427,7 @@ describe('wiring', () => {
     const src = read('electron/ipcHandlers.ts');
     const flag = src.indexOf('const phoneHasLiveTranscript = Boolean(context && String(context).trim());');
     assert.ok(flag > 0 && flag < src.indexOf('intelligenceManager.conversationHistoryBlock(context'), 'taken before the history joins the context');
-    const phone = src.slice(flag, src.indexOf('const stream = llmHelper.streamChat(message, phoneImagePaths.length', flag));
+    const phone = src.slice(flag, src.indexOf('const { stream, outcome } = llmHelper.streamChatWithOutcome(message, phoneImagePaths.length', flag));
     assert.equal((phone.match(/hasLiveTranscript: phoneHasLiveTranscript,/g) ?? []).length, 2);
     assert.doesNotMatch(phone, /hasLiveTranscript: Boolean\(context/);
   });

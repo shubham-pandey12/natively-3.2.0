@@ -4160,6 +4160,7 @@ export class AppState {
         stt = new GoogleSTT(speaker);
       }
     } else if (sttProvider === 'apple-speech') {
+      // A carried-over on-device selection must never send audio to a cloud provider.
       stt = new AppleSpeechSTT();
     } else if (sttProvider === 'local-whisper') {
       const { LocalWhisperSTT } = require('./audio/LocalWhisperSTT');

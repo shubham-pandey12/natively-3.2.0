@@ -297,8 +297,8 @@ test('stop sends the protocol terminator, discards pending audio, and makes a la
   assert.deepEqual(errors, [], 'the helper exiting after stop must not be reported as a crash');
 });
 
-test('rejects unsupported platforms before spawning the helper', () => {
-  const { spawnCalls, runtime } = createHarness({ platform: 'linux', release: '6.0.0' });
+test('rejects a carried-over Apple Speech selection on Windows before spawning the helper', () => {
+  const { spawnCalls, runtime } = createHarness({ platform: 'win32', release: '10.0.26100' });
   const stt = new AppleSpeechSTT('/fake/helper', runtime);
   const errors = [];
   stt.on('error', (error) => errors.push(error));

@@ -414,7 +414,14 @@ export class AppleSpeechSTT extends EventEmitter {
     // generation supersedes this process. Never reuse its input stream.
     if (child && !child.killed) {
       child.stdin.end('{"type":"stop"}\n');
-      const timer = setTimeout(() => { if (child.exitCode === null) child.kill('SIGKILL'); }, 5000);
+      const timer = setTimeout(() => {
+        if (child.exitCode === null) {
+          try {
+            if (process.platform === 'win32') child.kill();
+            else child.kill('SIGKILL');
+          } catch { /* already gone */ }
+        }
+      }, 5000);
       timer.unref(); child.once('exit', () => clearTimeout(timer));
     }
   }

@@ -29,7 +29,7 @@ import fs from 'node:fs';
 import path from 'path';
 import { runProfileMigration } from './migrateUserData';
 
-if (app.isPackaged) {
+if (app && typeof app.isPackaged === 'boolean' && app.isPackaged) {
   const { dir } = runProfileMigration({
     platform: process.platform,
     isPackaged: true,

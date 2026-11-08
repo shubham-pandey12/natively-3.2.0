@@ -4290,7 +4290,7 @@ export class IntelligenceEngine extends EventEmitter {
                         questionSpeaker: questionSpokenByUser && !question?.trim() ? 'user' : 'other',
                         // Low-confidence query rewrite: the user's fast model, 1.5 s hard cap.
                         queryRewriter: require('./context-intelligence/retrieval/rewriter-binding').bindQueryRewriter(this.llmHelper),
-                        screenText: _screenPortText || _screenDescription,
+                        screenText: _screenDescription,
                         // The chat-history rollback must reach THIS surface too.
                         // ipcHandlers was the only call site passing it, so the
                         // Settings toggle rolled back typed chat while live

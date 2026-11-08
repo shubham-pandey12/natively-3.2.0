@@ -30,7 +30,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
 import Module from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COMPILED = path.resolve(__dirname, '../../../dist-electron/electron/ScreenshotHelper.js');
@@ -66,6 +66,9 @@ const DISPLAY = { id: 1, scaleFactor: 2, bounds: BOUNDS };
 
 // Mutable capture-control state the fake desktopCapturer reads.
 let currentThumbnail;
+let captureDisplays = [DISPLAY];
+let captureSources;
+let displaysAfterEnumeration;
 let getSourcesCalls;
 let writtenFiles; // { path, buffer } records for every fs.writeFile the SUT performs
 
@@ -76,13 +79,14 @@ function makeFakeElectron() {
       getPath: () => fs.mkdtempSync(path.join(os.tmpdir(), 'ss-runtime-'))
     },
     screen: {
-      getAllDisplays: () => [DISPLAY],
+      getAllDisplays: () => captureDisplays,
       getPrimaryDisplay: () => DISPLAY
     },
     desktopCapturer: {
       getSources: async () => {
         getSourcesCalls++;
-        return [
+        if (displaysAfterEnumeration) captureDisplays = displaysAfterEnumeration;
+        return captureSources ?? [
           {
             id: 'screen:0:0',
             name: 'Entire Screen',
@@ -111,9 +115,7 @@ before(async () => {
     return originalLoad.apply(this, arguments);
   };
 
-  const mod = await import(path.sep === '\\'
-    ? 'file://' + COMPILED.replace(/\\/g, '/')
-    : 'file://' + COMPILED);
+  const mod = await import(pathToFileURL(COMPILED).href);
   ScreenshotHelper = mod.ScreenshotHelper;
   assert.equal(typeof ScreenshotHelper, 'function', 'compiled ScreenshotHelper class must be importable');
 });
@@ -269,6 +271,58 @@ describe('captureWithDesktopCapturer runtime (single display, mocked Electron)',
   });
 });
 
+test('multi-monitor capture uses display IDs and refuses ambiguous sources', async () => {
+  const right = { ...DISPLAY, id: 2, bounds: { ...BOUNDS, x: BOUNDS.width } };
+  const leftImage = makeThumbnail(1440, 900);
+  const rightImage = makeThumbnail(1440, 900);
+  rightImage.toPNG = () => Buffer.from('right display');
+  captureDisplays = [DISPLAY, right];
+  captureSources = [
+    { id: 'screen:0:0', name: 'Screen 1', display_id: '2', thumbnail: rightImage },
+    { id: 'screen:1:0', name: 'Screen 2', display_id: '1', thumbnail: leftImage },
+  ];
+  const restore = interceptWrites();
+  try {
+    const helper = new ScreenshotHelper('queue');
+    await helper.takeScreenshot(right);
+    assert.equal(writtenFiles[0].buffer.toString(), 'right display');
+    captureSources[0].display_id = '';
+    await helper.takeScreenshot(right);
+    assert.equal(writtenFiles[1].buffer.toString(), 'right display');
+    captureSources.push({ id: 'screen:2:0', name: 'Disconnected screen', display_id: '3', thumbnail: leftImage });
+    await assert.rejects(helper.takeScreenshot(right), /Could not identify the selected screen/);
+    captureSources.pop();
+    captureSources[1].display_id = '';
+    await assert.rejects(helper.takeScreenshot(right), /Could not identify the selected screen/);
+    assert.equal(writtenFiles.length, 2);
+  } finally {
+    restore();
+    captureDisplays = [DISPLAY];
+    captureSources = undefined;
+  }
+});
+
+test('a display unplug during full or stitched region capture writes no screenshot', async () => {
+  const left = { ...DISPLAY, id: 2, scaleFactor: 1, bounds: { ...BOUNDS, x: -BOUNDS.width } };
+  const restore = interceptWrites();
+  displaysAfterEnumeration = [DISPLAY];
+  try {
+    const helper = new ScreenshotHelper('queue');
+    captureDisplays = [left, DISPLAY];
+    await assert.rejects(helper.takeScreenshot(left), /display layout changed during capture/);
+    captureDisplays = [left, DISPLAY];
+    await assert.rejects(
+      helper.takeSelectiveScreenshot({ x: -40, y: 10, width: 80, height: 40 }),
+      /display layout changed during capture/,
+    );
+    assert.equal(writtenFiles.length, 0);
+  } finally {
+    restore();
+    captureDisplays = [DISPLAY];
+    displaysAfterEnumeration = undefined;
+  }
+});
+
 // ---- Fix #3 anti-drift: the MULTI-display helper uses the SAME density-agnostic math,
 // verified against two displays with DIFFERENT scale factors (1× external + 2× built-in).
 // This proves each per-display intersection maps to its own thumbnail's pixel space and
@@ -277,7 +331,7 @@ describe('captureWithDesktopCapturer runtime (single display, mocked Electron)',
 describe('computeThumbnailCrop: mixed-DPI multi-display anti-drift', () => {
   let computeThumbnailCrop;
   before(async () => {
-    const mod = await import('file://' + COMPILED);
+    const mod = await import(pathToFileURL(COMPILED).href);
     computeThumbnailCrop = mod.computeThumbnailCrop;
   });
 

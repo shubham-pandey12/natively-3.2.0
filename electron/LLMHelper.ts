@@ -3238,7 +3238,7 @@ export class LLMHelper {
     // unconditionally, so without this the whole turn throws rather than merely
     // losing its health tracking.
     if (!this.textHealth) this.textHealth = new Map();
-    yield* runStreamingTextFallback(
+    const stream = runStreamingTextFallback(
       [primary, ...fittedSpares],
       this.textHealth,
       {
@@ -3247,6 +3247,7 @@ export class LLMHelper {
         // and maxAttempts 2 would make a single-provider turn four billed
         // requests before the chain even ends.
         maxAttempts: 1,
+        rethrowAfterCommit: true,
         ttftTimeoutMs: budgetMs,
         hedgeEnabled: hedging,
         hedgeDelayDefaultMs: this.hedgeDelayForBudget(budgetMs),
@@ -3256,6 +3257,17 @@ export class LLMHelper {
       {},
       opts.abortSignal,
     );
+    let committed = false;
+    try {
+      for await (const token of stream) {
+        committed = true;
+        yield token;
+      }
+    } catch (error) {
+      if (opts.abortSignal?.aborted) return;
+      if (!committed) throw error;
+      yield LLMHelper.TRUNCATION_SENTINEL;
+    }
   }
 
   /**
@@ -10726,7 +10738,7 @@ let isMultimodal = !!(imagePaths?.length);
       // to "Answer in 100 words".
       try {
         const alreadyCarried = /<user_instructions\b|<custom_instructions>/.test(`${systemPromptOverride || ''}\n${message || ''}`);
-        const answerTurn = Boolean(routeOptions?.answerType);
+        const answerTurn = Boolean(routeOptions?.answerType) && routeOptions?.answerType !== 'project_link_answer';
         if (!alreadyCarried && answerTurn) {
           const modesMgr = modesMgrForInjection || require('./services/ModesManager').ModesManager.getInstance();
           const pinnedInstructions: string = modesMgr.getActiveModePinnedInstructions?.(modeAnswerType(routeOptions), routeOptions?.pinnedModeId ?? undefined) || '';
@@ -11550,9 +11562,7 @@ let isMultimodal = !!(imagePaths?.length);
       //
       // It now runs through the shared fallback engine: a spare rung if the user
       // has one keyed, and a PARALLEL RETRY of the same gateway if they do not.
-      // The engine still returns unconditionally afterwards, so the user-facing
-      // failure sentence below is still the last word — it just now speaks only
-      // once every rung, including the hedge, has failed.
+      // Exhausted pre-token attempts propagate through the caller's error path.
       const commit = { emitted: false };
       try {
         yield* this.trackCommit(
@@ -11575,11 +11585,7 @@ let isMultimodal = !!(imagePaths?.length);
           yield LLMHelper.TRUNCATION_SENTINEL;
           return;
         }
-        // Byte-identical to what streamWithCustom used to yield, so this path's
-        // UX is unchanged.
-        yield typeof e?.status === 'number'
-          ? `Error: Custom Provider returned HTTP ${e.status}`
-          : 'Error streaming from custom provider.';
+        throw e;
       }
       return;
     }
@@ -13945,11 +13951,7 @@ let isMultimodal = !!(imagePaths?.length);
         throw e;
       }
       console.error("Custom streaming failed", e);
-      // Same rule as the HTTP branch above: a failure must reach the caller AS a
-      // failure. The user-facing sentence this used to yield now lives at the
-      // one call site that is genuinely terminal (the `2a. CustomProvider`
-      // branch of _streamChatInner), where "there is no provider after this"
-      // is actually known. Here, it is not.
+      // Propagate transport failures to the fallback engine and its caller.
       throw e instanceof Error ? e : new Error(String(e));
     } finally {
       // Always drop the listener so we don't leak a subscription on a

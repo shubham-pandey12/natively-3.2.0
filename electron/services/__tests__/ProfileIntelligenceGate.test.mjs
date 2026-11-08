@@ -208,7 +208,7 @@ describe('PI gate wiring: LLMHelper knowledge intercept (phone chat, LLMHelper.c
     assert.match(read('llm/AnswerLLM.ts'), /this\.llmHelper\.streamChat\(/);
     const ipc = read('ipcHandlers.ts');
     assert.match(ipc, /const emailBody = await llmHelper\.chatWithGemini\(/, 'follow-up email');
-    assert.match(ipc, /const stream = llmHelper\.streamChat\(message, phoneImagePaths/, 'phone chat');
+    assert.match(ipc, /const \{ stream, outcome \} = llmHelper\.streamChatWithOutcome\(message, phoneImagePaths/, 'phone chat');
   });
 });
 

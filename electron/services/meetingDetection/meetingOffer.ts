@@ -126,7 +126,11 @@ export class MeetingOffers {
         private readonly options: { countdownMs?: number; expireMs?: number } = {},
     ) {
         this.now = deps.now ?? Date.now;
-        this.setT = deps.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
+        this.setT = deps.setTimeout ?? ((fn, ms) => {
+            const t = setTimeout(fn, ms);
+            t.unref?.();
+            return t;
+        });
         this.clearT = deps.clearTimeout ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     }
 

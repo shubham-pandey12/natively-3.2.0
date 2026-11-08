@@ -6970,6 +6970,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     setMessages((prev) => commitStreamingFlush(prev, msgId, withDiagramRepairs(text)));
   }, []);
 
+  const releasePhoneOverlayAnswer = useCallback(() => {
+    if (chatStreamSourceRef.current !== 'phone') return;
+    const replyId = streamingMsgIdRef.current;
+    flushToken();
+    streamingMsgIdRef.current = null;
+    streamingIntentRef.current = null;
+    chatStreamIdRef.current = null;
+    chatStreamSourceRef.current = null;
+    requestStartTimeRef.current = null;
+    setIsProcessing(false);
+    // The phone keeps its answer. This partial overlay copy must not become chat context.
+    setMessages((prev) => prev.filter((message) => message.id !== replyId));
+  }, [flushToken]);
+
   const tryBeginOverlayAction = useCallback((actionKey: string): boolean => {
     if (overlayActionInFlightRef.current.has(actionKey)) return false;
     const nowMs = Date.now();
@@ -6984,10 +6998,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     ) {
       return false;
     }
+    releasePhoneOverlayAnswer();
     overlayActionInFlightRef.current.add(actionKey);
     lastOverlayActionRef.current = { key: actionKey, atMs: nowMs };
     return true;
-  }, []);
+  }, [releasePhoneOverlayAnswer]);
 
   const endOverlayAction = useCallback((actionKey: string) => {
     overlayActionInFlightRef.current.delete(actionKey);
@@ -7334,6 +7349,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Direct and legacy streams share the single answer panel. Retire any legacy
     // owner before reserving the Direct placeholder; requestId correlation then
     // rejects every late Direct event from an older turn.
+    releasePhoneOverlayAnswer();
     window.electronAPI?.cancelChatStream?.();
     chatStreamIdRef.current = null;
     chatStreamSourceRef.current = null;
@@ -7430,7 +7446,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         message: '',
       });
     }
-  }, [flushToken, forceFinalizeStaleRagStream, settleDirectAssistFailure, settleDirectAssistIncomplete]);
+  }, [flushToken, forceFinalizeStaleRagStream, releasePhoneOverlayAnswer, settleDirectAssistFailure, settleDirectAssistIncomplete]);
 
   const cancelActiveChatStream = useCallback(() => {
     clearScreenshotRetry();
@@ -8940,6 +8956,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // was already queued before cancellation must never be adopted into it.
         if (activeDirectAssistRef.current) return;
         if (staleDesktopChatEvent(meta?.streamId, (meta as any)?.source)) return;
+        if ((meta as any)?.source === 'phone'
+            && streamingMsgIdRef.current !== `phone-${meta?.streamId}-reply`) return;
         const decision = resolveChatStreamToken(
           chatStreamIdRef.current, meta?.streamId,
           chatStreamSourceRef.current, (meta as any)?.source,
@@ -8958,6 +8976,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // Replaced by a newer typed question: the new question owns the card
         // and the spinner, so nothing here is released either.
         if (staleDesktopChatEvent(data?.streamId, (data as any)?.source)) return;
+        if ((data as any)?.source === 'phone'
+            && streamingMsgIdRef.current !== `phone-${data?.streamId}-reply`) return;
         // Ignore a done from a superseded stream (audit finding #3) so it can't
         // tear down a newer stream's row. A done without a streamId is honored
         // (back-compat). On an honored done we clear the adopted id.
@@ -9121,26 +9141,27 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     cleanups.push(
       window.electronAPI.onGeminiStreamError((error, meta?: { streamId?: number | null; source?: string }) => {
         if (activeDirectAssistRef.current) return;
-        // Guard (2026-07-31): a tagged error belonging to another stream must
-        // not tear down the one we're rendering. A phone-mirror failure carries
-        // source:'phone-mirror' and no streamId; a desktop failure carries the
-        // originating streamId — drop it unless it matches the adopted stream.
-        // Untagged errors keep the legacy behavior exactly.
         if (meta?.source === 'phone-mirror') {
-          // R-02: this branch deliberately keeps a phone failure out of the
-          // desktop UI, but it must still RELEASE the stream guard. Phone
-          // tokens are tagged source:'phone' (ipcHandlers.ts:12814) while this
-          // error is tagged 'phone-mirror' (:12851), and a provider that throws
-          // AFTER committing tokens never sends a `done` — so a phone turn that
-          // failed mid-answer left the guard pinned to the phone surface
-          // forever. Every later DESKTOP stream was then rejected as a
-          // cross-surface supersession (accept:false / honor:false): no text at
-          // all and a spinner that never stopped, until the user hit Escape.
-          // Releasing is safe here because this phone stream is definitively over.
-          if (resolveChatStreamSurfaceError(chatStreamSourceRef.current, meta.source).release) {
+          const replyId = `phone-${meta.streamId}-reply`;
+          if (chatStreamIdRef.current === meta.streamId
+              && resolveChatStreamSurfaceError(chatStreamSourceRef.current, meta.source).release) {
             chatStreamIdRef.current = null;
             chatStreamSourceRef.current = null;
           }
+          if (streamingMsgIdRef.current === replyId) {
+            flushToken();
+            streamingMsgIdRef.current = null;
+            streamingTextRef.current = '';
+            streamingIntentRef.current = null;
+            requestStartTimeRef.current = null;
+            setIsProcessing(false);
+          }
+          const failed = failedLine(error);
+          setMessages((prev) => prev.map((message) => message.id !== replyId ? message : (
+            message.text.trim()
+              ? { ...message, isStreaming: false, failure: { ...failed.failure, partial: true } }
+              : { ...message, isStreaming: false, ...failed }
+          )));
           return;
         }
         if (staleDesktopChatEvent(meta?.streamId, meta?.source)) return;
@@ -9188,17 +9209,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Phone-initiated chat: main process streams tokens via gemini-stream-*; this
     // event adds the user turn + streaming placeholder before tokens arrive.
     cleanups.push(
-      window.electronAPI.onPhoneMirrorIncomingChat(({ message }) => {
+      window.electronAPI.onPhoneMirrorIncomingChat(({ message, streamId }) => {
         // Main sent the attached screenshots with this question (the phone
         // shows the same tray), so it takes them as a question typed here
         // does, even while a Direct answer keeps the question off this chat.
         const shots = attachedContextRef.current;
         if (shots.length) setAttachedContext([]);
-        if (activeDirectAssistRef.current) return;
+        if (activeDirectAssistRef.current || manualSubmitInFlightRef.current
+            || overlayActionInFlightRef.current.size || chatStreamSourceRef.current === 'desktop'
+            || (streamingMsgIdRef.current && !pendingFinalizeRef.current)) return;
         flushToken();
         requestStartTimeRef.current = Date.now();
         const userId = genMessageId();
-        const placeholderId = `${userId}-reply`;
+        const placeholderId = `phone-${streamId}-reply`;
+        chatStreamIdRef.current = Number(streamId);
+        chatStreamSourceRef.current = 'phone';
         streamingMsgIdRef.current = placeholderId;
         streamingIntentRef.current = 'chat';
         streamingTextRef.current = '';
@@ -9807,6 +9832,7 @@ Provide only the answer, nothing else.`;
     // surfacing as the next answer starting mid-sentence with leftover
     // text from the previous turn. Also flush any tokens still pending
     // in the rAF buffer so they land on the prior row, not the new one.
+    releasePhoneOverlayAnswer();
     flushToken();
     tokenBufRef.current.intent = '';
     tokenBufRef.current.text = '';

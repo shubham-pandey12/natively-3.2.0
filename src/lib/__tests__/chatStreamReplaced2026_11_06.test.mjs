@@ -38,18 +38,33 @@ test('why the floor is needed: after the claim, the old stream\'s token would be
 
 test('wiring: the send releases the in-flight flag before it waits for the answer', () => {
   const body = overlay.split('const handleManualSubmit = async () => {')[1].split('const handleCustomButton = async')[0];
-  const release = body.indexOf('manualSubmitInFlightRef.current = false;\n      await window.electronAPI.streamGeminiChat(');
-  assert.ok(release > 0, 'released just before the round-trip');
-  assert.ok(body.indexOf('awaitingChatStreamStartRef.current = true;') < release, 'armed before the send');
+  const armed = body.indexOf('awaitingChatStreamStartRef.current = true;');
+  const send = body.indexOf('await window.electronAPI.streamGeminiChat(');
+  const release = body.lastIndexOf('manualSubmitInFlightRef.current = false;', send);
+  assert.ok(armed >= 0 && armed < release && release < send, 'armed and released before the round-trip');
   assert.match(body, /const mySubmit = \+\+manualSubmitSeqRef\.current;/);
   assert.match(body, /\} catch \(err\) \{\s*\/\/[^\n]*\n[^\n]*\n\s*if \(mySubmit !== manualSubmitSeqRef\.current\) return;/);
   assert.match(body, /if \(mySubmit === manualSubmitSeqRef\.current\) manualSubmitInFlightRef\.current = false;/);
 });
 
 test('wiring: token, done and error of a replaced stream are dropped before anything else', () => {
-  assert.match(overlay, /if \(activeDirectAssistRef\.current\) return;\s*if \(staleDesktopChatEvent\(meta\?\.streamId, \(meta as any\)\?\.source\)\) return;\s*const decision = resolveChatStreamToken\(/);
+  assert.match(overlay, /if \(activeDirectAssistRef\.current\) return;\s*if \(staleDesktopChatEvent\(meta\?\.streamId, \(meta as any\)\?\.source\)\) return;/);
   assert.match(overlay, /if \(staleDesktopChatEvent\(data\?\.streamId, \(data as any\)\?\.source\)\) return;/);
   assert.match(overlay, /if \(staleDesktopChatEvent\(meta\?\.streamId, meta\?\.source\)\) return;\s*if \(typeof meta\?\.streamId === 'number'/);
+});
+
+test('wiring: a phone question cannot replace a desktop-owned row in either direction', () => {
+  const incoming = overlay.split('window.electronAPI.onPhoneMirrorIncomingChat(')[1].split('}),')[0];
+  const busy = incoming.indexOf("chatStreamSourceRef.current === 'desktop'");
+  const reserve = incoming.indexOf('streamingMsgIdRef.current = placeholderId;');
+  assert.ok(busy >= 0 && reserve > busy, 'leave the active desktop placeholder and spinner alone');
+  assert.match(incoming, /chatStreamIdRef\.current = Number\(streamId\)/);
+  const release = overlay.split('const releasePhoneOverlayAnswer =')[1].split('const tryBeginOverlayAction')[0];
+  assert.match(release, /message\.id !== replyId/);
+  assert.match(overlay, /releasePhoneOverlayAnswer\(\);\s*overlayActionInFlightRef\.current\.add/);
+  assert.match(overlay, /releasePhoneOverlayAnswer\(\);\s*flushToken\(\);\s*tokenBufRef/);
+  assert.match(overlay, /streamingMsgIdRef\.current !== `phone-\$\{meta\?\.streamId\}-reply`\) return;/);
+  assert.match(overlay, /streamingMsgIdRef\.current !== `phone-\$\{data\?\.streamId\}-reply`\) return;/);
 });
 
 // The review's case (2026-11-06): Q1 still "Thinking" (no token, so no id
@@ -71,7 +86,9 @@ test('wiring: main names the stream before anything else of it; the overlay floo
   assert.match(ipc, /_chatStreamsBySender\.set\(senderId, \{ streamId: myStreamId, controller: myController \}\);\s*(?:\/\/[^\n]*\n\s*)*try \{ event\.sender\.send\('gemini-stream-started', \{ streamId: myStreamId \}\); \}/);
   const handler = ipc.split('const _geminiChatStreamHandler = async (')[1].split('const myStreamId = ++_chatStreamId;')[0];
   assert.doesNotMatch(handler, /event\.sender\.send\(/, 'nothing reaches the overlay before the id exists');
-  assert.match(overlay, /onGeminiStreamStarted\(\(data\) => \{\s*if \(typeof data\?\.streamId !== 'number'\) return;\s*replacedChatStreamFloorRef\.current = data\.streamId - 1;\s*awaitingChatStreamStartRef\.current = false;/);
+  const started = overlay.split('window.electronAPI.onGeminiStreamStarted(')[1].split('}),')[0];
+  assert.match(started, /if \(typeof data\?\.streamId !== 'number'\) return;/);
+  assert.match(started, /replacedChatStreamFloorRef\.current = data\.streamId - 1;\s*awaitingChatStreamStartRef\.current = false;/);
   const sends = overlay.split('await window.electronAPI.streamGeminiChat(').length - 1;
   // Each call has the arm within the 12 lines before it.
   const lines = overlay.split('\n');

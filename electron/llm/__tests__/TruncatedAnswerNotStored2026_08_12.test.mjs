@@ -39,10 +39,23 @@ const SENTINEL = LLMHelper.TRUNCATION_SENTINEL;
 async function drive(inner) {
   const fake = Object.create(LLMHelper.prototype);
   fake._streamChatInner = inner;
-  const { stream, outcome } = LLMHelper.prototype.streamChatWithOutcome.call(fake);
+  const { stream, outcome } = fake.streamChatWithOutcome();
   let text = '';
   for await (const tok of stream) text += tok;
   return { text, outcome };
+}
+
+function selectedProvider(open, abortSignal) {
+  return function () {
+    this.activeModelIsUserEndpoint = () => true;
+    this.activeAnswerLatencyKey = () => 'custom';
+    this.observedLatencyFor = () => undefined;
+    this.buildTextSpareRungs = () => [];
+    return this.streamSelectedProviderWithFailover({
+      id: 'custom', name: 'Test gateway', open, userContent: 'question',
+      finalSystemPrompt: '', thinkingBudget: 0, abortSignal,
+    });
+  };
 }
 
 describe('a completed stream reports itself complete', () => {
@@ -57,6 +70,22 @@ describe('a completed stream reports itself complete', () => {
 });
 
 describe('a stream that stops early reports itself truncated', () => {
+  test('a selected text provider that loses its connection after a token is incomplete', async () => {
+    const { text, outcome } = await drive(selectedProvider(async function* () {
+      yield 'partial answer';
+      throw new Error('socket hangup');
+    }));
+    assert.equal(text, 'partial answer');
+    assert.deepEqual(outcome, { truncated: true, reason: 'provider_failed_after_first_token' });
+  });
+
+  test('a selected text provider failure before the first token rejects', async () => {
+    const failure = Object.assign(new Error('provider rate limit'), { status: 429 });
+    await assert.rejects(drive(selectedProvider(async function* () {
+      throw failure;
+    })), (error) => error === failure || error.cause === failure);
+  });
+
   test('a post-commit provider failure is visible to the caller', async () => {
     const { text, outcome } = await drive(async function* () {
       yield 'Approach\n';

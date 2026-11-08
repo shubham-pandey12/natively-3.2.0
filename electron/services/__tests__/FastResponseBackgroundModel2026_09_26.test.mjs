@@ -992,8 +992,8 @@ describe('the three answer surfaces read their deadline through that answer\'s o
   test('phone mirror: the same, on phoneController', () => {
     // The phone's photos and the overlay's attached screenshots ride the phone
     // question (2026-09-27), so the image argument is no longer `undefined`.
-    assert.match(ipc, /llmHelper\.streamChat\(message, phoneImagePaths\.length \? phoneImagePaths : undefined, context, [^\n]*, \[\], phoneController\.signal, undefined, phoneRouteOptions\)/);
-    const site = between(ipc, 'const phoneLlm = llmHelper.textTurn?.(phoneController.signal) ?? llmHelper;', 'onCleanup: () => { try { phoneController.abort()');
+    assert.match(ipc, /llmHelper\.streamChatWithOutcome\(message, phoneImagePaths\.length \? phoneImagePaths : undefined, context, [^\n]*, \[\], phoneController\.signal, undefined, phoneRouteOptions\)/);
+    const site = between(ipc, 'const phoneLlm = llmHelper.textTurn?.(phoneController.signal) ?? llmHelper;', 'onCleanup: (reason) =>');
     assert.doesNotMatch(site, READS);
     assert.match(site, /performanceHooks\(\{\s*llmHelper: phoneLlm as any,\s*hasImages: phoneHasImages/);
     assert.match(site, /\{ llmHelper: phoneLlm as any, hasImages: phoneHasImages/);

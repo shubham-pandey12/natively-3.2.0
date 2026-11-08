@@ -1,9 +1,18 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   childExitReport, electronArgs, isLiveDevToolsReply, isReservedPort, killPlan, previousCdpPort, resolveDevPort, RESERVED_PORTS,
 } from '../devAgentSupport.mjs';
+
+test('a failed Electron rebuild cannot launch a stale bundle', () => {
+  const source = readFileSync(new URL('../dev-agent.mjs', import.meta.url), 'utf8');
+  const build = source.indexOf('const built = spawnSync(');
+  const launch = source.indexOf('const vite = spawn(', build);
+  assert.ok(build >= 0 && launch > build);
+  assert.match(source.slice(build, launch), /if \(built\.status !== 0\) \{\s+throw new Error/);
+});
 
 describe('reserved ports', () => {
   test("never hands out Chrome's 9222 or Node's 9229", () => {

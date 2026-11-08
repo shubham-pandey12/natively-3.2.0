@@ -1,5 +1,6 @@
 import { app, BrowserWindow, Menu, screen, systemPreferences } from 'electron';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { AppState } from './main';
 import { KeybindManager } from './services/KeybindManager';
@@ -39,7 +40,7 @@ console.log(
 // Force production mode if running as packaged app or inside app bundle
 const isDev = isEnvDev && !isPackaged;
 
-const overlayResizeTracePath = '/tmp/natively-overlay-resize-trace.log';
+const overlayResizeTracePath = path.join(os.tmpdir(), 'natively-overlay-resize-trace.log');
 
 function traceOverlayResize(event: string, data: Record<string, unknown>): void {
   if (!isDev) return;

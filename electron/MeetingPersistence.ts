@@ -426,6 +426,38 @@ export class MeetingPersistence {
     // typed just before Start belong to the meeting. Stop takes it.
     private liveUserNotes = '';
 
+    private writeEmergencyMeetingBackup(meetingId: string, data: unknown, reason: string): void {
+        const fs = require('node:fs') as typeof import('node:fs');
+        const path = require('node:path') as typeof import('node:path');
+        let tempFile: string | undefined;
+        try {
+            const { app } = require('electron');
+            const backupDir = path.join(app.getPath('userData'), 'emergency-transcripts');
+            fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+            const safeMeetingId = meetingId.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const backupFile = path.join(backupDir, `${safeMeetingId}.json`);
+            const { randomUUID } = require('node:crypto') as typeof import('node:crypto');
+            const pendingFile = path.join(backupDir, `.${safeMeetingId}.${randomUUID()}.tmp`);
+            const fd = fs.openSync(pendingFile, 'wx', 0o600);
+            tempFile = pendingFile;
+            try {
+                fs.writeFileSync(fd, JSON.stringify({ meetingId, data, reason, savedAt: new Date().toISOString() }), 'utf8');
+                fs.fsyncSync(fd);
+            } finally {
+                fs.closeSync(fd);
+            }
+            fs.renameSync(pendingFile, backupFile);
+            tempFile = undefined;
+            console.warn(`[MeetingPersistence] Emergency backup written to ${backupFile}`);
+        } catch (backupErr) {
+            console.error('[MeetingPersistence] Failed to write emergency backup:', backupErr);
+        } finally {
+            if (tempFile) {
+                try { fs.unlinkSync(tempFile); } catch { /* best effort after failed write or rename */ }
+            }
+        }
+    }
+
     /** The notes window's text for the running (or next) meeting. */
     public setLiveUserNotes(text: string): void {
         const next = typeof text === 'string' ? text.slice(0, LIVE_USER_NOTES_MAX_CHARS) : '';
@@ -1072,8 +1104,10 @@ export class MeetingPersistence {
             ...(surface ? { surface } : {}),
         };
 
+        let placeholderSaved = false;
         try {
             DatabaseManager.getInstance().saveMeeting(placeholder, snapshot.startTime, snapshot.durationMs);
+            placeholderSaved = true;
             // Saved: the live copy is no longer needed. (Not on failure: the
             // live copy is then the only one, and the next launch recovers it.)
             this.liveJournal.end();
@@ -1084,7 +1118,12 @@ export class MeetingPersistence {
             const wins = require('electron').BrowserWindow.getAllWindows();
             wins.forEach((w: any) => w.webContents.send('meetings-updated'));
         } catch (e) {
-            console.error("Failed to save placeholder", e);
+            if (placeholderSaved) {
+                console.warn('[MeetingPersistence] Placeholder saved, but post-save cleanup or notification failed:', e);
+            } else {
+                console.error('Failed to save placeholder', e);
+                this.writeEmergencyMeetingBackup(placeholder.id, placeholder, (e as Error)?.message || 'save_placeholder_failed');
+            }
         }
 
         // One writer per meeting: a recovery pass skips a meeting in this set,
@@ -1268,12 +1307,19 @@ export class MeetingPersistence {
                 console.log(`[MeetingPersistence] ${meetingId}: resumed before its notes were saved; the resumed Stop writes them.`);
                 return;
             }
+            let chatSaved = false;
             try {
                 DatabaseManager.getInstance().saveMeeting(finalMeeting, data.startTime, data.durationMs);
+                chatSaved = true;
                 const wins = require('electron').BrowserWindow.getAllWindows();
                 wins.forEach((w: any) => w.webContents.send('meetings-updated'));
             } catch (e) {
-                console.error('[MeetingPersistence] Failed to persist zero-eligible meeting:', e);
+                if (chatSaved) {
+                    console.warn('[MeetingPersistence] Chat saved, but notification failed:', e);
+                } else {
+                    console.error('[MeetingPersistence] Failed to persist zero-eligible meeting:', e);
+                    this.writeEmergencyMeetingBackup(meetingId, finalMeeting, (e as Error)?.message || 'save_chat_session_failed');
+                }
             }
             try {
                 telemetryService.track({
@@ -2055,6 +2101,7 @@ export class MeetingPersistence {
             // that had saved perfectly. The old catch only flipped the status,
             // which is why this was survivable before and is not now.
             if (!meetingSaved) {
+                this.writeEmergencyMeetingBackup(meetingId, data, (error as Error)?.message || 'process_and_save_failed');
                 try { DatabaseManager.getInstance().markSummaryGenerationFailed(meetingId, title); } catch { /* non-fatal */ }
             } else {
                 console.warn('[MeetingPersistence] post-save step failed; the meeting is saved and is left intact', {

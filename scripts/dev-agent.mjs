@@ -159,12 +159,13 @@ async function main() {
   const built = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'build-electron.js')], {
     cwd: ROOT, stdio: 'inherit', shell: false,
   });
-  // build-electron EXITS 0 ON FAILURE, so the exit code proves nothing — check
-  // that the artifact is actually there.
   if (built.error) throw built.error;
+  if (built.status !== 0) {
+    throw new Error(`build:electron failed (${built.signal ?? `exit ${built.status}`})`);
+  }
   const mainBundle = path.join(ROOT, 'dist-electron', 'electron', 'main.js');
   if (!existsSync(mainBundle)) {
-    throw new Error(`build:electron produced no ${path.relative(ROOT, mainBundle)} (it exits 0 on failure)`);
+    throw new Error(`build:electron produced no ${path.relative(ROOT, mainBundle)}`);
   }
 
   const vite = spawn(process.execPath, [
@@ -185,16 +186,19 @@ async function main() {
 
   // electronArgs adds --user-data-dir: NATIVELY_AGENT_USER_DATA alone left the
   // credentials file pointing at the real profile (see devAgentSupport.mjs).
+  const appEnv = {
+    ...process.env,
+    NODE_ENV: 'development',
+    NATIVELY_RENDERER_PORT: String(rendererPort),
+    NATIVELY_AGENT_USER_DATA: USER_DATA,
+  };
+  delete appEnv.ELECTRON_RUN_AS_NODE;
+
   const app = spawn(electronPath, electronArgs(ROOT, cdpPort, USER_DATA), {
     cwd: ROOT,
     stdio: 'inherit',
     shell: false,
-    env: {
-      ...process.env,
-      NODE_ENV: 'development',
-      NATIVELY_RENDERER_PORT: String(rendererPort),
-      NATIVELY_AGENT_USER_DATA: USER_DATA,
-    },
+    env: appEnv,
   });
   children.push(app);
 

@@ -14,6 +14,7 @@ const code = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, 
 const IPC = code(read('../../ipcHandlers.ts'));
 const MAIN = code(read('../../main.ts'));
 const WIRING = code(read('../proEntitlementWiring.ts'));
+const DEV_PREMIUM = code(read('../devPremiumOverride.ts'));
 const slice = (src, from, to) => { const a = src.indexOf(from); assert.ok(a >= 0, `marker not found: ${from}`); const b = src.indexOf(to, a); return src.slice(a, b > a ? b : a + 6000); };
 
 test('startup: reconcile once, late, off the startup path, and contained', () => {
@@ -52,6 +53,11 @@ test('wiring: no premium module means "nothing to do", never an error and never 
   assert.match(license, /if \(isDevPremiumOverrideEnabled\(\)\) \{\s*return \{ isPremium: \(\) => true, activateWithApiKey: async \(\) => \(\{ success: true \}\) \};/);
   assert.match(WIRING, /isPremium: \(\) => \{ const lm = licenseManager\(\); return lm \? Boolean\(lm\.isPremium\(\)\) : true; \}/);
   assert.match(WIRING, /if \(!lm\) return \{ success: false, skipped: true \}/);
+});
+
+test('development premium override is always on: licensing bypassed, Ultra by default', () => {
+  assert.match(DEV_PREMIUM, /export function isDevPremiumOverrideEnabled\(\): boolean \{\s*return true;\s*\}/);
+  assert.match(DEV_PREMIUM, /export function getDevPlanOverride\(\): string \| null \{\s*return 'ultra';\s*\}/);
 });
 
 test('wiring: only 401/403 on /v1/usage count as a refused key — 429 and 5xx are transient', () => {

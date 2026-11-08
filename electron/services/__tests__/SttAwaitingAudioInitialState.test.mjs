@@ -182,6 +182,10 @@ describe('B2: STT user/interviewer status must initialize to \'awaiting-audio\''
 });
 
 describe('Apple Speech language-asset preparation status', () => {
+  it('routes Apple Speech through its own platform guard without a cloud fallback', () => {
+    assert.match(main, /sttProvider === 'apple-speech'\) \{\s*(?:\/\/[^\n]*\n\s*)?stt = new AppleSpeechSTT\(\);\s*\}/);
+  });
+
   it('keeps the preparing state in sync across the main, preload, and renderer boundaries', () => {
     const mainInterface = /interface\s+SttStatusPayload\s*\{[\s\S]*?\}/.exec(main)?.[0] ?? '';
     assert.match(mainInterface, /state\s*:[^;]*['"]preparing['"]/);

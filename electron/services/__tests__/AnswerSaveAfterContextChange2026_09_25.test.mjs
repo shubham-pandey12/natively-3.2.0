@@ -1,12 +1,10 @@
 // An answer that finishes after the session was reset (meeting stop), or after
-// a mode switch cleared its context, is still shown — but it must not be saved
-// into the context that replaced the one it was asked in.
+// a mode switch cleared its context must not be saved into the replacement
+// context. Phone chat also discards the stale stream from the mirror.
 //
 // Both chat surfaces await the provider and then save the answer:
-//   - Phone-mirror chat has no stream registry, so neither the overlay's
-//     cancelChatStream() on session-reset nor modes:set-active's abort reaches
-//     it. Live on main: a phone answer asked before a mode switch was saved into
-//     the cleared context and fed back into the next question's prompt.
+//   - Phone-mirror chat also publishes completed answers to reconnect history.
+//     A stale answer must be discarded before that publish step.
 //   - Desktop chat from the LAUNCHER (GlobalChat / MeetingChat fallback) is not
 //     cancelled at meeting stop — only the overlay cancels its own stream. Live
 //     on main: the launcher answer was saved into the session that replaced the
@@ -38,7 +36,17 @@ const V3_ENV = 'NATIVELY_CONTEXT_INTELLIGENCE_V3';
 const noop = () => {};
 const handlers = new Map();
 const windowSends = [];
-const win = { isDestroyed: () => false, webContents: { send: (channel, ...args) => windowSends.push([channel, ...args]) } };
+let rendererClosing = false;
+const win = {
+  isDestroyed: () => false,
+  webContents: {
+    isDestroyed: () => false,
+    send: (channel, ...args) => {
+      if (rendererClosing) throw new Error('renderer closed');
+      windowSends.push([channel, ...args]);
+    },
+  },
+};
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'answer-save-context-change-'));
 const fakeElectron = {
   app: {
@@ -82,16 +90,20 @@ const stub = (target) => new Proxy(target, {
 });
 
 let contextEpoch = 0;
+let meetingActive = true;
 let releaseStream = null;
+let holdAfterFirstToken = false;
 const writes = [];
 // Held open until the test decides whether the context changes first.
 async function* heldAnswer(text) {
   await new Promise((resolve) => { releaseStream = resolve; });
   const half = Math.floor(text.length / 2);
   yield text.slice(0, half);
+  if (holdAfterFirstToken) await new Promise((resolve) => { releaseStream = resolve; });
   yield text.slice(half);
 }
 let answerText = '';
+let truncated = false;
 const intelligenceManager = stub({
   getContextEpoch: () => contextEpoch,
   getFormattedContext: () => '',
@@ -102,7 +114,7 @@ const intelligenceManager = stub({
 });
 const llmHelper = stub({
   streamChat: () => heldAnswer(answerText),
-  streamChatWithOutcome: () => ({ stream: heldAnswer(answerText), outcome: { truncated: false } }),
+  streamChatWithOutcome: () => ({ stream: heldAnswer(answerText), outcome: { truncated } }),
   isUsingOllama: () => false,
   isUsingCodexCli: () => false,
   getCodexSelectionAuthError: () => null,
@@ -112,6 +124,8 @@ const appState = stub({
   getIntelligenceManager: () => intelligenceManager,
   processingHelper: { getLLMHelper: () => llmHelper },
   getMainWindow: () => win,
+  getWindowHelper: () => ({ getOverlayWindow: () => win }),
+  getIsMeetingActive: () => meetingActive,
 });
 
 const phoneListeners = [];
@@ -150,6 +164,9 @@ async function finishAnswer({ contextChangedMidStream }) {
 afterEach(() => {
   writes.length = 0;
   windowSends.length = 0;
+  meetingActive = true;
+  holdAfterFirstToken = false;
+  truncated = false;
   delete process.env[V3_ENV];
 });
 
@@ -172,11 +189,74 @@ describe('phone-mirror chat vs a context change mid-answer', () => {
     ]);
   });
 
-  test('a reset or mode switch during the stream: still delivered, not saved', async () => {
+  test('renderer closing does not interrupt phone answer processing', async () => {
+    rendererClosing = true;
+    try {
+      await askFromPhone({ contextChangedMidStream: false });
+      assert.equal(savedAnswer()[0]?.[1], 'The pricing decision from meeting A.');
+    } finally {
+      rendererClosing = false;
+    }
+  });
+
+  test('a newer phone question supersedes an earlier provider response', async () => {
+    answerText = 'Old answer.';
+    const oldRun = phoneListeners[0]({ type: 'chat', message: 'First question' });
+    await waitForHeldStream();
+    const releaseOld = releaseStream;
+    releaseStream = null;
+    answerText = 'New answer.';
+    const newRun = phoneListeners[0]({ type: 'chat', message: 'Second question' });
+    await finishAnswer({ contextChangedMidStream: false });
+    releaseOld();
+    await Promise.all([oldRun, newRun]);
+    assert.deepEqual(savedAnswer(), [
+      ['addAssistantMessage', 'New answer.', 'phone_mirror'],
+      ['logUsage', 'Second question', 'New answer.'],
+    ]);
+    const delivered = windowSends.filter(([ch]) => ch === 'gemini-stream-token').map(([, tok]) => tok).join('');
+    assert.equal(delivered, 'New answer.');
+  });
+
+  test('an interrupted provider answer is reported without saving the partial text', async () => {
+    truncated = true;
+    try {
+      await askFromPhone({ contextChangedMidStream: false });
+      assert.deepEqual(savedAnswer(), []);
+      assert.ok(windowSends.some(([ch, message]) =>
+        ch === 'gemini-stream-error' && /interrupted/.test(message)));
+      assert.ok(!windowSends.some(([ch]) => ch === 'gemini-stream-done'));
+    } finally {
+      truncated = false;
+    }
+  });
+
+  test('a reset or mode switch before the first token discards the answer', async () => {
     const shown = await askFromPhone({ contextChangedMidStream: true });
-    assert.equal(shown, 'The pricing decision from meeting A.', 'the phone user must still get the answer');
-    assert.ok(windowSends.some(([ch]) => ch === 'gemini-stream-done'), 'the stream must still complete');
+    assert.equal(shown, '');
+    assert.ok(!windowSends.some(([ch]) => ch === 'gemini-stream-done'));
+    assert.ok(windowSends.some(([ch, message]) =>
+      ch === 'gemini-stream-error' && /meeting or mode changed/.test(message)));
     assert.deepEqual(savedAnswer(), [], 'the answer was saved into the context that replaced the one it was asked in');
+  });
+
+  test('Stop discards a partial answer even before the audio drain resets the context', async () => {
+    answerText = 'Partial text plus stale continuation.';
+    holdAfterFirstToken = true;
+    const run = phoneListeners[0]({ type: 'chat', message: 'Continue.' });
+    await finishAnswer({ contextChangedMidStream: false });
+    await waitForHeldStream();
+    meetingActive = false;
+    await finishAnswer({ contextChangedMidStream: false });
+    await run;
+    const reply = windowSends.find(([ch]) => ch === 'phone-mirror:incoming-chat')[1];
+    const tokens = windowSends.filter(([ch]) => ch === 'gemini-stream-token');
+    assert.equal(tokens.length, 1);
+    assert.ok(!windowSends.some(([ch]) => ch === 'gemini-stream-done'));
+    assert.ok(windowSends.some(([ch, message, meta]) =>
+      ch === 'gemini-stream-error' && /meeting or mode changed/.test(message)
+      && String(meta.streamId) === reply.streamId));
+    assert.deepEqual(savedAnswer(), []);
   });
 });
 
@@ -202,6 +282,8 @@ describe('desktop chat (launcher) vs a context change mid-answer', () => {
     return {
       shown: sent.filter(([ch]) => ch === 'gemini-stream-token').map(([, tok]) => tok).join(''),
       done: sent.some(([ch]) => ch === 'gemini-stream-done'),
+      incomplete: sent.find(([ch]) => ch === 'gemini-stream-done')?.[1]?.incomplete,
+      error: sent.find(([ch]) => ch === 'gemini-stream-error')?.[1],
     };
   }
 
@@ -223,6 +305,19 @@ describe('desktop chat (launcher) vs a context change mid-answer', () => {
       assert.equal(shown, ANSWER, 'the launcher user must still get the answer');
       assert.equal(done, true, 'the stream must still complete, or the launcher bubble stays "streaming"');
       assert.deepEqual(savedAnswer(), [], 'the answer was saved into the context that replaced the one it was asked in');
+    });
+
+    test(`${pathName}: an interrupted answer is shown as incomplete and never saved`, async () => {
+      truncated = true;
+      const result = await askFromLauncher({ v3, contextChangedMidStream: false });
+      assert.equal(result.shown, ANSWER);
+      if (v3) {
+        assert.equal(result.incomplete, true);
+      } else {
+        assert.equal(result.done, false);
+        assert.match(result.error, /interrupted/i);
+      }
+      assert.deepEqual(savedAnswer(), []);
     });
   }
 });

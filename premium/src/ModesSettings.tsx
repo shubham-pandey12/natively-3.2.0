@@ -332,7 +332,7 @@ function ReferenceFileStatus({ status, fileName }: { status?: string; fileName: 
   </span>;
 }
 
-const KnowledgePanel: React.FC<{ file: ReferenceFile; pack: any; loading: boolean; regenerating: boolean; userEditableCardsEnabled: boolean; onApproveCard: (cardId: string) => void; onRejectCard: (cardId: string) => void; onRegenerate: () => void; onExport: () => void; onReview: (cardId: string, action: 'approve' | 'reject') => void }> = ({ file, pack, loading, regenerating, userEditableCardsEnabled, onApproveCard, onRejectCard, onRegenerate, onExport, onReview }) => (
+const KnowledgePanel: React.FC<{ file: ReferenceFile; pack: any; loading: boolean; regenerating: boolean; userEditableCardsEnabled: boolean; onApproveCard: (cardId: string) => void; onRejectCard: (cardId: string) => void; onRegenerate: () => void; onExport: () => void; onReview: (cardId: string, action: 'approve' | 'reject') => void }> = ({ file, pack, loading, regenerating, userEditableCardsEnabled, onApproveCard, onRejectCard, onRegenerate, onExport }) => (
   <div data-knowledge-panel style={{ ...S.contentBox, padding: 12 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
       <strong style={{ fontSize: 12 }}>Knowledge Pack</strong>

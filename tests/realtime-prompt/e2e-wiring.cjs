@@ -96,14 +96,14 @@ const both = (c) => `${c?.system ?? ''}\n${c?.user ?? ''}`;
   check('E2', '[UserInstructions] output: custom_format, no repair', r.output?.codingFormat === 'custom_format' && r.output?.willRepair === false, JSON.stringify(r.output));
 
   out('\nE3  CONTROL · same turn, mode has NO instructions · default behaviour must be unchanged');
-  r = await turn({ modeTemplate: 'technical-interview', instructions: '', question: 'Write a function to solve two sum.', canned: OBEDIENT });
+  r = await turn({ modeTemplate: 'technical-interview', instructions: '', question: 'Write a function to solve two sum. Give me the full interview breakdown.', canned: OBEDIENT });
   c = r.captured[0];
   check('E3', 'six-heading contract IS attached', /Every heading is mandatory/.test(c?.system ?? ''), 'default contract missing');
   check('E3', 'no user-instruction block is rendered', !/<user_instructions|<custom_instructions>/.test(both(c)), 'block rendered with empty instructions');
   check('E3', 'non-conforming answer IS still repaired', /^## Complexity/m.test(r.committed), r.committed.slice(0, 200));
 
   out('\nE4  Technical-interview · "Use Java only" (the phrasing the old gate dropped)');
-  r = await turn({ modeTemplate: 'technical-interview', instructions: 'Use Java only', question: 'Write a function to reverse a linked list.', canned: OBEDIENT });
+  r = await turn({ modeTemplate: 'technical-interview', instructions: 'Use Java only', question: 'Write a function to reverse a linked list. Give me the full interview breakdown.', canned: OBEDIENT });
   c = r.captured[0];
   check('E4', 'delivered on a coding turn', /Use Java only/.test(both(c)), 'dropped');
   check('E4', 'CODE LANGUAGE resolved to Java', /CODE LANGUAGE is set by the user: Java/.test(both(c)), 'not resolved');
@@ -117,7 +117,7 @@ const both = (c) => `${c?.system ?? ''}\n${c?.user ?? ''}`;
   check('E5', 'personal fact never reaches the provider', !/RedisMart/.test(both(c)), 'FACT LEAKED');
 
   out('\nE6  TRAP · user-built mode NAMED "Interview Format:" with a plain constraint');
-  r = await turn({ modeTemplate: 'technical-interview', customMode: 'Interview Format: Strict', instructions: 'Be concise.', question: 'Write a function to solve two sum.', canned: OBEDIENT });
+  r = await turn({ modeTemplate: 'technical-interview', customMode: 'Interview Format: Strict', instructions: 'Be concise.', question: 'Write a function to solve two sum. Give me the full interview breakdown.', canned: OBEDIENT });
   c = r.captured[0];
   check('E6', 'the mode NAME is not mistaken for a format definition', /Every heading is mandatory/.test(c?.system ?? '') && r.output?.codingFormat !== 'custom_format', JSON.stringify(r.output));
   check('E6', 'and is not reported as STRUCTURE set by the user', !/STRUCTURE is set by the user/.test(both(c)), 'name read as structure');

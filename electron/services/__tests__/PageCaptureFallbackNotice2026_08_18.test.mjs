@@ -207,12 +207,15 @@ describe('main → preload → overlay wiring', () => {
     assert.match(ui, /pendingPageCaptureAtRef/);
   });
 
-  test('screenshot wins over AUTOMATIC page capture (auto-attach gated on no attachments)', () => {
+  test('the answer button consumes explicit page context without starting an automatic capture', () => {
     // 2026-08-19 decision: a screenshot is the user deliberately pointing at
     // something; the JIT auto-attach is a guess about the active tab. With
     // screenshots attached, the auto request must not run (they can describe
     // different content). Manual ⌘⇧Y captures still attach alongside.
     const src = read('src/components/NativelyInterface.tsx');
-    assert.match(src, /!hasManualContext && currentAttachments\.length === 0/);
+    const answer = src.slice(src.indexOf("analytics.trackCommandExecuted('what_to_say')"), src.indexOf('setScreenContextStatus(result.screenContextStatus', src.indexOf("analytics.trackCommandExecuted('what_to_say')")));
+    assert.match(answer, /consumeDirectPageContext\(\)/);
+    assert.match(answer, /lastCapturedDOM/);
+    assert.doesNotMatch(answer, /electronAPI\.capturePage/);
   });
 });
