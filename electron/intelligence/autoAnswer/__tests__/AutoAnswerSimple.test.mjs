@@ -6,7 +6,7 @@
  *   one-call-per-stoppage → 'a monologue costs ONE judge call per stoppage…'
  *   supersede             → 'new speech supersedes an in-flight verdict…'
  *   deferred verdict      → 'an INTERIM supersede defers the verdict…'
- *   deferred-verdict trap → 'growth is never held across…' / 'the user taking the floor drops…'
+ *   deferred-verdict trap → 'growth that completes a question is judged afresh'
  *   prefilter             → 'prefilter: …never cost a call'
  *   '?' fallback          → 'judge unavailable → only a trailing ? fires'
  *   early ask             → 'the early ask replaces the commit ask…'
@@ -25,7 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const Simple = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/SimpleAutoAnswer.js'));
 const { isMidWordCut } = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/AutoAnswerText.js'));
-const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS, RETRY_TTL_MS, HELD_MAX_AGE_MS, EARLY_JUDGE_MS } = Simple;
+const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS, RETRY_TTL_MS, HELD_MAX_AGE_MS, HELD_GROWTH_WORDS, EARLY_JUDGE_MS } = Simple;
 
 const flush = () => new Promise((r) => setImmediate(r));
 const YES = (over = {}) => JSON.stringify({ is_ask: true, directed_at_user: true, complete: true, act: 'question', answerability: 0.95, question_text: null, ...over });
@@ -35,7 +35,7 @@ function makeSimple(judgeImpl, overrides = {}) {
   const clock = new FakeClock();
   const state = {
     enabled: true, meetingActive: true, generation: 1, accepting: true, streaming: false,
-    turns: [], dispatched: [], offered: [], skips: [], events: [], cancelled: [], judgeCalls: [], contentTrace: [],
+    turns: [], dispatched: [], offered: [], skips: [], events: [], cancelled: [], judgeCalls: [], contentTrace: [], logs: [],
     ...overrides,
   };
   const host = {
@@ -50,7 +50,7 @@ function makeSimple(judgeImpl, overrides = {}) {
     cancelAutomaticAnswer: (r) => { state.cancelled.push(r); return true; },
     telemetry: (e) => { state.events.push(e); if (e.name === 'auto_answer_ignored') state.skips.push(e.skipReason); },
     logContent: (label, text) => state.contentTrace.push({ label, text }),
-    log: () => {},
+    log: (message) => state.logs.push(message),
     ...(judgeImpl ? { judgeCandidate: (req, signal) => { state.judgeCalls.push(req); state.judgeSignals = [...(state.judgeSignals || []), signal]; return judgeImpl(req, state.judgeCalls.length); } } : {}),
   };
   const engine = new SimpleAutoAnswerEngine(host, clock);
@@ -723,7 +723,46 @@ test('an INTERIM supersede defers the verdict instead of discarding it — and c
   assert.ok(h.state.events.some(e => e.judgeOutcome === 'held_applied'), 'recorded as held_applied');
 });
 
-test('growth is never held across: a completed question re-judges rather than answering the fragment', async () => {
+test('a held verdict survives a relay append of eight words after the complete question', async () => {
+  const resolvers = [];
+  const h = makeSimple(() => new Promise((r) => resolvers.push(r)));
+  const question = 'Why did you choose PostgreSQL over the alternatives?';
+  const tail = 'for the busiest service in that particular project';
+  assert.equal(tail.split(' ').length, HELD_GROWTH_WORDS);
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 100);
+  h.interviewer(tail);
+  resolvers[0](YES());
+  await flush(); await flush();
+  assert.deepEqual(h.texts(), []);
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 1);
+  assert.deepEqual(h.texts(), [question]);
+  assert.ok(h.state.logs.includes('[AutoAnswer:simple] applying held verdict to grown candidate (8 new words)'));
+});
+
+test('a held verdict is discarded when growth adds another sentence, another ask, or too many words', async () => {
+  const tails = [
+    'The API is public.',
+    'And what would you change',
+    'for the busiest service in that particular production project',
+  ];
+  assert.equal(tails[2].split(' ').length, HELD_GROWTH_WORDS + 1);
+  for (const tail of tails) {
+    const resolvers = [];
+    const h = makeSimple(() => new Promise((r) => resolvers.push(r)));
+    h.interviewer('Why did you choose PostgreSQL over the alternatives?');
+    await h.advance(STABILITY_MS + 100);
+    h.interviewer(tail);
+    resolvers[0](YES());
+    await flush(); await flush();
+    await h.advance(STABILITY_MS + 200);
+    assert.equal(h.state.judgeCalls.length, 2, tail);
+    assert.deepEqual(h.texts(), [], tail);
+  }
+});
+
+test('growth that completes a question is judged afresh', async () => {
   const resolvers = [];
   const h = makeSimple(() => new Promise((r) => resolvers.push(r)));
   h.interviewer('Tell me about the hardest bug you ever');

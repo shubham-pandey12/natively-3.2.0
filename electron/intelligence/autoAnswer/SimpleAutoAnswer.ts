@@ -198,20 +198,8 @@ export const FEEDBACK_WINDOW_MS = 20_000;
  * point, never mid-sentence.
  */
 export const HELD_MAX_AGE_MS = 15_000;
-/**
- * A held verdict is applied ONLY to the byte-identical candidate. Growth may
- * never be held across, in either direction, and this was proved by a test
- * before it could ship:
- *   - the growth COMPLETES the utterance ("tell me about the hardest bug you
- *     ever" + "debugged in production and how you found it?") — applying the
- *     held verdict answers a truncated question;
- *   - the growth is a NEW sentence — applying the held verdict answers Q1
- *     after Q2 arrived, which spec V2 §34 pins as an invariant.
- * So growth always re-judges, exactly as before. What this recovers is the
- * INTERIM supersede: an interim cannot change the candidate (`pending` is
- * finals-only), so a verdict it invalidated is still precisely about the text
- * on the table.
- */
+/** A short relay tail can reuse a held verdict if the original sentence is complete. */
+export const HELD_GROWTH_WORDS = 8;
 /** Busy-engine retry cadence and give-up. */
 export const RETRY_MS = 500;
 export const RETRY_TTL_MS = 8000;
@@ -381,7 +369,7 @@ export class SimpleAutoAnswerEngine {
     private parkedAttempt: (() => void) | null = null;
     /** A positive verdict superseded by still-arriving transcript — see HELD_MAX_AGE_MS. */
     private held: {
-        id: string; key: string; text: string;
+        id: string; key: string; candidate: string; text: string;
         answerability: number; act: AutoAnswerQuestion['dialogueAct']; at: number;
     } | null = null;
     /** Punctuation provenance of the latest interviewer final ('provider' family = a missing '?' means something). */
@@ -560,7 +548,7 @@ export class SimpleAutoAnswerEngine {
         // kept arriving. Checked BEFORE the lastJudgedKey return: an INTERIM
         // supersede leaves the candidate byte-identical, so that return would
         // otherwise swallow the very case this exists for.
-        const heldReady = this.applicableHeld(key, now);
+        const heldReady = this.applicableHeld(key, candidate, now);
         if (heldReady) {
             this.held = null;
             this.lastJudgedKey = key;
@@ -568,7 +556,12 @@ export class SimpleAutoAnswerEngine {
                 name: 'auto_answer_judged', questionId: heldReady.id, judgeOutcome: 'held_applied',
                 judgeMs: now - heldReady.at, dialogueAct: heldReady.act, answerability: heldReady.answerability,
             });
-            this.host.log?.(`[AutoAnswer:simple] applying the deferred verdict for ${heldReady.id}`);
+            if (key === heldReady.key) {
+                this.host.log?.(`[AutoAnswer:simple] applying the deferred verdict for ${heldReady.id}`);
+            } else {
+                const addedWords = key.split(' ').length - heldReady.key.split(' ').length;
+                this.host.log?.(`[AutoAnswer:simple] applying held verdict to grown candidate (${addedWords} new words)`);
+            }
             this.host.logContent?.(`deferred verdict applied ${heldReady.id} (a=${heldReady.answerability})`, heldReady.text);
             this.deliver(heldReady.id, heldReady.text, heldReady.answerability, heldReady.act, now);
             return;
@@ -614,17 +607,26 @@ export class SimpleAutoAnswerEngine {
         return joinTranscriptParts(this.pending.slice(Math.min(this.judgedParts, this.pending.length)));
     }
 
-    /**
-     * The held verdict, if it still applies to this candidate: same text, or
-     * the same text plus a little more speech. Anything else (a revision that
-     * broke the prefix, a long continuation, an old verdict) is dropped here
-     * so the stoppage judges afresh.
-     */
-    private applicableHeld(key: string, now: number): NonNullable<SimpleAutoAnswerEngine['held']> | null {
+    private heldKeyMatches(heldKey: string, currentKey: string): boolean {
+        return currentKey === heldKey || (currentKey.startsWith(heldKey + ' ')
+            && currentKey.split(' ').length - heldKey.split(' ').length <= HELD_GROWTH_WORDS);
+    }
+
+    private applicableHeld(key: string, candidate: string, now: number): NonNullable<SimpleAutoAnswerEngine['held']> | null {
         const h = this.held;
         if (!h) return null;
         if (now - h.at > HELD_MAX_AGE_MS) { this.held = null; return null; }
-        if (key !== h.key) { this.held = null; return null; }   // see the note on HELD_MAX_AGE_MS
+        if (!this.heldKeyMatches(h.key, key)) { this.held = null; return null; }
+        if (key !== h.key) {
+            const sentences = sentencesOf(candidate);
+            const tail = sentences.pop() ?? '';
+            // shortcut: unpunctuated original turns require an exact match until STT exposes sentence boundaries.
+            if (!/(?<!\.)[.!?]$/.test(h.candidate) || normalizeForCompare(sentences.join(' ')) !== h.key
+                || /[.!?]$/.test(tail) || isQuestionShaped(tail)) {
+                this.held = null;
+                return null;
+            }
+        }
         return h;
     }
 
@@ -729,7 +731,7 @@ export class SimpleAutoAnswerEngine {
                 if (superseded.route === 'evaluate' && superseded.action === 'answer'
                     && superseded.answerability > ANSWER_FLOOR) {
                     this.held = {
-                        id, key: normalizeForCompare(candidate),
+                        id, key: normalizeForCompare(candidate), candidate,
                         text: superseded.questionText ?? candidate,
                         answerability: superseded.answerability, act: superseded.act, at: this.clock.now(),
                     };
@@ -815,7 +817,7 @@ export class SimpleAutoAnswerEngine {
             // 0.66 s) an 'answer, a=0.9' verdict sat unapplied until the next
             // interviewer speech replaced the question.
             if (early && this.timer !== null && this.clock.now() - this.lastInterviewerAt < STABILITY_MS) {
-                this.held = { id, key: normalizeForCompare(candidate), text, answerability: route.answerability, act: route.act, at: this.clock.now() };
+                this.held = { id, key: normalizeForCompare(candidate), candidate, text, answerability: route.answerability, act: route.act, at: this.clock.now() };
                 return;
             }
             this.deliver(id, text, route.answerability, route.act, committedAt);
