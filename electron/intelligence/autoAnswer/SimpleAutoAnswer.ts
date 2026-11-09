@@ -275,7 +275,7 @@ export interface SimpleAutoAnswerHost {
     answerStreamActive?(): boolean;
     /** Hot window for judge context (finalized turns, both speakers). */
     recentTurns(): TranscriptTurn[];
-    dispatch(question: AutoAnswerQuestion, options: { reuseSpeculative: boolean }): void | Promise<unknown>;
+    dispatch(question: AutoAnswerQuestion, options: { reuseSpeculative: boolean; onSettled: (answered: boolean) => void }): void | Promise<unknown>;
     offer?(question: AutoAnswerQuestion): void;
     retractOffer?(questionId: string, reason: string): void;
     /** See answerStreamActive: retired 2026-09-03, supplied but never called. */
@@ -372,6 +372,7 @@ export class SimpleAutoAnswerEngine {
     private lastAnsweredText: string | null = null;
     private lastAnsweredCandidateKey = '';
     private lastAnsweredAt = 0;
+    private readonly inFlightAnswers = new Map<string, { candidateKey: string; questionKey: string }>();
     private warnedNoName = false;
     /** The automatic answer currently inside its feedback window. */
     private feedbackPending: { id: string; at: number; act: AutoAnswerQuestion['dialogueAct']; answerability: number } | null = null;
@@ -575,8 +576,7 @@ export class SimpleAutoAnswerEngine {
         const candidate = joinTranscriptParts(this.pending);
         const key = normalizeForCompare(candidate);
         const words = candidate.split(/\s+/).filter(Boolean).length;
-        const recentAnswer = this.recentAnsweredText(now);
-        if (recentAnswer && (this.lastAnsweredCandidateKey === key || normalizeForCompare(recentAnswer) === key)) {
+        if (this.isDuplicateAnswer(key, now)) {
             if (!early) {
                 this.held = null;
                 this.consumeCandidate();
@@ -645,6 +645,15 @@ export class SimpleAutoAnswerEngine {
 
     private recentAnsweredText(now: number): string | null {
         return now - this.lastAnsweredAt <= DEDUP_TTL_MS ? this.lastAnsweredText : null;
+    }
+
+    private isDuplicateAnswer(key: string, now: number): boolean {
+        const recentAnswer = this.recentAnsweredText(now);
+        if (recentAnswer && (this.lastAnsweredCandidateKey === key || normalizeForCompare(recentAnswer) === key)) return true;
+        for (const pending of this.inFlightAnswers.values()) {
+            if (pending.candidateKey === key || pending.questionKey === key) return true;
+        }
+        return false;
     }
 
     /** The finals no verdict has ruled on yet — where a new ask's shape is read. */
@@ -868,8 +877,7 @@ export class SimpleAutoAnswerEngine {
             return;
         }
         const text = route.questionText ?? candidate;
-        const recentAnswer = this.recentAnsweredText(this.clock.now());
-        if (route.action === 'answer' && recentAnswer && normalizeForCompare(recentAnswer) === normalizeForCompare(text)) {
+        if (route.action === 'answer' && this.isDuplicateAnswer(normalizeForCompare(text), this.clock.now())) {
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'duplicate' });
             this.judgedParts = partsAtConsult;
             return;
@@ -910,6 +918,7 @@ export class SimpleAutoAnswerEngine {
         const deadline = this.clock.now() + RETRY_TTL_MS;
         const seqAtDeliver = this.judgeSeq;
         const candidateKey = normalizeForCompare(joinTranscriptParts(this.pending));
+        const questionKey = normalizeForCompare(text);
         const attempt = () => {
             if (!this.host.isMeetingActive() || this.judgeSeq !== seqAtDeliver) {
                 // Live session 2026-09-03 (13-q6): a verdict of 1.0 was parked
@@ -926,7 +935,14 @@ export class SimpleAutoAnswerEngine {
                 }
                 return;
             }
-            const remaining = deadline - this.clock.now();
+            const now = this.clock.now();
+            if (this.isDuplicateAnswer(candidateKey, now) || this.isDuplicateAnswer(questionKey, now)) {
+                this.parkedAttempt = null;
+                this.consumeCandidate();
+                this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'duplicate' });
+                return;
+            }
+            const remaining = deadline - now;
             if (remaining <= 0) {
                 this.parkedAttempt = null;
                 const q = this.question(id, text, answerability, act, committedAt);
@@ -948,9 +964,17 @@ export class SimpleAutoAnswerEngine {
             // whole point of prefetching.
             const snapshot = this.host.speculativeSnapshot?.();
             const reuseSpeculative = Boolean(allowKeyedReuse && snapshot && snapshot.questionId === id && snapshot.text);
-            this.lastAnsweredText = text;
-            this.lastAnsweredCandidateKey = candidateKey;
-            this.lastAnsweredAt = this.clock.now();
+            const inFlight = { candidateKey, questionKey };
+            this.inFlightAnswers.set(id, inFlight);
+            const onSettled = (answered: boolean) => {
+                if (this.inFlightAnswers.get(id) !== inFlight) return;
+                this.inFlightAnswers.delete(id);
+                if (answered) {
+                    this.lastAnsweredText = text;
+                    this.lastAnsweredCandidateKey = candidateKey;
+                    this.lastAnsweredAt = this.clock.now();
+                }
+            };
             this.consumeCandidate();
             this.emit({ name: 'auto_answer_decision', questionId: id, action: 'auto', answerability });
             if (reuseSpeculative) this.host.log?.(`[AutoAnswer:simple] reusing the prefetched answer for ${id}`);
@@ -959,7 +983,11 @@ export class SimpleAutoAnswerEngine {
                 this.warnedNoName = true;
                 this.host.log?.('[AutoAnswer] user name not configured — teammate misfires possible');
             }
-            void this.host.dispatch(q, { reuseSpeculative });
+            try {
+                void Promise.resolve(this.host.dispatch(q, { reuseSpeculative, onSettled })).catch(() => onSettled(false));
+            } catch {
+                onSettled(false);
+            }
         };
         attempt();
     }
@@ -1156,6 +1184,7 @@ export class SimpleAutoAnswerEngine {
         this.localTurnHasTranscript = null;
         this.speakerByTurn.clear();
         this.lastJudgedKey = '';
+        this.inFlightAnswers.clear();
         this.lastAnsweredText = null;
         this.lastAnsweredCandidateKey = '';
         this.lastAnsweredAt = 0;

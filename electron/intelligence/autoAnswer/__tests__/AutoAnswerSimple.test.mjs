@@ -48,7 +48,13 @@ function makeSimple(judgeImpl, overrides = {}) {
     answerStreamActive: () => state.streaming,
     recentTurns: () => state.turns,
     userName: () => state.userName ?? null,
-    dispatch: (q, opts) => { state.dispatched.push(q); state.dispatchOpts = opts; state.streaming = true; },
+    dispatch: (q, opts) => {
+      state.dispatched.push(q);
+      state.dispatchOpts = opts;
+      state.streaming = true;
+      if (state.settleDispatch) state.settleDispatch(opts.onSettled);
+      else opts.onSettled(true);
+    },
     onAnswerDropped: (q) => state.dropped.push(q),
     offer: (q) => state.offered.push(q),
     cancelAutomaticAnswer: (r) => { state.cancelled.push(r); return true; },
@@ -184,6 +190,43 @@ test('a repeat is deduplicated within two minutes and judged again after the TTL
   assert.equal(h.state.judgeCalls.length, 2);
   assert.equal(h.state.judgeCalls[1].lastAnsweredText, null, 'the judge is no longer told to suppress this repeat');
   assert.deepEqual(h.texts(), [question, question]);
+});
+
+test('duplicates are held during generation, and a failed answer can be retried', async () => {
+  const attempts = [];
+  const h = makeSimple(async () => YES(), { settleDispatch: settle => attempts.push(settle) });
+  const question = 'Why did you choose PostgreSQL over the alternatives here?';
+  const repeat = async () => {
+    h.interviewer(question);
+    await h.advance(STABILITY_MS + 200);
+  };
+
+  await repeat();
+  await repeat();
+  assert.equal(attempts.length, 1, 'a second transcript cannot start a duplicate in flight');
+  attempts[0](false);
+
+  await repeat();
+  assert.equal(attempts.length, 2, 'a failed or cancelled attempt releases the question');
+  assert.equal(h.state.judgeCalls.at(-1).lastAnsweredText, null);
+  attempts[1](true);
+
+  await repeat();
+  assert.equal(attempts.length, 2, 'a successful answer still suppresses repeats');
+});
+
+test('a late completion from a stopped meeting cannot mark its question answered', async () => {
+  const attempts = [];
+  const h = makeSimple(async () => YES(), { settleDispatch: settle => attempts.push(settle) });
+  const question = 'Why did you choose PostgreSQL over the alternatives here?';
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+  h.engine.onMeetingStop();
+  h.engine.onMeetingStart();
+  attempts[0](true);
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(attempts.length, 2);
 });
 
 test('a successful auto-answer without a configured name logs once per meeting', async () => {

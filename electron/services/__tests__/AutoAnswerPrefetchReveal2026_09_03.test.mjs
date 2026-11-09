@@ -84,12 +84,30 @@ function dispatchNonAutomatic(engine) {
     });
 }
 
-function dispatch(engine, id, reuseSpeculative = true) {
+function dispatch(engine, id, reuseSpeculative = true, onSettled) {
     return engine.runAutoAnswer({
         id, text: QUESTION, confidence: 0.9, answerability: 0.9, dialogueAct: 'technical_question',
         isFollowUp: false, endpointSource: 'quiet_window', candidateGeneration: 1,
-    }, { reuseSpeculative, context: '' });
+    }, { reuseSpeculative, context: '', onSettled });
 }
+
+test('a failed fresh answer releases the cooldown and the same question can succeed immediately', async () => {
+    const { engine, finals } = await makeEngine();
+    const provider = engine.whatToAnswerLLM;
+    engine.whatToAnswerLLM = null;
+    const outcomes = [];
+    const settle = answered => outcomes.push(answered);
+
+    await dispatch(engine, 'q1', false, settle);
+    assert.deepEqual(outcomes, [false]);
+    assert.equal(engine.lastTriggerTime, 0);
+
+    engine.whatToAnswerLLM = provider;
+    await dispatch(engine, 'q2', false, settle);
+    assert.deepEqual(outcomes, [false, true]);
+    assert.equal(finals.at(-1).answer, ANSWER);
+    engine.reset();
+});
 
 test('13-q4: a prefetch that finished before the judge ruled is revealed on dispatch, not discarded', async () => {
     const { engine, session, finals, tokens } = await makeEngine();
@@ -126,21 +144,44 @@ test('13-q6: the engine accepts a dispatch while its OWN prefetch is streaming, 
     assert.equal(engine.canAutoAnswer(), true,
         'a live prefetch is not "busy": the dispatch adopts it — refusing it parked the verdict until the next candidate killed it');
 
-    await dispatch(engine, 'q6');
+    const outcomes = [];
+    await dispatch(engine, 'q6', true, answered => outcomes.push(answered));
+    assert.deepEqual(outcomes, [], 'adoption alone does not count as an answer');
     assert.deepEqual(finals, [], 'adopted mid-stream: nothing to show until the stream finishes');
     release();
     await untilIdle(engine);
     await flush();
+    assert.deepEqual(outcomes, [true]);
     assert.equal(finals.length, 1, 'the adopted stream is revealed at completion');
     assert.equal(finals[0].answer, ANSWER);
     engine.reset();
+});
+
+test('reset settles an adopted answer as cancelled even before its provider returns', async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const { engine, finals } = await makeEngine({ chunks: [ANSWER.slice(0, 40), ANSWER.slice(40)], gate });
+    engine.prefetchAutoAnswer('q7', QUESTION);
+    await flush();
+
+    const outcomes = [];
+    await dispatch(engine, 'q7', true, answered => outcomes.push(answered));
+    assert.deepEqual(outcomes, []);
+    engine.reset();
+    assert.deepEqual(outcomes, [false]);
+    release();
+    await flush();
+    assert.deepEqual(outcomes, [false]);
+    assert.deepEqual(finals, []);
 });
 
 test('a TRUNCATED prefetch is shown on adoption but never stored as session evidence', async () => {
     const { engine, session, finals } = await makeEngine({ truncated: true });
     engine.prefetchAutoAnswer('q8', QUESTION);
     await untilIdle(engine);
-    await dispatch(engine, 'q8');
+    const outcomes = [];
+    await dispatch(engine, 'q8', true, answered => outcomes.push(answered));
+    assert.deepEqual(outcomes, [false], 'a failed partial does not count as an answer');
     assert.equal(finals.length, 1, 'the user still sees the partial text, as with a truncated live answer');
     assert.equal(session.getFullUsage().length, 0, 'but an incomplete answer must not become prior_assistant_responses evidence');
     assert.equal(session.getFullTranscript().some((seg) => seg.text === ANSWER), false, 'nor session transcript history');

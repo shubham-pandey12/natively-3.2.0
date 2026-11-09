@@ -576,6 +576,7 @@ export class IntelligenceEngine extends EventEmitter {
      * completion, when the provider has paused). Null when no speculative
      * stream is in flight. See unmuteAdoptedStream in runWhatShouldISay.
      */
+    private adoptedAnswerResult?: { generationId: number; settle: (answered: boolean) => void };
     private speculativeAdoptHook: ((adoptedGenerationId: number) => void) | null = null;
     // epoch ms after which speculativeText is stale; Infinity while stream is still running
     private speculativeTextExpiry: number = Infinity;
@@ -1295,7 +1296,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
      */
-    async handleSuggestionTrigger(trigger: SuggestionTrigger): Promise<void> {
+    async handleSuggestionTrigger(trigger: SuggestionTrigger, onSettled?: (answered: boolean) => void): Promise<void> {
         // An absent confidence is not a low one: the planner substitutes the
         // intent classifier's score. Only an EXPLICIT sub-threshold value skips.
         // Not for an AUTOMATIC trigger: its confidence is the judge's
@@ -1306,14 +1307,16 @@ export class IntelligenceEngine extends EventEmitter {
         if (!trigger.automatic && trigger.confidence !== undefined && trigger.confidence < 0.5) return;
 
         if (trigger.automatic) { this.automaticTriggerPending = true; this.automaticTriggerCancelled = false; }
+        let result: boolean | 'adopted' | void = undefined;
         try {
-            await this.handleSuggestionTriggerInner(trigger);
+            result = await this.handleSuggestionTriggerInner(trigger, onSettled);
         } finally {
             if (trigger.automatic) { this.automaticTriggerPending = false; this.automaticTriggerCancelled = false; }
+            if (result !== 'adopted') onSettled?.(result === true);
         }
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger): Promise<void> {
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, onSettled?: (answered: boolean) => void): Promise<boolean | 'adopted' | void> {
         const spokenTurn = trigger.automatic ? this.latestSpokenTurn() : undefined;
         const plannerDecision = await this.planSuggestionTrigger(trigger);
         if (trigger.automatic && (this.isManualAnswerActive() || this.matchesSpokenAnswer(spokenTurn))) return;
@@ -1394,9 +1397,13 @@ export class IntelligenceEngine extends EventEmitter {
                         if (trigger.automatic && trigger.lastQuestion) {
                             this.emit('what_to_answer_question', { generationId: this.currentGenerationId, question: trigger.lastQuestion, pending: true });
                         }
+                        if (onSettled) {
+                            this.adoptedAnswerResult?.settle(false);
+                            this.adoptedAnswerResult = { generationId: this.currentGenerationId, settle: onSettled };
+                        }
                         // Unmute the stream NOW: paint what it has, stream the rest.
                         try { this.speculativeAdoptHook?.(this.currentGenerationId); } catch (err) { console.warn('[IntelligenceEngine] adopted-stream paint failed; it will reveal at completion:', err); }
-                        return;
+                        return 'adopted';
                     }
                     if (finished) {
                         console.log(`[IntelligenceEngine] Speculative stream accepted (Jaccard=${similarity.toFixed(2)}) — already finished; revealing`);
@@ -1406,8 +1413,7 @@ export class IntelligenceEngine extends EventEmitter {
                         if (spokenTurn !== undefined) {
                             this.spokenAnswer = { turn: spokenTurn, automatic: true, generationId: finished.generationId, completed: false };
                         }
-                        this.revealSpeculativeAnswer(finished, trigger.automatic === true);
-                        return;
+                        return this.revealSpeculativeAnswer(finished, trigger.automatic === true);
                     }
                     // Accepted, but the stream neither runs nor finished (aborted
                     // or errored between prefetch and dispatch): answer afresh.
@@ -1445,7 +1451,9 @@ export class IntelligenceEngine extends EventEmitter {
             try { this.llmHelper.setGroqFastTextMode(true); } catch { /* routing hint only */ }
         }
         try {
-            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined);
+            const outcomeOut: WhatToSayOutcomeOut = {};
+            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, { outcomeOut });
+            return outcomeOut.value?.status === 'success';
         } finally {
             this.nextRunIsAutomatic = false;
             if (fastAuto && !previousFastMode) {
@@ -1625,7 +1633,7 @@ export class IntelligenceEngine extends EventEmitter {
      * cut short is shown, like any truncated live answer, but it must not
      * become prior_assistant_responses evidence for the next turn.
      */
-    private revealSpeculativeAnswer(finished: SpeculativeAnswer, automatic: boolean, streamed?: SpeculativeStreamed): void {
+    private revealSpeculativeAnswer(finished: SpeculativeAnswer, automatic: boolean, streamed?: SpeculativeStreamed): boolean {
         let text = finished.text;
         // A speculative run is never `isCoding` (see runWhatShouldISay), so it
         // never gets the live path's stripVerificationSpec (its STREAM gets a
@@ -1652,7 +1660,8 @@ export class IntelligenceEngine extends EventEmitter {
             console.warn('[IntelligenceEngine] Prefetched answer was empty — nothing to reveal');
             // An adopted stream already opened a row; it gets no final, so close it.
             if (streamed?.emitted) this.emit('suggested_answer_discard', 'empty_after_strip', finished.generationId);
-            return;
+            if (automatic && this.currentGenerationId === finished.generationId) this.lastTriggerTime = 0;
+            return false;
         }
         // "Repetition guard" covers THIS path too. An adopted prefetch (the most
         // common Auto Answer path) returned before runWhatShouldISayInner's guard,
@@ -1744,6 +1753,17 @@ export class IntelligenceEngine extends EventEmitter {
             else this.spokenAnswer = undefined;
         }
         this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, undefined, undefined, outcome);
+        const answered = outcome.status === 'success';
+        if (automatic && !answered && this.currentGenerationId === generationId) this.lastTriggerTime = 0;
+        this.settleAdoptedAnswer(finished.generationId, answered);
+        return answered;
+    }
+
+    private settleAdoptedAnswer(generationId: number, answered: boolean): void {
+        const pending = this.adoptedAnswerResult;
+        if (pending?.generationId !== generationId) return;
+        this.adoptedAnswerResult = undefined;
+        pending.settle(answered);
     }
 
     /** Auto Answer V3: identity of the speculative cache, for keyed/embedding reuse. */
@@ -1761,7 +1781,7 @@ export class IntelligenceEngine extends EventEmitter {
     async runAutoAnswer(question: {
         id: string; text: string; confidence: number; answerability: number; dialogueAct: string;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
-    }, options: { reuseSpeculative: boolean; context: string }): Promise<void> {
+    }, options: { reuseSpeculative: boolean; context: string; onSettled?: (answered: boolean) => void }): Promise<void> {
         return this.handleSuggestionTrigger({
             context: options.context,
             lastQuestion: question.text,
@@ -1774,7 +1794,7 @@ export class IntelligenceEngine extends EventEmitter {
             endpointSource: question.endpointSource,
             candidateGeneration: question.candidateGeneration,
             reuseSpeculative: options.reuseSpeculative,
-        });
+        }, options.onSettled);
     }
 
     cancelAutomaticAnswer(reason: 'user_barge_in'): boolean {
@@ -7520,6 +7540,12 @@ export class IntelligenceEngine extends EventEmitter {
                     failed: Boolean(automaticQuestion && options?.outcomeOut?.value?.status === 'failed'),
                 });
             }
+            const adoptedWithoutAnswer = this.adoptedAnswerResult?.generationId === generationId;
+            if (this.currentGenerationId === generationId && (adoptedWithoutAnswer
+                || (automaticQuestion && options?.outcomeOut?.value?.status !== 'success'))) {
+                this.lastTriggerTime = 0;
+            }
+            this.settleAdoptedAnswer(generationId, false);
             // Resume background drains on EVERY exit path (answer, abort, error).
             releaseFg();
         }
@@ -9216,6 +9242,9 @@ export class IntelligenceEngine extends EventEmitter {
      */
     reset(): void {
         this.spokenAnswer = undefined;
+        if (this.adoptedAnswerResult) {
+            this.settleAdoptedAnswer(this.adoptedAnswerResult.generationId, false);
+        }
         this.activeMode = 'idle';
         this.currentGenerationId++; // Increment to break all active LLM streams
         if (this.whatToAnswerCancellationToken) {

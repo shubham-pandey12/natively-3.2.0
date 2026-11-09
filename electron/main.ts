@@ -3805,9 +3805,10 @@ export class AppState {
       if (!this.contentTraceEnabled()) return;
       console.log(`[AutoAnswer:text] ${label}\n    “${text}”`);
     },
-    dispatch: (question, { reuseSpeculative }) => {
-      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative }).catch((error) => {
+    dispatch: (question, { reuseSpeculative, onSettled }) => {
+      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative, onSettled }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
+        onSettled(false);
       });
     },
     cancelAutomaticAnswer: (reason) => this.intelligenceManager.cancelAutomaticAnswer(reason),
