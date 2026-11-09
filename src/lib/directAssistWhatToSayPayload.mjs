@@ -45,3 +45,9 @@ export function buildDirectWhatToSayPayload({
     transcript: undefined,
   };
 }
+
+export function speechAfterCapture({ speech, captureRevisions, explicitCapture }) {
+  if (explicitCapture || !speech || !captureRevisions.length) return undefined;
+  return captureRevisions.every(revision => revision !== undefined && revision < speech.revision)
+    ? speech.text : undefined;
+}

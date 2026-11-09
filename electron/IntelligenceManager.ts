@@ -288,6 +288,7 @@ export class IntelligenceManager extends EventEmitter {
 
     // ── Auto Answer V3 narrow APIs (V2 §43) ──
     isManualAnswerActive(): boolean { return this.engine.isManualAnswerActive(); }
+    beginDirectAssistAnswer(): () => void { return this.engine.beginDirectAssistAnswer(); }
     /** A What-to-Answer stream is live (any kind: manual, automatic, speculative). */
     isAnswerStreaming(): boolean { return this.engine.isAnswerStreaming(); }
     noteAutoAnswerCandidate(questionId: string, candidateGeneration: number): void {
@@ -347,7 +348,7 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.runAssistMode();
     }
 
-    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[], options?: { skipCooldown?: boolean; forceFresh?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[], options?: { skipCooldown?: boolean; forceFresh?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; spokenWithCapture?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         return this.engine.runWhatShouldISay(question, confidence, imagePaths, options);
     }
 

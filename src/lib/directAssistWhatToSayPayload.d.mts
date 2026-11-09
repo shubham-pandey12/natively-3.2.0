@@ -11,3 +11,9 @@ export function buildDirectWhatToSayPayload(input: {
   dynamicPromptInstruction?: string;
   hasScreenshots: boolean;
 }): DirectAssistWhatToSayPayload;
+
+export function speechAfterCapture(input: {
+  speech: { text: string; revision: number } | null;
+  captureRevisions: Array<number | undefined>;
+  explicitCapture: boolean;
+}): string | undefined;

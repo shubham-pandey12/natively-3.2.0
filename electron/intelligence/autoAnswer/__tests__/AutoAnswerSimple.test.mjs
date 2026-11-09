@@ -45,6 +45,7 @@ function makeSimple(judgeImpl, overrides = {}) {
     isMeetingActive: () => state.meetingActive,
     meetingGeneration: () => state.generation,
     engineAccepting: () => state.accepting,
+    manualAnswerActive: () => state.manualActive === true,
     answerStreamActive: () => state.streaming,
     recentTurns: () => state.turns,
     userName: () => state.userName ?? null,
@@ -1173,4 +1174,57 @@ test('isMidWordCut: the seam rule, case by case', () => {
   assert.equal(isMidWordCut('So tell me about', 'something else entirely'), false);
   assert.equal(isMidWordCut('exactly this', 'exactly this'), false);
   assert.equal(isMidWordCut('', 'anything'), false);
+});
+
+
+test('a spoken question waits through a long manual capture answer and dispatches once on idle', async () => {
+  const h = makeSimple(async () => YES(), { accepting: false, manualActive: true });
+  const question = 'How would you test that solution under heavy load?';
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + RETRY_TTL_MS + 1000);
+  assert.deepEqual(h.state.dropped, []);
+  assert.deepEqual(h.texts(), []);
+  h.state.accepting = true;
+  h.state.manualActive = false;
+  h.engine.onEngineIdle();
+  h.engine.onEngineIdle();
+  assert.deepEqual(h.texts(), [question]);
+});
+
+test('a newer complete question replaces one parked behind a manual capture answer', async () => {
+  const first = 'How would you test that solution under heavy load?';
+  const latest = 'How would you investigate unexpected production latency?';
+  const h = makeSimple(async (req) => YES({ question_text: req.candidateText.includes(latest) ? latest : first }),
+    { accepting: false, manualActive: true });
+  h.interviewer(first);
+  await h.advance(STABILITY_MS + 200);
+  h.engine.onLocalSpeechStart();
+  h.interviewer(latest, false);
+  h.state.accepting = true;
+  h.state.manualActive = false;
+  h.engine.onEngineIdle();
+  assert.deepEqual(h.texts(), [], 'the older question cannot dispatch into resumed speech');
+  h.interviewer(latest);
+  await h.advance(STABILITY_MS + 200);
+  assert.deepEqual(h.texts(), [latest]);
+});
+
+
+test('a manual capture starting during auto planning reparks the same spoken question', async () => {
+  let settle;
+  const h = makeSimple(async () => YES(), { settleDispatch: callback => { settle = callback; } });
+  const question = 'How would you test that solution under heavy load?';
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+  assert.deepEqual(h.texts(), [question]);
+  h.state.manualActive = true;
+  h.state.accepting = false;
+  settle(false);
+  await h.advance(RETRY_TTL_MS + 1000);
+  assert.deepEqual(h.state.dropped, []);
+  h.state.manualActive = false;
+  h.state.accepting = true;
+  h.engine.onEngineIdle();
+  assert.deepEqual(h.texts(), [question, question]);
+  settle(true);
 });

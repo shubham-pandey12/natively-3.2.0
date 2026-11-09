@@ -265,6 +265,7 @@ export interface SimpleAutoAnswerHost {
     onAnswerDropped?(question: AutoAnswerQuestion): void;
     meetingGeneration(): number;
     engineAccepting(): boolean;
+    manualAnswerActive?(): boolean;
     /**
      * RETIRED 2026-09-03 with the user channel: the engine no longer calls
      * either of these (nothing here cancels a stream any more — see the header)
@@ -916,8 +917,13 @@ export class SimpleAutoAnswerEngine {
     private deliver(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number, allowKeyedReuse = true): void {
         this.dropParked();
         const deadline = this.clock.now() + RETRY_TTL_MS;
+        // A manual answer owns the stream. Give its pending spoken follow-up the
+        // transcript window rather than expiring it after a short busy retry.
+        let waitingForManual = this.host.manualAnswerActive?.() === true;
+        const manualDeadline = this.clock.now() + PENDING_MAX_AGE_MS;
         const seqAtDeliver = this.judgeSeq;
-        const candidateKey = normalizeForCompare(joinTranscriptParts(this.pending));
+        const candidate = joinTranscriptParts(this.pending);
+        const candidateKey = normalizeForCompare(candidate);
         const questionKey = normalizeForCompare(text);
         const attempt = () => {
             if (!this.host.isMeetingActive() || this.judgeSeq !== seqAtDeliver) {
@@ -928,6 +934,13 @@ export class SimpleAutoAnswerEngine {
                 // is an outcome and must be reported like every other one.
                 const wasParked = this.parkedAttempt === attempt;
                 if (wasParked) this.parkedAttempt = null;
+                if (wasParked && waitingForManual && this.host.isMeetingActive() && this.clock.now() < manualDeadline) {
+                    // Revalidate against the next speech boundary. A correction or
+                    // a new question goes back through the judge.
+                    this.held = { id, key: candidateKey, candidate, text, answerability, act, at: this.clock.now() };
+                    this.lastJudgedKey = '';
+                    return;
+                }
                 if (wasParked) {
                     const reason = this.host.isMeetingActive() ? 'superseded_while_parked' : 'meeting_inactive';
                     this.host.log?.(`[AutoAnswer:simple] parked dispatch for ${id} dropped: ${reason}${reason === 'superseded_while_parked' ? ` (by ${this.judgeSeqCause ?? 'unknown'})` : ''}`);
@@ -942,7 +955,7 @@ export class SimpleAutoAnswerEngine {
                 this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'duplicate' });
                 return;
             }
-            const remaining = deadline - now;
+            const remaining = (waitingForManual ? manualDeadline : deadline) - now;
             if (remaining <= 0) {
                 this.parkedAttempt = null;
                 const q = this.question(id, text, answerability, act, committedAt);
@@ -964,6 +977,8 @@ export class SimpleAutoAnswerEngine {
             // whole point of prefetching.
             const snapshot = this.host.speculativeSnapshot?.();
             const reuseSpeculative = Boolean(allowKeyedReuse && snapshot && snapshot.questionId === id && snapshot.text);
+            const parts = this.pending;
+            const previousStallResolution = this.stallResolved;
             const inFlight = { candidateKey, questionKey };
             this.inFlightAnswers.set(id, inFlight);
             const onSettled = (answered: boolean) => {
@@ -973,6 +988,15 @@ export class SimpleAutoAnswerEngine {
                     this.lastAnsweredText = text;
                     this.lastAnsweredCandidateKey = candidateKey;
                     this.lastAnsweredAt = this.clock.now();
+                } else if (!waitingForManual && this.host.manualAnswerActive?.() && this.host.isMeetingActive()
+                    && this.judgeSeq === seqAtDeliver && this.clock.now() < manualDeadline) {
+                    // A manual capture can take the stream while the planner is awaiting intent.
+                    waitingForManual = true;
+                    this.pending = parts;
+                    this.lastJudgedKey = candidateKey;
+                    this.stallResolved = previousStallResolution;
+                    if (this.feedbackPending?.id === id) this.clearFeedback();
+                    attempt();
                 }
             };
             this.consumeCandidate();

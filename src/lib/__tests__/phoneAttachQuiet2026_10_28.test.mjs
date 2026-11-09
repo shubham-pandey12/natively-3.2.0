@@ -74,7 +74,7 @@ describe('wiring', () => {
   test('the overlay expands only when revealsOverlay says so, and keeps quiet out of the tray', () => {
     const ui = read('src/components/NativelyInterface.tsx');
     const handler = between(ui, 'const handleScreenshotAttach = (', '\n  };\n');
-    assert.match(handler, /const \{ quiet, \.\.\.item \} = data;/);
+    assert.match(handler, /const \{ quiet, \.\.\.shot \} = data;/);
     assert.match(handler, /if \(revealsOverlay\(\{ quiet \}\)\) setIsExpanded\(true\);/);
     assert.match(handler, /addAttachment\(prev, item\)/);
     assert.doesNotMatch(handler, /^\s*setIsExpanded\(true\);/m);

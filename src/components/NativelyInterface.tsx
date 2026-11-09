@@ -328,7 +328,7 @@ import {
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
 import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent } from '../lib/chatStreamGuard.mjs';
-import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
+import { buildDirectWhatToSayPayload, speechAfterCapture } from '../lib/directAssistWhatToSayPayload.mjs';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
 import {
   CHAT_HINTS,
@@ -633,6 +633,7 @@ interface ScreenshotRetrySnapshot {
   audioRevision: number;
   attachments: { path: string; preview: string; formulaCapture?: string }[];
   question?: string;
+  spokenWithCapture?: boolean;
   promptInstruction?: string;
   domContext?: string;
   domContextEnvelope?: import('../types/electron').ContextEnvelope;
@@ -1727,6 +1728,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     try {
       unsubDom = window.electronAPI?.onDomContextReceived?.((dom, meta, envelope) => {
         (window as any).lastCapturedDOM = dom;
+        pageCaptureRevisionRef.current = audioInputRevisionRef.current;
         // Stash the structured envelope (Smart Browser Context v2) so handleWhatToSay
         // can thread it into the answer request alongside the legacy domContext string.
         capturedEnvelopeRef.current = envelope ?? null;
@@ -2253,7 +2255,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   // Latent Context State (Screenshots attached but not sent)
   const [attachedContext, setAttachedContext] = useState<
-    Array<{ path: string; preview: string; formulaCapture?: string }>
+    Array<{ path: string; preview: string; formulaCapture?: string; audioRevision?: number }>
   >([]);
   // Phone Mirror: preview → path of every screenshot the tray held lately, so a
   // sent question card (which keeps only previews) can name its screenshots.
@@ -2262,7 +2264,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // The tray as of the last render, for listeners registered once.
   const attachedContextRef = useRef(attachedContext);
   const audioInputRevisionRef = useRef(0);
-  const lastSpeechBySpeakerRef = useRef(new Map<string, string>());
+  const pageCaptureRevisionRef = useRef(0);
+  const latestInterviewerSpeechRef = useRef<{ text: string; revision: number } | null>(null);
+  const lastSpeechBySpeakerRef = useRef(new Map<string, { event: string; revision: number }>());
   const screenshotRetryRef = useRef(createScreenshotRetry<ScreenshotRetrySnapshot>(
     (lease) => window.electronAPI.releaseScreenshotRetry(lease),
   ));
@@ -5677,6 +5681,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
       pendingRollingPartialRef.current = null;
       rollingCommittedRef.current = '';
+      latestInterviewerSpeechRef.current = null;
       setRollingTranscript('');
       setSttStalling(false);
       setIsInterviewerSpeaking(false);
@@ -5709,7 +5714,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleScreenshotAttach = (data: { path: string; preview: string; formulaCapture?: string; quiet?: boolean }) => {
     // A phone capture or photo is quiet: it joins the tray (which the phone
     // shows) without the overlay popping up on the desktop.
-    const { quiet, ...item } = data;
+    const { quiet, ...shot } = data;
+    const item = { ...shot, audioRevision: audioInputRevisionRef.current };
     if (revealsOverlay({ quiet })) setIsExpanded(true);
     attachedContextRef.current = addAttachment(attachedContextRef.current, item);
     setAttachedContext((prev) => addAttachment(prev, item));
@@ -7761,9 +7767,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // Distinct speech events can contain identical words; the producer's
         // timestamp distinguishes those from the same throttled partial being replayed.
         const speechEvent = speech ? `${transcript.timestamp ?? 'unknown'}\0${speech}` : '';
-        if (speech && lastSpeechBySpeakerRef.current.get(transcript.speaker) !== speechEvent) {
-          lastSpeechBySpeakerRef.current.set(transcript.speaker, speechEvent);
-          audioInputRevisionRef.current++;
+        let speechEventRevision = lastSpeechBySpeakerRef.current.get(transcript.speaker);
+        if (speech && speechEventRevision?.event !== speechEvent) {
+          speechEventRevision = { event: speechEvent, revision: ++audioInputRevisionRef.current };
+          lastSpeechBySpeakerRef.current.set(transcript.speaker, speechEventRevision);
         }
         // When Answer button is active, capture USER transcripts for voice input
         // Use ref to avoid stale closure issue
@@ -7806,6 +7813,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return; // Safety check for any other speaker types
         }
 
+        if (speech && speechEventRevision && (transcript.final || speech.split(/\s+/).length >= 4)) {
+          latestInterviewerSpeechRef.current = { text: transcript.text.trim(), revision: speechEventRevision.revision };
+        }
         // Route to rolling transcript bar — partials debounced; finals commit immediately.
         if (!transcript.final) {
           if (!interviewerSpeakingRef.current) {
@@ -8389,7 +8399,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     'live:sound_smart': 'Sound smart',
   };
 
-  const handleWhatToSay = async (promptInstruction?: string | React.MouseEvent, retryExplicitly = false) => {
+  const handleWhatToSay = async (promptInstruction?: string | React.MouseEvent, retryExplicitly = false, processCapture = false) => {
     // Timing: the moment this request was accepted (content-free; see diagramTimings).
     diagramRequestAtRef.current = performance.now();
     warmDiagramRendererOnIdle();
@@ -8406,6 +8416,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     setIsProcessing(true);
     // ⌘H then ⌘Enter in one motion: wait for a screenshot still capturing.
     const pending = pendingCaptureRef.current;
+    const interviewerSpeechAtPress = latestInterviewerSpeechRef.current;
     const waitingForCapture = pendingShotsRef.current.inFlight();
     const lateShots = await pendingShotsRef.current.settle();
     if (pendingShotsRef.current.inFlight() || (waitingForCapture && lateShots.length === 0)) {
@@ -8441,11 +8452,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       currentAttachments = retry.snapshot.attachments.map((shot) => ({ ...shot }));
       dynamicPromptInstruction = retry.snapshot.promptInstruction;
     }
+    const queuedPage = pageContext;
+    const pageQueued = Boolean((window as any).lastCapturedDOM);
+    const newerInterviewerRequest = speechAfterCapture({
+      speech: interviewerSpeechAtPress,
+      captureRevisions: [
+        ...currentAttachments.filter((shot) => !shot.formulaCapture || !pageQueued).map((shot) => shot.audioRevision),
+        ...(pageQueued ? [pageCaptureRevisionRef.current] : []),
+      ],
+      explicitCapture: Boolean(processCapture || retry || pending || waitingForCapture || pendingPageCaptureAtRef.current),
+    });
+    const spokenWithCapture = retry ? retry.snapshot.spokenWithCapture === true : Boolean(newerInterviewerRequest);
     const retrySnapshot: ScreenshotRetrySnapshot | null = currentAttachments.length ? {
       ...(retry?.snapshot ?? {}),
       audioRevision: audioInputRevisionRef.current,
       attachments: currentAttachments.map((shot) => ({ ...shot })),
       promptInstruction: dynamicPromptInstruction,
+      spokenWithCapture,
     } : null;
     const screenshotAttempt = screenshotRetryRef.current.begin(retrySnapshot, Boolean(retry));
     legacyScreenshotAttemptRef.current = null;
@@ -8484,7 +8507,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Bare spoken requests share the Auto Answer stream when that setting is on.
     const spokenOnly = !currentAttachments.length && !dynamicPromptInstruction
       && !(window as any).lastCapturedDOM && !pendingPageCaptureAtRef.current;
-    const shareAutomaticStream = spokenOnly
+    const shareAutomaticStream = (spokenOnly || (spokenWithCapture && !retry))
       && await window.electronAPI.getAutoAnswerEnabled?.().catch(() => false);
     const useDirectAssist = directAssistEnabled && !shareAutomaticStream;
 
@@ -8539,9 +8562,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           .slice(-8192);
         const hasScreenshots = currentAttachments.length > 0;
         const directWhatToSayPayload = buildDirectWhatToSayPayload({
-          interviewerRequest,
+          interviewerRequest: newerInterviewerRequest || interviewerRequest,
           dynamicPromptInstruction,
-          hasScreenshots,
+          hasScreenshots: hasScreenshots && !spokenWithCapture,
         });
         if (retrySnapshot) {
           retrySnapshot.question = retry?.snapshot.question || directWhatToSayPayload.currentRequest;
@@ -8550,7 +8573,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         }
         if (directWhatToSayPayload.source === 'stt') {
           setMessages((prev) => prev.map((message) => message.id === questionCardId
-            ? { ...message, role: 'interviewer', text: interviewerRequest, isQuickActionLabel: false }
+            ? { ...message, role: 'interviewer', text: retrySnapshot?.question || newerInterviewerRequest || interviewerRequest, isQuickActionLabel: false }
             : message));
         }
         await beginDirectAssist({
@@ -8630,7 +8653,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             }
           : undefined;
 
-      const questionForWta = retry?.snapshot.question || (currentAttachments.length > 0
+      const questionForWta = retry?.snapshot.question || newerInterviewerRequest || (currentAttachments.length > 0
         ? 'What should I say about this?'
         : (domContext ? 'What should I say about this?' : undefined));
       if (retrySnapshot) Object.assign(retrySnapshot, { question: questionForWta, domContext, domContextEnvelope, pageMeta: consumedPageMeta });
@@ -8639,12 +8662,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       const result = await window.electronAPI.generateWhatToSay(
         questionForWta,
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
-        { ...options, overlayQuestionId: questionCardId },
+        { ...options, overlayQuestionId: questionCardId, spokenWithCapture },
       );
       if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
       settleScreenshotRetry(screenshotAttempt.id, result.outcome?.reason === 'attachment_unavailable'
         ? 'cancelled' : result.outcome?.status ?? 'failed');
       if (result.outcome?.reason === 'automatic_answer_exists') {
+        if (spokenWithCapture && !retry) {
+          const restored = currentAttachments.reduce((tray, shot) => addAttachment(tray, shot), attachedContextRef.current);
+          attachedContextRef.current = restored;
+          setAttachedContext(restored);
+          if (domContext && !(window as any).lastCapturedDOM && !pendingPageCaptureAtRef.current) {
+            (window as any).lastCapturedDOM = domContext;
+            capturedEnvelopeRef.current = domContextEnvelope ?? null;
+            capturedMetaRef.current = consumedPageMeta ?? null;
+            setPageContext(queuedPage);
+          }
+        }
         setMessages((prev) => prev.filter((message) => message.id !== questionCardId));
         return;
       }
@@ -11157,15 +11191,16 @@ Provide only the answer, nothing else.`;
       // The answer can start before the tray effect records this one.
       phoneShotPathsRef.current.set(data.preview, data.path);
 
-      attachedContextRef.current = addAttachment(attachedContextRef.current, data);
-      setAttachedContext((prev) => addAttachment(prev, data));
+      const item = { ...data, audioRevision: audioInputRevisionRef.current };
+      attachedContextRef.current = addAttachment(attachedContextRef.current, item);
+      setAttachedContext((prev) => addAttachment(prev, item));
 
       // Use requestAnimationFrame so we wait for at least one paint cycle —
       // more reliable than setTimeout(0) under React 18 concurrent scheduling.
       // The ref guarantees handleWhatToSay has the screenshot regardless of
       // whether the state update has flushed yet.
       requestAnimationFrame(() => {
-        void Promise.resolve(handlersRef.current.handleWhatToSay()).finally(() => {
+        void Promise.resolve(handlersRef.current.handleWhatToSay(undefined, false, true)).finally(() => {
           if (pendingCaptureRef.current === data) pendingCaptureRef.current = null;
         });
       });

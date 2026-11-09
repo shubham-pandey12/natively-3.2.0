@@ -8535,6 +8535,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       mirrorToPhone(payload);
     };
 
+    const endDirectAssistAnswer = appState.getIntelligenceManager().beginDirectAssistAnswer();
     void (async () => {
       let terminalSent = false;
       let startSent = false;
@@ -8664,6 +8665,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           });
         }
       } finally {
+        endDirectAssistAnswer();
         event.sender.removeListener?.('destroyed', onSenderDestroyed);
         if (activeDirectAssistBySurface.get(surfaceKey) === active) {
           activeDirectAssistBySurface.delete(surfaceKey);
@@ -16340,7 +16342,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       _,
       question?: string,
       imagePaths?: string[],
-      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
+      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string; spokenWithCapture?: boolean },
     ) => {
       // The press, for the answer's latency trace (PiTraceInit.startedAt).
       const pressedAt = tracerNow();
@@ -16543,6 +16545,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         const effectiveQuestion = (typeof question === 'string' && question.trim().length > 0)
           ? question
           : (validatedImagePaths?.length ? 'What should I say about this?' : question);
+        const spokenWithCapture = options?.spokenWithCapture === true && typeof question === 'string' && Boolean(question.trim());
         let answer = await phonePress.run(() => intelligenceManager.runWhatShouldISay(
           effectiveQuestion,
           0.8,
@@ -16561,6 +16564,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // current manual press). See runWhatShouldISay.forceFresh branch.
             forceFresh: true,
             coalesceAutomatic: appState.getAutoAnswerEnabled(),
+            spokenWithCapture,
             onStart: () => {
               try { appState.onManualWhatToAnswer?.(); } catch { /* never block the answer */ }
             },
@@ -16622,6 +16626,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                         ? options.promptInstruction
                         : undefined,
                     domContext: effectiveDomContext,
+                    spokenWithCapture,
                     // The cropped image is still read by the answer itself.
                     ...(screenFromImage ? { screenFromImage: true } : {}),
                     // No screenContext on the retry: the pre-pass described

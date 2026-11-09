@@ -3795,6 +3795,7 @@ export class AppState {
     onAnswerDropped: (question) => this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-dropped', question.text),
     meetingGeneration: () => this._meetingGeneration,
     engineAccepting: () => this.intelligenceManager.canAutoAnswer(),
+    manualAnswerActive: () => this.intelligenceManager.isManualAnswerActive(),
     answerStreamActive: () => this.intelligenceManager.isAnswerStreaming(),
     // 180 s — the SAME window the answer itself is written from
     // (IntelligenceEngine's getContext(180)). At 60 s the judge could not see

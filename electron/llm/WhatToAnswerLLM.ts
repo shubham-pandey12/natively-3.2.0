@@ -208,6 +208,7 @@ export class WhatToAnswerLLM {
         // Owned by the caller rather than stored on the instance because
         // WhatToAnswerLLM is a long-lived singleton and turns can overlap.
         truncationSink?: { truncated: boolean; reason?: string },
+        spokenWithCapture = false,
     ): AsyncGenerator<string> {
         const MEASURE = process.env.MEASURE_LATENCY === 'true';
         let tStart = 0, tIntent = 0, tTemporal = 0, tMode = 0, tTrunc = 0, tPrompt = 0, tStreamStart = 0;
@@ -277,7 +278,7 @@ export class WhatToAnswerLLM {
                 // inspected), and the engine's scaffold stream-hold/regeneration
                 // gates consult the same predicate so they can never destroy a
                 // promoted turn's correct six-section answer.
-                if (isPromotedScreenCodingTurn({
+                if (!spokenWithCapture && isPromotedScreenCodingTurn({
                     alreadyCoding: resolved.codingTask === true,
                     question: answerPlan?.question,
                     hasImages: hasAttachedImages,
@@ -329,12 +330,12 @@ ${promptInstruction.trim()}
             if (instructionContext) {
                 intentContextParts.push(instructionContext);
             }
-            if (hasAttachedImages) {
-                intentContextParts.push(SCREEN_DIRECT_VISION_INSTRUCTION);
-            } else if (hasScreenText) {
-                // DOM capture / screen OCR: same instruction, different transport.
-                intentContextParts.push(SCREEN_DOM_INSTRUCTION);
-            }
+            const captureInstruction = hasAttachedImages || hasScreenText
+                ? (spokenWithCapture
+                    ? 'Answer the current spoken interviewer request. Use the captured screen or page only as supporting evidence when relevant.'
+                    : hasAttachedImages ? SCREEN_DIRECT_VISION_INSTRUCTION : SCREEN_DOM_INSTRUCTION)
+                : undefined;
+            if (captureInstruction) intentContextParts.push(captureInstruction);
             // REPEAT-PRESS DIRECTIVE (live repro 2026-08-19). Pressing the
             // trigger again on the SAME coding page, with no new question,
             // produced short commentary on the previous answer — culminating in
@@ -1151,12 +1152,8 @@ The user triggered this action with a coding problem on screen and NO new questi
             // own section; the v2 envelope and the legacy packet get it appended
             // (never twice — see withDiagramTurnBlock).
             let _wtaUserBase = _v3p?.user ?? _v2TurnUser ?? packet.userMessage;
-            if (_v3p) {
-                if (hasAttachedImages && !_wtaUserBase.includes(SCREEN_DIRECT_VISION_INSTRUCTION)) {
-                    _wtaUserBase = `${SCREEN_DIRECT_VISION_INSTRUCTION}\n\n${_wtaUserBase}`;
-                } else if (hasScreenText && !_wtaUserBase.includes(SCREEN_DOM_INSTRUCTION)) {
-                    _wtaUserBase = `${SCREEN_DOM_INSTRUCTION}\n\n${_wtaUserBase}`;
-                }
+            if (_v3p && captureInstruction && !_wtaUserBase.includes(captureInstruction)) {
+                _wtaUserBase = `${captureInstruction}\n\n${_wtaUserBase}`;
             }
             const _wtaUserMessage = _v3p ? _wtaUserBase : withDiagramTurnBlock(_wtaUserBase, diagramTurn);
             // PR #429 Bug 003: `_v3p?.system ?? finalPromptOverride` discarded the

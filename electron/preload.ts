@@ -552,7 +552,7 @@ interface ElectronAPI {
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string; spokenWithCapture?: boolean },
   ) => Promise<{
     answer: string | null;
     outcome?: WhatToSayOutcome;
@@ -2343,7 +2343,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string; spokenWithCapture?: boolean },
   ) => ipcRenderer.invoke('generate-what-to-say', question, imagePaths, options),
   startDirectAssist: (request: DirectAssistRequest) =>
     ipcRenderer.invoke('direct-assist-stream', request),

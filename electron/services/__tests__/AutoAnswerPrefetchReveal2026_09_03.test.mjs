@@ -327,6 +327,11 @@ test('a regular automatic answer only claims its own spoken turn', async () => {
     const manual = () => engine.runWhatShouldISay(undefined, 0.8, undefined, { forceFresh: true, skipCooldown: true, outcomeOut });
     assert.equal(await manual(), null);
     assert.equal(outcomeOut.value.reason, 'automatic_answer_exists');
+    assert.equal(await engine.runWhatShouldISay(QUESTION, 0.8, undefined, {
+        forceFresh: true, skipCooldown: true, spokenWithCapture: true, domContext: 'Earlier captured page', outcomeOut,
+    }), null);
+    assert.equal(outcomeOut.value.reason, 'automatic_answer_exists');
+    assert.equal(finals.length, 1, 'an attached page does not duplicate the same spoken answer');
 
     session.addTranscript({ speaker: 'interviewer', text: `Okay. ${QUESTION} What mattered most?`, timestamp: timestamp + 1, final: true });
     await dispatch(engine, 'revised-race', false);
@@ -337,5 +342,41 @@ test('a regular automatic answer only claims its own spoken turn', async () => {
     session.addTranscript({ speaker: 'interviewer', text: 'How would you migrate that database without downtime?', timestamp: timestamp + 2, final: true });
     await manual();
     assert.equal(finals.length, 2);
+    engine.reset();
+});
+
+
+test('a distinct judged question inside the cooldown after a manual capture still generates', async () => {
+    const { engine, session, finals } = await makeEngine();
+    await engine.runWhatShouldISay('What should I say about this?', 0.8, undefined, {
+        domContext: 'An unrelated coding exercise',
+        forceFresh: true,
+        skipCooldown: true,
+    });
+    session.addTranscript({ speaker: 'interviewer', text: QUESTION, timestamp: Date.now(), final: true });
+    engine.lastTriggerTime = Date.now() - 1000;
+    assert.equal(engine.canAutoAnswer(), true);
+    const outcomes = [];
+    await dispatch(engine, 'after-capture', false, answered => outcomes.push(answered));
+    assert.deepEqual(outcomes, [true]);
+    assert.equal(finals.at(-1)?.question, QUESTION);
+    engine.reset();
+});
+
+
+test('Direct Assist blocks automatic dispatch until all manual streams have released', async () => {
+    const { engine, finals } = await makeEngine();
+    const closeCapture = engine.beginDirectAssistAnswer();
+    const closeReplacement = engine.beginDirectAssistAnswer();
+    assert.equal(engine.isManualAnswerActive(), true);
+    assert.equal(engine.canAutoAnswer(), false);
+    await dispatch(engine, 'during-capture', false);
+    assert.equal(finals.length, 0);
+    closeCapture();
+    assert.equal(engine.canAutoAnswer(), false);
+    closeReplacement();
+    assert.equal(engine.canAutoAnswer(), true);
+    await dispatch(engine, 'after-capture', false);
+    assert.equal(finals.length, 1);
     engine.reset();
 });

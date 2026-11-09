@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildDirectWhatToSayPayload } from '../directAssistWhatToSayPayload.mjs';
+import { buildDirectWhatToSayPayload, speechAfterCapture } from '../directAssistWhatToSayPayload.mjs';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const interfaceSource = fs.readFileSync(
@@ -96,12 +96,12 @@ test('STT Answer Now awaits finalization, bypasses RAG, and marks image-only tur
 
 test('What-to-Say forwards recent interviewer STT and never auto-captures a page before Direct dispatch', () => {
   const body = section('const handleWhatToSay = async', 'const handleFollowUp = async');
-  const directBranch = body.indexOf('if (directAssistEnabled) {');
+  const directBranch = body.indexOf('if (useDirectAssist) {');
   const autoCapture = body.indexOf('phoneMirrorRequestAutoContext');
   assert.ok(directBranch >= 0 && autoCapture === -1, 'WTA must not automatically recapture a previous page');
   assert.match(body, /const directTranscriptSnapshot = pendingRollingPartialRef\.current/);
   assert.match(body, /const interviewerRequest = directTranscriptSnapshot/);
-  assert.match(body, /buildDirectWhatToSayPayload\(\{\s*interviewerRequest,\s*dynamicPromptInstruction,\s*hasScreenshots,/);
+  assert.match(body, /buildDirectWhatToSayPayload\(\{\s*interviewerRequest: newerInterviewerRequest \|\| interviewerRequest,\s*dynamicPromptInstruction,\s*hasScreenshots: hasScreenshots && !spokenWithCapture,/);
   assert.match(body, /source: directWhatToSayPayload\.source/);
   assert.match(body, /currentRequest: retrySnapshot\?\.question \|\| directWhatToSayPayload\.currentRequest/);
   assert.match(body, /transcript: directWhatToSayPayload\.transcript/);
@@ -174,13 +174,13 @@ test('late legacy provider, RAG, phone and intelligence events cannot mix into a
     'window.electronAPI.onGeminiStreamToken((token, meta) => {',
     'window.electronAPI.onGeminiStreamDone((data) => {',
     'window.electronAPI.onGeminiStreamError((error, meta?',
-    'window.electronAPI.onPhoneMirrorIncomingChat(({ message }) => {',
+    'window.electronAPI.onPhoneMirrorIncomingChat(({ message, streamId }) => {',
     'window.electronAPI.onRAGStreamChunk((data: { chunk: string }) => {',
     'window.electronAPI.onRAGStreamComplete(() => {',
     'window.electronAPI.onRAGStreamError((data: { error: string }) => {',
     'window.electronAPI.onIntelligenceSuggestedAnswerToken((data) => {',
     'window.electronAPI.onIntelligenceSuggestedAnswer((data) => {',
-    'window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(() => {',
+    'window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(({ generationId }) => {',
     'window.electronAPI.onIntelligenceTokenBatch((data) => {',
     'window.electronAPI.onIntelligenceManualResult((data) => {',
   ];
@@ -189,7 +189,7 @@ test('late legacy provider, RAG, phone and intelligence events cannot mix into a
     assert.ok(start >= 0, `missing callback: ${marker}`);
     assert.match(
       interfaceSource.slice(start, start + 700),
-      /if \(activeDirectAssistRef\.current\) return/,
+      /if \(activeDirectAssistRef\.current(?:\)| \|\|)/,
       `legacy callback is not Direct-isolated: ${marker}`,
     );
   }
@@ -511,4 +511,18 @@ test('every Direct surface hands beginDirectAssist its attachments, or that surf
       `a beginDirectAssist call site does not forward its attachments:\n${callSite}`,
     );
   }
+});
+
+
+test('newer interviewer speech wins over queued captures, but explicit capture and retry keep their request', () => {
+  const speech = { text: 'How would you test that solution?', revision: 5 };
+  const pick = (captureRevisions, explicitCapture = false) =>
+    speechAfterCapture({ speech, captureRevisions, explicitCapture });
+  assert.equal(pick([4]), speech.text);
+  assert.equal(pick([2, 4]), speech.text);
+  assert.equal(pick([2, 4], true), undefined);
+  assert.equal(pick([4, 5]), undefined, 'a newer page or attachment was deliberately added');
+  assert.equal(pick([undefined]), undefined, 'an undated in-flight capture keeps its request');
+  assert.equal(pick([]), undefined, 'plain speech retains its existing inference path');
+  assert.equal(speechAfterCapture({ speech: null, captureRevisions: [4], explicitCapture: false }), undefined);
 });

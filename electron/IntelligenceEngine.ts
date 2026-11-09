@@ -499,6 +499,14 @@ export class IntelligenceEngine extends EventEmitter {
         return this.session.getContextWithInterim(180).findLast(item => item.role === 'interviewer');
     }
 
+    private latestSpokenTurnFor(question?: string) {
+        const turn = this.latestSpokenTurn();
+        if (!turn || !question) return undefined;
+        return turn.text.trim() === question.trim()
+            || containsTranscriptRevision(turn.text, question)
+            || containsTranscriptRevision(question, turn.text) ? turn : undefined;
+    }
+
     private matchesSpokenAnswer(turn: ReturnType<IntelligenceEngine['latestSpokenTurn']>): boolean {
         const claimed = this.spokenAnswer?.turn;
         if (!claimed || !turn) return false;
@@ -508,6 +516,7 @@ export class IntelligenceEngine extends EventEmitter {
             && (containsTranscriptRevision(turn.text, claimed.text) || containsTranscriptRevision(claimed.text, turn.text));
     }
     private nextRunIsAutomatic = false;
+    private directAssistAnswers = 0;
     /**
      * Generation id of the engine's own SPECULATIVE prefetch, or null. Without
      * it, isManualAnswerActive read the prefetch (mode 'what_to_say', no
@@ -1277,6 +1286,7 @@ export class IntelligenceEngine extends EventEmitter {
      * and are allowed to supersede.
      */
     canAutoAnswer(): boolean {
+        if (this.directAssistAnswers > 0) return false;
         if (this.activeMode !== 'idle' && this.activeMode !== 'assist') {
             // The engine's OWN speculative prefetch is not "busy": the dispatch
             // that arrives now is the one that adopts it. Refusing it parked a
@@ -1317,7 +1327,7 @@ export class IntelligenceEngine extends EventEmitter {
     }
 
     private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, onSettled?: (answered: boolean) => void): Promise<boolean | 'adopted' | void> {
-        const spokenTurn = trigger.automatic ? this.latestSpokenTurn() : undefined;
+        const spokenTurn = trigger.automatic ? this.latestSpokenTurnFor(trigger.lastQuestion) : undefined;
         const plannerDecision = await this.planSuggestionTrigger(trigger);
         if (trigger.automatic && (this.isManualAnswerActive() || this.matchesSpokenAnswer(spokenTurn))) return;
         // A user barge-in landed while we were at the planner: the user is
@@ -1452,7 +1462,7 @@ export class IntelligenceEngine extends EventEmitter {
         }
         try {
             const outcomeOut: WhatToSayOutcomeOut = {};
-            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, { outcomeOut });
+            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, { outcomeOut, skipCooldown: trigger.automatic });
             return outcomeOut.value?.status === 'success';
         } finally {
             this.nextRunIsAutomatic = false;
@@ -1471,11 +1481,17 @@ export class IntelligenceEngine extends EventEmitter {
      */
     /** Auto Answer V3: a manual What-to-Answer is the live run (never superseded by an automatic one). */
     isManualAnswerActive(): boolean {
+        if (this.directAssistAnswers > 0) return true;
         if (this.activeMode !== 'what_to_say') return false;
         // The engine's own speculative prefetch and an automatic run are NOT
         // the user's manual press; only a run that is neither counts.
         return this.automaticGenerationId !== this.currentGenerationId
             && this.speculativeGenerationId !== this.currentGenerationId;
+    }
+
+    beginDirectAssistAnswer(): () => void {
+        this.directAssistAnswers++;
+        return () => { this.directAssistAnswers--; };
     }
 
     /** Auto Answer V3: any What-to-Answer stream is live (manual, automatic or speculative). */
@@ -2131,7 +2147,7 @@ export class IntelligenceEngine extends EventEmitter {
         })();
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; spokenWithCapture?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2156,7 +2172,7 @@ export class IntelligenceEngine extends EventEmitter {
             const heard = question?.trim() || turnOut.question?.trim();
             this.recordLiveTurn(answer, options?.screenContext,
                 heard || (sawScreen ? undefined : IntelligenceEngine.UNPROMPTED_TURN_QUESTION),
-                imagePaths?.length ?? 0, imagePaths, (question?.trim() || imagePaths?.length) ? 'user' : 'meeting', {
+                imagePaths?.length ?? 0, imagePaths, (!options?.spokenWithCapture && (question?.trim() || imagePaths?.length)) ? 'user' : 'meeting', {
                     page: options?.domContext, startedUnder,
                     // The describe call this press skipped (screenPrepass.ts) runs
                     // after the answer instead, if the transcription fails.
@@ -2166,7 +2182,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; spokenWithCapture?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2188,9 +2204,12 @@ export class IntelligenceEngine extends EventEmitter {
 
         const hasImages = Boolean(imagePaths?.length);
         const automatic = this.nextRunIsAutomatic;
-        const manualSpokenAnswer = options?.forceFresh && options.coalesceAutomatic !== false && !question && !hasImages
-            && !options.screenContext && !options.domContext && !options.promptInstruction;
-        const spokenTurn = (automatic || manualSpokenAnswer) ? this.latestSpokenTurn() : undefined;
+        const manualSpokenAnswer = options?.forceFresh && options.coalesceAutomatic !== false
+            && (options.spokenWithCapture === true || (!question && !hasImages
+                && !options.screenContext && !options.domContext && !options.promptInstruction));
+        const spokenTurn = automatic || (manualSpokenAnswer && options?.spokenWithCapture)
+            ? this.latestSpokenTurnFor(question)
+            : manualSpokenAnswer ? this.latestSpokenTurn() : undefined;
         if (manualSpokenAnswer && this.spokenAnswer?.automatic && this.matchesSpokenAnswer(spokenTurn)
             && (this.spokenAnswer.completed || (this.automaticGenerationId === this.spokenAnswer.generationId
                 && this.currentGenerationId === this.spokenAnswer.generationId))) {
@@ -4209,7 +4228,7 @@ export class IntelligenceEngine extends EventEmitter {
             // for the whole generation — and then (b) regenerated away by the
             // scaffold repair. Consult the SAME shared predicate WhatToAnswerLLM
             // uses, so both sides always agree on what this turn is.
-            const wtaPromotedScreenCoding = (() => {
+            const wtaPromotedScreenCoding = !options?.spokenWithCapture && (() => {
                 try {
                     const { isPromotedScreenCodingTurn } = require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals');
                     const _screenTextForPromotion = [options?.domContext, (options?.screenContext?.ocrText || (options?.screenContext as any)?.extractedText || (options?.screenContext as any)?.visibleSummary)]
@@ -4807,7 +4826,7 @@ export class IntelligenceEngine extends EventEmitter {
             // session transcript and usage, and fed to the NEXT turn as
             // prior_assistant_responses evidence.
             const wtaTruncation: { truncated: boolean; reason?: string } = { truncated: false };
-            const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise, requestSnapshot, whatToAnswerCancellationToken.signal, wtaTruncation);
+            const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise, requestSnapshot, whatToAnswerCancellationToken.signal, wtaTruncation, options?.spokenWithCapture);
             let streamAborted = false;
             let emittedStreamingToken = false;
             let streamingTokenBuffer = '';

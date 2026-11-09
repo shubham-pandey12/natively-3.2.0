@@ -92,3 +92,32 @@ test('manual attachment captions and explicit image questions cannot inherit a p
   const edit = 'Make the previous answer shorter using this image';
   assert.ok(decide(request('general',edit)).isFollowUp, 'explicit previous-answer intent must survive');
 });
+
+
+test('a newer spoken request reaches the provider with the capture as supporting evidence', async () => {
+  const speech = 'How would you test the solution under high load?';
+  const modeId = 'technical-interview';
+  const imagePaths = ['earlier-problem.png'];
+  const decision = decide(request(modeId, speech));
+  const v3Prompt = composePrompt({ decision, policy: resolveModePolicy(modeId), evidence: [] });
+  const calls = [];
+  const helper = { getCapabilities: () => ({ outputBudgetTokens: 2000 }), getPromptTier: () => 'full',
+    fitContextForCurrentModel: text => text, async *streamChat(...args) { calls.push(args); yield 'Use a load test'; } };
+  const modes = { getActiveModeSystemPromptSuffix: () => '', buildRetrievedActiveModeContextBlockHybrid: async () => '',
+    buildRetrievedActiveModeContextBlock: () => '', buildActiveModeContextBlock: () => '' };
+  const answerer = new WhatToAnswerLLM(helper, modes);
+  const snapshot = { activeModeInfo: null, modeId, requestId: 'speech-after-screen', surface: 'what_to_answer', generationId: 3, v3Prompt };
+  for await (const _ of answerer.generateStream(speech, undefined, undefined, imagePaths, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, snapshot, undefined, undefined, true)) {}
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0][1], imagePaths);
+  assert.match(calls[0][0], /current spoken interviewer request/);
+  assert.ok(calls[0][0].includes(speech));
+  assert.ok(!calls[0][0].includes(SCREEN_DIRECT_VISION_INSTRUCTION));
+
+  const payload = buildDirectWhatToSayPayload({ interviewerRequest: speech, hasScreenshots: false });
+  const direct = prepareDirectAssistPrompt({ requestId: 'direct-speech-after-screen', selection: { provider: 'gemini', model: 'gemini-3-flash' }, imagePaths, ...payload });
+  assert.equal(payload.source, 'stt');
+  assert.ok(direct.userPrompt.includes(speech));
+  assert.deepEqual([...direct.imagePaths], imagePaths);
+});
