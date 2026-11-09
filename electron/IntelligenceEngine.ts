@@ -2,6 +2,7 @@
 // LLM mode routing and orchestration.
 // Extracted from IntelligenceManager to decouple LLM logic from state management.
 
+import { containsTranscriptRevision } from './utils/rollingTranscriptState';
 import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 import type { SessionWriteDecision } from './llm/FinalAnswerGenerationPolicy';
 import { LiveHelperLLM, LIVE_HELPER_EMPTY, LIVE_HELPER_WINDOW_SECONDS, catchUpWindowSeconds, liveHelperDisplayKind, type LiveHelperAction } from './llm/liveHelpers';
@@ -151,6 +152,7 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
+    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean }) => void;
     'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => void;
     // generationId (audit finding #3): stamped on every live token so the renderer
     // can drop a batch from an answer that was already superseded. Optional →
@@ -491,6 +493,20 @@ export class IntelligenceEngine extends EventEmitter {
      * What-to-Answer — a different generation — is untouchable.
      */
     private automaticGenerationId: number | null = null;
+    private spokenAnswer: { turn: { timestamp: number; text: string }; automatic: boolean; generationId: number; completed: boolean } | undefined;
+
+    private latestSpokenTurn() {
+        return this.session.getContextWithInterim(180).findLast(item => item.role === 'interviewer');
+    }
+
+    private matchesSpokenAnswer(turn: ReturnType<IntelligenceEngine['latestSpokenTurn']>): boolean {
+        const claimed = this.spokenAnswer?.turn;
+        if (!claimed || !turn) return false;
+        if (claimed.timestamp === turn.timestamp) return true;
+        // shortcut: only compare nearby, substantially overlapping STT revisions, upgrade when providers expose a shared utterance ID.
+        return Math.abs(claimed.timestamp - turn.timestamp) <= 5000
+            && (containsTranscriptRevision(turn.text, claimed.text) || containsTranscriptRevision(claimed.text, turn.text));
+    }
     private nextRunIsAutomatic = false;
     /**
      * Generation id of the engine's own SPECULATIVE prefetch, or null. Without
@@ -1298,7 +1314,9 @@ export class IntelligenceEngine extends EventEmitter {
     }
 
     private async handleSuggestionTriggerInner(trigger: SuggestionTrigger): Promise<void> {
+        const spokenTurn = trigger.automatic ? this.latestSpokenTurn() : undefined;
         const plannerDecision = await this.planSuggestionTrigger(trigger);
+        if (trigger.automatic && (this.isManualAnswerActive() || this.matchesSpokenAnswer(spokenTurn))) return;
         // A user barge-in landed while we were at the planner: the user is
         // answering the question themselves — do not stream over them.
         if (trigger.automatic && this.automaticTriggerCancelled) {
@@ -1367,13 +1385,27 @@ export class IntelligenceEngine extends EventEmitter {
                         // generated first, then live); completion finishes the
                         // same row (see completeSpeculativeRun / revealSpeculativeAnswer).
                         this.speculativeAdoptedGenerationId = this.currentGenerationId;
-                        if (trigger.automatic) this.automaticGenerationId = this.currentGenerationId;
+                        if (trigger.automatic) {
+                            this.automaticGenerationId = this.currentGenerationId;
+                            if (spokenTurn !== undefined) {
+                                this.spokenAnswer = { turn: spokenTurn, automatic: true, generationId: this.currentGenerationId, completed: false };
+                            }
+                        }
+                        if (trigger.automatic && trigger.lastQuestion) {
+                            this.emit('what_to_answer_question', { generationId: this.currentGenerationId, question: trigger.lastQuestion, pending: true });
+                        }
                         // Unmute the stream NOW: paint what it has, stream the rest.
                         try { this.speculativeAdoptHook?.(this.currentGenerationId); } catch (err) { console.warn('[IntelligenceEngine] adopted-stream paint failed; it will reveal at completion:', err); }
                         return;
                     }
                     if (finished) {
                         console.log(`[IntelligenceEngine] Speculative stream accepted (Jaccard=${similarity.toFixed(2)}) — already finished; revealing`);
+                        if (trigger.automatic && trigger.lastQuestion) {
+                            this.emit('what_to_answer_question', { generationId: finished.generationId, question: trigger.lastQuestion });
+                        }
+                        if (spokenTurn !== undefined) {
+                            this.spokenAnswer = { turn: spokenTurn, automatic: true, generationId: finished.generationId, completed: false };
+                        }
                         this.revealSpeculativeAnswer(finished, trigger.automatic === true);
                         return;
                     }
@@ -1707,6 +1739,10 @@ export class IntelligenceEngine extends EventEmitter {
         const outcome: WhatToSayOutcome = finished.writeDecision?.policy === 'do_not_store'
             ? { status: 'failed', retryable: true, reason: finished.writeDecision.reason }
             : { status: 'success', retryable: false };
+        if (automatic && this.spokenAnswer?.generationId === finished.generationId) {
+            if (outcome.status === 'success') this.spokenAnswer.completed = true;
+            else this.spokenAnswer = undefined;
+        }
         this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, undefined, undefined, outcome);
     }
 
@@ -2075,7 +2111,7 @@ export class IntelligenceEngine extends EventEmitter {
         })();
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2110,7 +2146,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; coalesceAutomatic?: boolean; onStart?: () => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2128,6 +2164,18 @@ export class IntelligenceEngine extends EventEmitter {
 
         if (!question?.trim() && (imagePaths?.length ?? 0) > 0) {
             question = 'What should I say about this?';
+        }
+
+        const hasImages = Boolean(imagePaths?.length);
+        const automatic = this.nextRunIsAutomatic;
+        const manualSpokenAnswer = options?.forceFresh && options.coalesceAutomatic !== false && !question && !hasImages
+            && !options.screenContext && !options.domContext && !options.promptInstruction;
+        const spokenTurn = (automatic || manualSpokenAnswer) ? this.latestSpokenTurn() : undefined;
+        if (manualSpokenAnswer && this.spokenAnswer?.automatic && this.matchesSpokenAnswer(spokenTurn)
+            && (this.spokenAnswer.completed || (this.automaticGenerationId === this.spokenAnswer.generationId
+                && this.currentGenerationId === this.spokenAnswer.generationId))) {
+            setOutcome('cancelled', 'automatic_answer_exists');
+            return null;
         }
 
         // Manual user action (button press / hotkey) MUST start from a clean
@@ -2149,7 +2197,6 @@ export class IntelligenceEngine extends EventEmitter {
         // explicit user action, or the manual "What to answer" hotkey dies once the
         // speculative system starts refreshing lastTriggerTime on every interviewer
         // question. See triggerGate.ts.
-        const hasImages = Boolean(imagePaths && imagePaths.length > 0);
         if (shouldThrottleTrigger({
             hasImages,
             isSpeculative,
@@ -2207,6 +2254,8 @@ export class IntelligenceEngine extends EventEmitter {
             }
         }
 
+        options?.onStart?.();
+
         if (this.assistCancellationToken) {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
@@ -2230,7 +2279,10 @@ export class IntelligenceEngine extends EventEmitter {
         const generationId = ++this.currentGenerationId;
         // Stamp the run's identity before any await: a manual press racing in
         // mints a newer id and the automatic/speculative one is no longer live.
-        this.automaticGenerationId = this.nextRunIsAutomatic ? generationId : null;
+        this.automaticGenerationId = automatic ? generationId : null;
+        if (spokenTurn !== undefined) {
+            this.spokenAnswer = { turn: spokenTurn, automatic, generationId, completed: false };
+        }
         this.speculativeGenerationId = isSpeculative ? generationId : null;
         this.nextRunIsAutomatic = false;
         const isWtaSuperseded = () => (
@@ -2238,6 +2290,10 @@ export class IntelligenceEngine extends EventEmitter {
             || this.currentGenerationId !== generationId
         );
 
+        const automaticQuestion = this.automaticGenerationId === generationId && !isSpeculative ? question?.trim() : undefined;
+        if (automaticQuestion) {
+            this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true });
+        }
         this.setMode('what_to_say');
         // Speculative runs don't stamp lastTriggerTime at start — the cooldown slot
         // is reserved for the real trigger. We stamp it only on successful completion.
@@ -2576,6 +2632,12 @@ export class IntelligenceEngine extends EventEmitter {
                     trace.mark('repair_used', { reason: 'question_from_user_utterance' });
                     questionSpokenByUser = true;
                     console.log('[IntelligenceEngine] the user asked after the other party — answering the user\'s own question', { chars: userText.length });
+                }
+            }
+            if (!isSpeculative && !question && options?.overlayQuestionId && !questionSpokenByUser) {
+                const submitted = (extractedQuestion.latestQuestion || lastInterviewerTurn)?.trim();
+                if (submitted) {
+                    this.emit('what_to_answer_question', { generationId, question: submitted, overlayQuestionId: options.overlayQuestionId });
                 }
             }
             // WTA mint point (Phase 6 Slice 1, "what changes" item 1): one
@@ -7448,6 +7510,16 @@ export class IntelligenceEngine extends EventEmitter {
             if (this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) {
                 this.whatToAnswerCancellationToken = null;
             }
+            if (this.spokenAnswer?.generationId === generationId && !this.spokenAnswer.completed) {
+                if (!isSpeculative && options?.outcomeOut?.value?.status === 'success') this.spokenAnswer.completed = true;
+                else this.spokenAnswer = undefined;
+            }
+            if (automaticQuestion || isSpeculative) {
+                this.emit('what_to_answer_question', {
+                    generationId, pending: false,
+                    failed: Boolean(automaticQuestion && options?.outcomeOut?.value?.status === 'failed'),
+                });
+            }
             // Resume background drains on EVERY exit path (answer, abort, error).
             releaseFg();
         }
@@ -9143,6 +9215,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Reset engine state (cancels any in-flight operations)
      */
     reset(): void {
+        this.spokenAnswer = undefined;
         this.activeMode = 'idle';
         this.currentGenerationId++; // Increment to break all active LLM streams
         if (this.whatToAnswerCancellationToken) {

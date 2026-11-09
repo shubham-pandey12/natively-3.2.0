@@ -54,6 +54,12 @@ function norm(s: string): string {
     .trim();
 }
 
+/** A cumulative STT revision can add words before as well as after the old text. */
+export function containsTranscriptRevision(revision: string, previous: string): boolean {
+  const oldText = norm(previous);
+  return oldText.split(' ').length >= 6 && ` ${norm(revision)} `.includes(` ${oldText} `);
+}
+
 /** Index after the last finalized segment separator, or -1 when none. */
 export function lastFinalSeparatorIndex(prev: string): number {
   return prev.lastIndexOf(FINAL_SEPARATOR);
@@ -112,6 +118,9 @@ export function mergeRollingTranscriptPartial(prev: string, partialText: string)
 export function rollingTranscriptWithPartial(committed: string, partialText: string): string {
   const text = partialText.trim();
   if (!text) return committed;
+  const tail = inProgressRollingTail(committed);
+  if (containsTranscriptRevision(text, tail)) return capRollingTranscript(committedRollingPrefix(committed) + text);
+  if (containsTranscriptRevision(tail, text)) return committed;
   return committed ? capRollingTranscript(committed + FINAL_SEPARATOR + text) : text;
 }
 
@@ -124,6 +133,9 @@ export function mergeRollingTranscriptFinal(prev: string, finalText: string): st
   const inProgress = inProgressRollingTail(prev);
   const normText = norm(text);
   const normInProgress = norm(inProgress);
+
+  if (containsTranscriptRevision(text, inProgress)) return capRollingTranscript(prefix + text);
+  if (containsTranscriptRevision(inProgress, text)) return prev;
 
   if (inProgress && (normText.startsWith(normInProgress) || normInProgress.startsWith(normText))) {
     return prefix + text;

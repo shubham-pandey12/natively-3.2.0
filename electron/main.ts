@@ -8437,6 +8437,10 @@ export class AppState {
       return overlay && !overlay.isDestroyed() ? overlay : this.getMainWindow();
     }
 
+    this.intelligenceManager.on('what_to_answer_question', (data) => {
+      this.sendToWindow(answerWindow(), 'intelligence-what-to-answer-question', data);
+    });
+
     // Sprint 9: time-batched IPC token sends.
     //
     // Each LLM streaming token previously fired one webContents.send → one
@@ -8579,11 +8583,11 @@ export class AppState {
     // coding scaffold ended with no final answer (superseded/declined/errored).
     // Tell the renderer to drop the open scaffold row. Flush pending token
     // batches first so a late scaffold batch can't re-mount the row afterwards.
-    this.intelligenceManager.on('suggested_answer_discard', (reason: string) => {
+    this.intelligenceManager.on('suggested_answer_discard', (reason: string, generationId?: number) => {
       this.autoAnswerUsage.stopAwaitingAnswer();
       flushBatchesBeforeFinal();
       const win = answerWindow()
-      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason })
+      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason, generationId })
     })
 
     // Verified code execution (background): a ✓ badge when the shown code passed

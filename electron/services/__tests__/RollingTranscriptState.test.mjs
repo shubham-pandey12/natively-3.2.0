@@ -148,3 +148,11 @@ test('mergeRollingTranscriptFinal stays bounded over a long meeting', () => {
   // The most recent utterance is still visible at the tail.
   assert.ok(bar.includes('utterance number 4999'), 'latest utterance must survive the cap');
 });
+
+test('a cumulative revision replaces the repeated transcript in the preview and on final', () => {
+  const first = 'Explain the difference between Kafka and Redis PubSub. When would you choose Kafka over Redis PubSub in production? And what happens if a';
+  const revised = `Okay. ${first} consumer is down when a message is published?`;
+  const history = 'Take your time and explain your approach.';
+  assert.equal(playBar([['final', history], ['final', first], ['partial', revised]]), `${history}  ·  ${revised}`);
+  assert.equal(playBar([['final', history], ['final', first], ['final', revised]]), `${history}  ·  ${revised}`);
+});

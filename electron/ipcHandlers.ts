@@ -16340,14 +16340,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       _,
       question?: string,
       imagePaths?: string[],
-      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
+      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
     ) => {
       // The press, for the answer's latency trace (PiTraceInit.startedAt).
       const pressedAt = tracerNow();
       return _tracked(async () => {
-      // Auto Answer V3: a manual What-to-Answer (hotkey, button, or an accepted
-      // offer card) commits whatever Auto Answer was offering — retract the card.
-      try { appState.onManualWhatToAnswer?.(); } catch { /* never block the answer */ }
       try {
         let screenContext: any;
         let screenContextStatus: 'not_available' | 'available' | 'failed' = 'not_available';
@@ -16563,6 +16560,10 @@ export function initializeIpcHandlers(appState: AppState): void {
             // gate can otherwise bleed a previous question's answer into the
             // current manual press). See runWhatShouldISay.forceFresh branch.
             forceFresh: true,
+            coalesceAutomatic: appState.getAutoAnswerEnabled(),
+            onStart: () => {
+              try { appState.onManualWhatToAnswer?.(); } catch { /* never block the answer */ }
+            },
             outcomeOut,
             screenContext,
             pressedAt,
@@ -16572,6 +16573,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 ? options.promptInstruction
                 : undefined,
             domContext: effectiveDomContext,
+            overlayQuestionId: typeof options?.overlayQuestionId === 'string' ? options.overlayQuestionId : undefined,
           },
         ));
         // The refusal-triggered retry of #647's Problem A. The refusal ("I

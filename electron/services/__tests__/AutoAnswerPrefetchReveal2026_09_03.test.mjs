@@ -244,3 +244,57 @@ test('a prefetch that finished before adoption still reveals once, under a fresh
     assert.equal(tokens.join(''), LONG_ANSWER, 'revealed once');
     engine.reset();
 });
+
+test('a manual press leaves the adopted automatic stream and its final answer intact', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { engine, session, finals } = await makeEngine({ gate });
+    session.addTranscript({ speaker: 'interviewer', text: QUESTION, timestamp: Date.now(), final: true });
+    engine.prefetchAutoAnswer('race', QUESTION);
+    await dispatch(engine, 'race');
+
+    const outcomeOut = {};
+    const manual = () => engine.runWhatShouldISay(undefined, 0.8, undefined, { forceFresh: true, skipCooldown: true, outcomeOut });
+    assert.equal(await manual(), null);
+    assert.equal(outcomeOut.value.reason, 'automatic_answer_exists');
+    release();
+    await untilIdle(engine);
+    await flush();
+    assert.equal(await manual(), null, 'a completed automatic answer owns the same spoken turn');
+    assert.equal(finals.length, 1);
+    engine.reset();
+});
+
+test('a delayed automatic trigger leaves the manual answer for that spoken turn intact', async () => {
+    const { engine, session, finals } = await makeEngine();
+    session.addTranscript({ speaker: 'interviewer', text: QUESTION, timestamp: Date.now(), final: true });
+    await engine.runWhatShouldISay(undefined, 0.8, undefined, { forceFresh: true, skipCooldown: true });
+    assert.equal(finals.length, 1);
+    await dispatch(engine, 'race', false);
+    assert.equal(finals.length, 1);
+    engine.reset();
+});
+
+test('a regular automatic answer only claims its own spoken turn', async () => {
+    const { engine, session, finals } = await makeEngine();
+    const timestamp = Date.now() - 100;
+    session.addTranscript({ speaker: 'interviewer', text: QUESTION, timestamp, final: true });
+    await dispatch(engine, 'race', false);
+    assert.equal(finals.length, 1);
+
+    const outcomeOut = {};
+    const manual = () => engine.runWhatShouldISay(undefined, 0.8, undefined, { forceFresh: true, skipCooldown: true, outcomeOut });
+    assert.equal(await manual(), null);
+    assert.equal(outcomeOut.value.reason, 'automatic_answer_exists');
+
+    session.addTranscript({ speaker: 'interviewer', text: `Okay. ${QUESTION} What mattered most?`, timestamp: timestamp + 1, final: true });
+    await dispatch(engine, 'revised-race', false);
+    assert.equal(finals.length, 1, 'a repeated automatic trigger keeps the same answer');
+    assert.equal(await manual(), null, 'a cumulative transcript revision keeps the same answer');
+    assert.equal(outcomeOut.value.reason, 'automatic_answer_exists');
+
+    session.addTranscript({ speaker: 'interviewer', text: 'How would you migrate that database without downtime?', timestamp: timestamp + 2, final: true });
+    await manual();
+    assert.equal(finals.length, 2);
+    engine.reset();
+});
