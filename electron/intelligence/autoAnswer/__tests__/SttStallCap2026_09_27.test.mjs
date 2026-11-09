@@ -17,7 +17,7 @@ import { FakeClock } from './fakeClock.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const DIST = path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer');
-const { SimpleAutoAnswerEngine, STALL_PROMOTE_MS, isSameUtterance } = require(path.join(DIST, 'SimpleAutoAnswer.js'));
+const { SimpleAutoAnswerEngine, STALL_PROMOTE_MS, NO_INTERIM_WARN_MS, isSameUtterance } = require(path.join(DIST, 'SimpleAutoAnswer.js'));
 const { buildJudgePrompt } = require(path.join(DIST, 'AutoAnswerJudge.js'));
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -27,10 +27,11 @@ const INCOMPLETE = verdict({ is_ask: false, complete: false, act: 'incomplete', 
 /** The real engine. Each judge reply may carry a delay (ms on the fake clock). */
 function rig(replies = [], { judgeMs = 0 } = {}) {
   const clock = new FakeClock();
-  const s = { judged: [], dispatched: [], events: [] };
+  const s = { judged: [], dispatched: [], events: [], stalls: 0 };
   let n = 0;
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
+    onSttStall: () => { s.stalls++; },
     recentTurns: () => [],
     dispatch: (q) => { s.dispatched.push(q.text); },
     judgeCandidate: (req) => {
@@ -58,6 +59,38 @@ function rig(replies = [], { judgeMs = 0 } = {}) {
 
 const ASK = 'Why not just restart the whole cluster on a smaller node?';
 const CLIPPED = 'Why not just restart the whole cluster on a s';
+
+test('a speech stop without transcript warns once, then a late final is judged', async () => {
+  const h = rig();
+  h.stop();
+  h.clock.advance(NO_INTERIM_WARN_MS - 1);
+  assert.equal(h.s.stalls, 0);
+  h.clock.advance(1);
+  assert.equal(h.s.stalls, 1);
+  await h.wait(2200);
+  assert.equal(h.s.stalls, 1);
+  assert.equal(h.s.judged.length, 0);
+  h.final(ASK);
+  await h.wait(3000);
+  assert.ok(h.s.judged.length > 0);
+});
+
+test('transcript arrival, resumed speech, and meeting reset cancel the no-interim warning', () => {
+  for (const cancel of [
+    (h) => h.interim(''),
+    (h) => h.final(ASK),
+    (h) => h.engine.ingest({ speaker: 'user', text: 'Yes', final: true }),
+    (h) => h.start(),
+    (h) => h.engine.onMeetingStop(),
+  ]) {
+    const h = rig();
+    h.stop();
+    h.clock.advance(NO_INTERIM_WARN_MS - 1);
+    cancel(h);
+    h.clock.advance(1);
+    assert.equal(h.s.stalls, 0);
+  }
+});
 
 test('the normal path is unchanged: a final inside the cap gives the same judging, no lagging flag', async () => {
   const run = async (withStop) => {

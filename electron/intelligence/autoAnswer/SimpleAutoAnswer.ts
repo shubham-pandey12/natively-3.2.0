@@ -225,9 +225,10 @@ export const PENDING_MAX_AGE_MS = 90_000;
  *
  * What it cannot fix: a relay backlog where not even an interim has arrived
  * (live L14: the first interim came 5.3 s after the speech ended). There is
- * nothing to promote, so that turn waits exactly as before.
+ * nothing to promote, so the warning below surfaces the wait.
  */
 export const STALL_PROMOTE_MS = 2000;
+export const NO_INTERIM_WARN_MS = 3000;
 /**
  * The late final of a promoted interim is the SAME utterance when its words,
  * minus the interim's last (often clipped) one, are this contained in it and it
@@ -252,6 +253,7 @@ export function isSameUtterance(interim: string, final: string): boolean {
 export interface SimpleAutoAnswerHost {
     isEnabled(): boolean;
     isMeetingActive(): boolean;
+    onSttStall?(): void;
     meetingGeneration(): number;
     engineAccepting(): boolean;
     /**
@@ -331,6 +333,7 @@ export class SimpleAutoAnswerEngine {
     private localStopAt = 0;
     /** Fires STALL_PROMOTE_MS after the interim froze. */
     private stallTimer: ClockTimer | null = null;
+    private noInterimTimer: ClockTimer | null = null;
     /** A promoted interim that was answered, so its late final is not answered twice. */
     private stallAnswered: { text: string; at: number } | null = null;
     /** The interim last promoted: one stand-in per frozen interim, however many stops follow. */
@@ -431,7 +434,14 @@ export class SimpleAutoAnswerEngine {
             this.warmNextCandidate();
             return;
         }
-        if (this.pending.length === 0) return;
+        if (this.pending.length === 0) {
+            this.clearNoInterimTimer();
+            this.noInterimTimer = this.clock.setTimeout(() => {
+                this.noInterimTimer = null;
+                if (this.host.isEnabled() && this.host.isMeetingActive()) this.host.onSttStall?.();
+            }, NO_INTERIM_WARN_MS);
+            return;
+        }
         this.arm(ENDPOINT_CONFIRM_MS);
     }
 
@@ -448,6 +458,7 @@ export class SimpleAutoAnswerEngine {
 
     ingest(segment: TranscriptSegment & { speaker: string; final: boolean }): void {
         if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
+        if (segment.final || segment.speaker === 'interviewer') this.clearNoInterimTimer();
         const text = (segment.text ?? '').trim();
         const now = this.clock.now();
 
@@ -943,6 +954,11 @@ export class SimpleAutoAnswerEngine {
 
     private clearStallCap(): void {
         if (this.stallTimer !== null) { this.clock.clearTimeout(this.stallTimer); this.stallTimer = null; }
+        this.clearNoInterimTimer();
+    }
+
+    private clearNoInterimTimer(): void {
+        if (this.noInterimTimer !== null) { this.clock.clearTimeout(this.noInterimTimer); this.noInterimTimer = null; }
     }
 
     private armStallCap(): void {

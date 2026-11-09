@@ -482,6 +482,7 @@ interface ElectronAPI {
   onCredentialsChanged: (callback: () => void) => () => void;
 
   // Native Audio Service Events
+  onAutoAnswerSttStall: (callback: () => void) => () => void;
   onNativeAudioTranscript: (
     callback: (transcript: { speaker: string; text: string; final: boolean }) => void,
   ) => () => void;
@@ -2176,6 +2177,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   disableHindsight: () => ipcRenderer.invoke('hindsight:disable'),
 
   // Native Audio Service Events
+  onAutoAnswerSttStall: (callback: () => void) => {
+    const subscription = () => callback();
+    ipcRenderer.on('auto-answer-stt-stall', subscription);
+    return () => {
+      ipcRenderer.removeListener('auto-answer-stt-stall', subscription);
+    };
+  },
   onNativeAudioTranscript: (
     callback: (transcript: { speaker: string; text: string; final: boolean }) => void,
   ) => {

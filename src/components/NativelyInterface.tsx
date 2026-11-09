@@ -2028,6 +2028,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, [answerPanelPinned]);
 
   const [rollingTranscript, setRollingTranscript] = useState(''); // For interviewer rolling text bar
+  const [sttStalling, setSttStalling] = useState(false);
   const [isInterviewerSpeaking, setIsInterviewerSpeaking] = useState(false); // Track if actively speaking
   // Debounce partial STT ticks so answer/solution rows are not drowned in re-renders.
   const rollingPartialDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -5670,6 +5671,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       pendingRollingPartialRef.current = null;
       rollingCommittedRef.current = '';
       setRollingTranscript('');
+      setSttStalling(false);
       setIsInterviewerSpeaking(false);
       interviewerSpeakingRef.current = false;
       // Reset STT status to 'awaiting-audio' on session reset. The previous
@@ -7745,6 +7747,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     // Real-time Transcripts
+    cleanups.push(window.electronAPI.onAutoAnswerSttStall(() => setSttStalling(true)));
     cleanups.push(
       window.electronAPI.onNativeAudioTranscript((transcript) => {
         const speech = transcript.text?.trim().replace(/\s+/g, ' ').replace(/[?.!,;:]+$/, '').toLowerCase();
@@ -7796,6 +7799,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return; // Safety check for any other speaker types
         }
 
+        setSttStalling(false);
         // Route to rolling transcript bar — partials debounced; finals commit immediately.
         if (!transcript.final) {
           if (!interviewerSpeakingRef.current) {
@@ -12523,6 +12527,12 @@ Provide only the answer, nothing else.`;
                 shortcutKeys={globalShortcutsEnabled && !shortcutConflicts.has('acceptSuggestion') ? shortcuts.acceptSuggestion : []}
                 shortcutEnabled={isExpanded}
               />
+
+              <ChromeFold show={sttStalling} overlayVisible={isExpanded} requestHeightMotion={requestChromeHeightMotion}>
+                <div role="status" className="px-4 py-1 text-xs text-text-secondary">
+                  {t('Transcribing…')}
+                </div>
+              </ChromeFold>
 
               {/* Rolling Transcript Bar — live transcript + on-demand diagnostics
                   for hard failures. Reconnecting/awaiting-audio status is owned by

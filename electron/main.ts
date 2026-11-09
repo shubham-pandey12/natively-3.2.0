@@ -3790,6 +3790,7 @@ export class AppState {
   private readonly simpleAutoAnswer = new SimpleAutoAnswerEngine({
     isEnabled: () => this._autoAnswerEnabled,
     isMeetingActive: () => this.isMeetingActive,
+    onSttStall: () => this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-stt-stall'),
     meetingGeneration: () => this._meetingGeneration,
     engineAccepting: () => this.intelligenceManager.canAutoAnswer(),
     answerStreamActive: () => this.intelligenceManager.isAnswerStreaming(),

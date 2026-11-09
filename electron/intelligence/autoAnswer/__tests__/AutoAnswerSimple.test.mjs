@@ -263,10 +263,13 @@ test('the local VAD hint is taken only from providers that stream interims', () 
   }
 });
 
-test('the local VAD stop with nothing pending is a no-op', async () => {
+test('the local VAD stop with nothing pending schedules only the warning', async () => {
   const h = makeSimple(async () => YES());
   h.engine.onLocalSpeechEnd();
   await h.advance(ENDPOINT_CONFIRM_MS + 100);
+  assert.equal(h.state.judgeCalls.length, 0);
+  assert.equal(h.clock.pendingCount(), 1);
+  await h.advance(Simple.NO_INTERIM_WARN_MS);
   assert.equal(h.state.judgeCalls.length, 0);
   assert.equal(h.clock.pendingCount(), 0);
 });
