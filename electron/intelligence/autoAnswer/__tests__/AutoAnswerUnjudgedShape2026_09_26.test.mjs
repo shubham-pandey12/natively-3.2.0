@@ -20,6 +20,7 @@ import { FakeClock } from './fakeClock.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const Simple = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/SimpleAutoAnswer.js'));
+const { DECLARATIVE_TASK, isDeclarativeTask } = Simple;
 const { SimpleAutoAnswerEngine, STABILITY_MS, JUDGE_DEADLINE_MS, isQuestionShaped } = { ...Simple, ...require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/AutoAnswerJudge.js')) };
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -52,14 +53,67 @@ test('isQuestionShaped reads each sentence, not just the candidate\'s lead', () 
   assert.equal(isQuestionShaped("Take your time. And feel free to use whatever language you're comfortable with."), false);
 });
 
+test('declarative task leads match without punctuation and reject trailing fragments', () => {
+  for (const text of [
+    'Your task is to design a URL shortener',
+    'Your job is to reduce latency',
+    'The task is to build an index',
+    'What I want you to do is write a parser',
+    'I’d like you to implement a binary search',
+    'I want you to explain your decision',
+    'I need you to debug the service',
+    'Go ahead and write the function',
+    "Let's design a cache",
+    'Let’s see how you approach this problem',
+    'Let’s say you have a system that needs to process duplicate messages',
+    'Talk me through your approach',
+    'Take me through your experience',
+    'Run me through your solution',
+    'Okay, implement a binary search',
+  ]) {
+    assert.equal(DECLARATIVE_TASK.test(text), true, text);
+    assert.equal(isDeclarativeTask(text), true, text);
+    assert.equal(isQuestionShaped(text), true, text);
+  }
+  assert.equal(DECLARATIVE_TASK.test('Authentication you can skip'), false);
+  for (const text of [
+    'Authentication you can skip',
+    'Your task is to design a...',
+    'What I want you to do is',
+    'Let’s say you have a system that needs to…',
+  ]) {
+    assert.equal(isDeclarativeTask(text), false, text);
+    assert.equal(isQuestionShaped(text), false, text);
+  }
+});
+
 test('after a statement ruled silent, a declarative ask gets its prefetch inside the ration window', async () => {
   const h = rig(async (_req, n) => (n === 1 ? NO : YES));
   h.say("Great. So I'm Sarah, I lead the platform team here, and we'll spend about forty five minutes today.");
   await h.advance(STABILITY_MS + 2000);
   assert.equal(h.state.prefetched.length, 1, 'the statement took the window\'s one rationed prefetch');
-  h.say("Let's start with you. Tell me a little bit about yourself and what you've been working on recently.");
+  h.say('Your task is to design a URL shortener.');
   await h.advance(STABILITY_MS + 200);
   assert.equal(h.state.prefetched.length, 2, 'the ask is question-shaped even though the candidate opens with the statement');
+});
+
+test('judge failure dispatches declarative tasks with or without provider punctuation', async () => {
+  for (const [punctuation, text, judge] of [
+    ['provider', 'Your task is to design a URL shortener.', () => new Promise(() => {})],
+    ['none', 'Write a parser', async () => { throw new Error('judge unavailable'); }],
+  ]) {
+    const h = rig(judge, { punctuation });
+    h.say(text);
+    await h.advance(STABILITY_MS + JUDGE_DEADLINE_MS + 500);
+    assert.deepEqual(h.state.dispatched, [text]);
+  }
+});
+
+test('judge failure does not dispatch a hanging task even when it starts with what', async () => {
+  const h = rig(async () => null, { punctuation: 'none' });
+  h.say('What I want you to do is');
+  await h.advance(STABILITY_MS + 500);
+  assert.deepEqual(h.state.dispatched, []);
 });
 
 test('a question that is still pending (never ruled) keeps counting — only RULED finals are skipped', async () => {

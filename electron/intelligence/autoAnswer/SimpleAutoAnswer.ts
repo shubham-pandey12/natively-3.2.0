@@ -105,11 +105,11 @@ export const FALLBACK_INTERROGATIVE = /^(?:(?:ok(?:ay)?|so|and|now|alright|well)
  * and the answer's first token (0.7-2.7 s) running back to back, because an
  * interview asks faster than once per 25 s and the ration let the head start
  * fire for one question in several. A candidate that is question-SHAPED — a
- * trailing '?' or an interrogative lead ("tell me", "walk me through", "how
+ * trailing '?', a declarative task, or an interrogative lead ("tell me", "walk me through", "how
  * would you") — is the high-prior case: those are the asks the judge
  * overwhelmingly said 'answer' to, so a rejected prefetch is rare there and
- * the shape now bypasses the ration. Statements and bare declarative tasks
- * keep it: their prior is low, and the ration is what bounds the spend.
+ * the shape now bypasses the ration. Other statements keep it: their prior
+ * is low, and the ration is what bounds the spend.
  * (The engine's own guards — never over a live stream or an existing
  * speculation — still apply on top, so bypassing cannot stack generations.)
  */
@@ -133,14 +133,14 @@ export function sentencesOf(text: string): string[] {
 }
 /**
  * The shape that earns an unrationed prefetch: a sentence that ends in '?' or
- * opens with an interrogative lead. Per SENTENCE, not per candidate: a
+ * opens with an interrogative or declarative task lead. Per SENTENCE, not per candidate: a
  * candidate usually opens with the lead-in the judge already ruled silent
  * ("Great. So I'm Sarah, I lead the platform team…"), and a whole-candidate
  * test read THAT as the lead — live 2026-09-26 "…Let's start with you. Tell me
  * a little bit about yourself" got no head start.
  */
 export function isQuestionShaped(candidate: string): boolean {
-    return sentencesOf(candidate).some(s => /\?\s*$/.test(s) || FALLBACK_INTERROGATIVE.test(s));
+    return sentencesOf(candidate).some(s => /\?\s*$/.test(s) || isDeclarativeTask(s) || isInterrogativeLed(s));
 }
 /**
  * The asks that carry no question at all (2026-09-27). In sales, support and
@@ -156,10 +156,23 @@ export function isQuestionShaped(candidate: string): boolean {
  * bypass. A fragment that stops on a hanging word is still unfinished.
  */
 export const REPORT_SHAPED = /\b(?:i (?:just )?noticed|i see that|our (?:biggest |main |real )?(?:pain|problem|issue|challenge|concern|bottleneck)s? (?:is|are)|(?:can'?t|cannot|couldn'?t|won'?t|doesn'?t|isn'?t|aren'?t|not able to) (?:log|work|load|connect|sign|access|see|find|open|get)|error|it says|now says|keeps? (?:failing|crashing|timing out)|stopped working|(?:is|are) broken|went down)\b/i;
+/** Declarative interview tasks that can be actionable without a question mark. */
+export const DECLARATIVE_TASK = /^(?:(?:ok(?:ay)?|so|and|now|alright|well)[,.!\s]+)*(?:(?:your task|your job|the task|what i want you to do) is|i(?:['’]?d like| want| need) you to|go ahead and (?:write|implement|design|build|code)|let['’]?s (?:design|build|implement|see how you|say you (?:have|are|need))|(?:talk|take|run) me through|(?:implement|design|build|create|write) (?:a|an|the))\b/i;
 const HANGING_END = /\b(?:that|and|but|so|because|is|are|was|the|a|an|to|of|with|when|if|which)\s*[,.-]*\s*$/i;
 export function isReportShaped(candidate: string): boolean {
     const t = candidate.trim();
     return REPORT_SHAPED.test(t) && !HANGING_END.test(t);
+}
+
+/** Match a declarative task lead once the sentence has enough text to finish. */
+export function isDeclarativeTask(candidate: string): boolean {
+    const t = candidate.trim();
+    return DECLARATIVE_TASK.test(t) && !HANGING_END.test(t.replace(/…$/, ''));
+}
+
+function isInterrogativeLed(sentence: string): boolean {
+    // "What I want you to do is" starts with "what" but needs the task itself.
+    return FALLBACK_INTERROGATIVE.test(sentence) && !DECLARATIVE_TASK.test(sentence);
 }
 /**
  * How long after an automatic answer a manual press still counts as "that
@@ -565,9 +578,8 @@ export class SimpleAutoAnswerEngine {
         if (key === this.lastJudgedKey) return;                     // verdict already stands
         // A short candidate waits for more speech unless it already looks
         // like a question: a literal '?' (always positive evidence) or an
-        // interrogative lead (which needs no punctuation, per the
-        // punctuationProvenance absence-is-NEUTRAL contract).
-        const tooShort = words < MIN_NEW_WORDS && !candidate.includes('?') && !FALLBACK_INTERROGATIVE.test(candidate);
+        // interrogative or declarative task lead.
+        const tooShort = words < MIN_NEW_WORDS && !candidate.includes('?') && !FALLBACK_INTERROGATIVE.test(candidate) && !isDeclarativeTask(candidate);
         if (tooShort) {
             this.emit({ name: 'auto_answer_ignored', skipReason: 'incomplete', candidateWordCount: words });
             return;
@@ -732,14 +744,13 @@ export class SimpleAutoAnswerEngine {
             // (review 2026-08-25): clear the key so the next stoppage retries.
             this.lastJudgedKey = '';
             if (standInReplaced()) { this.arm(ENDPOINT_CONFIRM_MS); return; }
-            // Near-legacy fallback: a question mark, or — on providers that
-            // never guarantee punctuation — an interrogative-led utterance,
+            // Fallback: a question mark, a declarative task, or — on providers
+            // that never guarantee punctuation — an interrogative-led utterance,
             // read per sentence from the finals no verdict has ruled on (the
             // lead-in a verdict already called a statement is not the ask).
             const fresh = sentencesOf(unjudged);
             const asked = /\?\s*$/.test(candidate) || fresh.some(s => /\?\s*$/.test(s));
-            const interrogative = fresh.some(s => FALLBACK_INTERROGATIVE.test(s));
-            if (asked || (!this.punctuationGuaranteed && interrogative)) {
+            if (asked || fresh.some(isDeclarativeTask) || (!this.punctuationGuaranteed && fresh.some(isInterrogativeLed))) {
                 this.host.log?.(`[AutoAnswer:simple] judge ${outcome} — fallback dispatch`);
                 this.deliver(id, candidate, 0.9, 'general_question', committedAt);
             }
