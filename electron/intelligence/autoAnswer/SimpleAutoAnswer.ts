@@ -203,6 +203,7 @@ export const HELD_GROWTH_WORDS = 8;
 /** Busy-engine retry cadence and give-up. */
 export const RETRY_MS = 500;
 export const RETRY_TTL_MS = 8000;
+export const DROPPED_QUESTION_NOTICE = true;
 /**
  * Pending interviewer finals older than this no longer belong to the current
  * thought. Raised 30s -> 90s on 2026-08-25: a coding-interview problem
@@ -255,6 +256,7 @@ export interface SimpleAutoAnswerHost {
     isEnabled(): boolean;
     isMeetingActive(): boolean;
     onSttStall?(): void;
+    onAnswerDropped?(question: AutoAnswerQuestion): void;
     meetingGeneration(): number;
     engineAccepting(): boolean;
     /**
@@ -856,6 +858,7 @@ export class SimpleAutoAnswerEngine {
                 if (this.clock.now() >= deadline) {
                     this.parkedAttempt = null;
                     this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling' });
+                    this.host.onAnswerDropped?.(this.question(id, text, answerability, act, committedAt));
                     return;
                 }
                 this.parkedAttempt = attempt;

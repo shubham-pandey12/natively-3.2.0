@@ -3791,6 +3791,7 @@ export class AppState {
     isEnabled: () => this._autoAnswerEnabled,
     isMeetingActive: () => this.isMeetingActive,
     onSttStall: () => this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-stt-stall'),
+    onAnswerDropped: (question) => this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-dropped', question.text),
     meetingGeneration: () => this._meetingGeneration,
     engineAccepting: () => this.intelligenceManager.canAutoAnswer(),
     answerStreamActive: () => this.intelligenceManager.isAnswerStreaming(),

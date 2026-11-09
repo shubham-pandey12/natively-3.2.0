@@ -483,6 +483,7 @@ interface ElectronAPI {
 
   // Native Audio Service Events
   onAutoAnswerSttStall: (callback: () => void) => () => void;
+  onAutoAnswerDropped: (callback: (question: string) => void) => () => void;
   onNativeAudioTranscript: (
     callback: (transcript: { speaker: string; text: string; final: boolean }) => void,
   ) => () => void;
@@ -2182,6 +2183,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('auto-answer-stt-stall', subscription);
     return () => {
       ipcRenderer.removeListener('auto-answer-stt-stall', subscription);
+    };
+  },
+  onAutoAnswerDropped: (callback: (question: string) => void) => {
+    const subscription = (_: Electron.IpcRendererEvent, question: string) => callback(question);
+    ipcRenderer.on('auto-answer-dropped', subscription);
+    return () => {
+      ipcRenderer.removeListener('auto-answer-dropped', subscription);
     };
   },
   onNativeAudioTranscript: (

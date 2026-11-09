@@ -25,7 +25,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const Simple = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/SimpleAutoAnswer.js'));
 const { isMidWordCut } = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/AutoAnswerText.js'));
-const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS, RETRY_TTL_MS, HELD_MAX_AGE_MS, HELD_GROWTH_WORDS, EARLY_JUDGE_MS } = Simple;
+const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS, RETRY_TTL_MS, DROPPED_QUESTION_NOTICE, HELD_MAX_AGE_MS, HELD_GROWTH_WORDS, EARLY_JUDGE_MS } = Simple;
 
 const flush = () => new Promise((r) => setImmediate(r));
 const YES = (over = {}) => JSON.stringify({ is_ask: true, directed_at_user: true, complete: true, act: 'question', answerability: 0.95, question_text: null, ...over });
@@ -34,6 +34,7 @@ const NO = JSON.stringify({ is_ask: false, directed_at_user: false, complete: tr
 function makeSimple(judgeImpl, overrides = {}) {
   const clock = new FakeClock();
   const state = {
+    dropped: [],
     enabled: true, meetingActive: true, generation: 1, accepting: true, streaming: false,
     turns: [], dispatched: [], offered: [], skips: [], events: [], cancelled: [], judgeCalls: [], contentTrace: [], logs: [],
     ...overrides,
@@ -46,6 +47,7 @@ function makeSimple(judgeImpl, overrides = {}) {
     answerStreamActive: () => state.streaming,
     recentTurns: () => state.turns,
     dispatch: (q, opts) => { state.dispatched.push(q); state.dispatchOpts = opts; state.streaming = true; },
+    onAnswerDropped: (q) => state.dropped.push(q),
     offer: (q) => state.offered.push(q),
     cancelAutomaticAnswer: (r) => { state.cancelled.push(r); return true; },
     telemetry: (e) => { state.events.push(e); if (e.name === 'auto_answer_ignored') state.skips.push(e.skipReason); },
@@ -163,19 +165,26 @@ test('above ANSWER_FLOOR it answers; at or below it stays silent — no card, no
 });
 
 test('busy engine: retries and dispatches when it frees up; gives up after the TTL', async () => {
+  const question = 'Why did you choose PostgreSQL over the alternatives here?';
   const h = makeSimple(async () => YES(), { accepting: false });
-  h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
+  h.interviewer(question);
   await h.advance(STABILITY_MS + 200);
   assert.deepEqual(h.texts(), []);
   h.state.accepting = true;
   await h.advance(RETRY_MS + 100);
   assert.equal(h.texts().length, 1);
+  assert.deepEqual(h.state.dropped, []);
 
   const g = makeSimple(async () => YES(), { accepting: false });
-  g.interviewer('Why did you choose PostgreSQL over the alternatives here?');
+  g.interviewer(question);
+  await g.advance(STABILITY_MS + 200);
+  assert.deepEqual(g.state.dropped, []);
   await g.advance(STABILITY_MS + RETRY_TTL_MS + 1000);
   assert.deepEqual(g.texts(), []);
   assert.ok(g.state.skips.includes('engine_busy_or_cooling'));
+  assert.equal(DROPPED_QUESTION_NOTICE, true);
+  assert.deepEqual(g.state.dropped.map((q) => q.text), [question]);
+  assert.equal(g.state.dropped[0].id, g.state.events.find((e) => e.skipReason === 'engine_busy_or_cooling').questionId);
   assert.equal(g.clock.pendingCount(), 0, 'no leaked retry timer');
 });
 
@@ -688,6 +697,8 @@ test('onEngineIdle with nothing parked is inert, and a superseded park never fir
   await flush(); await flush();
   assert.deepEqual(g.texts(), [], 'the park died with the interviewer resuming');
   assert.ok(g.state.skips.includes('superseded_while_parked'), `a dropped park must say so (skips: ${g.state.skips.join(',')})`);
+  await g.advance(RETRY_TTL_MS + 1000);
+  assert.deepEqual(g.state.dropped, []);
 });
 
 test('a park dropped by supersession says so — never a silent exit (live session 2026-09-03, 13-q6)', async () => {

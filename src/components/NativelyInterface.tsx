@@ -7822,6 +7822,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }),
     );
 
+    cleanups.push(
+      window.electronAPI.onAutoAnswerDropped((question) => {
+        const text = `${chatFailureT.current('Auto-answer missed a question while the previous answer was loading:')} “${question}”`;
+        const notice: Message = { id: genMessageId(), role: 'system', text, note: { kind: 'noneYet', alone: true, text } };
+        setMessages((prev) => {
+          // Legacy token handlers still expect the streaming row to be last.
+          const insertAt = prev.findLastIndex((message) => !message.isStreaming) + 1;
+          return [...prev.slice(0, insertAt), notice, ...prev.slice(insertAt)];
+        });
+      }),
+    );
+
     // AI Suggestions from native audio (legacy)
     cleanups.push(
       window.electronAPI.onSuggestionProcessingStart(() => {

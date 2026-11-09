@@ -428,6 +428,7 @@ export interface ElectronAPI {
 
   // Native Audio Service Events
   onAutoAnswerSttStall: (callback: () => void) => () => void
+  onAutoAnswerDropped: (callback: (question: string) => void) => () => void
   onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean; timestamp?: number }) => void) => () => void
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => () => void
   onNativeAudioConnected: (callback: () => void) => () => void
