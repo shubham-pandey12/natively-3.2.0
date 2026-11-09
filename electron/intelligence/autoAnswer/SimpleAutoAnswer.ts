@@ -40,8 +40,9 @@ import {
 } from './AutoAnswerJudge';
 import { isMidWordCut, joinTranscriptParts, normalizeForCompare, tokenContainment } from './AutoAnswerText';
 import type { AutoAnswerThresholds } from './AutoAnswerPolicy';
-import { DEFAULT_THRESHOLDS } from './AutoAnswerPolicy';
+import { resolveAutoAnswerThresholds } from '../../context-intelligence/policies/mode-policy-registry';
 import type { AutoAnswerQuestion, AutoAnswerTelemetryEvent } from './AutoAnswerTypes';
+import type { WhatToSayOutcome } from '../../../src/types/whatToSayOutcome';
 
 /** Interviewer-side prefilter: a candidate that is nothing but acknowledgements never costs a judge call. */
 export const USER_BACKCHANNEL = /^(?:(?:yeah|yes|yep|yup|ya|mm-?hm+|mhm+|uh-?huh|ok(?:ay)?|right|sure|cool|got it|i see|nice|great|perfect|exactly|interesting|makes sense|sounds good|true|correct|wow|oh|ah|hm+|haha+|alright|of course|fair enough|no problem|totally|absolutely|definitely|indeed|good|fine)[\s,.!?-]*){1,4}$/i;
@@ -70,9 +71,7 @@ export const ENDPOINT_CONFIRM_MS = 350;
 /** Below this many NEW words (and no '?') we wait for more speech instead of calling. */
 export const MIN_NEW_WORDS = 4;
 /**
- * Fire at anything above this. The offer card is gone, so this is the only
- * line left in the dispatch decision — above it the answer is drafted, below
- * it nothing happens.
+ * Minimum safety floor. A verdict must also reach the resolved mode threshold.
  *
  * 0.20 (user, 2026-08-25) → 0.30 (user, 2026-08-26).
  *
@@ -199,9 +198,10 @@ export const HELD_MAX_AGE_MS = 15_000;
  * finals-only), so a verdict it invalidated is still precisely about the text
  * on the table.
  */
-/** Busy-engine retry cadence and give-up. */
+/** Queued positive verdicts expire 30 s from candidate arrival; raw utterances retain their 90 s assembly window. */
 export const RETRY_MS = 500;
-export const RETRY_TTL_MS = 8000;
+export const RETRY_TTL_MS = 30_000;
+export const MAX_PENDING_QUESTIONS = 2;
 /**
  * Pending interviewer finals older than this no longer belong to the current
  * thought. Raised 30s -> 90s on 2026-08-25: a coding-interview problem
@@ -249,6 +249,13 @@ export function isSameUtterance(interim: string, final: string): boolean {
     return tokenContainment(head, final) >= STALL_SAME_CONTAINMENT;
 }
 
+export interface AutoAnswerTerminalOutcome {
+    questionId: string;
+    text: string;
+    reason: 'stale' | 'judge_failed' | 'dispatch_failed' | 'superseded';
+    meetingGeneration: number;
+}
+
 export interface SimpleAutoAnswerHost {
     isEnabled(): boolean;
     isMeetingActive(): boolean;
@@ -264,7 +271,7 @@ export interface SimpleAutoAnswerHost {
     answerStreamActive?(): boolean;
     /** Hot window for judge context (finalized turns, both speakers). */
     recentTurns(): TranscriptTurn[];
-    dispatch(question: AutoAnswerQuestion, options: { reuseSpeculative: boolean }): void | Promise<unknown>;
+    dispatch(question: AutoAnswerQuestion, options: { reuseSpeculative: boolean }): void | Promise<WhatToSayOutcome['status'] | void>;
     offer?(question: AutoAnswerQuestion): void;
     retractOffer?(questionId: string, reason: string): void;
     /** See answerStreamActive: retired 2026-09-03, supplied but never called. */
@@ -292,6 +299,7 @@ export interface SimpleAutoAnswerHost {
     modeName?(): string | null;
     /** The USER's name, so the judge can tell an ask to them from one to a teammate. */
     userName?(): string | null;
+    terminal?(outcome: AutoAnswerTerminalOutcome): void;
     telemetry?(event: AutoAnswerTelemetryEvent): void;
     log?(line: string): void;
     /**
@@ -351,6 +359,7 @@ export class SimpleAutoAnswerEngine {
     private lastInterviewerAt = 0;
     private retryTimer: ClockTimer | null = null;
     private judgeSeq = 0;
+    private lifecycle = 0;
     /** Aborts the judge call in flight; nulled when it settles or is superseded. */
     private judgeAbort: AbortController | null = null;
     private sequence = 0;
@@ -361,8 +370,9 @@ export class SimpleAutoAnswerEngine {
     private feedbackTimer: ClockTimer | null = null;
     /** When the last prefetch fired, for PREFETCH_MIN_INTERVAL_MS pacing. */
     private lastPrefetchAt: number | null = null;
-    /** A dispatch waiting on a busy engine, so onEngineIdle can wake it immediately. */
-    private parkedAttempt: (() => void) | null = null;
+    private queued: AutoAnswerQuestion[] = [];
+    private dispatching: AutoAnswerQuestion | null = null;
+    private judgeRetryTimer: ClockTimer | null = null;
     /** A positive verdict superseded by still-arriving transcript — see HELD_MAX_AGE_MS. */
     private held: {
         id: string; key: string; text: string;
@@ -377,15 +387,23 @@ export class SimpleAutoAnswerEngine {
     constructor(
         private readonly host: SimpleAutoAnswerHost,
         private readonly clock: Clock = systemClock,
-        thresholds: AutoAnswerThresholds = DEFAULT_THRESHOLDS,
+        thresholds: AutoAnswerThresholds = resolveAutoAnswerThresholds('technical-interview'),
     ) {
         this.thresholds = thresholds;
     }
 
-    setThresholds(t: AutoAnswerThresholds): void { this.thresholds = t; }
+    setThresholds(t: AutoAnswerThresholds): void {
+        this.reset('superseded');
+        this.thresholds = t;
+    }
+
+    private passesThreshold(answerability: number): boolean {
+        return answerability > ANSWER_FLOOR && answerability >= this.thresholds.autoThreshold;
+    }
 
     /** Every supersede goes through here so the telemetry can name the cause. */
     private bumpJudgeSeq(cause: NonNullable<AutoAnswerTelemetryEvent['supersededBy']>): void {
+        if (this.judgeRetryTimer !== null) { this.clock.clearTimeout(this.judgeRetryTimer); this.judgeRetryTimer = null; }
         this.judgeSeq++;
         this.judgeSeqCause = cause;
         // The in-flight verdict is superseded — stop paying for it.
@@ -395,15 +413,12 @@ export class SimpleAutoAnswerEngine {
     onMeetingStart(): void { this.reset(); }
     onMeetingStop(): void { this.reset(); }
     /**
-     * The engine went idle. A dispatch parked behind it should go NOW rather
+     * The engine went idle. Fresh queued questions can dispatch now rather
      * than wait out the rest of its 500 ms poll — measured on a real interview,
      * the poll was adding most of a second on top of an already 6-second wait.
      */
     onEngineIdle(): void {
-        const parked = this.parkedAttempt;
-        if (!parked) return;
-        this.clearRetry();
-        parked();
+        this.drainQueue();
     }
 
     /** Provider says the interviewer's turn ended: confirm the stop sooner. */
@@ -527,7 +542,7 @@ export class SimpleAutoAnswerEngine {
         this.pending = this.pending.filter(p => now - p.at <= PENDING_MAX_AGE_MS);
         // Finals arrive in time order, so aged-out ones are always a prefix.
         this.judgedParts = Math.max(0, this.judgedParts - (before - this.pending.length));
-        if (this.pending.length === 0) return;
+        if (this.pending.length === 0) { if (!early) this.drainQueue(); return; }
         const candidate = joinTranscriptParts(this.pending);
         const key = normalizeForCompare(candidate);
         const words = candidate.split(/\s+/).filter(Boolean).length;
@@ -626,8 +641,9 @@ export class SimpleAutoAnswerEngine {
         } catch { /* prefetch is an optimisation; never break the pipeline */ }
     }
 
-    private async consult(id: string, candidate: string, committedAt: number, early = false): Promise<void> {
+    private async consult(id: string, candidate: string, committedAt: number, early = false, attempt = 0, candidateAt = this.pending[this.judgedParts]?.at ?? committedAt): Promise<void> {
         const seq = this.judgeSeq;
+        const lifecycle = this.lifecycle;
         const generation = this.host.meetingGeneration();
         let timer: ClockTimer | null = null;
         let timedOut = false;
@@ -683,7 +699,7 @@ export class SimpleAutoAnswerEngine {
         // single one of them had said 'answer'.
         const verdict = outcome === 'verdict' ? parseJudgeVerdict(raw, candidate) : null;
         // Superseded: more interviewer speech arrived, the meeting moved on.
-        if (seq !== this.judgeSeq || !this.host.isMeetingActive() || this.host.meetingGeneration() !== generation) {
+        if (lifecycle !== this.lifecycle || seq !== this.judgeSeq || !this.host.isMeetingActive() || this.host.meetingGeneration() !== generation) {
             this.emit({
                 name: 'auto_answer_judged', questionId: id, judgeOutcome: 'stale', judgeMs,
                 supersededBy: !this.host.isMeetingActive() ? 'meeting_ended'
@@ -701,10 +717,10 @@ export class SimpleAutoAnswerEngine {
             // Defer, don't discard. Only a POSITIVE verdict is held: a silent
             // one must not veto the grown candidate, because the ask may be in
             // the very words that superseded it.
-            if (verdict && this.host.isMeetingActive() && this.host.meetingGeneration() === generation) {
+            if (verdict && lifecycle === this.lifecycle && this.host.isMeetingActive() && this.host.meetingGeneration() === generation) {
                 const superseded = routeForVerdict(verdict);
                 if (superseded.route === 'evaluate' && superseded.action === 'answer'
-                    && superseded.answerability > ANSWER_FLOOR) {
+                    && this.passesThreshold(superseded.answerability)) {
                     this.held = {
                         id, key: normalizeForCompare(candidate),
                         text: superseded.questionText ?? candidate,
@@ -717,10 +733,29 @@ export class SimpleAutoAnswerEngine {
         if (!verdict) {
             if (outcome === 'verdict') outcome = 'unparseable';
             if (outcome !== 'absent') this.emit({ name: 'auto_answer_judged', questionId: id, judgeOutcome: outcome as 'timeout' | 'error' | 'unparseable', judgeMs });
-            // A transient judge failure must not silence the question forever
-            // (review 2026-08-25): clear the key so the next stoppage retries.
+            if (standInReplaced()) { this.lastJudgedKey = ''; this.arm(ENDPOINT_CONFIRM_MS); return; }
+            if (outcome !== 'absent') {
+                if (this.clock.now() - candidateAt >= RETRY_TTL_MS) {
+                    this.terminal(id, candidate, 'stale');
+                } else if (attempt < 2) {
+                    this.judgeRetryTimer = this.clock.setTimeout(() => {
+                        this.judgeRetryTimer = null;
+                        if (lifecycle === this.lifecycle && seq === this.judgeSeq && this.host.isEnabled() && this.host.isMeetingActive()
+                            && this.host.meetingGeneration() === generation) {
+                            void this.consult(id, candidate, committedAt, early, attempt + 1, candidateAt);
+                        }
+                    }, RETRY_MS);
+                    return;
+                } else {
+                    this.terminal(id, candidate, 'judge_failed');
+                }
+                this.pending.splice(0, partsAtConsult);
+                this.judgedParts = 0;
+                this.lastJudgedKey = '';
+                return;
+            }
+            // An explicitly absent judge keeps the supported judge-off heuristic path.
             this.lastJudgedKey = '';
-            if (standInReplaced()) { this.arm(ENDPOINT_CONFIRM_MS); return; }
             // Near-legacy fallback: a question mark, or — on providers that
             // never guarantee punctuation — an interrogative-led utterance,
             // read per sentence from the finals no verdict has ruled on (the
@@ -773,11 +808,7 @@ export class SimpleAutoAnswerEngine {
             return;
         }
         const text = route.questionText ?? candidate;
-        // Answer or nothing. The judge decides, and the only number left in
-        // the decision is ANSWER_FLOOR — the per-mode bars no longer gate a
-        // dispatch, because the thing they used to demote to (the offer card)
-        // is gone.
-        if (route.action === 'answer' && route.answerability > ANSWER_FLOOR) {
+        if (route.action === 'answer' && this.passesThreshold(route.answerability)) {
             // An EARLY verdict was asked after EARLY_JUDGE_MS of quiet, which
             // is not enough to call the turn over. If the judge happened to be
             // fast enough that STABILITY_MS has still not elapsed, hold the
@@ -803,61 +834,96 @@ export class SimpleAutoAnswerEngine {
         }
     }
 
-    /** Dispatch now, or retry while the engine is busy — woken early by onEngineIdle. */
+    /** Positive verdicts own a snapshot, so later speech cannot invalidate or absorb them. */
     private deliver(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number): void {
-        const deadline = this.clock.now() + RETRY_TTL_MS;
-        const seqAtDeliver = this.judgeSeq;
-        const attempt = () => {
-            if (!this.host.isMeetingActive() || this.judgeSeq !== seqAtDeliver) {
-                // Live session 2026-09-03 (13-q6): a verdict of 1.0 was parked
-                // behind the engine's own prefetch, the next candidate bumped
-                // the sequence, and this branch exited with nothing — no
-                // telemetry, no log, no answer. A park was armed, so its death
-                // is an outcome and must be reported like every other one.
-                // Identity, not mere presence: deliver() arms a new retry timer
-                // without clearing the previous one, so a stale attempt closure
-                // can still fire while a NEWER, still-valid dispatch holds the
-                // park. Nulling that one here would cost it its onEngineIdle
-                // fast-wake and mis-attribute the drop to the wrong question.
-                const wasParked = this.parkedAttempt === attempt;
-                if (wasParked) this.parkedAttempt = null;
-                if (wasParked) {
-                    const reason = this.host.isMeetingActive() ? 'superseded_while_parked' : 'meeting_inactive';
-                    this.host.log?.(`[AutoAnswer:simple] parked dispatch for ${id} dropped: ${reason}${reason === 'superseded_while_parked' ? ` (by ${this.judgeSeqCause ?? 'unknown'})` : ''}`);
-                    this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: reason, answerability });
-                }
-                return;
+        if (!this.passesThreshold(answerability)) {
+            this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'low_answerability', answerability });
+            this.judgedParts = this.pending.length;
+            return;
+        }
+        const q = this.question(id, text, answerability, act, committedAt);
+        q.startedAt = this.pending[this.judgedParts]?.at ?? q.startedAt;
+        const promoted = this.pending.find(p => p.provisional);
+        this.stallAnswered = promoted ? { text: promoted.text, at: this.clock.now() } : null;
+        this.pending = [];
+        this.judgedParts = 0;
+        this.lastJudgedKey = '';
+        const key = normalizeForCompare(text);
+        if ((this.dispatching && normalizeForCompare(this.dispatching.text) === key)
+            || this.queued.some(queued => normalizeForCompare(queued.text) === key)) {
+            this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'duplicate' });
+            return;
+        }
+        this.queued.unshift(q);
+        if (this.queued.length > MAX_PENDING_QUESTIONS) {
+            const displaced = this.queued.pop()!;
+            this.terminal(displaced.id, displaced.text, 'superseded');
+        }
+        this.emit({ name: 'auto_answer_queued', questionId: id, queueDepth: this.queued.length });
+        this.drainQueue();
+    }
+
+    private terminal(id: string, text: string, reason: AutoAnswerTerminalOutcome['reason'] | 'meeting_ended', notify = true): void {
+        this.emit({ name: 'auto_answer_terminal', questionId: id, terminalReason: reason });
+        if (notify && reason !== 'meeting_ended' && this.host.isEnabled() && this.host.isMeetingActive()) {
+            this.host.terminal?.({ questionId: id, text, reason, meetingGeneration: this.host.meetingGeneration() });
+        }
+    }
+
+    private drainQueue(): void {
+        this.clearRetry();
+        if (!this.host.isEnabled() || !this.host.isMeetingActive()) {
+            for (const q of this.queued.splice(0)) this.terminal(q.id, q.text, 'meeting_ended', false);
+            return;
+        }
+        this.queued = this.queued.filter(q => {
+            if (q.meetingGeneration !== this.host.meetingGeneration()) {
+                this.terminal(q.id, q.text, 'meeting_ended', false);
+                return false;
             }
-            if (!this.host.engineAccepting()) {
-                if (this.clock.now() >= deadline) {
-                    this.parkedAttempt = null;
-                    this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling' });
-                    return;
-                }
-                this.parkedAttempt = attempt;
-                this.retryTimer = this.clock.setTimeout(attempt, RETRY_MS);
-                return;
+            if (this.clock.now() - q.startedAt >= RETRY_TTL_MS) {
+                this.terminal(q.id, q.text, 'stale');
+                return false;
             }
-            this.parkedAttempt = null;
-            const q = this.question(id, text, answerability, act, committedAt);
-            // If the engine already has an answer in flight for THIS question
-            // (our prefetch, or its own interim speculation keyed by
-            // noteCandidate), adopt it instead of starting over — that is the
-            // whole point of prefetching.
-            const snapshot = this.host.speculativeSnapshot?.();
-            const reuseSpeculative = Boolean(snapshot && snapshot.questionId === id && snapshot.text);
-            this.lastAnsweredText = text;
-            const promoted = this.pending.find(p => p.provisional);
-            this.stallAnswered = promoted ? { text: promoted.text, at: this.clock.now() } : null;
-            this.pending = [];
-            this.judgedParts = 0;
-            this.lastJudgedKey = '';
-            this.emit({ name: 'auto_answer_decision', questionId: id, action: 'auto', answerability });
-            if (reuseSpeculative) this.host.log?.(`[AutoAnswer:simple] reusing the prefetched answer for ${id}`);
-            this.armFeedback(id, act, answerability);
-            void this.host.dispatch(q, { reuseSpeculative });
+            return true;
+        });
+        if (!this.queued.length) return;
+        // Wait for new speech to settle and its judge to finish before selecting the newest verdict.
+        if (this.dispatching || this.timer !== null || this.earlyTimer !== null || this.judgeAbort !== null
+            || this.judgeRetryTimer !== null || !this.host.engineAccepting()) {
+            this.retryTimer = this.clock.setTimeout(() => { this.retryTimer = null; this.drainQueue(); }, RETRY_MS);
+            return;
+        }
+        const q = this.queued.shift()!;
+        this.dispatching = q;
+        const snapshot = this.host.speculativeSnapshot?.();
+        const reuseSpeculative = Boolean(snapshot && snapshot.questionId === q.id && snapshot.text);
+        this.emit({ name: 'auto_answer_decision', questionId: q.id, action: 'auto', answerability: q.answerability });
+        this.armFeedback(q.id, q.dialogueAct, q.answerability);
+        const finish = (status: WhatToSayOutcome['status'] | void) => {
+            if (this.dispatching !== q) return;
+            this.dispatching = null;
+            if (q.meetingGeneration !== this.host.meetingGeneration() || !this.host.isMeetingActive()) return;
+            if (status === 'failed' || status === 'cancelled') {
+                if (this.feedbackPending?.id === q.id) this.clearFeedback();
+                if (status === 'failed') this.terminal(q.id, q.text, 'dispatch_failed');
+            } else {
+                this.lastAnsweredText = q.text;
+            }
+            this.drainQueue();
         };
-        attempt();
+        try {
+            const completion = this.host.dispatch(q, { reuseSpeculative });
+            if (completion) void completion.then(finish, () => finish('failed'));
+            else {
+                finish(undefined);
+                return;
+            }
+        } catch {
+            finish('failed');
+            return;
+        }
+        if (this.queued.length) this.retryTimer = this.clock.setTimeout(() => { this.retryTimer = null; this.drainQueue(); }, RETRY_MS);
     }
 
     private question(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number): AutoAnswerQuestion {
@@ -924,7 +990,10 @@ export class SimpleAutoAnswerEngine {
         if (this.retryTimer !== null) { this.clock.clearTimeout(this.retryTimer); this.retryTimer = null; }
     }
 
-    private dropParked(): void { this.parkedAttempt = null; this.clearRetry(); }
+    private dropParked(reason: 'meeting_ended' | 'superseded'): void {
+        this.clearRetry();
+        for (const q of this.queued.splice(0)) this.terminal(q.id, q.text, reason, false);
+    }
 
     /**
      * Hand the host the candidate-to-be: the pending finals plus the interim
@@ -1014,9 +1083,11 @@ export class SimpleAutoAnswerEngine {
         return false;
     }
 
-    private reset(): void {
+    private reset(reason: 'meeting_ended' | 'superseded' = 'meeting_ended'): void {
+        this.lifecycle++;
+        this.dispatching = null;
         this.disarm();
-        this.dropParked();
+        this.dropParked(reason);
         this.clearFeedback();
         this.pending = [];
         this.judgedParts = 0;

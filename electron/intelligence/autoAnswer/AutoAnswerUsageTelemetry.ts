@@ -158,6 +158,7 @@ export class AutoAnswerUsageTelemetry {
                     if (event.judgeOutcome === 'verdict') q.judgeMs = ms(event.judgeMs);
                     return;
                 }
+                case 'auto_answer_terminal':
                 case 'auto_answer_ignored': {
                     // Before a candidate forms (incomplete, backchannel, duplicate)
                     // nothing was judged; only a candidate's silence counts.

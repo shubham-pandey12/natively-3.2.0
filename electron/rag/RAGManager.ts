@@ -504,10 +504,13 @@ export class RAGManager {
      * Start JIT indexing for a live meeting.
      * Call when a meeting session begins.
      */
-    startLiveIndexing(meetingId: string): void {
+    private retainedLiveMeetingId: string | null = null;
+
+    startLiveIndexing(meetingId: string, opts: { preserveExisting?: boolean } = {}): void {
         // Set before the readiness check: a meeting is live whether or not it
         // can be indexed as it goes (see isMeetingLive).
         this._meetingLive = true;
+        this.retainedLiveMeetingId = opts.preserveExisting ? meetingId : null;
         // The bundled local model counts as not ready until its first embed, so
         // a user on it gets no live semantic index, keywords only. Starting it
         // anyway was measured on 2026-10-15 (3-hour meeting, 15 questions, real
@@ -534,7 +537,7 @@ export class RAGManager {
         // live session, and it is safe: these JIT rows are always disposable
         // (post-meeting RAG re-indexes under the real meeting id).
         try {
-            this.deleteMeetingData(meetingId);
+            if (!opts.preserveExisting) this.deleteMeetingData(meetingId);
         } catch (e) {
             console.warn('[RAGManager] Failed to purge stale live-indexing data before start:', e);
         }
@@ -549,7 +552,18 @@ export class RAGManager {
             console.warn('[RAGManager] Failed to create transient meeting row for live indexing', e);
         }
 
-        this.liveIndexer.start(meetingId);
+        let nextChunkIndex = 0;
+        if (opts.preserveExisting) {
+            try {
+                const row = this.db.prepare('SELECT MAX(chunk_index) AS lastIndex FROM chunks WHERE meeting_id = ?')
+                    .get(meetingId) as { lastIndex: number | null };
+                nextChunkIndex = (row.lastIndex ?? -1) + 1;
+            } catch (e) {
+                console.warn('[RAGManager] Could not read saved chunk positions, skipping resumed live indexing:', e);
+                return;
+            }
+        }
+        this.liveIndexer.start(meetingId, nextChunkIndex);
     }
 
     /**
@@ -568,6 +582,7 @@ export class RAGManager {
      */
     async stopLiveIndexing(): Promise<void> {
         this._meetingLive = false;
+        this.retainedLiveMeetingId = null;
         await this.liveIndexer.stop();
     }
 
@@ -647,6 +662,7 @@ export class RAGManager {
     }
 
     getLiveMeetingId(): string | null {
+        if (this._meetingLive && this.retainedLiveMeetingId) return this.retainedLiveMeetingId;
         if (!this.liveIndexer.isRunning() || !this.liveIndexer.hasIndexedChunks()) return null;
         return this.liveIndexer.getActiveMeetingId();
     }

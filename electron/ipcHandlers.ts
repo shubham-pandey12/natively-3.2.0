@@ -19963,6 +19963,18 @@ export function initializeIpcHandlers(appState: AppState): void {
       const wasActive = activeMode?.id === id;
       mgr.deleteMode(id);
       if (wasActive) {
+        // Deleting the active mode has the same stream/context boundary as clearing it.
+        const { abortAndInvalidateChatStreams } = require('./services/chatStreamRegistry') as typeof import('./services/chatStreamRegistry');
+        abortAndInvalidateChatStreams(_chatStreamsBySender);
+        _phoneChatStreamController?.cancel('The meeting or mode changed before this answer finished.');
+        const intelligence = appState.getIntelligenceManager();
+        intelligence.supersedeLiveAnswers();
+        intelligence.clearSessionContext();
+        intelligence.clearDynamicActionContext();
+        _manualConversationMemory.clearAllSessions();
+        _manualCodingState.clearAllSessions();
+        require('./context-intelligence/question/conversation-state-store').clearConversationState();
+        appState.applyAutoAnswerThresholds?.(null);
         BrowserWindow.getAllWindows().forEach((win) => {
           if (!win.isDestroyed()) {
             win.webContents.send('mode-changed', { id: null, name: null, fileCount: 0, indexedCount: 0 });
@@ -21680,6 +21692,18 @@ export function initializeIpcHandlers(appState: AppState): void {
   // pipeline (no stubbing of retrieval or generation).
   if (process.env.NATIVELY_E2E === '1') {
     console.warn('[E2E] NATIVELY_E2E=1 — registering test-only IPC handlers (must never ship enabled).');
+    safeHandle('__e2e__:auto-answer-missed', async () => {
+      if (app.isPackaged) return { success: false };
+      const overlay = appState.getWindowHelper().getOverlayWindow();
+      if (!overlay || overlay.isDestroyed()) return { success: false };
+      overlay.webContents.send('auto-answer-missed', {
+        questionId: 'e2e-missed-question',
+        text: 'Synthetic question for the overlay smoke test',
+        reason: 'judge_failed',
+        meetingGeneration: 0,
+      });
+      return { success: true };
+    });
 
     // Parser-faithful benchmark ingress. Unlike the older content-based helper
     // below, this runs the exact production PDF/DOCX/text parsing use case. The

@@ -170,6 +170,7 @@ export interface AutoAnswerCandidate {
 /** Structured telemetry (V2 §29). NO transcript text, by construction. */
 export type AutoAnswerTelemetryEventName =
     | 'auto_answer_candidate'
+    | 'auto_answer_terminal'
     | 'auto_answer_endpoint'
     | 'auto_answer_decision'
     | 'auto_answer_ignored'
@@ -198,6 +199,7 @@ export interface AutoAnswerTelemetryEvent {
     msFromLastSpeechToDecision?: number;
     msFromDecisionToFirstToken?: number;
     queueDepth?: number;
+    terminalReason?: 'stale' | 'judge_failed' | 'dispatch_failed' | 'superseded' | 'meeting_ended';
     skipReason?: AutoAnswerSkipReason;
     state?: AutoAnswerState;
     action?: AutoAnswerPolicyAction;

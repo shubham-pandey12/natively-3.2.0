@@ -327,7 +327,7 @@ import {
   pinnedViewportBudget,
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
-import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent } from '../lib/chatStreamGuard.mjs';
+import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, shouldDiscardLiveAnswer, resolveChatStreamSurfaceError, isStaleDesktopChatEvent } from '../lib/chatStreamGuard.mjs';
 import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
 import {
@@ -2272,6 +2272,31 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => () => screenshotRetryRef.current.clear(), []);
 
 
+  const [missedQuestions, setMissedQuestions] = useState<Array<{ questionId: string; text: string; reason: string; meetingGeneration: number; error?: string }>>([]);
+  const [retryingMissedQuestionId, setRetryingMissedQuestionId] = useState<string | null>(null);
+  const missedNoticeEpochRef = useRef(0);
+  useEffect(() => window.electronAPI?.onAutoAnswerMissed?.((notice) => {
+    if (!notice?.questionId || !notice.text || !['stale', 'judge_failed', 'dispatch_failed', 'superseded'].includes(notice.reason)) return;
+    setMissedQuestions((prev) => [...prev.filter((q) => q.questionId !== notice.questionId), notice]);
+  }), []);
+  const retryMissedQuestion = async (notice: typeof missedQuestions[number]) => {
+    if (retryingMissedQuestionId) return;
+    const epoch = missedNoticeEpochRef.current;
+    setRetryingMissedQuestionId(notice.questionId);
+    try {
+      const result = await window.electronAPI.generateWhatToSay(notice.text);
+      if (epoch !== missedNoticeEpochRef.current) return;
+      setMissedQuestions((prev) => result.answer && !result.error && result.outcome?.status !== 'failed'
+        ? prev.filter((q) => q.questionId !== notice.questionId)
+        : prev.map((q) => q.questionId === notice.questionId ? { ...q, error: 'Could not generate an answer. Try again.' } : q));
+    } catch {
+      if (epoch !== missedNoticeEpochRef.current) return;
+      setMissedQuestions((prev) => prev.map((q) => q.questionId === notice.questionId ? { ...q, error: 'Could not generate an answer. Try again.' } : q));
+    } finally {
+      if (epoch === missedNoticeEpochRef.current) setRetryingMissedQuestionId(null);
+    }
+  };
+
   // Settings State with Persistence
   const [isUndetectable, setIsUndetectable] = useState(false);
   // Direct Assist is a persisted SettingsManager flag (default OFF, with a
@@ -2313,6 +2338,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const unsub = window.electronAPI?.onModeChanged?.(
       (data: { id: string | null; name: string | null }) => {
         setActiveModeLabel(data.name);
+        missedNoticeEpochRef.current++;
+        setMissedQuestions([]);
+        setRetryingMissedQuestionId(null);
         // Defect G (2026-08-01): a mode switch must tear down in-flight chat
         // UI state, not just relabel the badge — otherwise an answer planned
         // under the old mode keeps its placeholder alive and lands visually
@@ -5585,6 +5613,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (!window.electronAPI?.onSessionReset) return;
     const unsubscribe = window.electronAPI.onSessionReset((payload) => {
       console.log('[NativelyInterface] Resetting session state...');
+      missedNoticeEpochRef.current++;
+      setMissedQuestions([]);
+      setRetryingMissedQuestionId(null);
       clearScreenshotRetry();
       lastSpeechBySpeakerRef.current.clear();
       window.electronAPI?.cancelChatStream?.();
@@ -7930,9 +7961,19 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Clear streaming refs FIRST (same ordering rationale as the null-feedback
     // path) so a late token batch can't append onto a row we're removing.
     cleanups.push(
-      window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(() => {
+      window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.((data) => {
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
+        if (!shouldDiscardLiveAnswer(liveAnswerGenIdRef.current, data.generationId)) return;
+        if (streamingIntentRef.current !== 'what_to_answer') return;
+        const rowId = streamingMsgIdRef.current;
+        if (pendingFinalizeRef.current?.msgId === rowId) {
+          pendingFinalizeRef.current = null;
+          if (pendingFinalizeTimeoutRef.current !== null) {
+            clearTimeout(pendingFinalizeTimeoutRef.current);
+            pendingFinalizeTimeoutRef.current = null;
+          }
+        }
         setIsProcessing(false);
         if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
         streamingNodeRef.current = null;
@@ -7949,7 +7990,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           cancelAnimationFrame(streamingCodeRafRef.current);
           streamingCodeRafRef.current = null;
         }
-        setMessages((prev) => discardStreamingByIntentMessages(prev, 'what_to_answer'));
+        setMessages((prev) => discardStreamingByIntentMessages(prev, 'what_to_answer', rowId));
       }) ?? (() => {}),
     );
 
@@ -12286,6 +12327,25 @@ Provide only the answer, nothing else.`;
                   }
                 />
               )}
+              </ChromeFold>
+
+              <ChromeFold show={missedQuestions.length > 0} overlayVisible={isExpanded} requestHeightMotion={requestChromeHeightMotion} innerClassName="pt-3 pb-1" testId="fold-missed-question">
+                {missedQuestions.map((notice) => (
+                  <OverlayBanner
+                    key={notice.questionId}
+                    className="mx-4"
+                    tone="warning"
+                    title={t('Missed a question — tap to generate')}
+                    message={notice.error ?? notice.text}
+                    onDismiss={() => setMissedQuestions((prev) => prev.filter((q) => q.questionId !== notice.questionId))}
+                    dismissLabel={t('Dismiss')}
+                    actions={
+                      <OverlayBannerButton variant="primary" disabled={retryingMissedQuestionId !== null} onClick={() => void retryMissedQuestion(notice)}>
+                        {t('Generate')}
+                      </OverlayBannerButton>
+                    }
+                  />
+                ))}
               </ChromeFold>
 
               {/* Transcription failed or is reconnecting. These two used to

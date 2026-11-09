@@ -53,7 +53,7 @@ function makeSimple(judgeImpl, overrides = {}) {
     log: () => {},
     ...(judgeImpl ? { judgeCandidate: (req, signal) => { state.judgeCalls.push(req); state.judgeSignals = [...(state.judgeSignals || []), signal]; return judgeImpl(req, state.judgeCalls.length); } } : {}),
   };
-  const engine = new SimpleAutoAnswerEngine(host, clock);
+  const engine = new SimpleAutoAnswerEngine(host, clock, overrides.thresholds);
   engine.onMeetingStart();
   const seg = (speaker, text, final = true) => ({ speaker, text, final, timestamp: clock.now(), origin: 'stt' });
   const interviewer = (text, final = true) => { if (final) state.turns.push({ role: 'interviewer', text, timestamp: clock.now() }); engine.ingest(seg('interviewer', text, final)); };
@@ -147,22 +147,22 @@ test('prefilter: backchannels and tiny fragments never cost a call', async () =>
   assert.deepEqual(h.texts(), []);
 });
 
-test('above ANSWER_FLOOR it answers; at or below it stays silent — no card, no asking', async () => {
+test('a permissive mode still cannot bypass ANSWER_FLOOR — no card, no asking', async () => {
   const { ANSWER_FLOOR } = Simple;
-  const h = makeSimple(async () => YES({ answerability: ANSWER_FLOOR + 0.01 }));
+  const h = makeSimple(async () => YES({ answerability: ANSWER_FLOOR + 0.01 }), { thresholds: { autoThreshold: 0, offerThreshold: 0, speculationThreshold: 0 } });
   h.interviewer('Can you see my screen okay before we start the interview?');
   await h.advance(STABILITY_MS + 300);
   assert.equal(h.texts().length, 1, 'a barely-confident ask is still answered');
   assert.deepEqual(h.state.offered, [], 'nothing is ever offered');
 
-  const g = makeSimple(async () => YES({ answerability: ANSWER_FLOOR }));
+  const g = makeSimple(async () => YES({ answerability: ANSWER_FLOOR }), { thresholds: { autoThreshold: 0, offerThreshold: 0, speculationThreshold: 0 } });
   g.interviewer('Can you see my screen okay before we start the interview?');
   await g.advance(STABILITY_MS + 300);
   assert.deepEqual(g.texts(), [], 'at the floor exactly, silent');
   assert.ok(g.state.skips.includes('low_answerability'));
 });
 
-test('busy engine: retries and dispatches when it frees up; gives up after the TTL', async () => {
+test('busy engine: retries on availability and expires visibly after freshness TTL', async () => {
   const h = makeSimple(async () => YES(), { accepting: false });
   h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await h.advance(STABILITY_MS + 200);
@@ -175,7 +175,7 @@ test('busy engine: retries and dispatches when it frees up; gives up after the T
   g.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await g.advance(STABILITY_MS + RETRY_TTL_MS + 1000);
   assert.deepEqual(g.texts(), []);
-  assert.ok(g.state.skips.includes('engine_busy_or_cooling'));
+  assert.ok(g.state.events.some(e => e.name === 'auto_answer_terminal' && e.terminalReason === 'stale'));
   assert.equal(g.clock.pendingCount(), 0, 'no leaked retry timer');
 });
 
@@ -200,7 +200,7 @@ test('the user\'s own speech never suppresses or cancels an automatic answer (us
   assert.deepEqual(h.state.cancelled, [], 'and never cancels the streaming answer');
 });
 
-test('judge unavailable → only a trailing ? fires (near-legacy fallback, no fire-on-everything)', async () => {
+test('explicit judge-off fallback remains supported; a failed judge never guesses', async () => {
   const h = makeSimple(null);                               // no judge hook at all
   h.interviewer('So the way this works is that every day a word is picked.');
   await h.advance(STABILITY_MS + 200);
@@ -212,7 +212,9 @@ test('judge unavailable → only a trailing ? fires (near-legacy fallback, no fi
   const g = makeSimple(async () => { throw new Error('quota'); });  // judge erroring
   g.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await g.advance(STABILITY_MS + 300);
-  assert.equal(g.texts().length, 1, 'error → ? fallback');
+  assert.deepEqual(g.texts(), [], 'provider errors must not guess from punctuation');
+  assert.equal(g.state.judgeCalls.length, 3, 'initial attempt plus two retries');
+  assert.ok(g.state.events.some(e => e.name === 'auto_answer_terminal' && e.terminalReason === 'judge_failed'));
 });
 
 test('a provider endpoint confirms the stop early', async () => {
@@ -349,8 +351,7 @@ test('review#4: punctuation provenance — no-\'?\' is negative evidence only wh
 
 test('the offer card is gone: nothing is ever offered or retracted, whatever the score', async () => {
   // Was: "replaced / expired / topic-change / meeting-stop all retract the
-  // card". There is no card to retract now — every real ask above the floor is
-  // simply answered.
+  // card". There is no card to retract; only asks above the resolved mode bar answer.
   const offered = [], retracted = [];
   const h = makeSimple(async (req, n) => YES({ answerability: n === 1 ? 0.5 : 0.95 }));
   h.engine.host.offer = (q) => offered.push(q);
@@ -366,7 +367,7 @@ test('the offer card is gone: nothing is ever offered or retracted, whatever the
 
   assert.deepEqual(offered, [], 'no card is ever rendered');
   assert.deepEqual(retracted, [], 'and so none is ever retracted');
-  assert.equal(h.texts().length, 2, 'both asks were answered outright');
+  assert.equal(h.texts().length, 1, 'only the ask above the mode threshold was answered');
 });
 
 // ── Latency work (2026-08-25): prefetch, speculative reuse, endpoint confirm ──
@@ -572,14 +573,15 @@ const ACT = (action, over = {}) => JSON.stringify({
   question_text: null, ...over,
 });
 
-test('a reply that still says "offer" is answered — doubt never resolves into silence', async () => {
+test('a legacy offer below the mode bar stays silent, without rendering a card', async () => {
   const h = makeSimple(async () => JSON.stringify({
     is_ask: true, directed_at_user: true, complete: true, act: 'question',
     action: 'offer', answerability: 0.5, question_text: null,
   }));
   h.interviewer('Can you see my screen okay before we start the interview?');
   await h.advance(STABILITY_MS + 300);
-  assert.equal(h.texts().length, 1, 'a retired "offer" verdict answers rather than asking');
+  assert.equal(h.texts().length, 0, 'a retired offer cannot bypass the mode threshold');
+  assert.ok(h.state.skips.includes('low_answerability'));
   assert.deepEqual(h.state.offered, []);
 });
 
@@ -671,7 +673,7 @@ test('a dispatch parked on a busy engine fires the instant the engine reports id
   assert.equal(h.clock.pendingCount() > 0, true, 'only the feedback window remains armed');
 });
 
-test('onEngineIdle with nothing parked is inert, and a superseded park never fires late', async () => {
+test('onEngineIdle is inert with no queue, and newer speech delays rather than destroys a positive verdict', async () => {
   const h = makeSimple(async () => YES());
   h.engine.onEngineIdle();
   assert.deepEqual(h.texts(), []);
@@ -683,11 +685,14 @@ test('onEngineIdle with nothing parked is inert, and a superseded park never fir
   g.state.accepting = true;
   g.engine.onEngineIdle();
   await flush(); await flush();
-  assert.deepEqual(g.texts(), [], 'the park died with the interviewer resuming');
-  assert.ok(g.state.skips.includes('superseded_while_parked'), `a dropped park must say so (skips: ${g.state.skips.join(',')})`);
+  assert.deepEqual(g.texts(), [], 'do not dispatch into resumed speech');
+  await g.advance(STABILITY_MS + 200);
+  g.engine.onEngineIdle();
+  assert.equal(g.texts().length, 1, 'retained verdict dispatches when speech settles');
+  assert.ok(!g.state.skips.includes('superseded_while_parked'));
 });
 
-test('a park dropped by supersession says so — never a silent exit (live session 2026-09-03, 13-q6)', async () => {
+test('newer finalized speech preserves both independent positive questions', async () => {
   // The real shape: verdict a=1.0 applied, engine busy with its own prefetch,
   // dispatch parked; 195 ms later the next candidate bumped the sequence and
   // the retry exited with no telemetry, no log, no answer.
@@ -698,7 +703,12 @@ test('a park dropped by supersession says so — never a silent exit (live sessi
   assert.ok(!h.state.skips.includes('superseded_while_parked'), 'nothing dropped yet');
   h.interviewer('And how does that interact with your caching layer?');   // new final supersedes
   await h.advance(RETRY_MS + 50);                                          // the retry poll runs
-  assert.equal(h.state.skips.filter(s => s === 'superseded_while_parked').length, 1, `skips: ${h.state.skips.join(',')}`);
+  assert.ok(!h.state.skips.includes('superseded_while_parked'));
+  await h.advance(STABILITY_MS + 200);
+  h.state.accepting = true;
+  h.engine.onEngineIdle();
+  await flush(); await flush();
+  assert.equal(h.texts().length, 2, 'both positive questions survived');
 });
 
 // ── deferred verdicts (live run 2026-08-25: 25 of 28 verdicts discarded) ─────
@@ -803,7 +813,7 @@ test('the dev content trace names the exact words judged, and the engine works w
     meetingGeneration: () => 1,
     engineAccepting: () => true,
     recentTurns: () => [],
-    dispatch: (q) => out.push(q),
+    dispatch: (q) => { out.push(q); },
     judgeCandidate: async () => YES(),
   }, clock);
   bare.onMeetingStart();

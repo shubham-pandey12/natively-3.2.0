@@ -401,6 +401,7 @@ describe('resuming a saved meeting (database)', () => {
             flushInterimTranscript() {},
             getSessionStartTime: () => start,
             markMeetingStart: (at) => { start = at; },
+            restoreTranscriptForResume: () => {}, // This fixture supplies only new speech to the save path.
             getMeetingMetadata: () => meta,
             getPersistableTranscript: () => ls,
             getPersistableUsage: () => [],

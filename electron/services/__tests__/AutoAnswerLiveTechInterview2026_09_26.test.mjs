@@ -196,8 +196,10 @@ test('prefetch REPLACES an interim speculation on fewer words, and the dispatch 
     const snap = engine.getSpeculativeSnapshot();
     assert.equal(snap.questionId, '1-q7', 'the replaced run must not wipe the new slot');
     assert.match(String(snap.text), /and a thread\?/);
-    await engine.handleSuggestionTrigger(autoTrigger("What's the difference between a process and a thread?", 1, '1-q7'));
+    const dispatched = engine.handleSuggestionTrigger(autoTrigger("What's the difference between a process and a thread?", 1, '1-q7'));
+    await flush();
     release(2);
+    assert.equal(await dispatched, 'success');
     await untilIdle(engine); await flush();
     assert.equal(runs(), 2, 'adopted â€” no third generation');
     assert.equal(finals.length, 1);
@@ -212,8 +214,10 @@ test('prefetch CLAIMS an interim speculation that already covers the question â€
     await flush(); await flush();
     assert.equal(runs(), 1, 'the running speculation is claimed, not duplicated');
     assert.equal(engine.getSpeculativeSnapshot().questionId, '1-q8');
-    await engine.handleSuggestionTrigger(autoTrigger('How does a hash map handle collisions between keys?', 1, '1-q8'));
+    const dispatched = engine.handleSuggestionTrigger(autoTrigger('How does a hash map handle collisions between keys?', 1, '1-q8'));
+    await flush();
     release(1);
+    assert.equal(await dispatched, 'success');
     await untilIdle(engine); await flush();
     assert.equal(runs(), 1);
     assert.equal(finals.length, 1);

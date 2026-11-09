@@ -151,10 +151,10 @@ export function applyWhatToAnswerNullFeedbackMessages(prev, feedback, idFactory 
  * safe to call alongside the manual-path null cleanup). Only removes a row that
  * is STILL streaming, so a previously-finalized answer is never deleted.
  */
-export function discardStreamingByIntentMessages(prev, intent = 'what_to_answer') {
+export function discardStreamingByIntentMessages(prev, intent = 'what_to_answer', rowId) {
   if (!Array.isArray(prev)) return [];
   const openIdx = prev.findLastIndex(
-    (m) => m.role === 'system' && m.intent === intent && m.isStreaming,
+    (m) => m.role === 'system' && m.intent === intent && m.isStreaming && (rowId === undefined || m.id === rowId),
   );
   if (openIdx === -1) return prev;
   const updated = [...prev];

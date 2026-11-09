@@ -82,7 +82,7 @@ export class LiveRAGIndexer {
      * Start live indexing for a meeting.
      * Begins a background timer that periodically chunks & embeds new transcript.
      */
-    start(meetingId: string): void {
+    start(meetingId: string, nextChunkIndex = 0): void {
         if (this.isActive) {
             this.stop();
         }
@@ -91,7 +91,7 @@ export class LiveRAGIndexer {
         this.sessionToken = ++this.sessionSeq;
         this.allSegments = [];
         this.indexedSegmentCount = 0;
-        this.chunkCounter = 0;
+        this.chunkCounter = nextChunkIndex;
         this.indexedChunkCount = 0;
         this.pendingEmbeds = [];
         this.embeddedChunks = [];
@@ -212,7 +212,7 @@ export class LiveRAGIndexer {
                     }));
                     const chunkIds = this.vectorStore.saveChunks(indexedChunks);
                     this.chunkCounter += indexedChunks.length;
-                    console.log(`[LiveRAGIndexer] Saved ${indexedChunks.length} chunks (${this.chunkCounter} total) for meeting ${meetingId}`);
+                    console.log(`[LiveRAGIndexer] Saved ${indexedChunks.length} chunks for meeting ${meetingId}`);
                     for (let i = 0; i < chunkIds.length; i++) {
                         this.pendingEmbeds.push({ id: chunkIds[i], text: indexedChunks[i].text });
                     }

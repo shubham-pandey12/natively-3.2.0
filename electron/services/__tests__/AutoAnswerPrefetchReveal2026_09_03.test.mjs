@@ -116,6 +116,31 @@ test('a finished prefetch does not stamp the trigger cooldown — the dispatch t
     engine.reset();
 });
 
+test('an automatic dispatch owns the planner until it finishes or is cancelled', async () => {
+    const { engine } = await makeEngine();
+    let finishPlanning;
+    engine.planSuggestionTrigger = () => new Promise(resolve => { finishPlanning = resolve; });
+    const planned = dispatch(engine, 'planning');
+    assert.equal(engine.canAutoAnswer(), false);
+    assert.equal(await dispatch(engine, 'overlap'), 'cancelled');
+    engine.prefetchAutoAnswer('overlap', QUESTION);
+    assert.equal(engine.getActiveMode(), 'idle');
+
+    engine.reset();
+    finishPlanning({ kind: 'answer', confidence: 0.9 });
+    assert.equal(await planned, 'cancelled');
+    assert.equal(engine.canAutoAnswer(), true);
+});
+
+test('a provider fallback with text is still a failed automatic dispatch', async () => {
+    const { engine } = await makeEngine();
+    engine.runWhatShouldISay = async (_question, _confidence, _images, { outcomeOut }) => {
+        outcomeOut.value = { status: 'failed', retryable: true };
+        return 'The provider is unavailable.';
+    };
+    assert.equal(await dispatch(engine, 'failed'), 'failed');
+});
+
 test('13-q6: the engine accepts a dispatch while its OWN prefetch is streaming, and reveals it when the stream ends', async () => {
     let release;
     const gate = new Promise((r) => { release = r; });
@@ -126,9 +151,12 @@ test('13-q6: the engine accepts a dispatch while its OWN prefetch is streaming, 
     assert.equal(engine.canAutoAnswer(), true,
         'a live prefetch is not "busy": the dispatch adopts it — refusing it parked the verdict until the next candidate killed it');
 
-    await dispatch(engine, 'q6');
+    const dispatched = dispatch(engine, 'q6');
+    await flush();
     assert.deepEqual(finals, [], 'adopted mid-stream: nothing to show until the stream finishes');
+    assert.equal(engine.canAutoAnswer(), false, 'the adopted stream still owns the dispatch');
     release();
+    assert.equal(await dispatched, 'success');
     await untilIdle(engine);
     await flush();
     assert.equal(finals.length, 1, 'the adopted stream is revealed at completion');
@@ -140,7 +168,7 @@ test('a TRUNCATED prefetch is shown on adoption but never stored as session evid
     const { engine, session, finals } = await makeEngine({ truncated: true });
     engine.prefetchAutoAnswer('q8', QUESTION);
     await untilIdle(engine);
-    await dispatch(engine, 'q8');
+    assert.equal(await dispatch(engine, 'q8'), 'failed');
     assert.equal(finals.length, 1, 'the user still sees the partial text, as with a truncated live answer');
     assert.equal(session.getFullUsage().length, 0, 'but an incomplete answer must not become prior_assistant_responses evidence');
     assert.equal(session.getFullTranscript().some((seg) => seg.text === ANSWER), false, 'nor session transcript history');
@@ -216,13 +244,14 @@ test('an adopted IN-FLIGHT prefetch paints the buffered text at adoption and str
     await flush(); await flush();
     assert.deepEqual(tokens, [], 'until the judge rules, a speculative stream paints nothing');
 
-    await dispatch(engine, 'q10');
+    const dispatched = dispatch(engine, 'q10');
     await flush(); await flush();
     assert.ok(tokens.length >= 1, 'adoption paints what was already generated, without waiting for the stream to finish');
     assert.equal(tokens.join(''), LONG_PREFIX, 'exactly the text generated so far');
     assert.deepEqual(finals, [], 'the final still waits for completion');
 
     release();
+    assert.equal(await dispatched, 'success');
     await untilIdle(engine);
     await flush();
     assert.equal(finals.length, 1);

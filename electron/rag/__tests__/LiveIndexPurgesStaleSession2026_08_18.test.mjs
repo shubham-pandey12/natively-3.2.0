@@ -21,7 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(__dirname, '..', 'RAGManager.ts'), 'utf8');
 
 function startLiveIndexingBody() {
-  const i = src.indexOf('startLiveIndexing(meetingId: string): void {');
+  const i = src.indexOf('startLiveIndexing(meetingId: string,');
   assert.notEqual(i, -1, 'startLiveIndexing not found');
   const j = src.indexOf('\n    /**', i);
   return src.slice(i, j === -1 ? i + 3000 : j);
@@ -31,7 +31,7 @@ test('startLiveIndexing purges stale data for the id before starting', () => {
   const body = startLiveIndexingBody();
   const purge = body.indexOf('this.deleteMeetingData(meetingId)');
   const insert = body.indexOf('INSERT OR IGNORE INTO meetings');
-  const start = body.indexOf('this.liveIndexer.start(meetingId)');
+  const start = body.indexOf('this.liveIndexer.start(meetingId, nextChunkIndex)');
   assert.notEqual(purge, -1,
     'startLiveIndexing must purge the constant live id before indexing — otherwise a crashed or overlapped previous session leaks its transcript into the next meeting (F-411)');
   assert.notEqual(insert, -1);

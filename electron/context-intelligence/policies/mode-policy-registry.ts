@@ -195,7 +195,7 @@ const budget = (evidence: number, conv: number, tx: number, screen: number) =>
 const retrieval = (candidates: number, accepted: number) =>
   ({ enabled: true, maximumAttempts: 2 as const, maximumCandidates: candidates, maximumAcceptedEvidence: accepted });
 
-/** Interview-style modes: the user is the candidate; the overlay is theirs alone. */
+/** Interview modes require 0.88 confidence; more public meeting/listening modes keep stricter bars. */
 const AUTO_ANSWER_INTERVIEW = { autoThreshold: 0.88, offerThreshold: 0.65, speculationThreshold: 0.82 } as const;
 /** Meeting-style modes: colleagues present; fire less, offer more. */
 const AUTO_ANSWER_MEETING = { autoThreshold: 0.94, offerThreshold: 0.75, speculationThreshold: 0.88 } as const;

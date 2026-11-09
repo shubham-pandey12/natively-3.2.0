@@ -86,10 +86,11 @@ async function adoptMidStream(chunks) {
     h.engine.prefetchAutoAnswer('s1', QUESTION);
     await flush(); await flush();
     assert.deepEqual(h.tokens, [], 'unadopted, the prefetch paints nothing');
-    await dispatch(h.engine, 's1');
+    const dispatched = dispatch(h.engine, 's1');
     await flush(); await flush();
     assert.ok(h.tokens.length >= 1, 'adoption painted the text generated so far (the path under test)');
     release();
+    assert.equal(await dispatched, 'success');
     await untilIdle(h.engine);
     await flush();
     return h;

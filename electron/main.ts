@@ -1601,6 +1601,7 @@ export class AppState {
   public autoStartTrialForMeeting: (() => void) | null = null;
   public autoTrialSettled: (() => boolean) | null = null;
   private _meetingGeneration = 0;
+  private _resumeCapturePromise: Promise<void> | null = null;
   // Reads who speaks in a Zoom / Teams desktop call while a meeting runs
   // (services/meetingDetection/desktopCallSpeakers.ts). One per meeting.
   private desktopCallSpeakers: DesktopCallSpeakers | null = null;
@@ -3791,6 +3792,11 @@ export class AppState {
     isEnabled: () => this._autoAnswerEnabled,
     isMeetingActive: () => this.isMeetingActive,
     meetingGeneration: () => this._meetingGeneration,
+    terminal: (outcome) => {
+      if (!this.isMeetingActive || outcome.meetingGeneration !== this._meetingGeneration) return;
+      if (!['stale', 'judge_failed', 'dispatch_failed', 'superseded'].includes(outcome.reason)) return;
+      this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-missed', outcome);
+    },
     engineAccepting: () => this.intelligenceManager.canAutoAnswer(),
     answerStreamActive: () => this.intelligenceManager.isAnswerStreaming(),
     // 180 s — the SAME window the answer itself is written from
@@ -3805,6 +3811,7 @@ export class AppState {
     dispatch: (question, { reuseSpeculative }) => {
       return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
+        return 'failed' as const;
       });
     },
     cancelAutomaticAnswer: (reason) => this.intelligenceManager.cancelAutomaticAnswer(reason),
@@ -5354,153 +5361,180 @@ export class AppState {
       console.log('[Main] System resume — this meeting runs without audio (Ambient AI Chat), nothing to restart.');
       return;
     }
-    console.log('[Main] System resume — restarting captures so CoreAudio/cpal handles are fresh.');
+    if (this._resumeCapturePromise) return this._resumeCapturePromise;
+    const generation = this._meetingGeneration;
+    const isCurrentMeeting = () => this.isMeetingActive && this._meetingGeneration === generation;
+    let ownedMic: MicrophoneCapture | null = null;
+    let ownedSystem: SystemAudioCapture | null = null;
+    const resume = (async () => {
+      console.log('[Main] System resume — restarting captures so CoreAudio/cpal handles are fresh.');
 
-    // B7: reset ALL audio recovery state BEFORE recreating captures. State is
-    // tied to a SPECIFIC capture instance's failure history; once we destroy
-    // + recreate, the fresh captures must get a clean slate. Mirrors the
-    // fuller reset done in startMeeting. Pre-fix:
-    //   1. Counter saturation (attempts == 3) caused the early-return guards
-    //      in setupMicRecoveryHandler / setupAudioRecoveryHandler to drop
-    //      the FIRST post-wake error event silently — cpal frequently
-    //      emits a transient 'error' on wake, which was the exact bug.
-    //   2. A pre-sleep recovery in flight (`_*RecoveryInProgress = true`)
-    //      AND its pending `_*RecoveryTimer` would still be referenced by
-    //      the abandoned recovery promise after wake, so a stale recovery
-    //      could land on a freshly recreated capture.
-    this._systemAudioRecoveryInProgress = false;
-    this._systemAudioRecoveryAttempts = 0;
-    this._systemAudioConsecutiveFailures = 0;
-    if (this._systemAudioRecoveryTimer) {
-      clearTimeout(this._systemAudioRecoveryTimer);
-      this._systemAudioRecoveryTimer = null;
-    }
-    this._micRecoveryInProgress = false;
-    this._micRecoveryAttempts = 0;
-    if (this._micRecoveryTimer) {
-      clearTimeout(this._micRecoveryTimer);
-      this._micRecoveryTimer = null;
-    }
-
-    // STT sockets do NOT reliably survive a sleep/wake cycle: the WebSocket can be
-    // half-open (no FIN observed) so writes after wake silently go nowhere and no
-    // transcript ever arrives. Recreating the captures alone (below) left the OLD
-    // STT instances in place, relying on an assumed-but-not-coded reconnect (audit
-    // finding #5). Explicitly tear them down here — same pattern as
-    // _doReconfigureSttProvider — and recreate fresh instances after the captures
-    // are back, so the data path wires to live sockets. Captures are already
-    // stopped/destroyed below, so no audio events race this teardown.
-    if (this.googleSTT) {
-      try { this.googleSTT.stop(); this.googleSTT.removeAllListeners(); } catch (e) { console.warn('[Main] Resume: googleSTT teardown threw:', e); }
-      this.googleSTT = null;
-    }
-    if (this.googleSTT_User) {
-      try { this.googleSTT_User.stop(); this.googleSTT_User.removeAllListeners(); } catch (e) { console.warn('[Main] Resume: googleSTT_User teardown threw:', e); }
-      this.googleSTT_User = null;
-    }
-
-    // Mic first. MicrophoneCapture is lazy-init: start() constructs the cpal
-    // input stream. Do this before starting the CoreAudio system tap so cpal
-    // does not negotiate input while the aggregate device IO proc is active.
-    // Mic usually survives sleep, but recreate to be safe; cpal exclusive mode
-    // on Windows can silently drop the stream.
-    if (this.microphoneCapture) {
-      try {
-        await this.microphoneCapture.destroy();
-      } catch (e) {
-        console.warn('[Main] Resume: mic capture destroy threw:', e);
+      // B7: reset ALL audio recovery state BEFORE recreating captures. State is
+      // tied to a SPECIFIC capture instance's failure history; once we destroy
+      // + recreate, the fresh captures must get a clean slate. Mirrors the
+      // fuller reset done in startMeeting. Pre-fix:
+      //   1. Counter saturation (attempts == 3) caused the early-return guards
+      //      in setupMicRecoveryHandler / setupAudioRecoveryHandler to drop
+      //      the FIRST post-wake error event silently — cpal frequently
+      //      emits a transient 'error' on wake, which was the exact bug.
+      //   2. A pre-sleep recovery in flight (`_*RecoveryInProgress = true`)
+      //      AND its pending `_*RecoveryTimer` would still be referenced by
+      //      the abandoned recovery promise after wake, so a stale recovery
+      //      could land on a freshly recreated capture.
+      this._systemAudioRecoveryInProgress = false;
+      this._systemAudioRecoveryAttempts = 0;
+      this._systemAudioConsecutiveFailures = 0;
+      if (this._systemAudioRecoveryTimer) {
+        clearTimeout(this._systemAudioRecoveryTimer);
+        this._systemAudioRecoveryTimer = null;
       }
-      this.microphoneCapture = null;
-    }
-    try {
-      this.microphoneCapture = new MicrophoneCapture(this._lastRequestedInputDeviceId);
-      this._micSttRateApplied = false;
-      this.wireMicCapture(this.microphoneCapture, '(Resume)');
-      this.microphoneCapture.start();
-    } catch (err) {
-      console.error('[Main] Resume: failed to restart mic capture:', err);
-      this.sendAudioCaptureFailed( {
-        channel: 'mic',
-        message: 'Microphone did not restart after wake. Close other apps using the mic, then restart the meeting.',
-        attempt: 0,
-        maxAttempts: 0,
-        terminal: true,
-        stuck: false,
-      });
-    }
-
-    // System audio (CoreAudio Tap is the most fragile across sleep cycles).
-    // Start it after the mic stream has been constructed to avoid CoreAudio HAL
-    // contention during resume as well as initial meeting start.
-    if (this.systemAudioCapture) {
-      try {
-        await this.systemAudioCapture.destroy();
-      } catch (e) {
-        console.warn('[Main] Resume: system capture destroy threw:', e);
+      this._micRecoveryInProgress = false;
+      this._micRecoveryAttempts = 0;
+      if (this._micRecoveryTimer) {
+        clearTimeout(this._micRecoveryTimer);
+        this._micRecoveryTimer = null;
       }
-      this.systemAudioCapture = null;
-    }
-    try {
-      const screenCapability = await resolveMacSystemAudioCapability('resume capture restart');
-      if (screenCapability.effectiveDenied) {
-        this.sendSystemAudioPermissionDenied(
-          screenCapability.message ?? formatPermissionMessage('screen-recording-denied'),
-          screenCapability.titleKey ?? permissionTitleKey('screen-recording-denied'),
-        );
-        this.broadcastDeviceSelection({
-          kind: 'output',
-          requested: this._lastRequestedOutputDeviceId || null,
-          actual: null,
-          fellBack: true,
-          reason: 'screen-recording-permission-denied',
-        });
-      } else if (this.systemAudioCapture) {
-        // Ownership revalidation — same rationale as the route-change and
-        // recovery flows (F-102): another rebuild assigned the field while we
-        // awaited the capability check; keep theirs instead of orphaning it.
-        console.warn('[Main] Resume: capture rebuilt by another flow mid-await — keeping theirs.');
-      } else {
-        this.systemAudioCapture = new SystemAudioCapture(this._lastRequestedOutputDeviceId);
-        this._sysSttRateApplied = false;
-        this.wireSystemCapture(this.systemAudioCapture, '(Resume)');
-        this.systemAudioCapture.start();
-      }
-    } catch (err) {
-      console.error('[Main] Resume: failed to restart system capture:', err);
-      this.sendAudioCaptureFailed( {
-        channel: 'system',
-        message: 'System audio capture failed to restart after wake. End and restart the meeting to recover.',
-        attempt: 0,
-        maxAttempts: 0,
-        terminal: true,
-        stuck: false,
-      });
-    }
 
-    // Recreate the STT providers we tore down above so the freshly-restarted
-    // captures feed live sockets (audit finding #5). Mirrors the STT block in
-    // setupSystemAudioPipeline + the .start() in _doReconfigureSttProvider. Each
-    // is guarded so a single provider failure doesn't abort the other channel; a
-    // failed createSTTProvider leaves the field null and the capture's `?.write`
-    // becomes a no-op rather than throwing. We only recreate ones we nulled, so
-    // there is no risk of double-starting an existing provider.
-    if (!this.googleSTT) {
-      try {
-        this.googleSTT = this.createSTTProvider('interviewer');
-        this.googleSTT?.start();
-      } catch (sttErr) {
-        console.error('[Main] Resume: interviewer STT recreate failed:', sttErr);
+      // STT sockets do NOT reliably survive a sleep/wake cycle: the WebSocket can be
+      // half-open (no FIN observed) so writes after wake silently go nowhere and no
+      // transcript ever arrives. Recreating the captures alone (below) left the OLD
+      // STT instances in place, relying on an assumed-but-not-coded reconnect (audit
+      // finding #5). Explicitly tear them down here — same pattern as
+      // _doReconfigureSttProvider — and recreate fresh instances after the captures
+      // are back, so the data path wires to live sockets. Captures are already
+      // stopped/destroyed below, so no audio events race this teardown.
+      if (this.googleSTT) {
+        try { this.googleSTT.stop(); this.googleSTT.removeAllListeners(); } catch (e) { console.warn('[Main] Resume: googleSTT teardown threw:', e); }
         this.googleSTT = null;
       }
-    }
-    if (!this.googleSTT_User) {
-      try {
-        this.googleSTT_User = this.createSTTProvider('user');
-        this.googleSTT_User?.start();
-      } catch (sttErr) {
-        console.error('[Main] Resume: user STT recreate failed:', sttErr);
+      if (this.googleSTT_User) {
+        try { this.googleSTT_User.stop(); this.googleSTT_User.removeAllListeners(); } catch (e) { console.warn('[Main] Resume: googleSTT_User teardown threw:', e); }
         this.googleSTT_User = null;
       }
+
+      // Mic first. MicrophoneCapture is lazy-init: start() constructs the cpal
+      // input stream. Do this before starting the CoreAudio system tap so cpal
+      // does not negotiate input while the aggregate device IO proc is active.
+      // Mic usually survives sleep, but recreate to be safe; cpal exclusive mode
+      // on Windows can silently drop the stream.
+      if (this.microphoneCapture) {
+        try {
+          await this.microphoneCapture.destroy();
+        } catch (e) {
+          console.warn('[Main] Resume: mic capture destroy threw:', e);
+        }
+        if (!isCurrentMeeting()) return;
+        this.microphoneCapture = null;
+      }
+      if (!isCurrentMeeting()) return;
+      try {
+        this.microphoneCapture = ownedMic = new MicrophoneCapture(this._lastRequestedInputDeviceId);
+        this._micSttRateApplied = false;
+        this.wireMicCapture(this.microphoneCapture, '(Resume)');
+        this.microphoneCapture.start();
+      } catch (err) {
+        console.error('[Main] Resume: failed to restart mic capture:', err);
+        this.sendAudioCaptureFailed( {
+          channel: 'mic',
+          message: 'Microphone did not restart after wake. Close other apps using the mic, then restart the meeting.',
+          attempt: 0,
+          maxAttempts: 0,
+          terminal: true,
+          stuck: false,
+        });
+      }
+
+      // System audio (CoreAudio Tap is the most fragile across sleep cycles).
+      // Start it after the mic stream has been constructed to avoid CoreAudio HAL
+      // contention during resume as well as initial meeting start.
+      if (this.systemAudioCapture) {
+        try {
+          await this.systemAudioCapture.destroy();
+        } catch (e) {
+          console.warn('[Main] Resume: system capture destroy threw:', e);
+        }
+        if (!isCurrentMeeting()) return;
+        this.systemAudioCapture = null;
+      }
+      if (!isCurrentMeeting()) return;
+      try {
+        const screenCapability = await resolveMacSystemAudioCapability('resume capture restart');
+        if (!isCurrentMeeting()) return;
+        if (screenCapability.effectiveDenied) {
+          this.sendSystemAudioPermissionDenied(
+            screenCapability.message ?? formatPermissionMessage('screen-recording-denied'),
+            screenCapability.titleKey ?? permissionTitleKey('screen-recording-denied'),
+          );
+          this.broadcastDeviceSelection({
+            kind: 'output',
+            requested: this._lastRequestedOutputDeviceId || null,
+            actual: null,
+            fellBack: true,
+            reason: 'screen-recording-permission-denied',
+          });
+        } else if (this.systemAudioCapture) {
+          // Ownership revalidation — same rationale as the route-change and
+          // recovery flows (F-102): another rebuild assigned the field while we
+          // awaited the capability check; keep theirs instead of orphaning it.
+          console.warn('[Main] Resume: capture rebuilt by another flow mid-await — keeping theirs.');
+        } else {
+          this.systemAudioCapture = ownedSystem = new SystemAudioCapture(this._lastRequestedOutputDeviceId);
+          this._sysSttRateApplied = false;
+          this.wireSystemCapture(this.systemAudioCapture, '(Resume)');
+          this.systemAudioCapture.start();
+        }
+      } catch (err) {
+        console.error('[Main] Resume: failed to restart system capture:', err);
+        this.sendAudioCaptureFailed( {
+          channel: 'system',
+          message: 'System audio capture failed to restart after wake. End and restart the meeting to recover.',
+          attempt: 0,
+          maxAttempts: 0,
+          terminal: true,
+          stuck: false,
+        });
+      }
+
+      // Recreate the STT providers we tore down above so the freshly-restarted
+      // captures feed live sockets (audit finding #5). Mirrors the STT block in
+      // setupSystemAudioPipeline + the .start() in _doReconfigureSttProvider. Each
+      // is guarded so a single provider failure doesn't abort the other channel; a
+      // failed createSTTProvider leaves the field null and the capture's `?.write`
+      // becomes a no-op rather than throwing. We only recreate ones we nulled, so
+      // there is no risk of double-starting an existing provider.
+      if (!isCurrentMeeting()) return;
+      if (!this.googleSTT) {
+        try {
+          this.googleSTT = this.createSTTProvider('interviewer');
+          this.googleSTT?.start();
+        } catch (sttErr) {
+          console.error('[Main] Resume: interviewer STT recreate failed:', sttErr);
+          this.googleSTT = null;
+        }
+      }
+      if (!isCurrentMeeting()) return;
+      if (!this.googleSTT_User) {
+        try {
+          this.googleSTT_User = this.createSTTProvider('user');
+          this.googleSTT_User?.start();
+        } catch (sttErr) {
+          console.error('[Main] Resume: user STT recreate failed:', sttErr);
+          this.googleSTT_User = null;
+        }
+      }
+    })().finally(async () => {
+      if (!isCurrentMeeting()) {
+        // Stop joins this recovery before tearing down the remaining fields.
+        for (const capture of [ownedMic, ownedSystem]) {
+          try { await capture?.destroy(); } catch { /* Stop also retires its live fields. */ }
+          if (this.microphoneCapture === capture) this.microphoneCapture = null;
+          if (this.systemAudioCapture === capture) this.systemAudioCapture = null;
+        }
+      }
+    });
+    this._resumeCapturePromise = resume;
+    try { await resume; } finally {
+      if (this._resumeCapturePromise === resume) this._resumeCapturePromise = null;
     }
   }
 
@@ -7889,7 +7923,7 @@ export class AppState {
 
         // Start JIT RAG live indexing
         if (this.ragManager) {
-          this.ragManager.startLiveIndexing('live-meeting-current');
+          this.ragManager.startLiveIndexing(resumeBase?.meetingId ?? 'live-meeting-current', { preserveExisting: !!resumeBase });
           liveIndexingStartedByInit = true;
         }
 
@@ -8206,7 +8240,10 @@ export class AppState {
       // The init body may reject with the `audio_init_aborted` sentinel on abort — expected.
     }
     this._audioInitPromise = null;
-    // The await (the only yield point before `_pendingTeardown` is assigned) is done;
+    try { await this._resumeCapturePromise; } catch (err) {
+      console.warn('[Main] Wake recovery failed during Stop:', err);
+    }
+    // In-flight initialization and wake recovery are now retired;
     // the remaining teardown runs synchronously, so re-entry is no longer possible here
     // and the `_pendingTeardown`-based guard above takes over once it's set.
     this._endMeetingInFlight = false;
@@ -8576,11 +8613,11 @@ export class AppState {
     // coding scaffold ended with no final answer (superseded/declined/errored).
     // Tell the renderer to drop the open scaffold row. Flush pending token
     // batches first so a late scaffold batch can't re-mount the row afterwards.
-    this.intelligenceManager.on('suggested_answer_discard', (reason: string) => {
+    this.intelligenceManager.on('suggested_answer_discard', (reason: string, generationId?: number) => {
       this.autoAnswerUsage.stopAwaitingAnswer();
       flushBatchesBeforeFinal();
       const win = answerWindow()
-      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason })
+      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason, generationId })
     })
 
     // Verified code execution (background): a ✓ badge when the shown code passed

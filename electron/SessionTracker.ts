@@ -44,6 +44,7 @@ export type TranscriptOrigin = 'stt' | 'manual_chat' | 'assistant' | 'system_ins
 // context. Defined in its own module so the other formatter can share it.
 import { TYPED_TURN_LABEL } from './llm/typedTurnLabel';
 import { insertSortedByTimestamp } from './audio/sttGapRecovery';
+import { isSpokenSavedLine } from './intelligence/savedTranscriptOrigin';
 export { TYPED_TURN_LABEL };
 
 export interface TranscriptSegment {
@@ -136,6 +137,7 @@ export interface AssistantResponse {
 export class SessionTracker {
     // Context management (mirrors Swift ContextManager)
     private contextItems: ContextItem[] = [];
+    private restoredContext: ContextItem[] = [];
     // Grounding-campaign2 fix (H7, 2026-07-17): this eviction bound must be >=
     // the largest `lastSeconds` any live call site actually requests, or
     // getContext(N) silently truncates to whatever this value is regardless of
@@ -685,7 +687,7 @@ export class SessionTracker {
      */
     getContext(lastSeconds: number = 120): ContextItem[] {
         const cutoff = Date.now() - (lastSeconds * 1000);
-        return this.contextItems.filter(item => item.timestamp >= cutoff);
+        return [...this.restoredContext, ...this.contextItems.filter(item => item.timestamp >= cutoff)];
     }
 
     /**
@@ -724,7 +726,7 @@ export class SessionTracker {
         const lines = this.persistedTranscript;
         let from = lines.length;
         for (let i = lines.length - 1, olderRun = 0; i >= this.assistantViewStart; i--) {
-            if (lines[i].timestamp < cutoff) {
+            if (lines[i].timestamp < cutoff && lines[i].marker !== 'restored') {
                 if (++olderRun >= SessionTracker.DURABLE_SCAN_OLDER_RUN) break;
             } else {
                 olderRun = 0;
@@ -733,7 +735,7 @@ export class SessionTracker {
         }
         for (let i = from; i < lines.length; i++) {
             const seg = lines[i];
-            if (seg.timestamp < cutoff) continue;
+            if (seg.timestamp < cutoff && seg.marker !== 'restored') continue;
             const text = (seg.text || '').trim();
             if (!text) continue;
             const role = this.mapSpeakerToRole(seg.speaker);
@@ -889,7 +891,23 @@ export class SessionTracker {
 
     /** Every segment of the session, oldest first, for saving the meeting. */
     getPersistableTranscript(): TranscriptSegment[] {
-        return this.persistedTranscript;
+        // The saved base is merged at Stop/quit; replayed evidence must not be saved twice.
+        return this.persistedTranscript.filter(segment => segment.marker !== 'restored');
+    }
+
+    /** Restore evidence directly, without ingestion, recap or automatic-answer side effects. */
+    restoreTranscriptForResume(lines: TranscriptSegment[]): void {
+        const restored = lines.filter(line => isSpokenSavedLine(line) && typeof line.text === 'string'
+            && line.text.trim() && Number.isFinite(line.timestamp))
+            .slice(-SessionTracker.MAX_PERSISTED_SEGMENTS)
+            .map(line => ({ ...line, final: true, marker: 'restored' }));
+        this.persistedTranscript = [...restored, ...this.getPersistableTranscript()];
+        this.assistantViewStart = 0;
+        this.recapCursor = restored.length;
+        // The judge keeps eight turns; old timestamps remain intact after a long relaunch gap.
+        this.restoredContext = restored.slice(-8).map(line => ({
+            role: this.mapSpeakerToRole(line.speaker), text: line.text, timestamp: line.timestamp,
+        }));
     }
 
     private keepForPersistence(segment: TranscriptSegment): void {
@@ -1209,6 +1227,7 @@ export class SessionTracker {
      */
     reset(opts: { keepMeetingRecord?: boolean } = {}): void {
         this.contextItems = [];
+        this.restoredContext = [];
         if (!opts.keepMeetingRecord) {
             this.persistedTranscript = [];
             this.sessionStartTime = Date.now();

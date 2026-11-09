@@ -327,7 +327,8 @@ Time O(n), Space O(1).`;
 
     const answer = await engine.runWhatShouldISay(undefined, 0.9, undefined, { skipCooldown: true });
 
-    assert.equal(answer, A4_UNRECOVERED_SCAFFOLD);
+    assert.equal(answer, null, 'a superseded request must not return its original scaffold either');
+    assert.deepEqual(finals, [], 'a superseded request must not publish a final answer');
     assert.equal(
       session.getFullTranscript().some(segment => segment.text.includes('tail-aggregation for high-cardinality')),
       false,

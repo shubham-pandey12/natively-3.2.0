@@ -28,7 +28,7 @@ const YES = JSON.stringify({ is_ask: true, directed_at_user: true, complete: tru
 
 function rig(judge, { punctuation = 'provider' } = {}) {
   const clock = new FakeClock();
-  const state = { dispatched: [], prefetched: [], judgeCalls: 0 };
+  const state = { dispatched: [], prefetched: [], judgeCalls: 0, notices: [] };
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
     recentTurns: () => [],
@@ -36,6 +36,7 @@ function rig(judge, { punctuation = 'provider' } = {}) {
     prefetchAnswer: (id, text) => { state.prefetched.push(text); },
     speculativeSnapshot: () => ({ questionId: null, text: null }),
     judgeCandidate: (req) => { state.judgeCalls++; return judge(req, state.judgeCalls); },
+    terminal: (notice) => state.notices.push(notice),
     telemetry: () => {}, log: () => {},
   };
   const engine = new SimpleAutoAnswerEngine(host, clock);
@@ -75,15 +76,17 @@ test('a question that is still pending (never ruled) keeps counting — only RUL
   assert.equal(h.state.prefetched.length, before + 1, 'an incomplete verdict leaves its words unjudged');
 });
 
-test('judge failure: a question after a silent lead-in still takes the fallback on a punctuation-less provider', async () => {
-  // Punctuation-less provider (no '?'): the fallback is the interrogative lead,
-  // and it now reads the sentences after the ruled lead-in.
+test('judge failure after a silent lead-in retries then reports missed instead of guessing', async () => {
+  // A real judge timeout is retried; punctuation must not bypass the failed classification.
   const h = rig(async (_req, n) => (n === 1 ? NO : new Promise(() => {})), { punctuation: 'none' });
   h.say('Great so I am Sarah and I lead the platform team here.');
   await h.advance(STABILITY_MS + 2000);
   h.say('How would you shard the sessions table');
-  await h.advance(STABILITY_MS + JUDGE_DEADLINE_MS + 500);
-  assert.equal(h.state.dispatched.length, 1, 'judge timed out and the question was not lost');
+  await h.advance(STABILITY_MS + 3 * JUDGE_DEADLINE_MS + 2000);
+  assert.equal(h.state.dispatched.length, 0, 'never guess on a real judge timeout');
+  assert.equal(h.state.judgeCalls, 4, 'silent lead-in plus three attempts for the question');
+  assert.equal(h.state.notices.length, 1);
+  assert.equal(h.state.notices[0].reason, 'judge_failed');
 });
 
 test('judge failure: a lead-in already ruled silent does not by itself fire the fallback', async () => {

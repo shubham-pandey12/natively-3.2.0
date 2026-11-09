@@ -210,6 +210,11 @@ export function resolveChatStreamDone(activeId, incomingId, activeSource, incomi
  * @param {number|null|undefined} incomingId the generationId on the incoming batch item (may be absent)
  * @returns {{ accept: boolean, activeId: number|null }}
  */
+/** A terminal event may only mutate the generation it identifies. */
+export function shouldDiscardLiveAnswer(activeId, incomingId) {
+  return typeof activeId === 'number' && Number.isFinite(activeId) && activeId === incomingId;
+}
+
 export function resolveLiveAnswerBatch(activeId, incomingId) {
   const cur = typeof activeId === 'number' ? activeId : null;
   if (typeof incomingId !== 'number') {

@@ -598,6 +598,7 @@ export class MeetingPersistence {
         this.liveSurface = opts?.surface ?? this.resumeBase?.surface ?? null;
         const id = this.resumeBase?.meetingId ?? crypto.randomUUID();
         if (this.resumeBase) {
+            this.session.restoreTranscriptForResume(this.resumeBase.transcript);
             this.liveUserNotes = (this.resumeBase.userNotes ?? '').slice(0, LIVE_USER_NOTES_MAX_CHARS);
             // Notes still being written for the first part stop before they save.
             this.claimWriter(this.resumeBase.meetingId);

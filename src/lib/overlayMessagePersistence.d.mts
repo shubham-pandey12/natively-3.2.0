@@ -22,6 +22,7 @@ export function applyWhatToAnswerNullFeedbackMessages<T extends { id: string; ro
 export function discardStreamingByIntentMessages<T extends { id: string; role: string; text: string; intent?: string; isStreaming?: boolean }>(
   prev: T[],
   intent?: string,
+  rowId?: string | null,
 ): T[];
 
 export function dropSealedEmptyByIntentMessages<T extends { id: string; role: string; text: string; intent?: string; isStreaming?: boolean }>(

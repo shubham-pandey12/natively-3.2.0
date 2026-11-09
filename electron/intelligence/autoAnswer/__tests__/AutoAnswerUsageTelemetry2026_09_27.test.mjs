@@ -109,11 +109,11 @@ test('an answer the user overrides: "superseded", and the manual answer\'s words
 });
 
 test('the meeting row counts candidates, answers, silences and judge failures', async () => {
-  const m = meeting([verdict(), SILENT, NEVER, 'not json at all']);
-  await m.say('What is the difference between a process and a thread?');
+  const m = meeting([verdict(), SILENT, NEVER, NEVER, NEVER, 'not json at all', 'not json at all', 'not json at all']);
+  await m.say('What is the difference between a process and a thread?', 1500);
   m.usage.answerShown();
-  await m.say('Great, that makes sense, thanks for walking through it.');
-  await m.say('Let me pull up the roadmap document for everyone here', 8000);   // judge never answers
+  await m.say('Great, that makes sense, thanks for walking through it.', 1500);
+  await m.say('Let me pull up the roadmap document for everyone here', 10000);   // judge never answers
   await m.say('Okay so the next item on the agenda is the launch plan');        // unparseable verdict
   m.engine.onMeetingStop();
   m.usage.meetingEnded();
@@ -121,14 +121,13 @@ test('the meeting row counts candidates, answers, silences and judge failures', 
   const [row] = meetings(m.rows);
   assert.ok(row, 'one meeting row');
   assert.equal(row.feature_session_id, 'meeting-1', 'joins the meeting\'s answer rows');
-  // 5, not 4: after an unparseable verdict the engine re-judges at the next
-  // stoppage (lastJudgedKey is cleared), and that retry is a candidate too.
-  assert.equal(row.reported_count, 5, 'candidates judged');
+  // Retries belong to the same candidate; each terminal failure is one silent outcome.
+  assert.equal(row.reported_count, 4, 'four distinct candidates, not retry attempts');
   assert.equal(typeof row.reported_duration_ms, 'number');
   assert.equal(row.metadata.answered, 1);
-  assert.equal(row.metadata.silent, 2, 'the thanks, and the retried agenda remark');
-  assert.equal(row.metadata.judge_timeouts, 1);
-  assert.equal(row.metadata.judge_errors, 1);
+  assert.equal(row.metadata.silent, 3, 'the thanks and the two terminal judge failures');
+  assert.equal(row.metadata.judge_timeouts, 3);
+  assert.equal(row.metadata.judge_errors, 3);
   assert.ok(Object.keys(row.metadata).length <= 8);
   // The answer never got feedback before the meeting ended: sent unresolved, not lost.
   const [answer] = answers(m.rows);

@@ -268,7 +268,7 @@ export class IntelligenceManager extends EventEmitter {
     }
 
     async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): Promise<void> {
-        return this.engine.handleSuggestionTrigger(trigger);
+        await this.engine.handleSuggestionTrigger(trigger);
     }
 
     /** Mode + cooldown gate for the Auto Answer trigger. See IntelligenceEngine.canAutoAnswer. */
@@ -321,7 +321,7 @@ export class IntelligenceManager extends EventEmitter {
     runAutoAnswer(
         question: Parameters<IntelligenceEngine['runAutoAnswer']>[0],
         options: { reuseSpeculative: boolean },
-    ): Promise<void> {
+    ): ReturnType<IntelligenceEngine['runAutoAnswer']> {
         return this.engine.runAutoAnswer(question, { ...options, context: this.getFormattedContext(120) });
     }
     /**
