@@ -203,11 +203,63 @@ test('a successful auto-answer without a configured name logs once per meeting',
   assert.equal(h.texts().length, 3);
   assert.equal(count(), 1);
 
+  h.engine.onDisabled();
+  h.interviewer('What would you monitor during the migration?');
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.texts().length, 4);
+  assert.equal(count(), 1);
+
   h.engine.onMeetingStop();
   h.engine.onMeetingStart();
   h.interviewer('What would you monitor during the migration?');
   await h.advance(STABILITY_MS + 200);
   assert.equal(count(), 2);
+});
+
+test('the no-name guard blocks a named ask even if the judge strips the name and answers', async () => {
+  const question = 'Can you tell me how you would shard this table?';
+  const h = makeSimple(async () => YES({ question_text: question, action: 'answer' }));
+  h.interviewer(`Alex, ${question}`);
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 1);
+  assert.deepEqual(h.texts(), []);
+  assert.equal(h.state.logs.some(line => line.includes('user name not configured')), false);
+
+  const known = makeSimple(async () => YES({ question_text: question, action: 'answer' }), { userName: 'Alex' });
+  known.interviewer(`Alex, ${question}`);
+  await known.advance(STABILITY_MS + 200);
+  assert.deepEqual(known.texts(), [question]);
+});
+
+test('no-name fallback can answer a room-wide ask without carrying the named ask into dispatch', async () => {
+  const h = makeSimple();
+  const named = 'Alex, can you share your screen?';
+  const open = 'Does anyone know how to shard this table?';
+  h.interviewer(named);
+  await h.advance(STABILITY_MS + 200);
+  assert.deepEqual(h.texts(), []);
+
+  h.interviewer(open);
+  await h.advance(STABILITY_MS + 200);
+  assert.deepEqual(h.texts(), [open]);
+});
+
+test('an exact repeat of a candidate remains a duplicate when the judge extracted a shorter answer', async () => {
+  const question = 'How would you shard this table?';
+  const candidate = `We are moving to multiple regions. ${question}`;
+  const h = makeSimple(async () => YES({ question_text: question }));
+  h.interviewer(candidate);
+  await h.advance(STABILITY_MS + 200);
+  h.interviewer(candidate);
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 1);
+  assert.deepEqual(h.texts(), [question]);
+
+  h.clock.advance(DEDUP_TTL_MS + 1);
+  h.interviewer(candidate);
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 2);
+  assert.deepEqual(h.texts(), [question, question]);
 });
 
 test('busy engine: retries and dispatches when it frees up; gives up after the TTL', async () => {
@@ -232,6 +284,43 @@ test('busy engine: retries and dispatches when it frees up; gives up after the T
   assert.deepEqual(g.state.dropped.map((q) => q.text), [question]);
   assert.equal(g.state.dropped[0].id, g.state.events.find((e) => e.skipReason === 'engine_busy_or_cooling').questionId);
   assert.equal(g.clock.pendingCount(), 0, 'no leaked retry timer');
+});
+
+test('a delayed idle notification cannot dispatch an expired park, and a repeat can still be answered', async () => {
+  const h = makeSimple(async () => YES(), { accepting: false });
+  const question = 'Why did you choose PostgreSQL over the alternatives here?';
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+
+  // Simulate a delayed retry callback: the first event after the deadline is idle.
+  h.clock.t += RETRY_TTL_MS;
+  h.state.accepting = true;
+  h.engine.onEngineIdle();
+  assert.deepEqual(h.texts(), []);
+  assert.deepEqual(h.state.dropped.map((q) => q.text), [question]);
+  assert.equal(h.clock.pendingCount(), 0);
+
+  await h.advance(60_000);
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.at(-1).candidateText, question);
+  assert.equal(h.state.judgeCalls.at(-1).lastAnsweredText, null);
+  assert.deepEqual(h.texts(), [question]);
+});
+
+test('the final for a TTL-expired promoted interim does not reopen the dropped ask', async () => {
+  const h = makeSimple(async () => YES(), { accepting: false });
+  const question = 'Why did you choose PostgreSQL over the alternatives here?';
+  h.interviewer(question, false);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(Simple.STALL_PROMOTE_MS + RETRY_TTL_MS + 100);
+  assert.deepEqual(h.state.dropped.map((q) => q.text), [question]);
+
+  h.state.accepting = true;
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+  assert.deepEqual(h.texts(), []);
+  assert.equal(h.state.judgeCalls.length, 1);
 });
 
 test('the user\'s own speech never suppresses or cancels an automatic answer (user decision 2026-09-03)', async () => {
@@ -747,6 +836,18 @@ test('onEngineIdle with nothing parked is inert, and a superseded park never fir
   assert.deepEqual(g.state.dropped, []);
 });
 
+test('resumed interviewer speech supersedes a parked answer before its first interim', async () => {
+  const h = makeSimple(async () => YES(), { accepting: false });
+  h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
+  await h.advance(STABILITY_MS + 200);
+  h.engine.onLocalSpeechStart();
+  h.state.accepting = true;
+  h.engine.onEngineIdle();
+  assert.deepEqual(h.texts(), []);
+  assert.deepEqual(h.state.dropped, []);
+  assert.ok(h.state.skips.includes('superseded_while_parked'));
+});
+
 test('a park dropped by supersession says so — never a silent exit (live session 2026-09-03, 13-q6)', async () => {
   // The real shape: verdict a=1.0 applied, engine busy with its own prefetch,
   // dispatch parked; 195 ms later the next candidate bumped the sequence and
@@ -780,21 +881,24 @@ test('an INTERIM supersede defers the verdict instead of discarding it — and c
   assert.ok(h.state.events.some(e => e.judgeOutcome === 'held_applied'), 'recorded as held_applied');
 });
 
-test('a held verdict survives a relay append of eight words after the complete question', async () => {
+test('a held verdict waits for commit and includes eight appended words in the question', async () => {
   const resolvers = [];
   const h = makeSimple(() => new Promise((r) => resolvers.push(r)));
-  const question = 'Why did you choose PostgreSQL over the alternatives?';
+  const question = 'Great question. Why did you choose PostgreSQL over the alternatives?';
   const tail = 'for the busiest service in that particular project';
   assert.equal(tail.split(' ').length, HELD_GROWTH_WORDS);
   h.interviewer(question);
+  h.engine.host.speculativeSnapshot = () => ({ questionId: '1-q1', text: question });
   await h.advance(STABILITY_MS + 100);
   h.interviewer(tail);
   resolvers[0](YES());
   await flush(); await flush();
+  await h.advance(EARLY_JUDGE_MS + 20);
   assert.deepEqual(h.texts(), []);
   await h.advance(STABILITY_MS + 200);
   assert.equal(h.state.judgeCalls.length, 1);
-  assert.deepEqual(h.texts(), [question]);
+  assert.deepEqual(h.texts(), [`${question} ${tail}`]);
+  assert.equal(h.state.dispatchOpts.reuseSpeculative, false);
   assert.ok(h.state.logs.includes('[AutoAnswer:simple] applying held verdict to grown candidate (8 new words)'));
 });
 
@@ -803,6 +907,9 @@ test('a held verdict is discarded when growth adds another sentence, another ask
     'The API is public.',
     'And what would you change',
     'for the busiest service in that particular production project',
+    'Please elaborate.',
+    'Actually I meant MySQL',
+    'Show me how you would test it',
   ];
   assert.equal(tails[2].split(' ').length, HELD_GROWTH_WORDS + 1);
   for (const tail of tails) {
@@ -833,6 +940,21 @@ test('growth that completes a question is judged afresh', async () => {
   resolvers[1](YES());
   await flush(); await flush();
   assert.ok(/how you found it\?/.test(h.texts()[0]), 'the WHOLE question is answered');
+});
+
+test('an older superseded judge cannot replace the current held verdict', async () => {
+  const resolvers = [];
+  const h = makeSimple(() => new Promise(r => resolvers.push(r)));
+  h.interviewer('Why did you choose PostgreSQL?');
+  await h.advance(EARLY_JUDGE_MS + 20);
+  h.interviewer('How would you test it?');
+  await h.advance(EARLY_JUDGE_MS + 20);
+  resolvers[1](YES({ question_text: 'How would you test it?' }));
+  await flush();
+  resolvers[0](YES());
+  await flush();
+  await h.advance(STABILITY_MS);
+  assert.deepEqual(h.texts(), ['How would you test it?']);
 });
 
 test('a deferred verdict survives the user talking over it', async () => {

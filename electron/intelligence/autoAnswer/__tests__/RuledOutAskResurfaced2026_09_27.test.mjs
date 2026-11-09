@@ -29,6 +29,7 @@ function rig(replies) {
   let n = 0;
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
+    userName: () => 'Sarah',
     recentTurns: () => [], dispatch: (q) => { state.dispatched.push(q.text); },
     judgeCandidate: async () => replies[n++] ?? SILENT,
     telemetry: (e) => { if (e.name === 'auto_answer_ignored') state.skipped.push(e.skipReason); },
@@ -38,8 +39,8 @@ function rig(replies) {
   engine.onMeetingStart();
   // `ms` of quiet after the final: 4 s is past every commit window; a short
   // gap is a speaker still mid-sentence.
-  const say = async (text, ms = 4000) => {
-    engine.ingest({ speaker: 'interviewer', text, final: true, timestamp: clock.now(), origin: 'stt', punctuationSource: 'provider' });
+  const say = async (text, ms = 4000, final = true) => {
+    engine.ingest({ speaker: 'interviewer', text, final, timestamp: clock.now(), origin: 'stt', punctuationSource: 'provider' });
     for (let t = 0; t < ms; t += 20) { clock.advance(20); await flush(); }
   };
   return { state, say };
@@ -60,6 +61,19 @@ test('a NEW question after a ruled-out remark is still answered', async () => {
   await h.say('Take your time with this one, there is no rush at all.');
   await h.say(ask);
   assert.deepEqual(h.state.dispatched, [ask]);
+});
+
+test('a superseded verdict cannot hold a request already ruled out', async () => {
+  const raj = 'Raj, can you make sure support knows about the Thursday cutover?';
+  let resolveVerdict;
+  const h = rig([SILENT, new Promise(resolve => { resolveVerdict = resolve; })]);
+  await h.say(raj);
+  await h.say("Yes, I'll post in their channel today.", 200);
+  await h.say('and', 0, false);
+  resolveVerdict(verdict({ question_text: raj }));
+  await flush();
+  await h.say('and', 1000, false);
+  assert.deepEqual(h.state.dispatched, []);
 });
 
 test('an incomplete ask finished by later speech is still answered (incomplete is never ruled out)', async () => {

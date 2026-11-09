@@ -7747,7 +7747,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     // Real-time Transcripts
-    cleanups.push(window.electronAPI.onAutoAnswerSttStall(() => setSttStalling(true)));
+    cleanups.push(window.electronAPI.onAutoAnswerSttStall(setSttStalling));
     cleanups.push(
       window.electronAPI.onNativeAudioTranscript((transcript) => {
         const speech = transcript.text?.trim().replace(/\s+/g, ' ').replace(/[?.!,;:]+$/, '').toLowerCase();
@@ -7799,7 +7799,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return; // Safety check for any other speaker types
         }
 
-        setSttStalling(false);
         // Route to rolling transcript bar — partials debounced; finals commit immediately.
         if (!transcript.final) {
           if (!interviewerSpeakingRef.current) {

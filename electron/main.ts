@@ -1619,6 +1619,7 @@ export class AppState {
   private readonly transcriptionPause = new TranscriptionPause();
   private readonly _transcriptionPauseListener = this.transcriptionPause.onChange((paused) => {
     try { this.meetingAutoStop.setPaused(paused); } catch { /* auto-stop never blocks a pause */ }
+    if (paused) this.simpleAutoAnswer.cancelSttStall();
     this.sendToMeetingSurfaces('meeting-transcription-paused', { paused });
     console.log(`[Main] Transcription ${paused ? 'paused: both channels carry silence' : 'resumed'}`);
   });
@@ -3790,7 +3791,7 @@ export class AppState {
   private readonly simpleAutoAnswer = new SimpleAutoAnswerEngine({
     isEnabled: () => this._autoAnswerEnabled,
     isMeetingActive: () => this.isMeetingActive,
-    onSttStall: () => this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-stt-stall'),
+    onSttStall: (stalled) => this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-stt-stall', stalled),
     onAnswerDropped: (question) => this.sendToWindow(this.windowHelper.getOverlayWindow(), 'auto-answer-dropped', question.text),
     meetingGeneration: () => this._meetingGeneration,
     engineAccepting: () => this.intelligenceManager.canAutoAnswer(),
@@ -4879,7 +4880,7 @@ export class AppState {
         // endpoint anyway) and the local models (their own VAD closes the
         // segment, then inference runs). For those the stop always precedes
         // the text, so it would judge the turn without its last words.
-        if (this._autoAnswerEnabled && this.isMeetingActive) {
+        if (this._autoAnswerEnabled && this.isMeetingActive && !this.transcriptionPause.isPaused()) {
           try {
             const { CredentialsManager } = require('./services/CredentialsManager');
             const provider = CredentialsManager.getInstance().getSttProvider();
@@ -10184,7 +10185,7 @@ export class AppState {
     this._autoAnswerEnabled = enabled;
     // Drop anything already armed: turning the toggle off mid-meeting must not
     // let one more auto-answer land a second later.
-    if (!enabled) this.cancelAutoAnswer();
+    if (!enabled) this.simpleAutoAnswer.onDisabled();
     console.log(`[AppState] autoAnswerEnabled set to ${enabled}`);
     return true;
   }

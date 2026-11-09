@@ -427,7 +427,7 @@ export interface ElectronAPI {
   disableHindsight: () => Promise<{ success: boolean; error?: string }>
 
   // Native Audio Service Events
-  onAutoAnswerSttStall: (callback: () => void) => () => void
+  onAutoAnswerSttStall: (callback: (stalled: boolean) => void) => () => void
   onAutoAnswerDropped: (callback: (question: string) => void) => () => void
   onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean; timestamp?: number }) => void) => () => void
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => () => void

@@ -17,7 +17,7 @@ import { FakeClock } from './fakeClock.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const DIST = path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer');
-const { SimpleAutoAnswerEngine, STALL_PROMOTE_MS, NO_INTERIM_WARN_MS, isSameUtterance } = require(path.join(DIST, 'SimpleAutoAnswer.js'));
+const { SimpleAutoAnswerEngine, EARLY_JUDGE_MS, STABILITY_MS, STALL_PROMOTE_MS, NO_INTERIM_WARN_MS, isSameUtterance } = require(path.join(DIST, 'SimpleAutoAnswer.js'));
 const { buildJudgePrompt } = require(path.join(DIST, 'AutoAnswerJudge.js'));
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -27,11 +27,11 @@ const INCOMPLETE = verdict({ is_ask: false, complete: false, act: 'incomplete', 
 /** The real engine. Each judge reply may carry a delay (ms on the fake clock). */
 function rig(replies = [], { judgeMs = 0 } = {}) {
   const clock = new FakeClock();
-  const s = { judged: [], dispatched: [], events: [], stalls: 0 };
+  const s = { judged: [], dispatched: [], events: [], stallStates: [] };
   let n = 0;
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
-    onSttStall: () => { s.stalls++; },
+    onSttStall: (stalled) => { s.stallStates.push(stalled); },
     recentTurns: () => [],
     dispatch: (q) => { s.dispatched.push(q.text); },
     judgeCandidate: (req) => {
@@ -64,31 +64,70 @@ test('a speech stop without transcript warns once, then a late final is judged',
   const h = rig();
   h.stop();
   h.clock.advance(NO_INTERIM_WARN_MS - 1);
-  assert.equal(h.s.stalls, 0);
+  assert.deepEqual(h.s.stallStates, []);
   h.clock.advance(1);
-  assert.equal(h.s.stalls, 1);
+  assert.deepEqual(h.s.stallStates, [true]);
   await h.wait(2200);
-  assert.equal(h.s.stalls, 1);
+  assert.deepEqual(h.s.stallStates, [true]);
   assert.equal(h.s.judged.length, 0);
   h.final(ASK);
+  assert.deepEqual(h.s.stallStates, [true, false]);
   await h.wait(3000);
   assert.ok(h.s.judged.length > 0);
 });
 
-test('transcript arrival, resumed speech, and meeting reset cancel the no-interim warning', () => {
+test('transcript arrival, resumed speech, pause, and meeting reset cancel or clear the warning', () => {
   for (const cancel of [
     (h) => h.interim(''),
     (h) => h.final(ASK),
     (h) => h.engine.ingest({ speaker: 'user', text: 'Yes', final: true }),
     (h) => h.start(),
+    (h) => h.engine.cancelSttStall(),
     (h) => h.engine.onMeetingStop(),
+    (h) => h.engine.onMeetingStart(),
   ]) {
     const h = rig();
     h.stop();
     h.clock.advance(NO_INTERIM_WARN_MS - 1);
     cancel(h);
     h.clock.advance(1);
-    assert.equal(h.s.stalls, 0);
+    assert.deepEqual(h.s.stallStates, []);
+
+    const late = rig();
+    late.stop();
+    late.clock.advance(NO_INTERIM_WARN_MS + 50);
+    cancel(late);
+    assert.deepEqual(late.s.stallStates, [true, false]);
+  }
+});
+
+test('two consecutive silent turns warn independently despite older buffered finals', () => {
+  const h = rig();
+  h.final('Thanks for walking me through that.');
+  h.start();
+  h.interim(''); // Provider keep-alive, no words from the new turn.
+  h.stop();
+  h.clock.advance(NO_INTERIM_WARN_MS - 1);
+  h.stop(); // A duplicate stop must not postpone or repeat a warning.
+  h.clock.advance(1);
+  assert.deepEqual(h.s.stallStates, [true]);
+  h.start();
+  h.stop();
+  h.clock.advance(NO_INTERIM_WARN_MS);
+  assert.deepEqual(h.s.stallStates, [true, false, true]);
+});
+
+test('resumed VAD blocks both a held verdict and a judge still in flight before STT catches up', async () => {
+  for (const judgeMs of [0, STABILITY_MS]) {
+    const h = rig([], { judgeMs });
+    h.final(ASK);
+    await h.wait(EARLY_JUDGE_MS);
+    assert.equal(h.s.judged.length, 1);
+    h.start();
+    h.engine.onProviderEndpoint(); // A late stop from the previous turn.
+    h.interim(''); // Keep-alive is not progress on the new turn.
+    await h.wait(2 * STABILITY_MS);
+    assert.deepEqual(h.s.dispatched, []);
   }
 });
 

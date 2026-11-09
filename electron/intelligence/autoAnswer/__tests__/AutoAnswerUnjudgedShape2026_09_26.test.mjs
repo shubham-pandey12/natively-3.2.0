@@ -21,7 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const Simple = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/SimpleAutoAnswer.js'));
 const { DECLARATIVE_TASK, isDeclarativeTask } = Simple;
-const { SimpleAutoAnswerEngine, STABILITY_MS, JUDGE_DEADLINE_MS, isQuestionShaped } = { ...Simple, ...require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/AutoAnswerJudge.js')) };
+const { SimpleAutoAnswerEngine, EARLY_JUDGE_MS, STABILITY_MS, JUDGE_DEADLINE_MS, isQuestionShaped } = { ...Simple, ...require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/AutoAnswerJudge.js')) };
 
 const flush = () => new Promise((r) => setImmediate(r));
 const NO = JSON.stringify({ is_ask: false, directed_at_user: false, complete: true, act: 'statement', answerability: 0.1, question_text: null });
@@ -65,7 +65,10 @@ test('declarative task leads match without punctuation and reject trailing fragm
     'Go ahead and write the function',
     "Let's design a cache",
     'Let’s see how you approach this problem',
-    'Let’s say you have a system that needs to process duplicate messages',
+    'I’d love to see how you would approach this',
+    'Could you show me how you would approach this',
+    'Show me how you would debug this',
+    'Explain to me how the cache works',
     'Talk me through your approach',
     'Take me through your experience',
     'Run me through your solution',
@@ -80,6 +83,10 @@ test('declarative task leads match without punctuation and reject trailing fragm
     'Authentication you can skip',
     'Your task is to design a...',
     'What I want you to do is',
+    'What I want you to do is?',
+    'Take me through',
+    'Show me how',
+    'Let’s say you have a system that needs to process duplicate messages',
     'Let’s say you have a system that needs to…',
   ]) {
     assert.equal(isDeclarativeTask(text), false, text);
@@ -113,6 +120,25 @@ test('judge failure does not dispatch a hanging task even when it starts with wh
   const h = rig(async () => null, { punctuation: 'none' });
   h.say('What I want you to do is');
   await h.advance(STABILITY_MS + 500);
+  assert.deepEqual(h.state.dispatched, []);
+});
+
+test('a fast fallback waits for commit and is invalidated by continued speech', async () => {
+  const h = rig(async () => null);
+  h.say('Show me how you would debug this');
+  await h.advance(EARLY_JUDGE_MS + 20);
+  assert.deepEqual(h.state.dispatched, []);
+  h.say('with');
+  await h.advance(EARLY_JUDGE_MS + 20);
+  assert.equal(h.state.judgeCalls, 2);
+  await h.advance(STABILITY_MS + 20);
+  assert.deepEqual(h.state.dispatched, []);
+});
+
+test('judge failure does not treat hypothetical framing as a task', async () => {
+  const h = rig(async () => null);
+  h.say("Let's say you have a system that processes duplicate messages.");
+  await h.advance(STABILITY_MS + 20);
   assert.deepEqual(h.state.dispatched, []);
 });
 
