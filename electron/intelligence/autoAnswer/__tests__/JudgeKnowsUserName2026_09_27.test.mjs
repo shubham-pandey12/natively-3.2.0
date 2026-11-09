@@ -31,7 +31,9 @@ const REQ = {
   lastAnsweredText: null,
 };
 
-test('no name known: the prompt is byte-identical to the one the corpora were scored on', () => {
+test('no name known: the prompt asks the judge to prefer silence on likely teammate asks', () => {
+  const prompt = buildJudgePrompt(REQ);
+  assert.match(prompt, /The user's name is not configured:.*capitalized proper name.*excluding question words.*answerability at most 0\.5.*action "silent".*USER must answer/);
   assert.equal(buildJudgePrompt({ ...REQ, userName: null }), buildJudgePrompt(REQ));
   assert.equal(buildJudgePrompt({ ...REQ, userName: '  ' }), buildJudgePrompt(REQ));
   assert.equal(buildJudgePrompt({ ...REQ, userName: '42' }), buildJudgePrompt(REQ), 'a name with no letters is no name');
@@ -82,7 +84,8 @@ test('slips are named in the prompt as the USER', () => {
 });
 
 test('the rule rides only when the candidate calls on someone ELSE by name', () => {
-  const plain = (candidateText) => buildJudgePrompt({ ...REQ, candidateText, userName: null });
+  const plain = (candidateText) => buildJudgePrompt({ ...REQ, candidateText, userName: null })
+    .replace(/\nThe user's name is not configured:[^\n]+\n/, '');
   const named = (candidateText, userName = 'Alex') => buildJudgePrompt({ ...REQ, candidateText, userName });
   for (const c of [
     'Alex, how is the payout migration going?',                 // the USER

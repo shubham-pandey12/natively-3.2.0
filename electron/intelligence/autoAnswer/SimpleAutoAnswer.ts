@@ -36,7 +36,7 @@ import type { TranscriptTurn } from '../../llm/transcriptCleaner';
 import type { Clock, ClockTimer } from './AutoAnswerClock';
 import { systemClock } from './AutoAnswerClock';
 import {
-    JUDGE_DEADLINE_MS, JUDGE_CONTEXT_TURNS, parseJudgeVerdict, routeForVerdict, type JudgeRequest,
+    JUDGE_DEADLINE_MS, JUDGE_CONTEXT_TURNS, judgeUserFirstName, parseJudgeVerdict, routeForVerdict, type JudgeRequest,
 } from './AutoAnswerJudge';
 import { isMidWordCut, joinTranscriptParts, normalizeForCompare, tokenContainment } from './AutoAnswerText';
 import type { AutoAnswerThresholds } from './AutoAnswerPolicy';
@@ -200,6 +200,8 @@ export const FEEDBACK_WINDOW_MS = 20_000;
 export const HELD_MAX_AGE_MS = 15_000;
 /** A short relay tail can reuse a held verdict if the original sentence is complete. */
 export const HELD_GROWTH_WORDS = 8;
+/** How long a dispatched answer suppresses repeats of the same ask. */
+export const DEDUP_TTL_MS = 120_000;
 /** Busy-engine retry cadence and give-up. */
 export const RETRY_MS = 500;
 export const RETRY_TTL_MS = 8000;
@@ -362,6 +364,8 @@ export class SimpleAutoAnswerEngine {
     private sequence = 0;
     private lastJudgedKey = '';
     private lastAnsweredText: string | null = null;
+    private lastAnsweredAt = 0;
+    private warnedNoName = false;
     /** The automatic answer currently inside its feedback window. */
     private feedbackPending: { id: string; at: number; act: AutoAnswerQuestion['dialogueAct']; answerability: number } | null = null;
     private feedbackTimer: ClockTimer | null = null;
@@ -583,7 +587,8 @@ export class SimpleAutoAnswerEngine {
             this.emit({ name: 'auto_answer_ignored', skipReason: 'backchannel', candidateWordCount: words });
             return;
         }
-        if (this.lastAnsweredText && normalizeForCompare(this.lastAnsweredText) === key) {
+        const recentAnswer = this.recentAnsweredText(now);
+        if (recentAnswer && normalizeForCompare(recentAnswer) === key) {
             this.emit({ name: 'auto_answer_ignored', skipReason: 'duplicate' });
             return;
         }
@@ -602,6 +607,10 @@ export class SimpleAutoAnswerEngine {
         this.host.noteCandidate?.(id, this.sequence);
         this.maybePrefetch(id, candidate, this.unjudgedText(), now);
         void this.consult(id, candidate, now, early);
+    }
+
+    private recentAnsweredText(now: number): string | null {
+        return now - this.lastAnsweredAt <= DEDUP_TTL_MS ? this.lastAnsweredText : null;
     }
 
     /** The finals no verdict has ruled on yet — where a new ask's shape is read. */
@@ -687,7 +696,7 @@ export class SimpleAutoAnswerEngine {
                         candidateParts: parts,
                         modeName: this.host.modeName?.() ?? null,
                         questionId: id,
-                        lastAnsweredText: this.lastAnsweredText,
+                        lastAnsweredText: this.recentAnsweredText(this.clock.now()),
                         userName: this.host.userName?.() ?? null,
                         ...(this.pending.some(p => p.provisional) ? { transcriptLagging: true } : {}),
                     }, abort.signal),
@@ -874,6 +883,7 @@ export class SimpleAutoAnswerEngine {
             const snapshot = this.host.speculativeSnapshot?.();
             const reuseSpeculative = Boolean(snapshot && snapshot.questionId === id && snapshot.text);
             this.lastAnsweredText = text;
+            this.lastAnsweredAt = this.clock.now();
             const promoted = this.pending.find(p => p.provisional);
             this.stallAnswered = promoted ? { text: promoted.text, at: this.clock.now() } : null;
             this.pending = [];
@@ -882,6 +892,10 @@ export class SimpleAutoAnswerEngine {
             this.emit({ name: 'auto_answer_decision', questionId: id, action: 'auto', answerability });
             if (reuseSpeculative) this.host.log?.(`[AutoAnswer:simple] reusing the prefetched answer for ${id}`);
             this.armFeedback(id, act, answerability);
+            if (!this.warnedNoName && !judgeUserFirstName(this.host.userName?.())) {
+                this.warnedNoName = true;
+                this.host.log?.('[AutoAnswer] user name not configured — teammate misfires possible');
+            }
             void this.host.dispatch(q, { reuseSpeculative });
         };
         attempt();
@@ -1063,6 +1077,8 @@ export class SimpleAutoAnswerEngine {
         this.speakerByTurn.clear();
         this.lastJudgedKey = '';
         this.lastAnsweredText = null;
+        this.lastAnsweredAt = 0;
+        this.warnedNoName = false;
         this.lastPrefetchAt = null;
         this.held = null;
         this.bumpJudgeSeq('meeting_reset');

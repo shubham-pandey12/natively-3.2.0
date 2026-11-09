@@ -26,6 +26,7 @@ const require = createRequire(import.meta.url);
 const Simple = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/SimpleAutoAnswer.js'));
 const { isMidWordCut } = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/AutoAnswerText.js'));
 const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS, RETRY_TTL_MS, DROPPED_QUESTION_NOTICE, HELD_MAX_AGE_MS, HELD_GROWTH_WORDS, EARLY_JUDGE_MS } = Simple;
+const { DEDUP_TTL_MS } = Simple;
 
 const flush = () => new Promise((r) => setImmediate(r));
 const YES = (over = {}) => JSON.stringify({ is_ask: true, directed_at_user: true, complete: true, act: 'question', answerability: 0.95, question_text: null, ...over });
@@ -46,6 +47,7 @@ function makeSimple(judgeImpl, overrides = {}) {
     engineAccepting: () => state.accepting,
     answerStreamActive: () => state.streaming,
     recentTurns: () => state.turns,
+    userName: () => state.userName ?? null,
     dispatch: (q, opts) => { state.dispatched.push(q); state.dispatchOpts = opts; state.streaming = true; },
     onAnswerDropped: (q) => state.dropped.push(q),
     offer: (q) => state.offered.push(q),
@@ -162,6 +164,50 @@ test('above ANSWER_FLOOR it answers; at or below it stays silent — no card, no
   await g.advance(STABILITY_MS + 300);
   assert.deepEqual(g.texts(), [], 'at the floor exactly, silent');
   assert.ok(g.state.skips.includes('low_answerability'));
+});
+
+test('a repeat is deduplicated within two minutes and judged again after the TTL', async () => {
+  const h = makeSimple(async () => YES());
+  const question = 'Why did you choose PostgreSQL over the alternatives here?';
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+  assert.deepEqual(h.texts(), [question]);
+
+  h.interviewer(question.toUpperCase());
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 1);
+  assert.ok(h.state.skips.includes('duplicate'));
+
+  h.clock.advance(DEDUP_TTL_MS + 1);
+  h.interviewer(question);
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 2);
+  assert.equal(h.state.judgeCalls[1].lastAnsweredText, null, 'the judge is no longer told to suppress this repeat');
+  assert.deepEqual(h.texts(), [question, question]);
+});
+
+test('a successful auto-answer without a configured name logs once per meeting', async () => {
+  const warning = '[AutoAnswer] user name not configured — teammate misfires possible';
+  const h = makeSimple(async () => YES(), { userName: 'Priya' });
+  const count = () => h.state.logs.filter(line => line === warning).length;
+  h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(count(), 0);
+
+  h.state.userName = null;
+  h.interviewer('How would you shard that table across regions?');
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(count(), 1);
+  h.interviewer('What would you monitor during the migration?');
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.texts().length, 3);
+  assert.equal(count(), 1);
+
+  h.engine.onMeetingStop();
+  h.engine.onMeetingStart();
+  h.interviewer('What would you monitor during the migration?');
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(count(), 2);
 });
 
 test('busy engine: retries and dispatches when it frees up; gives up after the TTL', async () => {

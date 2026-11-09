@@ -281,10 +281,11 @@ ${partsLabelled ? 'The candidate itself is split by speaker below; judge the ASK
     const answered = req.lastAnsweredText
         ? `\nAlready answered for the USER moments ago: "${keepTail(req.lastAnsweredText, JUDGE_ANSWERED_CHAR_CAP)}"\nAnything that RESTATES that ask, or adds its details, constraints, materials or follow-on explanation, is NOT a new ask: is_ask false, answerability at most 0.2. Only a genuinely NEW question or a changed requirement counts.\n`
         : '';
-    // Only when the candidate calls on SOMEONE ELSE by name. Any extra text
+    // For a known user name, add guidance only when the candidate calls on
+    // SOMEONE ELSE by name. Any extra text
     // here moves the model on unrelated borderline turns (measured 2026-09-27:
     // with the rule on every call, senior-swe-strings #10/#11 flipped 3/3 on
-    // a transcript with no names in it), so every other prompt stays
+    // a transcript with no names in it), so other prompts with a known name stay
     // byte-identical. Trailing, like the answered ask: it decides
     // directed_at_user for the candidate, so it sits next to it.
     const name = judgeUserFirstName(req.userName);
@@ -292,7 +293,9 @@ ${partsLabelled ? 'The candidate itself is split by speaker below; judge the ASK
     const isUser = (w: string) => [name ?? '', ...slips].some(n => n.toLowerCase() === w.toLowerCase());
     const addressesSomeoneElse = name !== null && addressedNamesIn(candidateBlock).some(w => !isUser(w));
     const aka = slips.length ? ` (speech-to-text also wrote it as ${slips.map(s => `"${s}"`).join(', ')} here: that is the USER too)` : '';
-    const addressee = addressesSomeoneElse
+    const addressee = name === null
+        ? `\nThe user's name is not configured: when a question opens with a capitalized proper name outside the OTHERS transcript's normal vocabulary, excluding question words like How, What and Why, treat it as likely directed at someone else, set answerability at most 0.5, and return action "silent" unless the rest of the question makes it clear the USER must answer.\n`
+        : addressesSomeoneElse
         ? `\nThe USER's name is ${name}${aka}. "${name}, can you…" is addressed TO the USER. "<another name>, can you…" is addressed to that OTHER person: directed_at_user false, action "silent", even though the USER could answer it. "Does anyone…" and asks with no name are judged as usual.\n`
         : '';
     // ORDERING IS LOAD-BEARING (measured 2026-08-25). A cache-friendly layout
