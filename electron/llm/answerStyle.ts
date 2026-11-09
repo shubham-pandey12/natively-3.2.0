@@ -153,3 +153,10 @@ export function enumerableFormLine(question: string): string {
   if (!isEnumerableAsk(question)) return '';
   return DEPTH_ASK_RE.test(question) ? ENUMERABLE_DETAIL_FORM_LINE : ENUMERABLE_FORM_LINE;
 }
+
+export const CAREER_STORY_FALLBACK = 'Use a matching real story if the supplied facts support one. Otherwise, '
+  + 'give a complete hypothetical example in first person using conditional language throughout. '
+  + 'Use relevant, supported skills or project experience to choose the approach. If there is no relevant background, '
+  + 'choose a plausible situation for the question. Include a concrete situation, actions, tradeoff, and intended result. '
+  + 'Keep actual experience separate from the hypothetical. Do not invent past events, credentials, or measured outcomes, '
+  + 'and do not open with an explanation about missing context.';

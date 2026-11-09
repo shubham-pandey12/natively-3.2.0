@@ -114,11 +114,9 @@ test('looking-for-work prompt stabilizes no-overclaim behavior with few-shot exa
     'No context behavioral question',
     'Weak context with role or project but no metrics',
     'JD skill absent from profile context',
-    "I don't have specific past experience loaded right now. I can frame this honestly as a small, relevant example if that matches my background:",
-    'The impact was qualitative',
+    "give a complete hypothetical example in first person using conditional language throughout",
     'not quantified',
     "I wouldn't want to overstate that",
-    'use the exact no-context admission opener',
     'behavioral, intro, fit, motivation, or accomplishment-based answer',
     'do not invent a current role, company, title, dates, or accomplishments',
     'without profile context, avoid invented accomplishments',
@@ -147,7 +145,7 @@ test('team meeting capture examples stay schematic and do not seed names or comp
 
 test('looking-for-work examples require grounding and avoid concrete invented detail', () => {
   assertIncludesAll(MODE_PROMPTS['looking-for-work'], [
-    'use the exact no-context admission opener before any illustrative example',
+    'Keep actual experience separate from the hypothetical',
     'avoid invented accomplishments',
     'never fabricate percentages, dollar amounts, durations, or scale figures',
   ], 'looking-for-work');

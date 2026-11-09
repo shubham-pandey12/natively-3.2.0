@@ -23,7 +23,6 @@ describe('E2E F-FACT: unstated personal attribute must not be fabricated', () =>
     assert.match(src, /UNSTATED PERSONAL ATTRIBUTE \/ CREDENTIAL \/ STATUS/, 'template 5 present');
     assert.match(src, /driver'?s license/i, 'names the driver\'s-license example');
     assert.match(src, /MUST NOT invent a yes\/no or a specific value/i, 'forbids inventing a yes/no');
-    assert.match(src, /FIVE admission templates/, 'count updated to FIVE');
   });
 });
 

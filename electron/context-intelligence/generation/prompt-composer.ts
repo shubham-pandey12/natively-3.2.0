@@ -16,7 +16,7 @@
 // nothing later in the prompt can appear to supersede them, evidence late and
 // explicitly framed as untrusted data.
 
-import { isCurrentScreenRequest } from '../question/turn-classifier';
+import { BEHAVIORAL_STORY_RE, isCurrentScreenRequest } from '../question/turn-classifier';
 import type { TurnDecision, EvidenceItem } from '../contracts/types';
 import type { ModePolicy } from '../policies/mode-policy-registry';
 import { packContext, type PackBudget, type PackedContext } from './context-packer';
@@ -27,7 +27,7 @@ import {
   userInstructionsOverrideAppLength,
   USER_INSTRUCTION_AUTHORITY_NOTE,
 } from '../../llm/userInstructionContract';
-import { enumerableFormLine } from '../../llm/answerStyle';
+import { CAREER_STORY_FALLBACK, enumerableFormLine } from '../../llm/answerStyle';
 import { looksLikeQuestion } from '../question/question-resolver';
 
 export interface ComposeInput {
@@ -190,7 +190,8 @@ const OWN_LIFE_RULE_TEXT = 'Speaking as the user about their own life (their job
   + '"in front of" you, and never cite their résumé or profile as a document ("the résumé shows", "my profile says"). Say what the evidence '
   + 'states as their own memory, in first person ("I left that team when the contract ended in January"), and simply leave out what it does '
   + 'not state: no invented detail and no remark that it is missing. Asked for a story the evidence does not hold, open directly with how '
-  + 'they handle that situation, never with "I don\'t have a specific example" or "let me tell you how I handle it instead".';
+  + 'they would handle that situation, never with "I don\'t have a specific example" or "let me tell you how I handle it instead". '
+  + 'For experience and fit questions, connect the closest supported project, skill or accomplishment to the ask. Explain how that experience would transfer, and keep any proposed approach conditional.';
 
 const PERMANENT_RULES = [
   'Never fabricate personal experience, employment, projects, skills or education.',
@@ -1475,6 +1476,13 @@ export function composePrompt(input: ComposeInput): ComposedPrompt {
   // to do when the QUESTION itself asks for the instructions. Those are different
   // failures and the second one was live.
   const isMetaRequest = d.questionTypes.includes('META_REQUEST' as never);
+  const canConstructCareerStory = !isMetaRequest && OWN_LIFE_MODES.has(d.modeId)
+    && d.generalKnowledgeAllowed && d.groundingPolicy !== 'ASK_BEFORE_FALLBACK'
+    && policy.capabilityPolicy.hypotheticalExamples && !input.withheldScopes?.length
+    && d.questionTypes.includes('PERSONAL_EXPERIENCE')
+    && !d.claimRequirements.some((c) => c.authority === 'PRIVATE_SOURCE_REQUIRED' && !c.claimType.startsWith('USER_'))
+    && BEHAVIORAL_STORY_RE.test(d.resolvedQuestion)
+    && !/\b(?:according to|based (?:only|solely) on|using (?:only|solely))\b/i.test(d.resolvedQuestion);
 
   // The user's standing instructions. Analysed once: the analysis decides
   // whether the app's own length default may ride at all.
@@ -1522,7 +1530,7 @@ export function composePrompt(input: ComposeInput): ComposedPrompt {
     push('precedence_contract', precedenceContract(evidence)),
     push('precedence_history', precedenceHistory(d)),
     push('secondary_source', secondarySourceGuidance(d)),
-    push('evidence_coverage', weakEvidenceGuidance(d, input.fallbackUsed, Boolean(packed.evidenceBlock))),
+    push('evidence_coverage', canConstructCareerStory ? '' : weakEvidenceGuidance(d, input.fallbackUsed, Boolean(packed.evidenceBlock))),
     push('exhaustive', exhaustive && packed.evidenceBlock
       ? '# Exhaustive request\nThe user asked for EVERY occurrence. Every evidence block above is already '
         + 'loaded for you: do not narrate reading, loading or checking anything — output the list directly. '
@@ -1611,7 +1619,7 @@ export function composePrompt(input: ComposeInput): ComposedPrompt {
       // the exact fabrication the grounding policy exists to prevent.
       // A FAST turn gets nothing: it never needed evidence, and telling it that
       // retrieval failed would be false.
-      : push('no_evidence', noEvidenceNotice(
+      : canConstructCareerStory ? '' : push('no_evidence', noEvidenceNotice(
         d, input.attachedSourceCount, input.profileSourceCount,
         input.conversationHasContent === true,
         input.conversationHasScreenObservation === true,
@@ -1623,7 +1631,9 @@ export function composePrompt(input: ComposeInput): ComposedPrompt {
       ? push('privacy_withheld', privacyWithholdingNotice(input.withheldScopes, true))
       : '',
     push('today', todayNotice(input.now ?? new Date(), d.resolvedQuestion, input.conversationSummary, packed.evidenceBlock)),
-    push('evidence_story', evidenceStoryGuard(d, Boolean(packed.evidenceBlock))),
+    push('evidence_story', canConstructCareerStory
+      ? `# Career example\n${CAREER_STORY_FALLBACK}`
+      : evidenceStoryGuard(d, Boolean(packed.evidenceBlock))),
     push('personal_commitment', personalCommitmentNotice(d.resolvedQuestion, policy.id, Boolean(input.heardQuestion))),
     push('calculation', calculationNotice(d.resolvedQuestion, input.conversationSummary, packed.evidenceBlock)),
     push('refinement', refinementNotice(d.resolvedQuestion, input.conversationSummary, input.heardQuestion === true)),
