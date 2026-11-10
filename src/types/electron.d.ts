@@ -881,7 +881,7 @@ export interface ElectronAPI {
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void
   onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => () => void
-  onWhatToAnswerQuestion: (callback: (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean }) => void) => () => void;
+  onWhatToAnswerQuestion: (callback: (data: { generationId: number; question?: string; overlayQuestionId?: string; replacesGenerationId?: number; pending?: boolean; failed?: boolean }) => void) => () => void;
   onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; generationId?: number; sourceLabel?: string; emittedAt?: number; stopReason?: string; outcome?: WhatToSayOutcome }) => void) => () => void
   onIntelligenceSuggestedAnswerDiscard: (callback: (data: { reason: string; generationId?: number }) => void) => () => void
   // Verified code execution (background): ✓ badge + corrected message.

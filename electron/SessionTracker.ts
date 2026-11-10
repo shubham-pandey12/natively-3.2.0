@@ -780,9 +780,7 @@ export class SessionTracker {
     getContextWithInterim(lastSeconds: number = 120): ContextItem[] {
         const contextItems = [...this.getContext(lastSeconds)];
 
-        // RC-1 (session C, 2026-08-21): same resolver as the WTA injection site
-        // in IntelligenceEngine — a cumulative provider interim (measured up to
-        // 10K chars) must never be appended whole; only its novel tail is.
+        // Cumulative provider interims must contribute only their novel words.
         const lastInterim = this.lastInterimInterviewer;
         if (lastInterim && lastInterim.text.trim().length > 0) {
             const { resolveInterimInjection } = require('./llm/interimInjectionGuard') as typeof import('./llm/interimInjectionGuard');
@@ -797,6 +795,7 @@ export class SessionTracker {
                     role: 'interviewer',
                     text: verdict.text,
                     timestamp: lastInterim.timestamp,
+                    ...(lastInterim.punctuationSource ? { punctuationSource: lastInterim.punctuationSource } : {}),
                 });
             }
         }

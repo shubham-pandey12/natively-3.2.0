@@ -148,7 +148,7 @@ describe('RC-1: guards that must not over-fire', () => {
     assert.equal(r.reason, 'duplicate');
   });
 
-  test('legacy duplicate guard preserved: timestamp within 1s of last interviewer item skips', () => {
+  test('a nearby interim already covered by the final skips', () => {
     const item = { role: 'interviewer', text: 'Why Rust exactly?', timestamp: NOW - 700 };
     const r = resolve('Why Rust', { timestamp: NOW - 300, finals: [item], lastContextItem: item });
     assert.equal(r.action, 'skip');
@@ -177,4 +177,11 @@ describe('RC-1: length-cap backstop when no anchor matches', () => {
     assert.ok(r.text.length <= MAX_INTERIM_INJECTION_CHARS);
     assert.match(r.text, /keep relational\?$/);
   });
+});
+
+test('distinct interim words within 200ms of a final survive', () => {
+  const item = { role: 'interviewer', text: 'We are migrating PostgreSQL across regions.', timestamp: NOW - 700 };
+  assert.deepEqual(resolve('How would you do it without downtime?', {
+    timestamp: NOW - 500, finals: [item], lastContextItem: item,
+  }), { action: 'inject', reason: 'fresh', text: 'How would you do it without downtime?' });
 });

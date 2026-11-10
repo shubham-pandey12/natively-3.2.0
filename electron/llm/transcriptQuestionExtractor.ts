@@ -18,6 +18,7 @@
 // Fully dynamic: no profile-, company-, or fixture-specific strings. Everything
 // is derived from the transcript turns and generic question/role grammar.
 
+import { containsTranscriptRevision } from '../utils/rollingTranscriptState';
 import { TranscriptTurn, cleanTranscript } from './transcriptCleaner';
 import {
     SOCIAL_PLEASANTRY, WAIT_IDIOM,
@@ -317,7 +318,8 @@ function classifyType(q: string): ExtractedQuestionType {
  */
 export function extractLatestQuestion(
     turns: TranscriptTurn[],
-    windowTurns: number = 6
+    windowTurns: number = 6,
+    joinSpokenFragments = false
 ): ExtractedQuestion {
     const empty: ExtractedQuestion = {
         detectedSpeaker: 'unknown',
@@ -458,6 +460,23 @@ export function extractLatestQuestion(
         if (prevIsAsk && !GREETING_ONLY.test(prevText) && !GREETING_ONLY.test(prevRaw)) {
             scoringText = `${prevText} ${scoringText}`;
             latestQuestion = `${prevRaw} ${latestQuestion}`;
+        }
+    }
+    if (joinSpokenFragments && latestQuestion === rawTextAt(chosenIdx)) {
+        // shortcut: join nearby setup until STT supplies stable utterance boundaries.
+        for (let i = chosenIdx - 1; i >= 0; i--) {
+            const prior = cleaned[i];
+            const next = cleaned[i + 1];
+            const raw = rawTextAt(i);
+            if (prior.role !== 'interviewer' || rawIndexOfCleaned[i] + 1 !== rawIndexOfCleaned[i + 1]
+                || next.timestamp - prior.timestamp > 2500 || chosen.timestamp - prior.timestamp > 10000
+                || GREETING_ONLY.test(raw) || QUESTION_MARK.test(raw)
+                || ((/[.!]$/.test(raw) || INTERROGATIVE_LEAD.test(next.text))
+                    && (INTERROGATIVE_LEAD.test(prior.text) || TASK_DIRECTIVE.test(prior.text)
+                        || IMPERATIVE_ASK.test(prior.text)))) break;
+            if (raw !== latestQuestion && !containsTranscriptRevision(latestQuestion, raw)) {
+                latestQuestion = `${raw} ${latestQuestion}`;
+            }
         }
     }
     const hasMark = QUESTION_MARK.test(scoringText) || QUESTION_MARK.test(latestQuestion);

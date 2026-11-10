@@ -25,7 +25,7 @@ const verdict = (over) => JSON.stringify({ is_ask: true, directed_at_user: true,
 const INCOMPLETE = verdict({ is_ask: false, complete: false, act: 'incomplete', action: 'silent', answerability: 0.1 });
 
 /** The real engine. Each judge reply may carry a delay (ms on the fake clock). */
-function rig(replies = [], { judgeMs = 0 } = {}) {
+function rig(replies = [], { judgeMs = 0, settle } = {}) {
   const clock = new FakeClock();
   const s = { judged: [], dispatched: [], events: [], stallStates: [] };
   let n = 0;
@@ -33,7 +33,7 @@ function rig(replies = [], { judgeMs = 0 } = {}) {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
     onSttStall: (stalled) => { s.stallStates.push(stalled); },
     recentTurns: () => [],
-    dispatch: (q) => { s.dispatched.push(q.text); },
+    dispatch: (q, { onSettled }) => { s.dispatched.push(q.text); settle?.(onSettled); },
     judgeCandidate: (req) => {
       s.judged.push(req);
       const r = replies[n++] ?? verdict();
@@ -265,4 +265,51 @@ test('the judge prompt carries the lagging note only when asked, byte-identical 
   assert.notEqual(lagging, plain);
   assert.match(lagging, /speech-to-text has not caught up/);
   assert.ok(lagging.indexOf('speech-to-text has not caught up') > lagging.indexOf('</candidate>'), 'trailing, beside the candidate');
+});
+
+test('confirmed speech stop waits for the dangling question tail', async () => {
+  const h = rig();
+  const opening = 'We are migrating PostgreSQL across regions.';
+  h.final(opening);
+  h.interim('How would you do it');
+  h.stop();
+  await h.wait(STABILITY_MS + 100);
+  assert.deepEqual(h.s.dispatched, []);
+  const tail = 'How would you do it without downtime?';
+  h.final(tail);
+  await h.wait(STABILITY_MS + 1000);
+  assert.deepEqual(h.s.dispatched, [`${opening} ${tail}`]);
+});
+
+test('failed provisional answers recover regardless of late-final settlement order', async () => {
+  for (const finalFirst of [false, true]) {
+    const callbacks = [];
+    const h = rig([], { settle: callback => callbacks.push(callback) });
+    h.interim(CLIPPED);
+    h.stop();
+    await h.wait(STALL_PROMOTE_MS + STABILITY_MS);
+    assert.deepEqual(h.s.dispatched, [CLIPPED]);
+    if (finalFirst) h.final(ASK);
+    callbacks[0](false);
+    if (!finalFirst) h.final(ASK);
+    await h.wait(STABILITY_MS + 1000);
+    assert.deepEqual(h.s.dispatched, [CLIPPED, ASK]);
+    callbacks[1](true);
+    h.final(ASK);
+    await h.wait(STABILITY_MS + 1000);
+    assert.deepEqual(h.s.dispatched, [CLIPPED, ASK]);
+  }
+});
+
+test('old failed provisional dispatches cannot restore speech after a meeting reset', async () => {
+  const callbacks = [];
+  const h = rig([], { settle: callback => callbacks.push(callback) });
+  h.interim(CLIPPED);
+  h.stop();
+  await h.wait(STALL_PROMOTE_MS + STABILITY_MS);
+  h.final(ASK);
+  h.engine.onMeetingStop();
+  callbacks[0](false);
+  await h.wait(STABILITY_MS + 1000);
+  assert.deepEqual(h.s.dispatched, [CLIPPED]);
 });

@@ -21,9 +21,7 @@
 // Decision order:
 //   1. empty        -> skip
 //   2. stale        -> skip  (interims are in-flight speech; a dead one is noise)
-//   3. duplicate    -> skip  (legacy guard preserved: exact text match, or the
-//                             last interviewer item landed within 1s — the
-//                             final for this same utterance already arrived)
+//   3. duplicate    -> skip text already covered by the latest final
 //   4. containment  -> find the newest final whose tail-anchor occurs in the
 //                      interim; everything up to and including that anchor is
 //                      already covered by finals, so inject only what follows
@@ -129,16 +127,16 @@ export function resolveInterimInjection(input: InterimInjectionInput): InterimIn
     return { action: 'skip', reason: 'stale' };
   }
 
-  // Legacy duplicate guard, preserved byte-for-byte in behavior: the final for
-  // this same utterance already landed as the last context item.
-  const last = input.lastContextItem;
-  if (last && last.role === 'interviewer'
-    && (last.text === raw || Math.abs(last.timestamp - input.interim.timestamp) < 1000)) {
-    return { action: 'skip', reason: 'duplicate' };
-  }
-
   const interimTokens = tokenize(trimmed);
   if (interimTokens.length === 0) return { action: 'skip', reason: 'empty' };
+
+  const last = input.lastContextItem;
+  if (last?.role === 'interviewer') {
+    const covered = lastAnchorMatchEnd(tokenize(last.text), interimTokens.map(token => token.word)) !== -1;
+    if (last.text.trim() === trimmed || (covered && Math.abs(last.timestamp - input.interim.timestamp) < 1000)) {
+      return { action: 'skip', reason: 'duplicate' };
+    }
+  }
 
   // Containment: newest final first — the newest match cuts the most.
   const finalsNewestFirst = input.recentInterviewerFinals.slice(-MAX_FINALS_SCANNED).reverse();

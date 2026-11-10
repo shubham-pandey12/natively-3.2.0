@@ -707,7 +707,7 @@ interface ElectronAPI {
 
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void;
-  onWhatToAnswerQuestion: (callback: (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean }) => void) => () => void;
+  onWhatToAnswerQuestion: (callback: (data: { generationId: number; question?: string; overlayQuestionId?: string; replacesGenerationId?: number; pending?: boolean; failed?: boolean }) => void) => () => void;
   onIntelligenceSuggestedAnswer: (
     callback: (data: { answer: string; question: string; confidence: number; sourceLabel?: string; generationId?: number; stopReason?: string; outcome?: WhatToSayOutcome }) => void,
   ) => () => void;

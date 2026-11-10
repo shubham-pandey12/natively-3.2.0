@@ -346,8 +346,14 @@ export class SimpleAutoAnswerEngine {
     private noInterimTimer: ClockTimer | null = null;
     private sttStalled = false;
     private localTurnHasTranscript: boolean | null = null;
-    /** A promoted interim whose dispatch was resolved, so its late final cannot reopen it. */
-    private stallResolved: { text: string; at: number } | null = null;
+    private stallResolved: {
+        text: string;
+        at: number;
+        failed?: boolean;
+        final?: { text: string; at: number; speaker?: string };
+        prefix?: SimpleAutoAnswerEngine['pending'];
+        seq?: number;
+    } | null = null;
     /** The interim last promoted: one stand-in per frozen interim, however many stops follow. */
     private promotedInterim: string | null = null;
     /**
@@ -466,6 +472,7 @@ export class SimpleAutoAnswerEngine {
         }
         // The dangling interim IS the stall case: start its clock from here.
         if (this.lastInterviewerInterim) {
+            this.disarm();
             this.armStallCap();
             this.warmNextCandidate();
             return;
@@ -569,6 +576,8 @@ export class SimpleAutoAnswerEngine {
     private onStoppage(early: boolean): void {
         if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
         const now = this.clock.now();
+        if (this.stallTimer !== null && this.lastInterviewerInterim && this.localStopAt !== 0
+            && (this.speechStartsSeen || this.localStopAt >= this.utteranceStartAt)) return;
         const before = this.pending.length;
         this.pending = this.pending.filter(p => now - p.at <= PENDING_MAX_AGE_MS);
         // Finals arrive in time order, so aged-out ones are always a prefix.
@@ -877,7 +886,9 @@ export class SimpleAutoAnswerEngine {
             this.judgedParts = partsAtConsult;
             return;
         }
-        const text = route.questionText ?? candidate;
+        const text = standInReplaced() && (!route.questionText || normalizeForCompare(route.questionText) === normalizeForCompare(candidate))
+            ? joinTranscriptParts(this.pending)
+            : route.questionText ?? candidate;
         if (route.action === 'answer' && this.isDuplicateAnswer(normalizeForCompare(text), this.clock.now())) {
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'duplicate' });
             this.judgedParts = partsAtConsult;
@@ -979,6 +990,12 @@ export class SimpleAutoAnswerEngine {
             const reuseSpeculative = Boolean(allowKeyedReuse && snapshot && snapshot.questionId === id && snapshot.text);
             const parts = this.pending;
             const previousStallResolution = this.stallResolved;
+            this.consumeCandidate();
+            const stalled = this.stallResolved;
+            if (stalled) {
+                stalled.prefix = parts.slice(0, -1);
+                stalled.seq = seqAtDeliver;
+            }
             const inFlight = { candidateKey, questionKey };
             this.inFlightAnswers.set(id, inFlight);
             const onSettled = (answered: boolean) => {
@@ -988,7 +1005,7 @@ export class SimpleAutoAnswerEngine {
                     this.lastAnsweredText = text;
                     this.lastAnsweredCandidateKey = candidateKey;
                     this.lastAnsweredAt = this.clock.now();
-                } else if (!waitingForManual && this.host.manualAnswerActive?.() && this.host.isMeetingActive()
+                } else if (!stalled?.final && !waitingForManual && this.host.manualAnswerActive?.() && this.host.isMeetingActive()
                     && this.judgeSeq === seqAtDeliver && this.clock.now() < manualDeadline) {
                     // A manual capture can take the stream while the planner is awaiting intent.
                     waitingForManual = true;
@@ -997,9 +1014,15 @@ export class SimpleAutoAnswerEngine {
                     this.stallResolved = previousStallResolution;
                     if (this.feedbackPending?.id === id) this.clearFeedback();
                     attempt();
+                } else if (stalled && this.stallResolved === stalled) {
+                    stalled.failed = true;
+                    if (stalled.final && this.judgeSeq === seqAtDeliver && this.host.isMeetingActive()) {
+                        this.stallResolved = null;
+                        this.pending = [...(stalled.prefix ?? []), stalled.final];
+                        this.arm(ENDPOINT_CONFIRM_MS);
+                    }
                 }
             };
-            this.consumeCandidate();
             this.emit({ name: 'auto_answer_decision', questionId: id, action: 'auto', answerability });
             if (reuseSpeculative) this.host.log?.(`[AutoAnswer:simple] reusing the prefetched answer for ${id}`);
             this.armFeedback(id, act, answerability);
@@ -1183,8 +1206,16 @@ export class SimpleAutoAnswerEngine {
             return true;
         }
         if (resolved && now - resolved.at <= STALL_ANSWERED_TTL_MS && isSameUtterance(resolved.text, text)) {
+            const stillCurrent = resolved.seq === this.judgeSeq;
+            if (resolved.failed && stillCurrent) {
+                this.pending.push(...(resolved.prefix ?? []));
+                return false;
+            }
             this.lastInterviewerInterim = '';
-            this.host.log?.('[AutoAnswer:simple] the stalled final arrived after its interim was settled: not reopening it');
+            if (stillCurrent) {
+                resolved.final = { text, at: now, speaker };
+                this.stallResolved = resolved;
+            }
             return true;
         }
         return false;

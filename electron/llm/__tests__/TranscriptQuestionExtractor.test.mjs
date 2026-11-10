@@ -393,3 +393,12 @@ describe('toCandidateFraming (interviewer 2nd-person → candidate 1st-person)',
   });
 });
 
+
+test('spoken extraction joins setup and respects speaker and question boundaries', () => {
+  const setup = 'We are migrating PostgreSQL across regions.';
+  const ask = 'How would you do it without downtime?';
+  assert.equal(extractLatestQuestion([turn('interviewer', setup), turn('interviewer', ask)], 6, true).latestQuestion, `${setup} ${ask}`);
+  assert.equal(extractLatestQuestion([turn('interviewer', 'How do you detect lag'), turn('interviewer', ask)], 6, true).latestQuestion, ask);
+  assert.equal(extractLatestQuestion([turn('interviewer', setup), turn('user', 'I see.'), turn('interviewer', ask)], 6, true).latestQuestion, ask);
+  assert.equal(extractLatestQuestion([turn('interviewer', setup), turn('interviewer', `${setup} ${ask}`)], 6, true).latestQuestion, `${setup} ${ask}`);
+});

@@ -336,12 +336,12 @@ test('a regular automatic answer only claims its own spoken turn', async () => {
     session.addTranscript({ speaker: 'interviewer', text: `Okay. ${QUESTION} What mattered most?`, timestamp: timestamp + 1, final: true });
     await dispatch(engine, 'revised-race', false);
     assert.equal(finals.length, 1, 'a repeated automatic trigger keeps the same answer');
-    assert.equal(await manual(), null, 'a cumulative transcript revision keeps the same answer');
-    assert.equal(outcomeOut.value.reason, 'automatic_answer_exists');
+    await manual();
+    assert.equal(outcomeOut.value.status, 'success', 'new question words permit a manual retry');
 
     session.addTranscript({ speaker: 'interviewer', text: 'How would you migrate that database without downtime?', timestamp: timestamp + 2, final: true });
     await manual();
-    assert.equal(finals.length, 2);
+    assert.equal(finals.length, 3);
     engine.reset();
 });
 
@@ -378,5 +378,73 @@ test('Direct Assist blocks automatic dispatch until all manual streams have rele
     assert.equal(engine.canAutoAnswer(), true);
     await dispatch(engine, 'after-capture', false);
     assert.equal(finals.length, 1);
+    engine.reset();
+});
+
+test('keyed prefetch cannot substitute a fragment for a complete question', async () => {
+    const { engine, finals } = await makeEngine();
+    engine.prefetchAutoAnswer('split', 'Why did you choose PostgreSQL');
+    await untilIdle(engine);
+    await dispatch(engine, 'split');
+    assert.equal(finals.at(-1)?.question, QUESTION);
+    engine.reset();
+});
+
+test('manual press includes setup and the final arriving during its grace period', async () => {
+    const { engine, session } = await makeEngine();
+    const setup = 'We are migrating a high traffic PostgreSQL database across regions.';
+    const ask = 'How would you do it without downtime?';
+    const t = Date.now() - 300;
+    session.handleTranscript({ speaker: 'interviewer', final: true, timestamp: t, text: setup });
+    session.handleTranscript({ speaker: 'interviewer', final: false, timestamp: t + 200, text: 'How would you do it' });
+    const cards = [];
+    engine.on('what_to_answer_question', event => cards.push(event));
+    const answer = engine.runWhatShouldISay(undefined, 0.8, undefined, {
+        forceFresh: true, skipCooldown: true, overlayQuestionId: 'manual',
+    });
+    session.handleTranscript({ speaker: 'interviewer', final: true, timestamp: t + 250, text: ask });
+    await answer;
+    assert.equal(cards.find(card => card.overlayQuestionId === 'manual')?.question, `${setup} ${ask}`);
+    engine.reset();
+});
+
+test('manual press can replace a stalled automatic stream while late results stay suppressed', async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const { engine, session, finals } = await makeEngine({ gate });
+    session.addTranscript({ speaker: 'interviewer', text: QUESTION, timestamp: Date.now(), final: true });
+    const cards = [];
+    engine.on('what_to_answer_question', event => cards.push(event));
+    engine.prefetchAutoAnswer('stalled', QUESTION);
+    await dispatch(engine, 'stalled');
+    engine.spokenAnswer.lastProgressAt -= 8000;
+    const outcomeOut = {};
+    const manual = engine.runWhatShouldISay(undefined, 0.8, undefined, {
+        forceFresh: true, skipCooldown: true, overlayQuestionId: 'retry', outcomeOut,
+    });
+    release();
+    await manual;
+    assert.equal(outcomeOut.value.status, 'success');
+    assert.equal(cards.find(card => card.overlayQuestionId === 'retry')?.replacesGenerationId, cards[0].generationId);
+    assert.equal(finals.length, 1);
+    engine.reset();
+});
+
+test('a request superseded during transcript grace cannot publish or cancel the newer answer', async () => {
+    const { engine, session, finals } = await makeEngine();
+    session.handleTranscript({ speaker: 'interviewer', text: QUESTION, timestamp: Date.now(), final: false });
+    const oldOutcome = {};
+    const old = engine.runWhatShouldISay(undefined, 0.8, undefined, {
+        forceFresh: true, skipCooldown: true, overlayQuestionId: 'old', outcomeOut: oldOutcome,
+    });
+    const newOutcome = {};
+    await engine.runWhatShouldISay('How would you monitor replication lag?', 0.8, undefined, {
+        forceFresh: true, skipCooldown: true, outcomeOut: newOutcome,
+    });
+    await old;
+    assert.equal(oldOutcome.value.status, 'cancelled');
+    assert.equal(newOutcome.value.status, 'success');
+    assert.equal(finals.length, 1);
+    assert.equal(finals[0].question, 'How would you monitor replication lag?');
     engine.reset();
 });

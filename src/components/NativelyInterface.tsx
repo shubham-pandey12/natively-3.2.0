@@ -7851,7 +7851,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, replacesGenerationId, pending, failed }) => {
         const id = overlayQuestionId ?? `interviewer-answer-${generationId}`;
         if (!question) {
           setMessages((prev) => prev.some((message) => message.id === id && message.answerPending)
@@ -7862,9 +7862,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (activeDirectAssistRef.current) return;
         if (overlayQuestionId) {
           if (legacyIntelligenceTombstonedRef.current) return;
-          setMessages((prev) => prev.map((message) => message.id === id
-            ? { ...message, role: 'interviewer', text: question, isQuickActionLabel: false }
-            : message));
+          const decision = resolveLiveAnswerBatch(liveAnswerGenIdRef.current, generationId);
+          if (!decision.accept) return;
+          const replacedStreamId = replacesGenerationId !== undefined && replacesGenerationId === liveAnswerGenIdRef.current
+            && streamingIntentRef.current === 'what_to_answer' ? streamingMsgIdRef.current : null;
+          liveAnswerGenIdRef.current = decision.activeId;
+          if (replacedStreamId) prepareIntelligenceStreamPlaceholder('what_to_answer');
+          setMessages((prev) => prev.filter((message) => message.id !== replacedStreamId
+            && message.id !== `interviewer-answer-${replacesGenerationId}`)
+            .map((message) => message.id === id
+              ? { ...message, role: 'interviewer', text: question, isQuickActionLabel: false }
+              : message));
+
           return;
         }
         // Only a new, committed automatic question may reopen legacy streaming after Direct.

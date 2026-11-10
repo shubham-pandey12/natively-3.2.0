@@ -1,3 +1,4 @@
+import { normalizeForCompare } from './intelligence/autoAnswer/AutoAnswerText';
 // IntelligenceEngine.ts
 // LLM mode routing and orchestration.
 // Extracted from IntelligenceManager to decouple LLM logic from state management.
@@ -152,7 +153,7 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
-    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean }) => void;
+    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; replacesGenerationId?: number; pending?: boolean; failed?: boolean }) => void;
     'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => void;
     // generationId (audit finding #3): stamped on every live token so the renderer
     // can drop a batch from an answer that was already superseded. Optional →
@@ -232,6 +233,9 @@ interface SpeculativeAnswer {
     answerType?: AnswerType;
     answerStyle?: string;
 }
+
+const MANUAL_AUTO_TAKEOVER_MS = 8000;
+const MANUAL_TRANSCRIPT_GRACE_MS = 350;
 
 export class IntelligenceEngine extends EventEmitter {
     // Mode state
@@ -493,7 +497,7 @@ export class IntelligenceEngine extends EventEmitter {
      * What-to-Answer — a different generation — is untouchable.
      */
     private automaticGenerationId: number | null = null;
-    private spokenAnswer: { turn: { timestamp: number; text: string }; automatic: boolean; generationId: number; completed: boolean } | undefined;
+    private spokenAnswer: { question?: string; lastProgressAt: number; turn: { timestamp: number; text: string }; automatic: boolean; generationId: number; completed: boolean } | undefined;
 
     private latestSpokenTurn() {
         return this.session.getContextWithInterim(180).findLast(item => item.role === 'interviewer');
@@ -1366,19 +1370,13 @@ export class IntelligenceEngine extends EventEmitter {
             const expired = Date.now() > this.speculativeTextExpiry;
             const stale = expired || !trigger.lastQuestion; // empty question — reject conservatively
             if (!stale) {
-                // Keyed reuse (V3 Amendment 6): the controller already verified
-                // identity by questionId or embedding cosine; Jaccard is the fallback.
-                // Text-matched (not keyed) reuse must also have HEARD the
-                // question: the similarity scores any pure prefix at 0.9, and
-                // live 2026-09-26 (T08) it adopted a speculation on "And third,
-                // get a random element, where every element has the same" for
-                // the whole three-operation task — the user got a restatement
-                // of one operation instead of the design.
-                const similarity = trigger.reuseSpeculative
-                    ? 1
-                    : speculationCoversQuestion(this.speculativeText, trigger.lastQuestion)
-                        ? speculativeQuestionSimilarity(this.speculativeText, trigger.lastQuestion)
-                        : 0;
+                // An ID may survive transcript growth. Reuse requires all committed words.
+                const committedWords = normalizeForCompare(trigger.lastQuestion);
+                const draftWords = normalizeForCompare(this.speculativeText);
+                const coversCommitted = Boolean(committedWords && ` ${draftWords} `.includes(` ${committedWords} `));
+                const similarity = coversCommitted
+                    ? (trigger.reuseSpeculative ? 1 : speculativeQuestionSimilarity(this.speculativeText, trigger.lastQuestion))
+                    : 0;
                 this.speculativeText = null;
                 this.speculativeTextExpiry = Infinity;
                 this.speculativeQuestionId = null;
@@ -1401,7 +1399,7 @@ export class IntelligenceEngine extends EventEmitter {
                         if (trigger.automatic) {
                             this.automaticGenerationId = this.currentGenerationId;
                             if (spokenTurn !== undefined) {
-                                this.spokenAnswer = { turn: spokenTurn, automatic: true, generationId: this.currentGenerationId, completed: false };
+                                this.spokenAnswer = { question: trigger.lastQuestion, lastProgressAt: Date.now(), turn: spokenTurn, automatic: true, generationId: this.currentGenerationId, completed: false };
                             }
                         }
                         if (trigger.automatic && trigger.lastQuestion) {
@@ -1421,7 +1419,7 @@ export class IntelligenceEngine extends EventEmitter {
                             this.emit('what_to_answer_question', { generationId: finished.generationId, question: trigger.lastQuestion });
                         }
                         if (spokenTurn !== undefined) {
-                            this.spokenAnswer = { turn: spokenTurn, automatic: true, generationId: finished.generationId, completed: false };
+                            this.spokenAnswer = { question: trigger.lastQuestion, lastProgressAt: Date.now(), turn: spokenTurn, automatic: true, generationId: finished.generationId, completed: false };
                         }
                         return this.revealSpeculativeAnswer(finished, trigger.automatic === true);
                     }
@@ -2204,15 +2202,29 @@ export class IntelligenceEngine extends EventEmitter {
 
         const hasImages = Boolean(imagePaths?.length);
         const automatic = this.nextRunIsAutomatic;
-        const manualSpokenAnswer = options?.forceFresh && options.coalesceAutomatic !== false
-            && (options.spokenWithCapture === true || (!question && !hasImages
-                && !options.screenContext && !options.domContext && !options.promptInstruction));
+        const inferSpokenQuestion = !isSpeculative && !question && !hasImages
+            && !options?.screenContext && !options?.domContext && !options?.promptInstruction;
+        const manualSpokenAnswer = forceFresh && options?.coalesceAutomatic !== false
+            && (options?.spokenWithCapture === true || inferSpokenQuestion);
+        const spokenContext = inferSpokenQuestion ? this.session.getContextWithInterim(180) : undefined;
         const spokenTurn = automatic || (manualSpokenAnswer && options?.spokenWithCapture)
             ? this.latestSpokenTurnFor(question)
-            : manualSpokenAnswer ? this.latestSpokenTurn() : undefined;
-        if (manualSpokenAnswer && this.spokenAnswer?.automatic && this.matchesSpokenAnswer(spokenTurn)
-            && (this.spokenAnswer.completed || (this.automaticGenerationId === this.spokenAnswer.generationId
-                && this.currentGenerationId === this.spokenAnswer.generationId))) {
+            : manualSpokenAnswer ? spokenContext?.findLast(item => item.role === 'interviewer') : undefined;
+        const claimed = this.spokenAnswer;
+        const currentSpokenQuestion = spokenContext
+            ? extractLatestQuestion(spokenContext, 6, true).latestQuestion : question;
+        const claimedWords = normalizeForCompare(claimed?.turn.text ?? '');
+        const currentWords = normalizeForCompare(currentSpokenQuestion ?? '');
+        const matchingAutomatic = claimed?.automatic && manualSpokenAnswer && (
+            this.matchesSpokenAnswer(spokenTurn)
+            || (spokenTurn && Math.abs(spokenTurn.timestamp - claimed.turn.timestamp) <= 5000
+                && claimedWords && ` ${currentWords} `.includes(` ${claimedWords} `))
+        ) ? claimed : undefined;
+        if (matchingAutomatic
+            && currentWords === normalizeForCompare(matchingAutomatic.question ?? '')
+            && (matchingAutomatic.completed || (now - matchingAutomatic.lastProgressAt < MANUAL_AUTO_TAKEOVER_MS
+                && this.automaticGenerationId === matchingAutomatic.generationId
+                && this.currentGenerationId === matchingAutomatic.generationId))) {
             setOutcome('cancelled', 'automatic_answer_exists');
             return null;
         }
@@ -2320,7 +2332,7 @@ export class IntelligenceEngine extends EventEmitter {
         // mints a newer id and the automatic/speculative one is no longer live.
         this.automaticGenerationId = automatic ? generationId : null;
         if (spokenTurn !== undefined) {
-            this.spokenAnswer = { turn: spokenTurn, automatic, generationId, completed: false };
+            this.spokenAnswer = { question, lastProgressAt: now, turn: spokenTurn, automatic, generationId, completed: false };
         }
         this.speculativeGenerationId = isSpeculative ? generationId : null;
         this.nextRunIsAutomatic = false;
@@ -2571,40 +2583,15 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const contextItems = this.session.getContext(180);
-            trace.mark('transcript_window_loaded', { turns: contextItems.length });
-
-            // Inject latest interim transcript if available.
-            // RC-1 (session C, 2026-08-21): guarded by resolveInterimInjection —
-            // the STT relay was observed sending CUMULATIVE interims (21 ->
-            // 10,126 chars over one session) and the old exact-equality/1s guard
-            // let the whole-session blob be appended as the newest turn, which
-            // extractLatestQuestion then returned verbatim as "the question"
-            // (86/86 injected presses). The resolver cuts the interim to its
-            // novel tail against recent finals, caps length, and skips stale ones.
-            const lastInterim = this.session.getLastInterimInterviewer();
-            if (lastInterim && lastInterim.text.trim().length > 0) {
-                const { resolveInterimInjection } = require('./llm/interimInjectionGuard') as typeof import('./llm/interimInjectionGuard');
-                const verdict = resolveInterimInjection({
-                    interim: { text: lastInterim.text, timestamp: lastInterim.timestamp },
-                    recentInterviewerFinals: contextItems.filter(item => item.role === 'interviewer'),
-                    lastContextItem: contextItems[contextItems.length - 1] ?? null,
-                    now: Date.now(),
-                });
-                if (verdict.action === 'inject') {
-                    console.log(`[IntelligenceEngine] Injecting interim transcript`, { length: verdict.text.length, rawLength: lastInterim.text.length, reason: verdict.reason });
-                    contextItems.push({
-                        role: 'interviewer',
-                        text: verdict.text,
-                        timestamp: lastInterim.timestamp,
-                        // F9: the interim carries provider punctuation provenance
-                        // from the STT seam (provider_interim / unavailable).
-                        ...(lastInterim.punctuationSource ? { punctuationSource: lastInterim.punctuationSource } : {}),
-                    });
-                } else {
-                    console.log(`[IntelligenceEngine] Interim injection skipped`, { rawLength: lastInterim.text.length, reason: verdict.reason });
+            if (inferSpokenQuestion && forceFresh && this.session.getLastInterimInterviewer()) {
+                await new Promise<void>(resolve => setTimeout(resolve, MANUAL_TRANSCRIPT_GRACE_MS));
+                if (isWtaSuperseded()) {
+                    recordWtaCancellation();
+                    return null;
                 }
             }
+            const contextItems = this.session.getContextWithInterim(180);
+            trace.mark('transcript_window_loaded', { turns: contextItems.length });
 
             const transcriptTurns = contextItems.map(item => ({
                 role: item.role,
@@ -2623,7 +2610,7 @@ export class IntelligenceEngine extends EventEmitter {
             );
 
             const lastInterviewerTurn = this.session.getLastInterviewerTurn();
-            const extractedQuestion = extractLatestQuestion(transcriptTurns);
+            const extractedQuestion = extractLatestQuestion(transcriptTurns, 6, inferSpokenQuestion);
             // Set when the user's OWN spoken line is chosen as the question below.
             let questionSpokenByUser = false;
             // SPEAKER-MISATTRIBUTION FALLBACK (2026-09-07, always answer). Real
@@ -2676,7 +2663,10 @@ export class IntelligenceEngine extends EventEmitter {
             if (!isSpeculative && !question && options?.overlayQuestionId && !questionSpokenByUser) {
                 const submitted = (extractedQuestion.latestQuestion || lastInterviewerTurn)?.trim();
                 if (submitted) {
-                    this.emit('what_to_answer_question', { generationId, question: submitted, overlayQuestionId: options.overlayQuestionId });
+                    this.emit('what_to_answer_question', {
+                        generationId, question: submitted, overlayQuestionId: options.overlayQuestionId,
+                        replacesGenerationId: matchingAutomatic && !matchingAutomatic.completed ? matchingAutomatic.generationId : undefined,
+                    });
                 }
             }
             // WTA mint point (Phase 6 Slice 1, "what changes" item 1): one
@@ -4984,6 +4974,9 @@ export class IntelligenceEngine extends EventEmitter {
                 }
                 // #3: stamp this request's generationId so a superseded answer's
                 // already-queued tokens can be dropped renderer-side.
+                if (this.spokenAnswer?.generationId === generationId) {
+                    this.spokenAnswer.lastProgressAt = Date.now();
+                }
                 this.emit('suggested_answer_token', chunk, question || 'inferred', confidence, generationId);
             };
             // Non-coding paint path: buffer tokens, decide the scaffold hold once,
