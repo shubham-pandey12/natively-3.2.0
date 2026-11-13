@@ -6,12 +6,13 @@
 //
 // This EXECUTES the real hook out of the compiled bundle: what matters is
 // which meeting starts make a request, and a source reading cannot tell that.
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadIpcHandlers, LIVE_TRIAL } from './autoTrialHarness.mjs';
 
 let ipc;
 before(() => { ipc = loadIpcHandlers('meeting-starts-trial'); });
+after(() => { ipc?.dispose(); });
 
 const startMeeting = () => ipc.appState.autoStartTrialForMeeting();
 const sent = (channel) => ipc.sends.filter((s) => s.channel === channel);
@@ -25,6 +26,7 @@ test('main registers the meeting-start hook', () => {
 
 test('own AI keys: the meeting starts no trial', async () => {
   await ipc.handlers.get('set-groq-api-key')({}, 'gsk_test_own_key');
+  assert.deepEqual(ipc.unexpectedNetworkRequests, [], 'the test must not make external model-catalog requests');
   startMeeting();
   await ipc.settle();
   assert.equal(ipc.trialStartCalls.length, 0);
@@ -56,7 +58,9 @@ test('no AI: the meeting starts the trial, without waiting for it', async () => 
   assert.equal(ipc.appState.autoTrialSettled(), false);
   // A second start request while the first is in flight must not double up.
   startMeeting();
-  while (!release) await new Promise((r) => setTimeout(r, 5));
+  const releaseDeadline = Date.now() + 5_000;
+  while (!release && Date.now() < releaseDeadline) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(typeof release, 'function', 'state.reply was never reached; trial eligibility may have skipped startTrialFlow');
   release();
   await ipc.settle();
   assert.equal(ipc.trialStartCalls.length, 1);

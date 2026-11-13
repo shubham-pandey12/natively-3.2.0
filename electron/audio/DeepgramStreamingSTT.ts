@@ -288,6 +288,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
                 // Bound to the captured `live` so a stale Open can never add a
                 // duplicate listener to the current connection.
                 live.on(LiveTranscriptionEvents.Transcript, (data: any) => {
+                    if (live !== this.live) return; // ignore results from a retired connection
                     try {
                         const alt = data.channel?.alternatives?.[0];
                         const transcript = alt?.transcript;
@@ -362,6 +363,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
             // no speech_final fired for the utterance. Additive; nothing else
             // consumes it.
             this.live.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+                if (live !== this.live) return; // ignore endpoints from a retired connection
                 try { this.emit('endpoint', { type: 'utterance_end' }); } catch { /* listeners never break the socket */ }
             });
 

@@ -62,3 +62,14 @@ test('the overlay fills its chat from the start\'s session-reset', () => {
   assert.ok(body.indexOf('setMessages([])') < body.indexOf('resumedChatMessages(payload?.resumedChat)'), 'cleared first, then the earlier chat');
   assert.match(body, /directAssistHistoryRef\.current = resumedDirectHistory\(payload\?\.resumedChat\)/);
 });
+
+test('a fresh session reset clears Direct history before optional resume hydration', () => {
+  const src = fs.readFileSync(path.join(REPO, 'src/components/NativelyInterface.tsx'), 'utf8');
+  const start = src.indexOf('window.electronAPI.onSessionReset((payload)');
+  const body = src.slice(start, src.indexOf('return () => unsubscribe();', start));
+  const historyAssignment = body.indexOf('directAssistHistoryRef.current = resumedDirectHistory(payload?.resumedChat)');
+  const resumeGuard = body.indexOf('if (earlier.length > 0)');
+
+  assert.ok(historyAssignment >= 0 && historyAssignment < resumeGuard,
+    'Direct history must be set to the resumed turns or [] for every reset, including a fresh session');
+});

@@ -14,7 +14,7 @@ const require = createRequire(import.meta.url);
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // The build `npm test` makes. NATIVELY_TEST_IPC_BUNDLE points a local run at a
 // bundle built elsewhere, so it need not overwrite a build another run is using.
-const COMPILED = process.env.NATIVELY_TEST_IPC_BUNDLE || path.join(ROOT, 'dist-electron/electron/ipcHandlers.js');
+const COMPILED = path.resolve(ROOT, process.env.NATIVELY_TEST_IPC_BUNDLE || 'dist-electron/electron/ipcHandlers.js');
 
 export const LIVE_TRIAL = () => ({
   ok: true,
@@ -27,10 +27,12 @@ export const LIVE_TRIAL = () => ({
 
 export function loadIpcHandlers(label) {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), `${label}-`));
+  const previousUserData = process.env.NATIVELY_TEST_USERDATA;
   process.env.NATIVELY_TEST_USERDATA = userData;
   const handlers = new Map();
   const sends = [];
   const trialStartCalls = [];
+  const unexpectedNetworkRequests = [];
   const state = { meetingActive: true, reply: async () => { throw new Error('no reply planned'); } };
 
   const win = { isDestroyed: () => false, webContents: { send: (channel, data) => sends.push({ channel, data }) } };
@@ -64,6 +66,18 @@ export function loadIpcHandlers(label) {
     get: (target, key) => (key in target ? target[key] : key === 'then' ? undefined : function nativeStub() {}),
   });
   const origLoad = Module._load;
+  const originalFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    Module._load = origLoad;
+    if (originalFetch) Object.defineProperty(globalThis, 'fetch', originalFetch);
+    else delete globalThis.fetch;
+    if (previousUserData === undefined) delete process.env.NATIVELY_TEST_USERDATA;
+    else process.env.NATIVELY_TEST_USERDATA = previousUserData;
+    fs.rmSync(userData, { recursive: true, force: true });
+  };
   Module._load = function patched(request, ...rest) {
     if (request === 'electron') return fakeElectron;
     if (/[\\/]native-module[\\/]index\.[^\\/]+\.node$/.test(request)) return fakeNative;
@@ -75,21 +89,28 @@ export function loadIpcHandlers(label) {
       const body = await state.reply();
       return { ok: body.__status ? body.__status < 400 : true, status: body.__status ?? 200, json: async () => body };
     }
-    return { ok: false, status: 503, json: async () => ({ error: 'not_stubbed' }) };
+    unexpectedNetworkRequests.push(String(url));
+    throw new Error(`Unexpected network request from auto-trial test: ${String(url)}`);
   };
 
-  const mod = require(COMPILED);
-  const appState = {
-    processingHelper: { getLLMHelper: () => new Proxy({}, { get: () => noop }) },
-    sendModelChanged: noop,
-    reconfigureSttProvider: async () => {},
-    getKnowledgeOrchestrator: () => null,
-    getIntelligenceManager: () => new Proxy({}, { get: () => noop }),
-    getIsMeetingActive: () => state.meetingActive,
-  };
-  // initializeIpcHandlers registers what these tests need long before it
-  // reaches the app-lifecycle wiring at the end, which the stand-in cannot satisfy.
-  try { mod.initializeIpcHandlers(appState); } catch { /* lifecycle wiring only */ }
+  let appState;
+  try {
+    const mod = require(COMPILED);
+    appState = {
+      processingHelper: { getLLMHelper: () => new Proxy({}, { get: () => noop }) },
+      sendModelChanged: noop,
+      reconfigureSttProvider: async () => {},
+      getKnowledgeOrchestrator: () => null,
+      getIntelligenceManager: () => new Proxy({}, { get: () => noop }),
+      getIsMeetingActive: () => state.meetingActive,
+    };
+    // initializeIpcHandlers registers what these tests need long before it
+    // reaches the app-lifecycle wiring at the end, which the stand-in cannot satisfy.
+    try { mod.initializeIpcHandlers(appState); } catch { /* lifecycle wiring only */ }
+  } catch (error) {
+    dispose();
+    throw error;
+  }
 
   /** Wait until the automatic start has nothing left in flight. */
   const settle = async (ms = 8_000) => {
@@ -101,5 +122,5 @@ export function loadIpcHandlers(label) {
     throw new Error('automatic trial start did not settle');
   };
 
-  return { handlers, sends, trialStartCalls, state, appState, settle };
+  return { handlers, sends, trialStartCalls, unexpectedNetworkRequests, state, appState, settle, dispose };
 }

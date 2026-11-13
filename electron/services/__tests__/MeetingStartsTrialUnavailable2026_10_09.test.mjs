@@ -5,12 +5,13 @@
 //
 // A separate file from MeetingStartsTrial because "claimed" is permanent, and
 // the compiled module's credentials live for the whole process.
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadIpcHandlers } from './autoTrialHarness.mjs';
 
 let ipc;
 before(() => { ipc = loadIpcHandlers('meeting-starts-trial-used'); });
+after(() => { ipc?.dispose(); });
 const told = () => ipc.sends.filter((s) => s.channel === 'trial-auto-start').map((s) => s.data);
 
 test('the meeting ended while the first attempt was failing: no second attempt, nobody told', async () => {

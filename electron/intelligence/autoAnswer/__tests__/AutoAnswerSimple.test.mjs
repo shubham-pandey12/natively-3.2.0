@@ -158,6 +158,14 @@ test('prefilter: backchannels and tiny fragments never cost a call', async () =>
   assert.deepEqual(h.texts(), []);
 });
 
+test('a short punctuation-less elliptical question reaches the judge', async () => {
+  const h = makeSimple(async () => YES());
+  h.interviewer('Any tradeoffs');
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 1, 'short elliptical asks must not be treated as unfinished fragments');
+  assert.deepEqual(h.texts(), ['Any tradeoffs']);
+});
+
 test('above ANSWER_FLOOR it answers; at or below it stays silent — no card, no asking', async () => {
   const { ANSWER_FLOOR } = Simple;
   const h = makeSimple(async () => YES({ answerability: ANSWER_FLOOR + 0.01 }));

@@ -1,0 +1,119 @@
+{
+  "task": "Natively Step 7B",
+  "generatedAt": "2026-11-11",
+  "executionEnvironment": {
+    "platform": "darwin",
+    "node": "v24.22.0",
+    "blackHole16ch": "available",
+    "blackHole2ch": "available",
+    "ffmpeg": "missing",
+    "windowsHost": false,
+    "playwrightChromium": "missing"
+  },
+  "results": [
+    {
+      "scenario": "stale Deepgram connection callbacks",
+      "expected": "Transcript and UtteranceEnd callbacks from retired connections are ignored.",
+      "actual": "Source-contract regression passed for both callback guards.",
+      "status": "PASS",
+      "executionEnvironment": "Node 24.22.0 on macOS",
+      "logs": ["Deepgram SDK is embedded in the Electron bundle; the regression checks the source contract rather than substituting a fake socket."]
+    },
+    {
+      "scenario": "local STT final arriving after stop",
+      "expected": "Pending local finals remain observable after stop and drain before the meeting snapshot.",
+      "actual": "The stopped provider retained an already-running final until its reply path could drain; provider drain and main teardown regressions passed (5 focused tests, 0 failures after correction).",
+      "status": "PASS",
+      "executionEnvironment": "Node 24.22.0 on macOS",
+      "logs": ["The added already-running-final test failed before the correction and passed afterward. Uses the existing fake worker utility; no full AppState/database delayed-result integration was run."]
+    },
+    {
+      "scenario": "short punctuation-free question",
+      "expected": "'Any tradeoffs' reaches the question judge while backchannels remain filtered.",
+      "actual": "Auto Answer suite passed; 181 tests passed, 0 failed.",
+      "status": "PASS",
+      "executionEnvironment": "Electron Node test runner on macOS",
+      "logs": []
+    },
+    {
+      "scenario": "fresh session Direct history reset",
+      "expected": "A fresh session reset assigns empty Direct history before optional resume hydration.",
+      "actual": "Renderer source-contract regression passed; resume helper suite passed.",
+      "status": "PASS",
+      "executionEnvironment": "Node 24.22.0 on macOS",
+      "logs": ["The component was not mounted in a browser for this regression."]
+    },
+    {
+      "scenario": "Electron startup and gated IPC",
+      "expected": "Real Electron launcher loads, test bridge responds, and meeting state is inactive.",
+      "actual": "Playwright Electron smoke passed: reset IPC succeeded and get-meeting-active returned false.",
+      "status": "PASS",
+      "executionEnvironment": "Electron on macOS; isolated temporary user data; Vite 5180",
+      "logs": []
+    },
+    {
+      "scenario": "macOS live-audio reliability scenarios",
+      "expected": "Real capture and STT verify normal, long, paused, fast, noisy, follow-up, and overlapping-speaker cases.",
+      "actual": null,
+      "status": "BLOCKED",
+      "executionEnvironment": "macOS; BlackHole devices detected; no FFmpeg executable",
+      "logs": ["No audio scenario ran; see tests/meeting-memory/results/step7b-preflight-1794337489504.json."]
+    },
+    {
+      "scenario": "physical audio endpoint disconnection",
+      "expected": "Capture reports endpoint loss and resumes transcript delivery after reconnection.",
+      "actual": null,
+      "status": "BLOCKED",
+      "executionEnvironment": "macOS; requires operator-controlled physical endpoint",
+      "logs": ["BlackHole is virtual and cannot be unplugged to simulate native device removal."]
+    },
+    {
+      "scenario": "Windows WASAPI endpoint routing",
+      "expected": "Default and non-default playback routes, switching, disconnection, and fallback are exercised.",
+      "actual": null,
+      "status": "NOT TESTED",
+      "executionEnvironment": "No Windows host available",
+      "logs": ["No Windows playback helper was added because it could not be built or validated on this host."]
+    },
+    {
+      "scenario": "Playwright browser suite",
+      "expected": "Existing browser UI tests run with the configured Playwright browser.",
+      "actual": "13 failed to launch and 4 skipped because the Playwright Chromium headless-shell binary is absent.",
+      "status": "BLOCKED",
+      "executionEnvironment": "macOS; Playwright 1.60; Chromium binary missing",
+      "logs": ["No browser was installed during this task."]
+    },
+    {
+      "scenario": "renderer library suite",
+      "expected": "All existing renderer library tests pass.",
+      "actual": "2,997 passed, 4 failed, out of 3,016.",
+      "status": "FAIL",
+      "executionEnvironment": "Node 24.22.0 on macOS",
+      "logs": ["Failures: native select scan; Issue #540 rolling transcript wiring; answer failure copy; funnel analytics wording. The Direct-history regression passed."]
+    },
+    {
+      "scenario": "component suite",
+      "expected": "All existing component tests pass.",
+      "actual": "864 passed, 14 failed, out of 879.",
+      "status": "FAIL",
+      "executionEnvironment": "Node 24.22.0 on macOS",
+      "logs": ["Failures were existing mode-settings and premium onboarding/upgrade toaster source assertions."]
+    },
+    {
+      "scenario": "complete Electron unit suite",
+      "expected": "The complete npm test suite exits with a summary.",
+      "actual": "The run logged failures and stalled at MeetingStartsTrial2026_10_09; it was interrupted after 99 seconds. A standalone run failed the offline retry assertion and left a test pending.",
+      "status": "BLOCKED",
+      "executionEnvironment": "Electron Node test runner on macOS",
+      "logs": ["The new Deepgram, local STT, and short-question regressions passed before the stall."]
+    },
+    {
+      "scenario": "Electron TypeScript validation",
+      "expected": "Electron TypeScript project type-checks without errors.",
+      "actual": "npm run typecheck:electron exited successfully.",
+      "status": "PASS",
+      "executionEnvironment": "TypeScript 7 on macOS",
+      "logs": []
+    }
+  ]
+}

@@ -584,10 +584,10 @@ export class LocalWhisperSTT extends EventEmitter {
             this.gapFlushTimer = null;
         }
 
+        this.isDrainingFinals = true;
         if (this.vad) {
             const segs = this.vad.flush();
             this.vad = null;
-            this.isDrainingFinals = true;
             segs.forEach(s => this.dispatchFinal(s.samples));
         }
 
@@ -607,7 +607,7 @@ export class LocalWhisperSTT extends EventEmitter {
 
         const w = this.worker;
         if (w) {
-            const shouldKeepWorkerForFinals = this.isDrainingFinals && (this.pendingAudio.length > 0 || this.drainingFinalsInFlight > 0);
+            const shouldKeepWorkerForFinals = this.isDrainingFinals && (this.pendingAudio.length > 0 || this.finalTasksOutstanding > 0 || this.drainingFinalsInFlight > 0);
             if (shouldKeepWorkerForFinals) {
                 // F-205: bound the drain. The release paths from here on are
                 // all worker-reply-driven ('result'/'error'/flushPending), and
@@ -696,7 +696,7 @@ export class LocalWhisperSTT extends EventEmitter {
      * dictation's last-words wait only.
      */
     hasPendingWork(): boolean {
-        return this.isActive && (this.pendingAudio.length > 0 || this.finalTasksOutstanding > 0);
+        return this.pendingAudio.length > 0 || this.finalTasksOutstanding > 0;
     }
 
     finalize(): boolean {
@@ -1532,8 +1532,8 @@ export class LocalWhisperSTT extends EventEmitter {
                 return;
             }
 
-            // After stop(), allow only the explicitly flushed final segments to
-            // return during the 5s drain window; partials and unrelated worker
+            // After stop(), allow queued and already-running final results to
+            // return during the bounded drain; partials and unrelated worker
             // messages remain ignored on a torn-down instance.
             if (!this.isActive && !(this.isDrainingFinals && msg.type === 'result')) return;
 
@@ -1600,7 +1600,7 @@ export class LocalWhisperSTT extends EventEmitter {
                 this.segmentOpenedAt = 0;
                 if (this.isDrainingFinals) {
                     this.drainingFinalsInFlight = Math.max(0, this.drainingFinalsInFlight - 1);
-                    if (this.drainingFinalsInFlight === 0 && this.worker) {
+                    if (this.pendingAudio.length === 0 && this.finalTasksOutstanding === 0 && this.worker) {
                         this.beginWorkerTermination(this.worker);
                     }
                 }
@@ -1631,7 +1631,7 @@ export class LocalWhisperSTT extends EventEmitter {
                 if (msg.taskId?.startsWith('t')) this.finalTasksOutstanding = Math.max(0, this.finalTasksOutstanding - 1);
                 if (this.isDrainingFinals && msg.taskId?.startsWith('t')) {
                     this.drainingFinalsInFlight = Math.max(0, this.drainingFinalsInFlight - 1);
-                    if (this.drainingFinalsInFlight === 0 && this.worker) {
+                    if (this.pendingAudio.length === 0 && this.finalTasksOutstanding === 0 && this.worker) {
                         this.beginWorkerTermination(this.worker);
                     }
                 }
@@ -1798,7 +1798,7 @@ export class LocalWhisperSTT extends EventEmitter {
         this.maybePushNemotronLangToWorker();
         const queued = this.pendingAudio.splice(0);
         queued.forEach(({ audio, nemotronReset }) => this.sendTranscribe(audio, false, nemotronReset));
-        if (this.isDrainingFinals && queued.length === 0 && this.drainingFinalsInFlight === 0 && this.worker) {
+        if (this.isDrainingFinals && queued.length === 0 && this.finalTasksOutstanding === 0 && this.worker) {
             this.beginWorkerTermination(this.worker);
         }
     }

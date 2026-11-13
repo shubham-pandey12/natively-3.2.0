@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -60,4 +61,39 @@ test('a wedged final drain is bounded and releases the shared ONNX slot', async 
   } finally {
     LocalWhisperSTT.DRAIN_WATCHDOG_MS = prev;
   }
+});
+
+test('a final still draining after stop remains visible to the meeting-end wait', () => {
+  const { stt } = wedgedDrain();
+  stt.finalTasksOutstanding = 1;
+  stt.stop();
+
+  assert.equal(stt.hasPendingWork(), true,
+    'meeting teardown must know a local final is still in flight before it snapshots the transcript');
+});
+
+test('stop keeps the worker alive for a final inference already in flight', () => {
+  const { stt } = wedgedDrain();
+  const worker = stt.worker;
+  stt.isDrainingFinals = false;
+  stt.drainingFinalsInFlight = 0;
+  stt.finalTasksOutstanding = 1;
+
+  stt.stop();
+
+  assert.equal(stt.worker, worker,
+    'an active final must be allowed to reply after stop instead of being terminated before the transcript snapshot');
+  assert.equal(stt.hasPendingWork(), true);
+});
+
+test('meeting teardown drains provider-reported finals before taking the meeting snapshot', () => {
+  const main = readFileSync(path.resolve(__dirname, '../../main.ts'), 'utf8');
+  const start = main.indexOf('// 2. Tear down STT sockets now that finals have arrived.');
+  const stop = main.indexOf('this.googleSTT?.stop();', start);
+  const wait = main.indexOf('const finalDrainStts =', stop);
+  const snapshot = main.indexOf('await this.intelligenceManager.stopMeeting()', wait);
+
+  assert.ok(start >= 0 && stop > start && wait > stop && snapshot > wait,
+    'STT finals that report pending work must drain after provider stop and before stopMeeting snapshots the transcript');
+  assert.match(main.slice(wait, snapshot), /hasPendingWork\?\.\(\)/);
 });

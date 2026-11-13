@@ -5698,9 +5698,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       // A resumed meeting (2026-11-03): its earlier answers come back, so the
       // chat carries on where it stopped; typed turns are Direct history too.
       const earlier = resumedChatMessages(payload?.resumedChat);
+      directAssistHistoryRef.current = resumedDirectHistory(payload?.resumedChat);
       if (earlier.length > 0) {
         setMessages(earlier as Message[]);
-        directAssistHistoryRef.current = resumedDirectHistory(payload?.resumedChat);
       }
 
       // Track new conversation/session if applicable?
@@ -8557,15 +8557,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
               : message,
           ));
         }
-        // The rolling bar is already capped at 8 KiB. Keep the latest few STT
-        // segments so a question split by punctuation/finalization stays intact,
-        // while older meeting discussion cannot become the primary request.
+        // The rolling bar is already capped at 8 KiB. Keep the latest 20 STT
+        // segments so multi-sentence questions and follow-ups are captured in
+        // full, while older meeting discussion cannot become the primary request.
+        // 20 segments ≈ 60–120 s of speech; the 8 KiB char cap is the final guard.
         const directTranscriptSnapshot = pendingRollingPartialRef.current
           ? rollingTranscriptWithPartial(rollingCommittedRef.current, pendingRollingPartialRef.current)
           : rollingCommittedRef.current;
         const interviewerRequest = directTranscriptSnapshot
           .split('  ·  ')
-          .slice(-4)
+          .slice(-20)
           .join('  ·  ')
           .trim()
           .slice(-8192);

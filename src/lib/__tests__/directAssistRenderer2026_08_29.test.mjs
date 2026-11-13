@@ -101,6 +101,11 @@ test('What-to-Say forwards recent interviewer STT and never auto-captures a page
   assert.ok(directBranch >= 0 && autoCapture === -1, 'WTA must not automatically recapture a previous page');
   assert.match(body, /const directTranscriptSnapshot = pendingRollingPartialRef\.current/);
   assert.match(body, /const interviewerRequest = directTranscriptSnapshot/);
+  // Must keep at least 20 segments so multi-sentence interview questions are not truncated.
+  // Regression guard: .slice(-4) caused only the last sentence to reach the LLM.
+  const segSlice = body.match(/\.split\('  ·  '\)\s*\n?\s*\.slice\(-(\d+)\)/);
+  assert.ok(segSlice, 'direct transcript must call .slice() after .split() to cap segment count');
+  assert.ok(Number(segSlice[1]) >= 20, `transcript window must keep ≥20 segments; found ${segSlice[1]}`);
   assert.match(body, /buildDirectWhatToSayPayload\(\{\s*interviewerRequest: newerInterviewerRequest \|\| interviewerRequest,\s*dynamicPromptInstruction,\s*hasScreenshots: hasScreenshots && !spokenWithCapture,/);
   assert.match(body, /source: directWhatToSayPayload\.source/);
   assert.match(body, /currentRequest: retrySnapshot\?\.question \|\| directWhatToSayPayload\.currentRequest/);

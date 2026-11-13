@@ -17,6 +17,7 @@ const WATCH = process.argv.includes('--watch');
 // entrypoint, but leaves private runtime imports unresolved for the packaged
 // premium build to supply. Normal development and release builds are unchanged.
 const CORE_SMOKE = process.env.NATIVELY_CORE_SMOKE === '1';
+const ELECTRON_TEST_BUILD = process.env.NATIVELY_ELECTRON_TEST_BUILD === '1';
 const path = require('path');
 const fs = require('fs');
 
@@ -56,6 +57,25 @@ const coreSmokePremiumExternalPlugin = {
     esbuild.onResolve({ filter: /^(?:\.\.\/)+premium(?:\/|$)/ }, (args) => ({
       path: args.path,
       external: true,
+    }));
+  },
+};
+
+// The automatic-trial integration tests need a non-premium user, while normal
+// development builds intentionally use devPremiumOverride. Keep that seam in a
+// separate, opt-in bundle so the application's regular output is unchanged.
+const trialTestPlugin = {
+  name: 'trial-test-dependencies',
+  setup(esbuild) {
+    esbuild.onResolve({ filter: /^\.\/services\/(?:devPremiumOverride|LiveModelCatalogService)$/ }, (args) => {
+      if (args.importer !== path.join(rootDir, 'electron/ipcHandlers.ts')) return undefined;
+      return { path: args.path, namespace: 'trial-test' };
+    });
+    esbuild.onLoad({ filter: /.*/, namespace: 'trial-test' }, (args) => ({
+      contents: args.path.endsWith('devPremiumOverride')
+        ? 'export const isDevPremiumOverrideEnabled = () => false; export const getDevPlanOverride = () => null;'
+        : 'export class LiveModelCatalogService { static getInstance() { return new LiveModelCatalogService(); } setOnUpdated() {} async refreshProvider() { return { success: true, models: [] }; } async refreshAllConfiguredProviders() {} }',
+      loader: 'js',
     }));
   },
 };
@@ -212,6 +232,19 @@ if (WATCH) {
   }
   build(buildOptions).then(() => {
     copyAssets();
-    console.log(`[build-electron] Done in ${Date.now() - start}ms`);
+    if (!ELECTRON_TEST_BUILD) {
+      console.log(`[build-electron] Done in ${Date.now() - start}ms`);
+      return;
+    }
+    const testOptions = {
+      ...buildOptions,
+      entryPoints: ['electron/ipcHandlers.ts'],
+      outdir: path.resolve(rootDir, 'dist-electron-test'),
+      plugins: [trialTestPlugin],
+      sourcemap: false,
+    };
+    return build(testOptions).then(() => {
+      console.log(`[build-electron] Trial-test bundle done in ${Date.now() - start}ms`);
+    });
   }).catch(onFailure);
 }

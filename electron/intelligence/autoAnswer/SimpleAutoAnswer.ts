@@ -85,7 +85,7 @@ export const MIN_NEW_WORDS = 4;
  */
 export const ANSWER_FLOOR = 0.30;
 /** Judge-unavailable fallback on punctuation-less providers: interrogative-led utterances. */
-export const FALLBACK_INTERROGATIVE = /^(?:(?:ok(?:ay)?|so|and|now|alright|well)[,.!\s]+)*(?:how|what|why|when|where|which|who|whose|can|could|would|should|do|does|did|are|is|will|have you|tell me|tell us|walk me|walk us|explain|describe)\b/i;
+export const FALLBACK_INTERROGATIVE = /^(?:(?:ok(?:ay)?|so|and|now|alright|well)[,.!\s]+)*(?:how|what|why|when|where|which|who|whose|any|can|could|would|should|do|does|did|are|is|will|have you|tell me|tell us|walk me|walk us|explain|describe)\b/i;
 /**
  * Prefetch pacing. Starting the answer alongside the judge removes ~830 ms
  * (measured) from the critical path, but a prefetch the verdict rejects is a

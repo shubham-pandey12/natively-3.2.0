@@ -29,6 +29,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildHour, FACTS, WPM as HOUR_WPM, TURN_GAP_S as HOUR_GAP } from './interview-hour.mjs';
 import { buildMock, WPM as MOCK_WPM, TURN_GAP_S as MOCK_GAP } from './mock-tech-interview.mjs';
+import { RELIABILITY_SCENARIOS, PHYSICAL_DISCONNECTION_SCENARIO } from './reliability-scenarios.mjs';
 import { denialRe, distinctiveWords, renderSessionScreenshot } from '../scenarios.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,48 @@ const scriptName = args.includes('--script') ? args[args.indexOf('--script') + 1
 const WPM = scriptName === 'mock' ? MOCK_WPM : HOUR_WPM;
 const TURN_GAP_S = scriptName === 'mock' ? MOCK_GAP : HOUR_GAP;
 const VOICE = { interviewer: 'Samantha', user: 'Daniel' };
+
+if (scriptName === 'reliability') {
+  const missing = [];
+  const audioDevices = spawnSync('say', ['-a', '?'], { encoding: 'utf8' });
+  if (audioDevices.error || !/BlackHole 16ch/i.test(audioDevices.stdout ?? '')) missing.push('BlackHole 16ch / macOS say device');
+  if (audioDevices.error || !/BlackHole 2ch/i.test(audioDevices.stdout ?? '')) missing.push('BlackHole 2ch / macOS say device');
+  const ffmpegCheck = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
+  if (ffmpegCheck.error || ffmpegCheck.status !== 0) missing.push('ffmpeg executable');
+  if (missing.length) {
+    const resultsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'results');
+    fs.mkdirSync(resultsDir, { recursive: true });
+    const result = {
+      label,
+      script: scriptName,
+      generatedAt: new Date().toISOString(),
+      environment: { platform: process.platform, node: process.version },
+      scenarios: [
+        ...RELIABILITY_SCENARIOS.map((scenario) => ({
+          scenario: scenario.id,
+          expected: { transcriptTerms: scenario.expectedTerms, ...(scenario.answerTerms ? { answerTerms: scenario.answerTerms } : {}) },
+          actual: null,
+          status: 'BLOCKED',
+          executionEnvironment: { platform: process.platform, stt: 'not started' },
+          logs: [`missing prerequisite: ${missing.join(', ')}`],
+        })),
+        {
+          scenario: PHYSICAL_DISCONNECTION_SCENARIO.id,
+          expected: PHYSICAL_DISCONNECTION_SCENARIO.expected,
+          actual: null,
+          status: 'BLOCKED',
+          executionEnvironment: { platform: process.platform },
+          logs: ['requires an operator to remove and reconnect a physical or disable-able render endpoint during capture'],
+        },
+      ],
+    };
+    const file = path.join(resultsDir, `${label}-${Date.now()}.json`);
+    fs.writeFileSync(file, JSON.stringify(result, null, 2));
+    for (const scenario of result.scenarios) console.log(`[scenario] ${scenario.scenario} BLOCKED — ${scenario.logs[0]}`);
+    console.log(`results: ${path.relative(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'), file)}`);
+    process.exit(0);
+  }
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function withTimeout(p, ms, what) {
@@ -68,15 +111,25 @@ function ffmpegDeviceIndex(name) {
 ffmpegDeviceIndex('BlackHole 16ch'); // fail fast at start if it is missing
 const PAN_ALL_16 = `pan=16c|${Array.from({ length: 16 }, (_, i) => `c${i}=c0`).join('|')}`;
 
-function speak(who, text) {
+function speak(who, text, options = {}) {
+  const wpm = options.wpm ?? WPM;
   return new Promise((resolve, reject) => {
     let p;
     if (who === 'interviewer') {
       const f = path.join(os.tmpdir(), `mm-interviewer-${process.pid}.aiff`);
-      execFileSync('say', ['-v', VOICE[who], '-r', String(WPM), '-o', f, text]);
-      p = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-re', '-i', f, '-af', PAN_ALL_16, '-f', 'audiotoolbox', '-audio_device_index', ffmpegDeviceIndex('BlackHole 16ch'), '-'], { stdio: 'ignore' });
+      execFileSync('say', ['-v', VOICE[who], '-r', String(wpm), '-o', f, text]);
+      const args = ['-hide_banner', '-loglevel', 'error', '-re', '-i', f];
+      if (options.noise) {
+        args.push('-f', 'lavfi', '-i', 'anoisesrc=duration=120:color=pink:amplitude=0.015:sample_rate=44100',
+          '-filter_complex', `[0:a]volume=1[voice];[1:a]volume=0.08[noise];[voice][noise]amix=inputs=2:duration=first,${PAN_ALL_16}[out]`, '-map', '[out]');
+      } else {
+        args.push('-af', PAN_ALL_16);
+      }
+      args.push('-f', 'audiotoolbox', '-audio_device_index', ffmpegDeviceIndex('BlackHole 16ch'), '-');
+      p = spawn('ffmpeg', args, { stdio: 'ignore' });
+      p.on('close', () => { try { fs.unlinkSync(f); } catch { /* temp audio cleanup */ } });
     } else {
-      p = spawn('say', ['-v', VOICE[who], '-a', sayDeviceId('BlackHole 2ch'), '-r', String(WPM), text], { stdio: 'ignore' });
+      p = spawn('say', ['-v', VOICE[who], '-a', sayDeviceId('BlackHole 2ch'), '-r', String(wpm), text], { stdio: 'ignore' });
     }
     p.on('error', reject);
     p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${who === 'interviewer' ? 'ffmpeg' : 'say'} exited ${code}`))));
@@ -167,6 +220,90 @@ async function wtaTurn() {
   return { answer: r?.answer ?? null, error: r?.error ?? null, resolvedQuestion: r?.question ?? null, ms: Date.now() - t0 };
 }
 
+const normalizeText = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+async function runReliabilityScenario(scenario) {
+  const startedAt = new Date().toISOString();
+  const logs = [];
+  try {
+    const baselineCount = (await probe({ transcriptTail: 1 })).transcript?.count ?? 0;
+    if (scenario.overlap) {
+      const [interviewer, user] = scenario.overlap;
+      const results = await Promise.all([
+        speak(interviewer.who, interviewer.text, interviewer),
+        sleep(350).then(() => speak(user.who, user.text, user)),
+      ]);
+      logs.push(`overlap audio completed (${results.length} channels)`);
+      out.says.push(...scenario.overlap.map((turn) => ({ who: turn.who, text: turn.text, scenario: scenario.id })));
+    } else {
+      for (const turn of scenario.turns) {
+        if (turn.pauseMs) {
+          await sleep(turn.pauseMs);
+          logs.push(`paused ${turn.pauseMs}ms before continuing`);
+          continue;
+        }
+        await speak(turn.who, turn.text, turn);
+        out.says.push({ who: turn.who, text: turn.text, scenario: scenario.id, wpm: turn.wpm ?? WPM, noise: turn.noise === true });
+        await sleep(TURN_GAP_S * 1000);
+      }
+    }
+
+    // A following harmless utterance gives endpointing providers a chance to
+    // commit the scenario's final segment before the transcript assertion.
+    await speak('interviewer', 'Thank you.', { wpm: 160 });
+    let actual = '';
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      const state = await probe({ transcriptTail: 100 });
+      const lines = state?.transcript?.last ?? [];
+      const firstNewLine = Math.max(0, baselineCount - Math.max(0, (state?.transcript?.count ?? 0) - lines.length));
+      actual = lines.slice(firstNewLine)
+        .filter((line) => !scenario.speakers || scenario.speakers.includes(line.speaker))
+        .map((line) => `${line.speaker}: ${line.text}`).join('\n');
+      const normalized = normalizeText(actual);
+      if (scenario.expectedTerms.every((term) => normalized.includes(normalizeText(term)))) break;
+      await sleep(1000);
+    }
+    const transcriptText = normalizeText(actual);
+    const missingTerms = scenario.expectedTerms.filter((term) => !transcriptText.includes(normalizeText(term)));
+    const record = {
+      scenario: scenario.id,
+      expected: { transcriptTerms: scenario.expectedTerms },
+      actual: { transcript: actual },
+      status: missingTerms.length === 0 ? 'PASS' : 'FAIL',
+      executionEnvironment: { platform: process.platform, stt: 'Natively configured provider', devices: out.devices },
+      logs: [...logs, ...(missingTerms.length ? [`missing transcript terms: ${missingTerms.join(', ')}`] : ['expected terms observed in live transcript'])],
+    };
+    if (scenario.answerQuestion) {
+      const answer = await wtaTurn();
+      const answerText = normalizeText(answer.answer);
+      const missingAnswerTerms = scenario.answerTerms.filter((term) => !answerText.includes(normalizeText(term)));
+      record.answer = {
+        expected: { terms: scenario.answerTerms },
+        actual: answer.answer,
+        status: answer.answer && missingAnswerTerms.length === 0 ? 'PASS' : answer.error ? 'FAIL' : 'FAIL',
+        latencyMs: answer.ms,
+        logs: [answer.error || '', ...missingAnswerTerms.map((term) => `missing answer term: ${term}`)].filter(Boolean),
+      };
+    }
+    out.scenarios.push(record);
+    save();
+    return record;
+  } catch (error) {
+    const record = {
+      scenario: scenario.id,
+      expected: { transcriptTerms: scenario.expectedTerms },
+      actual: null,
+      status: 'FAIL',
+      executionEnvironment: { platform: process.platform, devices: out.devices },
+      logs: [...logs, String(error?.message || error)],
+      startedAt,
+    };
+    out.scenarios.push(record);
+    save();
+    return record;
+  }
+}
+
 // ── scoring ──────────────────────────────────────────────────────────────────
 function factOf(expect) {
   if (typeof expect === 'string') return FACTS[expect];
@@ -199,13 +336,15 @@ const where = (promptUser, re) => {
 };
 
 // ── run ──────────────────────────────────────────────────────────────────────
-const built = scriptName === 'mock' ? buildMock() : buildHour();
+const built = scriptName === 'mock' ? buildMock() : scriptName === 'reliability'
+  ? { steps: [{ kind: 'reliability-scenarios' }], estMinutes: 3 }
+  : buildHour();
 const { steps } = built;
 const estMinutes = built.estMinutes ?? null;
 const outDir = path.join(ROOT, 'tests', 'meeting-memory', 'results');
 fs.mkdirSync(outDir, { recursive: true });
 const outFile = path.join(outDir, `${label}-${Date.now()}.json`);
-const out = { label, script: scriptName, questions: built.questions ?? null, estMinutes, startedAt: new Date().toISOString(), devices: {}, probes: [], timeline: [], notes: [], says: [] };
+const out = { label, script: scriptName, questions: built.questions ?? null, estMinutes, startedAt: new Date().toISOString(), environment: { platform: process.platform, node: process.version }, devices: {}, probes: [], scenarios: [], timeline: [], notes: [], says: [] };
 const save = () => fs.writeFileSync(outFile, JSON.stringify(out, null, 2));
 
 const inputs = await evalIn('launcher', () => window.electronAPI.getInputDevices());
@@ -261,7 +400,21 @@ for (const step of steps) {
   if (minute() > maxMinutes) break;
   if (appGone) { out.notes.push('APP_GONE'); break; }
   try {
-    if (step.kind === 'say') {
+    if (step.kind === 'reliability-scenarios') {
+      for (const scenario of RELIABILITY_SCENARIOS) {
+        const result = await runReliabilityScenario(scenario);
+        console.log(`[scenario] ${result.scenario} ${result.status}`);
+      }
+      out.scenarios.push({
+        scenario: PHYSICAL_DISCONNECTION_SCENARIO.id,
+        expected: PHYSICAL_DISCONNECTION_SCENARIO.expected,
+        actual: null,
+        status: 'BLOCKED',
+        executionEnvironment: { platform: process.platform, devices: out.devices },
+        logs: ['requires an operator to remove and reconnect a physical or disable-able render endpoint during capture'],
+      });
+      save();
+    } else if (step.kind === 'say') {
       const start = Date.now();
       await speak(step.who, step.text);
       out.says.push({ who: step.who, text: step.text, start, end: Date.now() });

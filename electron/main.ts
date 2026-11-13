@@ -1348,6 +1348,8 @@ type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreaming
   notifySpeechEnded?: () => void;
   /** RestSTT: upload a held speech end now (issue #698). */
   releaseHeldSpeech?: () => void;
+  /** Queued or in-flight final transcript work. */
+  hasPendingWork?: () => boolean;
 };
 
 type ScreenshotWindowMode = 'launcher' | 'overlay';
@@ -8329,6 +8331,15 @@ export class AppState {
         // 2. Tear down STT sockets now that finals have arrived.
         this.googleSTT?.stop();
         this.googleSTT_User?.stop();
+
+        // Local Whisper keeps its worker alive after stop() to finish queued
+        // finals. Wait for that bounded drain before stopMeeting snapshots the
+        // transcript; otherwise a late result lands after the saved snapshot.
+        const finalDrainStts = [this.googleSTT, this.googleSTT_User]
+          .filter((s): s is STTProvider => !!s && typeof s.hasPendingWork === 'function');
+        for (const deadline = Date.now() + 15_500; Date.now() < deadline && finalDrainStts.some((s) => s.hasPendingWork?.());) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
 
         // 3. Snapshot transcript + persist placeholder + queue title/summary LLM.
         //    intelligenceManager.stopMeeting itself runs LLM in background.

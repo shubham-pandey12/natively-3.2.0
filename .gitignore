@@ -85,6 +85,7 @@ node_modules
 node_modules/
 jspm_packages/
 dist-electron/
+dist-electron-test/
 dist/
 
 # Compiled Apple Speech helper. Built explicitly for local development and
@@ -238,6 +239,7 @@ docs/superpowers/
 
 # Agent documentation patterns
 **/AGENTS.md
+!/AGENTS.md
 **/CLAUDE.md
 **/.claude/
 
@@ -508,6 +510,10 @@ tools/
 # Vision benchmark source documentation + generated reports
 !docs/
 docs/*
+!docs/audit/
+!docs/audit/**
+!docs/testing/
+!docs/testing/**
 !docs/VISION_MODEL_BENCHMARK.md
 # The local embedding model benchmark (2026-09-21/22): code comments across
 # electron/rag cite its sections (bundled-model choice, catalog recipes, caps).
