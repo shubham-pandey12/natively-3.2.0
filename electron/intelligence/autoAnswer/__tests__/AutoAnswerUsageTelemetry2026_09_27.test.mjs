@@ -174,7 +174,7 @@ test('main.ts wires it: engine events, first word, discard, manual answer, meeti
   assert.match(main, /queueBatch\('suggested_answer', \{ token, question, confidence, generationId \}\);\s*this\.autoAnswerUsage\.answerShown\(\);/, 'the first streamed token');
   assert.match(main, /flushBatchesBeforeFinal\(\);\s*this\.autoAnswerUsage\.answerShown\(\);/, 'an answer that arrives whole');
   assert.match(main, /'suggested_answer_discard'[\s\S]{0,80}this\.autoAnswerUsage\.stopAwaitingAnswer\(\)/);
-  assert.match(main, /onManualWhatToAnswer\(\): void \{[\s\S]{0,160}this\.autoAnswerUsage\.stopAwaitingAnswer\(\);\s*this\.simpleAutoAnswer\.onManualAnswerStarted\(\);/,
+  assert.match(main, /onManualWhatToAnswer\([^)]*\): void \{[\s\S]{0,160}this\.autoAnswerUsage\.stopAwaitingAnswer\(\);\s*this\.simpleAutoAnswer\.onManualAnswerStarted\(\);/,
     'stop waiting BEFORE the engine emits the override');
   assert.match(main, /this\.isMeetingActive = true;\s*this\.autoAnswerUsage\.meetingStarted\(\);/);
   assert.match(main, /this\.cancelAutoAnswer\(\);\s*this\.autoAnswerUsage\.meetingEnded\(\);/);

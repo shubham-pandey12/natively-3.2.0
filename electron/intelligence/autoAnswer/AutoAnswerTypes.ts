@@ -233,5 +233,5 @@ export interface AutoAnswerTelemetryEvent {
      * for the same reason as the retired skip reasons above — recorded runs
      * contain them.
      */
-    supersededBy?: 'interim' | 'final' | 'user_answering' | 'meeting_reset' | 'meeting_ended';
+    supersededBy?: 'interim' | 'final' | 'user_answering' | 'meeting_reset' | 'meeting_ended' | 'manual_answer';
 }

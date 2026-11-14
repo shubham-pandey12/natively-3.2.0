@@ -151,6 +151,7 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
+    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean }) => void;
     'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => void;
     // generationId (audit finding #3): stamped on every live token so the renderer
     // can drop a batch from an answer that was already superseded. Optional →
@@ -229,6 +230,52 @@ interface SpeculativeAnswer {
      */
     answerType?: AnswerType;
     answerStyle?: string;
+}
+
+/** The answer that owns an interviewer turn (see IntelligenceEngine.spokenAnswer). */
+interface SpokenAnswerClaim {
+    turn: { timestamp: number; text: string };
+    automatic: boolean;
+    generationId: number;
+    completed: boolean;
+    /** Resolves true when the owner answered, false when it failed or was superseded. */
+    settled: Promise<boolean>;
+    settle: (answered: boolean) => void;
+}
+
+/** Two timestamps further apart than this are different turns, whatever their words. */
+const SPOKEN_TURN_MATCH_WINDOW_MS = 15_000;
+/** Longest a manual press waits on the automatic answer it joined before answering itself. */
+const SPOKEN_JOIN_MAX_WAIT_MS = 60_000;
+
+function spokenWords(text: string): string {
+    return text.toLowerCase()
+        .replace(/[\p{Pd}]+/gu, ' ')
+        .replace(/[\p{P}\p{S}]+/gu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * Whether two readings of the interviewer's latest turn are the same
+ * utterance: the interim the press saw and the final that replaced it, or a
+ * final the provider later revised. One must contain the other, word for
+ * word; three words is enough so a short question ("why did you leave?")
+ * still matches its own final.
+ */
+export function isSameSpokenTurn(
+    a: { timestamp: number; text: string } | undefined,
+    b: { timestamp: number; text: string } | undefined,
+): boolean {
+    if (!a || !b) return false;
+    if (a.timestamp === b.timestamp && a.text === b.text) return true;
+    if (Math.abs(a.timestamp - b.timestamp) > SPOKEN_TURN_MATCH_WINDOW_MS) return false;
+    const x = spokenWords(a.text);
+    const y = spokenWords(b.text);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    const [shorter, longer] = x.length <= y.length ? [x, y] : [y, x];
+    return shorter.split(' ').length >= 3 && ` ${longer} `.includes(` ${shorter} `);
 }
 
 export class IntelligenceEngine extends EventEmitter {
@@ -519,6 +566,54 @@ export class IntelligenceEngine extends EventEmitter {
      * question (answer). Null ⇒ the cooldown behaves exactly as it always has.
      */
     private lastTriggerQuestion: string | null = null;
+    /**
+     * Which answer owns the interviewer's latest spoken turn — one owner per
+     * question. A manual press and Auto Answer used to race for the same
+     * turn and the user got two answers to one question:
+     *  - an automatic dispatch parked behind the manual run fired once the
+     *    engine went idle and answered the same question again;
+     *  - a manual press after (or during) an automatic answer started a second
+     *    generation for the question already answered.
+     * Now an automatic trigger whose turn is owned is skipped, and a spoken-only
+     * manual press JOINS an automatic answer for the same turn (no second model
+     * call). If that automatic answer fails, the joined press answers instead.
+     * A failed owner releases the turn, so the next press or trigger may answer.
+     */
+    private spokenAnswer: SpokenAnswerClaim | undefined;
+
+    private latestSpokenTurn(): { timestamp: number; text: string } | undefined {
+        const items = this.session.getContextWithInterim(180);
+        for (let i = items.length - 1; i >= 0; i--) {
+            if (items[i].role === 'interviewer' && items[i].text.trim()) {
+                return { timestamp: items[i].timestamp, text: items[i].text };
+            }
+        }
+        return undefined;
+    }
+
+    /** The interviewer's latest turn already has an owner (answered, or being answered). */
+    private spokenTurnOwned(): boolean {
+        return Boolean(this.spokenAnswer) && isSameSpokenTurn(this.spokenAnswer?.turn, this.latestSpokenTurn());
+    }
+
+    private claimSpokenTurn(turn: { timestamp: number; text: string } | undefined, automatic: boolean, generationId: number): void {
+        // Whoever waited on the previous owner is released: it was superseded.
+        const previous = this.spokenAnswer;
+        if (previous && !previous.completed) previous.settle(false);
+        if (!turn) { this.spokenAnswer = undefined; return; }
+        let settle: (answered: boolean) => void = () => {};
+        const settled = new Promise<boolean>((resolve) => { settle = resolve; });
+        this.spokenAnswer = { turn, automatic, generationId, completed: false, settled, settle };
+    }
+
+    /** The owning run ended: answered keeps the claim, anything else releases the turn. */
+    private settleSpokenTurn(generationId: number, answered: boolean): void {
+        const claim = this.spokenAnswer;
+        if (!claim || claim.generationId !== generationId || claim.completed) return;
+        if (answered) claim.completed = true;
+        else this.spokenAnswer = undefined;
+        claim.settle(answered);
+    }
 
     // Speculative inference: start LLM on high-confidence interviewer partials
     private speculativeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1297,8 +1392,29 @@ export class IntelligenceEngine extends EventEmitter {
         }
     }
 
+    /**
+     * An automatic trigger for a turn something else already owns: a manual
+     * answer is running, or the latest turn was (or is being) answered. Checked
+     * on entry and again after the planner await, which a manual press can
+     * overtake.
+     */
+    private skipOwnedAutomaticTrigger(trigger: SuggestionTrigger, confidence: number): boolean {
+        if (!trigger.automatic) return false;
+        if (!this.isManualAnswerActive() && !this.spokenTurnOwned()) return false;
+        console.log('[IntelligenceEngine] Automatic trigger skipped: this question already has an answer', {
+            manualActive: this.isManualAnswerActive(),
+            owner: this.spokenAnswer ? (this.spokenAnswer.automatic ? 'automatic' : 'manual') : 'none',
+        });
+        try {
+            this.emit('suggestion_skipped', { reason: 'already_answered', question: trigger.lastQuestion ?? '', confidence });
+        } catch { /* a listener must never break the trigger path */ }
+        return true;
+    }
+
     private async handleSuggestionTriggerInner(trigger: SuggestionTrigger): Promise<void> {
+        if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return;
         const plannerDecision = await this.planSuggestionTrigger(trigger);
+        if (this.skipOwnedAutomaticTrigger(trigger, plannerDecision.confidence)) return;
         // A user barge-in landed while we were at the planner: the user is
         // answering the question themselves — do not stream over them.
         if (trigger.automatic && this.automaticTriggerCancelled) {
@@ -1367,13 +1483,23 @@ export class IntelligenceEngine extends EventEmitter {
                         // generated first, then live); completion finishes the
                         // same row (see completeSpeculativeRun / revealSpeculativeAnswer).
                         this.speculativeAdoptedGenerationId = this.currentGenerationId;
-                        if (trigger.automatic) this.automaticGenerationId = this.currentGenerationId;
+                        if (trigger.automatic) {
+                            this.automaticGenerationId = this.currentGenerationId;
+                            this.claimSpokenTurn(this.latestSpokenTurn(), true, this.currentGenerationId);
+                        }
+                        if (trigger.automatic && trigger.lastQuestion) {
+                            this.emit('what_to_answer_question', { generationId: this.currentGenerationId, question: trigger.lastQuestion, pending: true });
+                        }
                         // Unmute the stream NOW: paint what it has, stream the rest.
                         try { this.speculativeAdoptHook?.(this.currentGenerationId); } catch (err) { console.warn('[IntelligenceEngine] adopted-stream paint failed; it will reveal at completion:', err); }
                         return;
                     }
                     if (finished) {
                         console.log(`[IntelligenceEngine] Speculative stream accepted (Jaccard=${similarity.toFixed(2)}) — already finished; revealing`);
+                        if (trigger.automatic && trigger.lastQuestion) {
+                            this.emit('what_to_answer_question', { generationId: finished.generationId, question: trigger.lastQuestion });
+                        }
+                        if (trigger.automatic) this.claimSpokenTurn(this.latestSpokenTurn(), true, finished.generationId);
                         this.revealSpeculativeAnswer(finished, trigger.automatic === true);
                         return;
                     }
@@ -1618,6 +1744,7 @@ export class IntelligenceEngine extends EventEmitter {
         }
         if (!text.trim()) {
             console.warn('[IntelligenceEngine] Prefetched answer was empty — nothing to reveal');
+            this.settleSpokenTurn(finished.generationId, false);
             // An adopted stream already opened a row; it gets no final, so close it.
             if (streamed?.emitted) this.emit('suggested_answer_discard', 'empty_after_strip', finished.generationId);
             return;
@@ -1707,6 +1834,7 @@ export class IntelligenceEngine extends EventEmitter {
         const outcome: WhatToSayOutcome = finished.writeDecision?.policy === 'do_not_store'
             ? { status: 'failed', retryable: true, reason: finished.writeDecision.reason }
             : { status: 'success', retryable: false };
+        this.settleSpokenTurn(finished.generationId, outcome.status === 'success');
         this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, undefined, undefined, outcome);
     }
 
@@ -2075,7 +2203,7 @@ export class IntelligenceEngine extends EventEmitter {
         })();
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2110,7 +2238,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2125,6 +2253,37 @@ export class IntelligenceEngine extends EventEmitter {
         const isSpeculative = options?.speculative === true;
         const skipCooldown = options?.skipCooldown === true;
         const forceFresh = options?.forceFresh === true;
+        // A manual press that asks only "answer what was just said": no typed
+        // question, no screenshot, page, screen text or quick-action prompt.
+        // Only this press can share a turn with Auto Answer; anything extra is
+        // a different request and runs on its own.
+        const manualSpoken = !isSpeculative && forceFresh && !question?.trim()
+            && !(imagePaths?.length) && !options?.screenContext && !options?.domContext?.trim()
+            && !options?.promptInstruction?.trim();
+
+        // One answer per spoken question: join the automatic answer that owns
+        // this turn instead of starting a second generation for it.
+        if (manualSpoken && options?.joinAutomatic) {
+            const claim = this.spokenAnswer;
+            if (claim?.automatic && isSameSpokenTurn(claim.turn, this.latestSpokenTurn())) {
+                if (!claim.completed) {
+                    console.log('[IntelligenceEngine] Manual press joins the automatic answer in flight', { generationId: claim.generationId });
+                    // Bounded: a run that never settled must not hang the press.
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const answered = await Promise.race([
+                        claim.settled,
+                        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), SPOKEN_JOIN_MAX_WAIT_MS); }),
+                    ]).finally(() => { if (timer) clearTimeout(timer); });
+                    if (!answered) console.log('[IntelligenceEngine] The joined automatic answer failed — answering the manual press');
+                }
+                if (claim.completed) {
+                    console.log('[IntelligenceEngine] Manual press: the automatic answer already covers this question', { generationId: claim.generationId });
+                    setOutcome('cancelled', 'automatic_answer_exists', false);
+                    return null;
+                }
+            }
+        }
+        options?.onStart?.({ spoken: manualSpoken });
 
         if (!question?.trim() && (imagePaths?.length ?? 0) > 0) {
             question = 'What should I say about this?';
@@ -2233,11 +2392,23 @@ export class IntelligenceEngine extends EventEmitter {
         this.automaticGenerationId = this.nextRunIsAutomatic ? generationId : null;
         this.speculativeGenerationId = isSpeculative ? generationId : null;
         this.nextRunIsAutomatic = false;
+        // This run owns the interviewer's latest turn (see spokenAnswer). Any
+        // other run starting now superseded the previous owner, which releases
+        // the turn from its own finally.
+        if (this.automaticGenerationId === generationId && !isSpeculative) {
+            this.claimSpokenTurn(this.latestSpokenTurn(), true, generationId);
+        } else if (manualSpoken) {
+            this.claimSpokenTurn(this.latestSpokenTurn(), false, generationId);
+        }
         const isWtaSuperseded = () => (
             this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken
             || this.currentGenerationId !== generationId
         );
 
+        const automaticQuestion = this.automaticGenerationId === generationId && !isSpeculative ? question?.trim() : undefined;
+        if (automaticQuestion) {
+            this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true });
+        }
         this.setMode('what_to_say');
         // Speculative runs don't stamp lastTriggerTime at start — the cooldown slot
         // is reserved for the real trigger. We stamp it only on successful completion.
@@ -2576,6 +2747,12 @@ export class IntelligenceEngine extends EventEmitter {
                     trace.mark('repair_used', { reason: 'question_from_user_utterance' });
                     questionSpokenByUser = true;
                     console.log('[IntelligenceEngine] the user asked after the other party — answering the user\'s own question', { chars: userText.length });
+                }
+            }
+            if (!isSpeculative && !question && options?.overlayQuestionId && !questionSpokenByUser) {
+                const submitted = (extractedQuestion.latestQuestion || lastInterviewerTurn)?.trim();
+                if (submitted) {
+                    this.emit('what_to_answer_question', { generationId, question: submitted, overlayQuestionId: options.overlayQuestionId });
                 }
             }
             // WTA mint point (Phase 6 Slice 1, "what changes" item 1): one
@@ -7448,6 +7625,15 @@ export class IntelligenceEngine extends EventEmitter {
             if (this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) {
                 this.whatToAnswerCancellationToken = null;
             }
+            // An adopted prefetch settled its claim when it was revealed; for
+            // every other run, only a successful answer keeps the turn.
+            this.settleSpokenTurn(generationId, !isSpeculative && options?.outcomeOut?.value?.status === 'success');
+            if (automaticQuestion || isSpeculative) {
+                this.emit('what_to_answer_question', {
+                    generationId, pending: false,
+                    failed: Boolean(automaticQuestion && options?.outcomeOut?.value?.status === 'failed'),
+                });
+            }
             // Resume background drains on EVERY exit path (answer, abort, error).
             releaseFg();
         }
@@ -9143,6 +9329,8 @@ export class IntelligenceEngine extends EventEmitter {
      * Reset engine state (cancels any in-flight operations)
      */
     reset(): void {
+        this.spokenAnswer?.settle(false);
+        this.spokenAnswer = undefined;
         this.activeMode = 'idle';
         this.currentGenerationId++; // Increment to break all active LLM streams
         if (this.whatToAnswerCancellationToken) {

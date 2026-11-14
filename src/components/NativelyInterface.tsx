@@ -548,6 +548,8 @@ interface Message {
   role: 'user' | 'system' | 'interviewer';
   text: string;
   isStreaming?: boolean;
+  answerPending?: boolean;
+  answerFailed?: boolean;
   hasScreenshot?: boolean;
   screenshotPreview?: string;
   // Every attached screenshot's data-URL preview (screenshotPreview is the first
@@ -1341,7 +1343,7 @@ const MessageRow = React.memo(
                 attached" equivalent for browser captures (⌘/Ctrl+Shift+Y or
                 auto-attach). Shows host — title so the user can see WHICH page
                 fed the answer; the transient status pill vanished on use. */}
-            {msg.role === 'user' && msg.pageContext && (
+            {msg.role !== 'system' && msg.pageContext && (
               (() => {
                 const host = hostnameFromUrl(msg.pageContext.url);
                 const title = msg.pageContext.title?.trim();
@@ -1380,6 +1382,11 @@ const MessageRow = React.memo(
               <ChatHintLine>{t(CHAT_HINTS[msg.hint])}</ChatHintLine>
             ) : msg.role === 'system' && msg.note?.alone ? null
               : msg.role === 'system' && msg.failure && !msg.failure.partial ? null : renderMessageText(msg)}
+            {(msg.answerPending || msg.answerFailed) && (
+              <div role="status" className="mt-1 text-[12px] overlay-text-muted">
+                {msg.answerPending ? t('Thinking') : t('No answer generated')}
+              </div>
+            )}
             {/* What happened to the answer, under it; or, with no answer, alone. */}
             {msg.role === 'system' && msg.note && msg.note.kind !== 'late' && (
               <ChatNoteLine kind={msg.note.kind} className={msg.note.alone ? '' : 'mt-2'}>{chatNoteText(msg.note, t)}</ChatNoteLine>
@@ -1388,7 +1395,7 @@ const MessageRow = React.memo(
                 model's context window (see requestBuilder's per-source drop
                 order) — surfaced so a thin-looking answer isn't a silent
                 mystery. Field names only, never the dropped content. */}
-            {msg.role === 'user' && (msg.trimmedFields?.length || msg.shortenedFields?.length) ? (
+            {msg.role !== 'system' && (msg.trimmedFields?.length || msg.shortenedFields?.length) ? (
               <div className="flex items-center gap-1 mt-1.5 text-[10px] opacity-60">
                 <HelpCircle className="w-2.5 h-2.5 flex-shrink-0" />
                 <span className="truncate max-w-[260px]">
@@ -7818,6 +7825,42 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }),
     );
 
+    cleanups.push(
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed }) => {
+        const id = overlayQuestionId ?? `interviewer-answer-${generationId}`;
+        if (!question) {
+          setMessages((prev) => prev.some((message) => message.id === id && message.answerPending)
+            ? prev.map((message) => message.id === id ? { ...message, answerPending: false, answerFailed: failed } : message)
+            : prev);
+          return;
+        }
+        if (activeDirectAssistRef.current) return;
+        if (overlayQuestionId) {
+          if (legacyIntelligenceTombstonedRef.current) return;
+          setMessages((prev) => prev.map((message) => message.id === id
+            ? { ...message, role: 'interviewer', text: question, isQuickActionLabel: false }
+            : message));
+          return;
+        }
+        // Only a new, committed automatic question may reopen legacy streaming after Direct.
+        const decision = resolveLiveAnswerBatch(
+          legacyIntelligenceTombstonedRef.current ? null : liveAnswerGenIdRef.current,
+          generationId,
+        );
+        if (!decision.accept) return;
+        legacyIntelligenceTombstonedRef.current = false;
+        liveAnswerGenIdRef.current = decision.activeId;
+        pinAnswerPanel();
+        setMessages((prev) => {
+          if (prev.some((message) => message.id === id)) return prev;
+          // Keep any active streaming row at the tail for the legacy token handlers.
+          const insertAt = prev.findLastIndex((message) => !message.isStreaming) + 1;
+          const row: Message = { id, role: 'interviewer', text: question, answerPending: pending };
+          return [...prev.slice(0, insertAt), row, ...prev.slice(insertAt)];
+        });
+      }) ?? (() => {}),
+    );
+
     // AI Suggestions from native audio (legacy)
     cleanups.push(
       window.electronAPI.onSuggestionProcessingStart(() => {
@@ -7930,9 +7973,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Clear streaming refs FIRST (same ordering rationale as the null-feedback
     // path) so a late token batch can't append onto a row we're removing.
     cleanups.push(
-      window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(() => {
+      window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(({ generationId }) => {
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
+        if (!resolveLiveAnswerBatch(liveAnswerGenIdRef.current, generationId).accept) return;
         setIsProcessing(false);
         if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
         streamingNodeRef.current = null;
@@ -8422,12 +8466,29 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     }
 
+    // One answer per spoken question. A press that only asks "answer what was
+    // just said" may be answered by the automatic answer for the same turn
+    // (main joins it rather than generating a second one), so with Auto Answer
+    // on it goes through the shared engine — never Direct, which would start
+    // a second stream — and opens no streaming row of its own: a placeholder
+    // would take over the automatic answer's live row. The card shows
+    // "Thinking" until main says which answer it is.
+    const spokenOnly = !retry && currentAttachments.length === 0 && !dynamicPromptInstruction
+      && !(window as any).lastCapturedDOM && !pendingPageCaptureAtRef.current;
+    const shareAutomaticStream = spokenOnly
+      && await (window.electronAPI.getAutoAnswerEnabled?.() ?? Promise.resolve(false)).catch(() => false);
+    const useDirectAssist = directAssistEnabled && !shareAutomaticStream;
+
     // Create AI response placeholder AFTER user message so thinking dots + response
     // appear BELOW the question card (not above it)
-    if (!directAssistEnabled) {
+    if (!useDirectAssist) {
       legacyIntelligenceTombstonedRef.current = false;
-      liveAnswerGenIdRef.current = null;
-      prepareIntelligenceStreamPlaceholder('what_to_answer');
+      if (shareAutomaticStream) {
+        setMessages((prev) => prev.map((message) => message.id === questionCardId ? { ...message, answerPending: true } : message));
+      } else {
+        liveAnswerGenIdRef.current = null;
+        prepareIntelligenceStreamPlaceholder('what_to_answer');
+      }
     }
     analytics.trackCommandExecuted('what_to_say');
 
@@ -8437,7 +8498,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (!screenshotRetryRef.current.attachLease(screenshotAttempt.id, lease)) return;
       }
       if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
-      if (directAssistEnabled) {
+      if (useDirectAssist) {
         // Direct screenshot requests never trigger automatic page capture. A
         // deliberate, already-captured page is still consumed once and can ride
         // alongside the image because the user explicitly attached both.
@@ -8479,6 +8540,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           retrySnapshot.question = retry?.snapshot.question || directWhatToSayPayload.currentRequest;
           retrySnapshot.domContext = directPageContext?.dom;
           retrySnapshot.pageMeta = directPageContext;
+        }
+        if (directWhatToSayPayload.source === 'stt') {
+          setMessages((prev) => prev.map((message) => message.id === questionCardId
+            ? { ...message, role: 'interviewer', text: interviewerRequest, isQuickActionLabel: false }
+            : message));
         }
         await beginDirectAssist({
           screenshotAttemptId: screenshotAttempt.id,
@@ -8566,11 +8632,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       const result = await window.electronAPI.generateWhatToSay(
         questionForWta,
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
-        options,
+        { ...options, overlayQuestionId: questionCardId },
       );
       if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
       settleScreenshotRetry(screenshotAttempt.id, result.outcome?.reason === 'attachment_unavailable'
         ? 'cancelled' : result.outcome?.status ?? 'failed');
+      if (result.outcome?.reason === 'automatic_answer_exists') {
+        // The automatic answer to this question is the answer: no second card.
+        setMessages((prev) => prev.filter((message) => message.id !== questionCardId));
+        return;
+      }
       setScreenContextStatus(result.screenContextStatus || 'not_available');
       setLatestUsedImageInput(Boolean(result.usedImageInput));
       setLatestVisionProviderUsed(result.visionProviderUsed);
@@ -8581,7 +8652,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       // and suggests the selective screenshot for next time; the retried
       // answer has already replaced the refusal in `result.answer`.
       setRefusalRetryNotice(result.refusalRetry ? { ...result.refusalRetry, at: Date.now() } : null);
-      if (result.answer == null) {
+      if (result.answer == null && shareAutomaticStream) {
+        // This press opened no streaming row of its own, so the open row (if
+        // any) belongs to the automatic answer: leave it and its refs alone.
+        setMessages((prev) => prev.map((message) => message.id === questionCardId
+          ? { ...message, answerPending: false, answerFailed: true } : message));
+        pinAnswerPanel();
+      } else if (result.answer == null) {
         // A quiet note, not a sentence at reading size where an answer would
         // be: main's own reason when it gives one, ours otherwise.
         const feedback = result.error ?? CHAT_NOTES.noneYet;
@@ -8633,7 +8710,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       endOverlayAction('what_to_say');
       // A Direct stream outlives the start IPC acknowledgement; its correlated
       // terminal event owns the processing state. Legacy WTA is request/response.
-      if (!directAssistEnabled && screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) setIsProcessing(false);
+      if (!useDirectAssist && screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) setIsProcessing(false);
+      // The press is over however it ended: its card stops saying "Thinking".
+      if (shareAutomaticStream) {
+        setMessages((prev) => prev.map((message) => message.id === questionCardId && message.answerPending
+          ? { ...message, answerPending: false } : message));
+      }
     }
   };
 

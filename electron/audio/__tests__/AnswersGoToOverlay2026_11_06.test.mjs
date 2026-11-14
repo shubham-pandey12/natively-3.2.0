@@ -37,3 +37,29 @@ test('every answer channel sent there is one only the overlay\'s interface liste
     assert.ok(users.every((f) => f === 'src/components/NativelyInterface.tsx'), `${channel} (${fn}) listened on by: ${users.join(', ')}`);
   }
 });
+
+test('submitted interviewer questions reach the overlay before automatic answer tokens', () => {
+  const engine = read('electron/IntelligenceEngine.ts');
+  const manager = read('electron/IntelligenceManager.ts');
+  const preload = read('electron/preload.ts');
+  const adoption = engine.slice(engine.indexOf('if (stillStreaming) {'), engine.indexOf('// Accepted, but the stream neither runs'));
+  assert.match(adoption, /what_to_answer_question[\s\S]*?speculativeAdoptHook/);
+  assert.match(adoption, /what_to_answer_question[\s\S]*?revealSpeculativeAnswer/);
+  assert.match(engine, /if \(automaticQuestion\) \{\s*this\.emit\('what_to_answer_question'/);
+  assert.match(engine, /if \(automaticQuestion \|\| isSpeculative\) \{\s*this\.emit\('what_to_answer_question', \{\s*generationId, pending: false/);
+  assert.match(manager, /'what_to_answer_question'/);
+  assert.match(block, /on\('what_to_answer_question'[\s\S]*?sendToWindow\(answerWindow\(\), 'intelligence-what-to-answer-question', data\)/);
+  assert.match(preload, /onWhatToAnswerQuestion:[\s\S]*?ipcRenderer\.on\('intelligence-what-to-answer-question'/);
+});
+
+test('manual speech replaces its own question card in both answer paths', () => {
+  const overlay = read('src/components/NativelyInterface.tsx');
+  const engine = read('electron/IntelligenceEngine.ts');
+  const ipc = read('electron/ipcHandlers.ts');
+  const handler = overlay.slice(overlay.indexOf('const handleWhatToSay ='), overlay.indexOf('const handleFollowUp ='));
+  assert.match(handler, /source === 'stt'[\s\S]*?message.id === questionCardId[\s\S]*?role: 'interviewer', text: interviewerRequest[\s\S]*?await beginDirectAssist/);
+  assert.match(handler, /generateWhatToSay\([\s\S]*?overlayQuestionId: questionCardId/);
+  assert.match(ipc, /overlayQuestionId: typeof options\?\.overlayQuestionId === 'string'/);
+  assert.match(engine, /!isSpeculative && !question && options\?\.overlayQuestionId && !questionSpokenByUser[\s\S]*?question: submitted, overlayQuestionId: options\.overlayQuestionId/);
+  assert.match(overlay, /onWhatToAnswerQuestion\?\.\([\s\S]*?overlayQuestionId \?\?[\s\S]*?if \(overlayQuestionId\)[\s\S]*?message\.id === id[\s\S]*?role: 'interviewer', text: question/);
+});

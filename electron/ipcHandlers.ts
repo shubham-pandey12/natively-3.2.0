@@ -16340,14 +16340,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       _,
       question?: string,
       imagePaths?: string[],
-      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
+      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
     ) => {
       // The press, for the answer's latency trace (PiTraceInit.startedAt).
       const pressedAt = tracerNow();
       return _tracked(async () => {
-      // Auto Answer V3: a manual What-to-Answer (hotkey, button, or an accepted
-      // offer card) commits whatever Auto Answer was offering — retract the card.
-      try { appState.onManualWhatToAnswer?.(); } catch { /* never block the answer */ }
       try {
         let screenContext: any;
         let screenContextStatus: 'not_available' | 'available' | 'failed' = 'not_available';
@@ -16572,6 +16569,22 @@ export function initializeIpcHandlers(appState: AppState): void {
                 ? options.promptInstruction
                 : undefined,
             domContext: effectiveDomContext,
+            overlayQuestionId: typeof options?.overlayQuestionId === 'string' ? options.overlayQuestionId : undefined,
+            // One answer per spoken question: with Auto Answer on, a press that
+            // only asks "answer what was just said" joins the automatic answer
+            // for the same turn instead of generating a second one. The engine
+            // decides whether the press qualifies (no question, image, page,
+            // screen text or prompt) and whether a matching answer exists.
+            joinAutomatic: appState.getAutoAnswerEnabled(),
+            // Auto Answer V3: a manual What-to-Answer (hotkey, button, or an
+            // accepted offer card) commits whatever Auto Answer was offering.
+            // Called only when this press really answers — a press that joined
+            // the automatic answer did not supersede it. A spoken-only press
+            // also takes the question over from Auto Answer.
+            // The engine decides `spoken` with the same test it uses for joining.
+            onStart: (press) => {
+              try { appState.onManualWhatToAnswer?.(press); } catch { /* never block the answer */ }
+            },
           },
         ));
         // The refusal-triggered retry of #647's Problem A. The refusal ("I

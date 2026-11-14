@@ -900,6 +900,34 @@ export class SimpleAutoAnswerEngine {
         this.host.log?.(`[AutoAnswer:simple] superseded by a manual answer after ${feedbackMs}ms`);
     }
 
+    /**
+     * A manual press is answering what the interviewer just said: the question
+     * is handed over to it. Whatever this engine still held for that question
+     * — a dispatch parked behind the busy engine, a verdict deferred or still
+     * being judged, the pending candidate itself — is dropped, so it is never
+     * dispatched after the manual answer as a second answer to one question.
+     * The candidate is remembered as answered, so the judge is told and a
+     * restatement of it is not dispatched either. Speech that arrives after
+     * the press starts a new candidate as usual.
+     */
+    onManualSpokenAnswer(): void {
+        const candidate = this.pending.length > 0 ? joinTranscriptParts(this.pending) : '';
+        const hadWork = Boolean(candidate) || this.parkedAttempt !== null || this.held !== null || this.judgeAbort !== null;
+        this.dropParked();
+        this.disarm();
+        this.held = null;
+        this.bumpJudgeSeq('manual_answer');
+        if (candidate) this.lastAnsweredText = candidate;
+        // A stalled interim stood in for its final: that late final is the
+        // same question, already handed over (see absorbStalledFinal).
+        const promoted = this.pending.find(p => p.provisional);
+        if (promoted) this.stallAnswered = { text: promoted.text, at: this.clock.now() };
+        this.pending = [];
+        this.judgedParts = 0;
+        this.lastJudgedKey = '';
+        if (hadWork) this.host.log?.('[AutoAnswer:simple] the question was handed over to a manual answer');
+    }
+
     private armFeedback(id: string, act: AutoAnswerQuestion['dialogueAct'], answerability: number): void {
         this.clearFeedback();
         this.feedbackPending = { id, at: this.clock.now(), act, answerability };

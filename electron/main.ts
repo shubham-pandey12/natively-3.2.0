@@ -3975,10 +3975,13 @@ export class AppState {
   });
 
   /** A manual What-to-Answer started (hotkey / button / accepted offer): the offer card is committed. */
-  public onManualWhatToAnswer(): void {
+  public onManualWhatToAnswer(press?: { spoken?: boolean }): void {
     // What streams next is the manual answer, not the automatic one.
     this.autoAnswerUsage.stopAwaitingAnswer();
     this.simpleAutoAnswer.onManualAnswerStarted();
+    // A press that answers what was just said takes the question over from
+    // Auto Answer, so nothing it still held for it dispatches afterwards.
+    if (press?.spoken) this.simpleAutoAnswer.onManualSpokenAnswer();
   }
 
   /** Per-mode ternary thresholds (V3 Amendment 4), resolved from the mode policy registry. */
@@ -8434,6 +8437,10 @@ export class AppState {
       return overlay && !overlay.isDestroyed() ? overlay : this.getMainWindow();
     }
 
+    this.intelligenceManager.on('what_to_answer_question', (data) => {
+      this.sendToWindow(answerWindow(), 'intelligence-what-to-answer-question', data);
+    });
+
     // Sprint 9: time-batched IPC token sends.
     //
     // Each LLM streaming token previously fired one webContents.send → one
@@ -8576,11 +8583,11 @@ export class AppState {
     // coding scaffold ended with no final answer (superseded/declined/errored).
     // Tell the renderer to drop the open scaffold row. Flush pending token
     // batches first so a late scaffold batch can't re-mount the row afterwards.
-    this.intelligenceManager.on('suggested_answer_discard', (reason: string) => {
+    this.intelligenceManager.on('suggested_answer_discard', (reason: string, generationId?: number) => {
       this.autoAnswerUsage.stopAwaitingAnswer();
       flushBatchesBeforeFinal();
       const win = answerWindow()
-      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason })
+      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason, generationId })
     })
 
     // Verified code execution (background): a ✓ badge when the shown code passed
