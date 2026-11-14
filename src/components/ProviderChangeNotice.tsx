@@ -32,6 +32,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, RefreshCw } from 'lucide-react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import { useCornerSlot } from '../hooks/useCornerSlot';
 import '../ui-components/LiquidGlassButton.css';
 import './ProviderChangeNotice.css';
 
@@ -159,7 +160,9 @@ type Main =
   | { kind: 'running' | 'done'; progress: ReindexProgress };
 
 export const ProviderChangeNotice: React.FC<ProviderChangeNoticeProps> = (props) => {
-  const { open } = props;
+  // The bottom-right corner shows one notice at a time (src/lib/cornerSlot.mjs):
+  // it waits while a higher one is there, and leaves at once when one arrives.
+  const { show: open, displaced } = useCornerSlot('provider_notice', props.open);
   // The host clears everything as it closes the card; the slide out keeps the
   // last open content instead of emptying as it goes.
   const lastOpen = useRef(props);
@@ -173,11 +176,14 @@ export const ProviderChangeNotice: React.FC<ProviderChangeNoticeProps> = (props)
   const slideRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (open) { setMounted(true); return; }
+    // Pushed out by a higher notice: gone at once, so only the incoming one
+    // moves (GenieModal's closeInstantly hand-over, as the other notices do).
+    if (displaced) { setEntered(false); setMounted(false); return; }
     setEntered(false);
     const closeMs = cssMs(slideRef.current, '--toast-close', 350);
     const t = setTimeout(() => setMounted(false), closeMs + 40);
     return () => clearTimeout(t);
-  }, [open]);
+  }, [open, displaced]);
   useLayoutEffect(() => {
     if (!open || !mounted || entered) return;
     void slideRef.current?.offsetWidth; // reflow: start from the closed pose

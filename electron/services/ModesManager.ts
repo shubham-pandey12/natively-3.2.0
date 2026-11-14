@@ -7,7 +7,7 @@ import { ModeContextRetriever, RETRY_ELIGIBLE_INDEX_STATUSES, type ModeRetrieval
 import type { ModeRetrievedContext as HybridContext } from './modes/ModeHybridRetriever';
 import type { AnswerType } from '../llm/AnswerPlanner';
 import type { ActiveModeInfo } from '../llm/modeProfiles';
-import { classifyCustomContext, selectCustomContextForAnswer } from '../llm/customContextClassifier';
+import { classifyCustomContext, selectCustomContextFactsForAnswer, selectCustomContextForAnswer } from '../llm/customContextClassifier';
 import { registerUserInstructionProvider, USER_INSTRUCTIONS_MAX_CHARS } from '../llm/userInstructionContract';
 import { diagLog } from '../llm/documentGroundedPrompt';
 import { planBuiltinAdoption, BUILTIN_MODE_LABELS } from './builtinModes';
@@ -67,6 +67,36 @@ export const PROFILE_OKF_RESERVED_MODE_ID = '__profile_okf__';
  * exists — a per-instance regression would still pass any single-bundle test.
  */
 export const ACTIVE_MODE_CACHE_KEY = '__nativelyActiveModeInfoCacheV1__';
+
+/**
+ * Pro modes are checked when an answer READS the active mode, not only when it
+ * is switched on (modes:set-active). Before 2026-11-07 a Pro mode set while
+ * licensed, or written straight into natively.db, kept shaping every answer
+ * after the licence or trial ended. Only the 'general' template (General and
+ * the user's own modes built from it) is free, the same line modes:set-active
+ * draws. The check is injected (ipcHandlers wires proAccess.isProOrTrialActive)
+ * so this module stays free of licence code; until it is wired nothing is
+ * withheld. On globalThis because esbuild inlines this module into several
+ * bundles (see _cache below). The stored choice is kept: Pro back, mode back.
+ */
+const PRO_ACCESS_KEY = '__nativelyModesProAccessV1__';
+export function setModesProAccessCheck(check: (() => boolean) | null): void {
+    (globalThis as unknown as Record<string, unknown>)[PRO_ACCESS_KEY] = check;
+}
+export function modeNeedsPro(mode: Pick<Mode, 'templateType'> | null | undefined): boolean {
+    return !!mode && mode.templateType !== 'general';
+}
+/** True when this mode needs Pro and the user has neither Pro nor a trial. */
+export function modeLockedWithoutPro(mode: Pick<Mode, 'templateType'> | null | undefined): boolean {
+    if (!modeNeedsPro(mode)) return false;
+    const check = (globalThis as unknown as Record<string, unknown>)[PRO_ACCESS_KEY] as (() => boolean) | null | undefined;
+    if (typeof check !== 'function') return false;
+    try {
+        return check() !== true;
+    } catch {
+        return true;
+    }
+}
 
 export type ModeTemplateType =
     | 'general'
@@ -522,7 +552,10 @@ export class ModesManager {
     public getActiveMode(): Mode | null {
         const row = DatabaseManager.getInstance().getActiveMode();
         if (row && row.id !== PROFILE_OKF_RESERVED_MODE_ID
-            && ModesManager.isKnownTemplateType(row.template_type)) return rowToMode(row);
+            && ModesManager.isKnownTemplateType(row.template_type)) {
+            const mode = rowToMode(row);
+            return modeLockedWithoutPro(mode) ? null : mode;
+        }
         const fallback = this.getBuiltinTechnicalInterviewMode();
         if (!fallback) return null;
         try {
@@ -531,7 +564,14 @@ export class ModesManager {
             console.warn('[ModesManager] Failed to persist fallback active mode:', e);
         }
         const activeRow = DatabaseManager.getInstance().getActiveMode();
-        return activeRow?.id === fallback.id ? rowToMode(activeRow) : fallback;
+        const mode = activeRow?.id === fallback.id ? rowToMode(activeRow) : fallback;
+        return modeLockedWithoutPro(mode) ? null : mode;
+    }
+
+    /** The stored active mode with no Pro check. Only for standing it down. */
+    public getStoredActiveMode(): Mode | null {
+        const row = DatabaseManager.getInstance().getActiveMode();
+        return row ? rowToMode(row) : null;
     }
 
     // ── Pinned-mode resolution (audit finding #6) ─────────────────
@@ -546,7 +586,7 @@ export class ModesManager {
             const pinned = this.getModes().find(m => m.id === pinnedModeId);
             // Fall back to the active mode only if the pinned mode was deleted
             // mid-request (rare); otherwise the pinned mode wins.
-            if (pinned) return pinned;
+            if (pinned) return modeLockedWithoutPro(pinned) ? null : pinned;
         }
         return this.getActiveMode();
     }
@@ -580,9 +620,9 @@ export class ModesManager {
     // rejection, plus a raw db.setActiveMode bypass in the license-loss path;
     // both fixed the same day. This slot keeps the harness runtimes truthful
     // and makes the class impossible if multi-bundle loading ever arrives.)
-    private static get _cache(): { info: ActiveModeInfo | null; valid: boolean } {
+    private static get _cache(): { info: ActiveModeInfo | null; valid: boolean; filledLocked?: boolean } {
         const g = globalThis as unknown as Record<string, unknown>;
-        let store = g[ACTIVE_MODE_CACHE_KEY] as { info: ActiveModeInfo | null; valid: boolean } | undefined;
+        let store = g[ACTIVE_MODE_CACHE_KEY] as { info: ActiveModeInfo | null; valid: boolean; filledLocked?: boolean } | undefined;
         if (!store) {
             store = { info: null, valid: false };
             g[ACTIVE_MODE_CACHE_KEY] = store;
@@ -604,8 +644,12 @@ export class ModesManager {
      */
     public getActiveModeInfo(): ActiveModeInfo | null {
         const store = ModesManager._cache;
-        if (store.valid) return store.info;
-        const mode = this.getActiveMode();
+        // The cache holds the stored mode; Pro is asked on every read. Filled while
+        // locked, its grounding was read without the mode: refilled once Pro is back.
+        if (store.valid && store.filledLocked && !modeLockedWithoutPro(store.info)) store.valid = false;
+        if (store.valid) return modeLockedWithoutPro(store.info) ? null : store.info;
+        const mode = this.getStoredActiveMode();
+        store.filledLocked = modeLockedWithoutPro(mode);
         if (mode) {
             const grounding = this.getActiveModeDocumentGroundingInfo(mode.id);
             store.info = {
@@ -624,7 +668,7 @@ export class ModesManager {
             store.info = null;
         }
         store.valid = true;
-        return store.info;
+        return modeLockedWithoutPro(store.info) ? null : store.info;
     }
 
     // Modes where the premium knowledge intercept (negotiation coaching, intro
@@ -1670,6 +1714,30 @@ export class ModesManager {
             ? selectCustomContextForAnswer(classifyCustomContext(raw), answerType).included.map(c => c.text).join('\n')
             : raw;
         let text = scoped.trim();
+        if (text.length > ModesManager.PINNED_INSTRUCTIONS_MAX_CHARS) {
+            text = text.slice(0, ModesManager.PINNED_INSTRUCTIONS_MAX_CHARS) + ' …[truncated]';
+        }
+        return text;
+    }
+
+    /**
+     * The facts the user wrote in the active mode's Real-time prompt (who they
+     * are, their work, their product), for the prompt's "notes the user wrote"
+     * data section. getActiveModePinnedInstructions carries the same text on
+     * the instruction channel, which binds presentation only and tells the
+     * model a fact there is no instruction; this is where those facts are read
+     * as the user's own words. Answer-type gated like the rest of the text (see
+     * selectCustomContextFactsForAnswer); empty for a strictly
+     * document-grounded mode, whose answers come from its files.
+     */
+    public getActiveModeUserNotes(answerType?: AnswerType, pinnedModeId?: string): string {
+        const mode = this.resolveMode(pinnedModeId);
+        if (!mode) return '';
+        const raw = (mode.customContext || '').trim();
+        if (!raw) return '';
+        if (this.getActiveModeDocumentGroundingInfo(pinnedModeId).strictDocumentGroundedActive) return '';
+        let text = selectCustomContextFactsForAnswer(classifyCustomContext(raw), answerType)
+            .map(c => c.text).join('\n').trim();
         if (text.length > ModesManager.PINNED_INSTRUCTIONS_MAX_CHARS) {
             text = text.slice(0, ModesManager.PINNED_INSTRUCTIONS_MAX_CHARS) + ' …[truncated]';
         }

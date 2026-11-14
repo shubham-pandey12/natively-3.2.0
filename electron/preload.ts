@@ -4,6 +4,8 @@ import type { SkillUploadPayload } from './services/skills/SkillValidator';
 import type { NativelyUsageResponse, NativelyPlansResponse } from '../src/types/nativelyUsage';
 import type { MeetingOutputsApi } from '../src/types/meetingOutputs';
 import type { ConnectorsApi } from '../src/types/connectors';
+import type { AutoAnswerModelInstall, AutoAnswerModelSavings } from './premium/autoAnswer';
+type AutoAnswerModelState = { install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings };
 import { PAGE_CAPTURE_FALLBACK_CHANNEL, PAGE_CAPTURE_STARTED_CHANNEL, type PageCaptureFallbackNotice } from './services/pageCaptureFallback';
 import type { CalendarSourceId as CalendarSourceIdInfo, CalendarSourceStatus as CalendarSourceStatusInfo } from './services/calendar/providers/types';
 
@@ -286,6 +288,7 @@ interface ElectronAPI {
   /** The plan catalog — allowances and prices, straight from the server, so the
    *  plan table never carries its own copy of numbers the server enforces. */
   getNativelyPlans: () => Promise<NativelyPlansResponse>;
+  resendNativelyKey: (email: string) => Promise<{ ok: boolean; message?: string; error?: string }>;
   getStoredCredentials: () => Promise<{
     /** Any AI route of the user's own (trialPolicy.hasOwnAiKey: custom and cURL providers count). */
     hasOwnAiKey?: boolean;
@@ -361,6 +364,10 @@ interface ElectronAPI {
   convertTrial: (choice: string) => Promise<{ ok: boolean }>;
   endTrialByok: (opts?: { force?: boolean }) => Promise<{ success: boolean; wipeIncomplete?: boolean; error?: string }>;
   onTrialEnded: (cb: (data: { choice: string; expiresAt?: string; showEndedCard?: boolean }) => void) => () => void;
+  /** A Pro pack ran out during a meeting (main: PackMeetingClock). `reason` is 'hours_used', 'window_closed' or null. */
+  onPackEnded: (cb: (data: { reason: string | null }) => void) => () => void;
+  /** Hours were added to a pack that ended mid-meeting; it is metered again. */
+  onPackRenewed: (cb: () => void) => () => void;
   /** The trial's AI allowance is in its last quarter (main: trial:status poll). */
   onTrialAllowanceLow: (cb: (data: { expiresAt?: string | null }) => void) => () => void;
   // Card ledger (toaster policy): shows, strikes and retirements per card.
@@ -527,6 +534,14 @@ interface ElectronAPI {
       terminal?: boolean;
       stuck?: boolean;
       titleKey?: string;
+      /** Advice only (shown once per meeting). */
+      advisory?: boolean;
+      /** A blocked permission: shown even on a hidden overlay. */
+      permission?: boolean;
+      /** false: real audio on the channel does not clear it. */
+      clearsOnRecovery?: boolean;
+      /** The channel carries real audio again: its stuck/terminal warning no longer holds. */
+      recovered?: boolean;
     }) => void,
   ) => () => void;
 
@@ -540,6 +555,8 @@ interface ElectronAPI {
       reconnectAttempts?: number;
       /** A stand-in carries the channel while `provider` is down (audio/sttFailover.ts). */
       fallback?: { provider: string; notice: string };
+      /** A local model is slower than speech: not a state change. */
+      behind?: true;
     }) => void,
   ) => () => void;
 
@@ -1299,7 +1316,15 @@ interface ElectronAPI {
   getMeetingAudioCapture: () => Promise<{ withoutAudio: boolean }>;
   onMeetingAudioCapture: (callback: (data: { withoutAudio: boolean }) => void) => () => void;
   getAutoAnswerEnabled: () => Promise<boolean>;
-  setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; message?: string }>;
+  getAutoAnswerAccess: () => Promise<{ available: boolean; allowed: boolean; basis: 'pro' | 'sharing' | 'none'; uploads: boolean; consent: { version: number; grantedAt: string } | null; enabled: boolean }>;
+  setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
+  deleteAutoAnswerSharedData: () => Promise<{ success: boolean; error?: string }>;
+  onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => () => void;
+  getAutoAnswerModelStatus: () => Promise<AutoAnswerModelState>;
+  installAutoAnswerModel: () => Promise<AutoAnswerModelState>;
+  removeAutoAnswerModel: () => Promise<AutoAnswerModelState>;
+  onAutoAnswerModelProgress: (callback: (install: AutoAnswerModelInstall) => void) => () => void;
   getDirectAssistEnabled: () => Promise<boolean>;
   setDirectAssistEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   onDirectAssistEnabledChanged: (callback: (enabled: boolean) => void) => () => void;
@@ -1379,6 +1404,9 @@ interface ElectronAPI {
     key: 'seenStartup' | 'seenProfileOnboarding' | 'seenModesOnboarding' | 'permsShown',
     value: boolean,
   ) => Promise<{ success: boolean; error?: string }>;
+  /** The permissions card's closes while a permission is missing (src/lib/permissionsCardPolicy.mjs). */
+  permissionsCardGet: () => Promise<{ dismissals: number; lastDismissedAt: number | null }>;
+  permissionsCardRecord: (event: 'dismissed' | 'granted') => Promise<{ success: boolean; error?: string; record?: { dismissals: number; lastDismissedAt: number | null } }>;
   /** First-launch shortcut tour: taught shortcuts become practice presses. */
   onboardingSetShortcutTour: (active: boolean) => Promise<{ success: boolean }>;
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => () => void;
@@ -1553,6 +1581,7 @@ interface ElectronAPI {
   // (structurally compatible) in src/types/electron.d.ts.
   skillsRefresh: () => Promise<unknown[]>;
   skillsOpenFolder: () => Promise<{ success: boolean; path: string; error?: string }>;
+  skillsSetAlwaysOn: (id: string, alwaysOn: boolean) => Promise<{ success: boolean; error?: string }>;
   /** Picks a SKILL.md through main's (capture-guarded) dialog; returns skills:upload's payload. */
   skillsPickFile: () => Promise<{ canceled: boolean; error?: string; payload?: { kind: 'file'; filename: string; contentBase64: string } }>;
   skillsDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
@@ -1851,6 +1880,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   skillsRefresh: () => ipcRenderer.invoke('skills:list'),
   skillsOpenFolder: () => ipcRenderer.invoke('skills:open-folder'),
   skillsPickFile: () => ipcRenderer.invoke('skills:pick-file'),
+  skillsSetAlwaysOn: (id: string, alwaysOn: boolean) => ipcRenderer.invoke('skills:set-always-on', id, alwaysOn),
   // Per-skill management: hard-delete. Built-ins are refused inside the
   // manager. Enable/disable is intentionally NOT exposed — users who don't
   // want a skill delete it instead (see SkillsSettings.tsx).
@@ -1991,6 +2021,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }) => ipcRenderer.invoke('review:update-testimonial', payload),
   getNativelyUsage: (force?: boolean) => ipcRenderer.invoke('get-natively-usage', force ? { force: true } : undefined),
   getNativelyPlans: () => ipcRenderer.invoke('get-natively-plans'),
+  resendNativelyKey: (email: string) => ipcRenderer.invoke('resend-natively-key', email),
   getStoredCredentials: () => ipcRenderer.invoke('get-stored-credentials'),
   // R-10 resolution flow: ambiguous credential stores (names + last-4 only).
   getAmbiguousCredentialStores: () => ipcRenderer.invoke('credentials:get-ambiguous-stores'),
@@ -2012,6 +2043,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const sub = (_: any, data: any) => cb(data);
     ipcRenderer.on('trial-ended', sub);
     return () => ipcRenderer.removeListener('trial-ended', sub);
+  },
+  onPackEnded: (cb: (data: { reason: string | null }) => void) => {
+    const sub = (_: any, data: any) => cb({ reason: typeof data?.reason === 'string' ? data.reason : null });
+    ipcRenderer.on('pack-ended', sub);
+    return () => ipcRenderer.removeListener('pack-ended', sub);
+  },
+  onPackRenewed: (cb: () => void) => {
+    const sub = () => cb();
+    ipcRenderer.on('pack-renewed', sub);
+    return () => ipcRenderer.removeListener('pack-renewed', sub);
   },
   onTrialAllowanceLow: (cb: (data: { expiresAt?: string | null }) => void) => {
     const sub = (_: any, data: any) => cb(data);
@@ -2168,6 +2209,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('hindsight-status', subscription);
     };
   },
+  // Hindsight: the last lifecycle status broadcast (null before the first), for a
+  // window that subscribes after it went out.
+  getHindsightStatus: () => ipcRenderer.invoke('hindsight:get-status'),
   // Hindsight: open the server's log file in the OS default viewer. Restricted to the
   // Hindsight log path (under app userData); renderer cannot pass arbitrary paths.
   openHindsightLog: () => ipcRenderer.invoke('open-hindsight-log'),
@@ -2291,6 +2335,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       terminal?: boolean;
       stuck?: boolean;
       titleKey?: string;
+      advisory?: boolean;
+      permission?: boolean;
+      clearsOnRecovery?: boolean;
+      recovered?: boolean;
     }) => void,
   ) => {
     const subscription = (_: any, payload: any) => callback(payload);
@@ -2310,6 +2358,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       reconnectAttempts?: number;
       /** A stand-in carries the channel while `provider` is down (audio/sttFailover.ts). */
       fallback?: { provider: string; notice: string };
+      /** A local model is slower than speech: not a state change. */
+      behind?: true;
     }) => void,
   ) => {
     const subscription = (_: any, data: any) => callback(data);
@@ -3575,6 +3625,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getAutoAnswerEnabled: () => ipcRenderer.invoke('get-auto-answer-enabled'),
   setAutoAnswerEnabled: (enabled: boolean) => ipcRenderer.invoke('set-auto-answer-enabled', enabled),
+  getAutoAnswerAccess: () => ipcRenderer.invoke('auto-answer:get-access'),
+  setAutoAnswerTrainingConsent: (granted: boolean) => ipcRenderer.invoke('auto-answer:set-training-consent', granted),
+  deleteAutoAnswerSharedData: () => ipcRenderer.invoke('auto-answer:delete-shared-data'),
+  onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => {
+    const subscription = (_: any, info: { reason: string }) => callback(info);
+    ipcRenderer.on('auto-answer:access-required', subscription);
+    return () => { ipcRenderer.removeListener('auto-answer:access-required', subscription); };
+  },
+  getAutoAnswerModelStatus: () => ipcRenderer.invoke('auto-answer-model:get-status'),
+  installAutoAnswerModel: () => ipcRenderer.invoke('auto-answer-model:install'),
+  removeAutoAnswerModel: () => ipcRenderer.invoke('auto-answer-model:remove'),
+  onAutoAnswerModelProgress: (callback: (install: AutoAnswerModelInstall) => void) => {
+    const subscription = (_: Electron.IpcRendererEvent, install: AutoAnswerModelInstall) => callback(install);
+    ipcRenderer.on('auto-answer-model:progress', subscription);
+    return () => { ipcRenderer.removeListener('auto-answer-model:progress', subscription); };
+  },
   getDirectAssistEnabled: () => ipcRenderer.invoke('get-direct-assist-enabled'),
   setDirectAssistEnabled: (enabled: boolean) => ipcRenderer.invoke('set-direct-assist-enabled', enabled),
   onDirectAssistEnabledChanged: (callback: (enabled: boolean) => void) => {
@@ -3655,6 +3721,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     key: 'seenStartup' | 'seenProfileOnboarding' | 'seenModesOnboarding' | 'permsShown',
     value: boolean
   ) => ipcRenderer.invoke('onboarding:set-flag', key, value),
+  permissionsCardGet: () => ipcRenderer.invoke('permissions-card:get'),
+  permissionsCardRecord: (event: 'dismissed' | 'granted') => ipcRenderer.invoke('permissions-card:record', event),
   onboardingSetShortcutTour: (active: boolean) => ipcRenderer.invoke('onboarding:set-shortcut-tour', active),
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => {
     const subscription = (_: any, actionId: string) => callback(actionId);

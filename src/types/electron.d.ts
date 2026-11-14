@@ -3,6 +3,24 @@ import type { AssistCatchUp, AssistDailyBrief, AssistEvent, AssistLiveRecap, Ass
 // Phase 3 — DynamicActionPayload mirrors electron/services/dynamic-actions/DynamicAction.ts.
 // Kept as a structural interface (not a class import) to preserve the strict main↔renderer
 // type boundary — the renderer never imports from electron/* directly.
+/** Mirrors DeciderInstallState (electron/premium/autoAnswer.ts, AutoAnswerModelInstall). */
+export type AutoAnswerModelInstall =
+  | { state: 'unsupported' }
+  | { state: 'not_entitled' }
+  | { state: 'available'; variant: string; bytes: number }
+  | { state: 'downloading'; variant: string; received: number; total: number }
+  | { state: 'installed'; variant: string; version: string; dir: string }
+  | { state: 'error'; variant: string; error: string; retryable: boolean };
+
+/** Mirrors SavingsSummary (electron/premium/autoAnswer.ts, AutoAnswerModelSavings). */
+export interface AutoAnswerModelSavings {
+  installedAt: string | null;
+  before: { days: number; judgeCalls: number; tokens: number; usd: number };
+  after: { days: number; moments: number; local: number; judged: number; tokensSaved: number; usdSaved: number; tokensSpent: number; usdSpent: number } | null;
+  projection: { localShare: number; judgeCallsSaved: number; tokensSaved: number; usdSaved: number } | null;
+  reference: { model: string; inPerM: number; outPerM: number; outTokensPerCall: number; charsPerToken: number };
+}
+
 export interface DynamicActionEvidenceRef {
   source: 'transcript' | 'screen' | 'reference' | 'meeting_history' | 'browser_dom'
   text: string
@@ -353,6 +371,7 @@ export interface ElectronAPI {
   // bridge. Four user-facing categories over five server-side meters.
   getNativelyUsage: (force?: boolean) => Promise<import('./nativelyUsage').NativelyUsageResponse>
   getNativelyPlans: () => Promise<import('./nativelyUsage').NativelyPlansResponse>
+  resendNativelyKey: (email: string) => Promise<{ ok: boolean; message?: string; error?: string }>
   getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasOwnAiKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasDeepseekKey: boolean; hasNvidiaNimKey?: boolean; hasOpenrouterKey?: boolean; hasFluxionKey?: boolean; fluxionProtocol?: 'openai' | 'anthropic'; hasAgentRouterKey?: boolean; hasLitellmBaseURL?: boolean; litellmBaseURL?: string | null; litellmMaxTokens?: number | null; hasNinerouterBaseURL?: boolean; hasNinerouterKey?: boolean; ninerouterBaseURL?: string | null; ninerouterMaxTokens?: number | null; ninerouterThinking?: string | null; ninerouterModelMeta?: Record<string, { reasoning?: boolean; thinkingCanDisable?: boolean; thinkingFormat?: string }>; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'qwen' | 'nvidia_nim' | 'natively' | 'local-whisper' | 'apple-speech'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; nvidiaNimSttModel?: string; sttModels?: { deepgram?: string; openai?: string }; hasSonioxKey?: boolean; hasQwenAsrKey?: boolean; hasTavilyKey?: boolean; geminiPreferredModel?: string; groqPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; deepseekPreferredModel?: string; nvidia_nimPreferredModel?: string; openrouterPreferredModel?: string; fluxionPreferredModel?: string; agentrouterPreferredModel?: string; litellmPreferredModel?: string; ninerouterPreferredModel?: string; disabledProviders?: string[]; cloudEnabledModels?: Record<string, string[]>; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string; sttQwenAsrKey?: string; openAiSttBaseUrl?: string }>
   // R-10 resolution flow: ambiguous credential stores (names + last-4 only; null when nothing to resolve).
   getAmbiguousCredentialStores: () => Promise<{
@@ -422,6 +441,8 @@ export interface ElectronAPI {
   onHindsightStatus: (callback: (data: { state: 'spawning' | 'ready' | 'unreachable' | 'spawn-failed' | 'auth-failed'; reason?: string; logPath?: string; at?: number }) => void) => () => void
   // Hindsight: open the server's log file in the OS default viewer. Path is resolved
   // server-side; renderer never supplies a path.
+  /** The last Hindsight lifecycle status broadcast, or null before the first. */
+  getHindsightStatus: () => Promise<{ state: 'spawning' | 'ready' | 'unreachable' | 'spawn-failed' | 'auth-failed'; reason?: string; logPath?: string; at?: number } | null>
   openHindsightLog: () => Promise<{ ok: boolean; logPath?: string; error?: string }>
   // Hindsight: user-initiated opt-out. Sets the explicit-disable sentinel.
   disableHindsight: () => Promise<{ success: boolean; error?: string }>
@@ -452,10 +473,10 @@ export interface ElectronAPI {
   // generic one.
   onSystemAudioPermissionDenied: (callback: (message: string, titleKey?: string) => void) => () => void
   onDeviceSelectionApplied: (callback: (payload: { kind: 'input' | 'output'; requested: string | null; actual: string | null; fellBack: boolean; reason?: string }) => void) => () => void
-  onAudioCaptureFailed: (callback: (payload: { channel: 'system' | 'mic'; message: string; attempt: number; maxAttempts: number; terminal?: boolean; stuck?: boolean; titleKey?: string }) => void) => () => void
+  onAudioCaptureFailed: (callback: (payload: { channel: 'system' | 'mic'; message: string; attempt: number; maxAttempts: number; terminal?: boolean; stuck?: boolean; titleKey?: string; /** Advice only (shown once per meeting). */ advisory?: boolean; /** A blocked permission: shown even on a hidden overlay. */ permission?: boolean; /** false: real audio on the channel does not clear it. */ clearsOnRecovery?: boolean; /** The channel carries real audio again: its stuck/terminal warning no longer holds. */ recovered?: boolean }) => void) => () => void
 
   // STT Status Events
-  onSttStatusChanged: (callback: (data: { state: 'connected' | 'reconnecting' | 'failed' | 'awaiting-audio' | 'preparing'; provider: string; error?: string; channel: 'user' | 'interviewer'; reconnectAttempts?: number; /** A stand-in carries the channel while `provider` is down. */ fallback?: { provider: string; notice: string } }) => void) => () => void
+  onSttStatusChanged: (callback: (data: { state: 'connected' | 'reconnecting' | 'failed' | 'awaiting-audio' | 'preparing'; provider: string; error?: string; channel: 'user' | 'interviewer'; reconnectAttempts?: number; /** A stand-in carries the channel while `provider` is down. */ fallback?: { provider: string; notice: string }; /** A local model is slower than speech: not a state change. */ behind?: true }) => void) => () => void
 
   getNativeAudioStatus: () => Promise<{ connected: boolean }>
 
@@ -1309,6 +1330,9 @@ export interface ElectronAPI {
   /** Async startup check — calls Dodo validate endpoint to detect server-side revocations. */
   licenseCheckPremiumAsync: () => Promise<boolean>
   onLicenseStatusChanged: (callback: (data: { isPremium: boolean, plan?: string }) => void) => () => void
+  /** A Pro pack ran out during a meeting (main: PackMeetingClock). */
+  onPackEnded?: (cb: (data: { reason: string | null }) => void) => () => void
+  onPackRenewed?: (cb: () => void) => () => void
   licenseDeactivate: () => Promise<{ success: boolean }>
   licenseGetHardwareId: () => Promise<string>
 
@@ -1337,7 +1361,16 @@ export interface ElectronAPI {
   getMeetingAudioCapture?: () => Promise<{ withoutAudio: boolean }>;
   onMeetingAudioCapture?: (callback: (data: { withoutAudio: boolean }) => void) => () => void;
   getAutoAnswerEnabled: () => Promise<boolean>;
-  setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; message?: string }>;
+  getAutoAnswerAccess: () => Promise<{ available?: boolean; allowed: boolean; basis: 'pro' | 'sharing' | 'none'; uploads: boolean; consent: { version: number; grantedAt: string } | null; enabled: boolean }>;
+  setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
+  deleteAutoAnswerSharedData: () => Promise<{ success: boolean; error?: string }>;
+  onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => () => void;
+  // The on-device Auto Answer model: paid download (API keys + Pro) and its before/after card.
+  getAutoAnswerModelStatus?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings }>;
+  installAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings }>;
+  removeAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings }>;
+  onAutoAnswerModelProgress?: (callback: (install: AutoAnswerModelInstall) => void) => () => void;
   getDirectAssistEnabled: () => Promise<boolean>;
   setDirectAssistEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   onDirectAssistEnabledChanged: (callback: (enabled: boolean) => void) => () => void;
@@ -1383,6 +1416,9 @@ export interface ElectronAPI {
     key: 'seenStartup' | 'seenProfileOnboarding' | 'seenModesOnboarding' | 'permsShown',
     value: boolean,
   ) => Promise<{ success: boolean; error?: string }>;
+  /** The permissions card's closes while a permission is missing (src/lib/permissionsCardPolicy.mjs). */
+  permissionsCardGet: () => Promise<{ dismissals: number; lastDismissedAt: number | null }>;
+  permissionsCardRecord: (event: 'dismissed' | 'granted') => Promise<{ success: boolean; error?: string; record?: { dismissals: number; lastDismissedAt: number | null } }>;
   /** First-launch shortcut tour: taught shortcuts become practice presses. */
   onboardingSetShortcutTour: (active: boolean) => Promise<{ success: boolean }>;
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => () => void;
@@ -1411,6 +1447,8 @@ export interface ElectronAPI {
   // manager. Enable/disable is intentionally NOT exposed on the renderer —
   // users who don't want a skill delete it instead.
   skillsDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
+  /** "Use in every answer": the skill rides every live and typed answer without its /name. */
+  skillsSetAlwaysOn?: (id: string, alwaysOn: boolean) => Promise<{ success: boolean; error?: string }>;
   // Skill upload — step-3 wiring. `skillsUpload(payload, { autoInstall: true })`
   // is a one-shot validate+install; `skillsPreview(payload)` always sets
   // `autoInstall: false` so the renderer can show a confirm card first.
@@ -1621,6 +1659,7 @@ export interface SkillSummary {
   description: string;
   source: 'builtin' | 'userData';
   enabled: boolean;
+  alwaysOn?: boolean; // "Use in every answer" (Settings › Skills)
 }
 
 // ---------------------------------------------------------------------------

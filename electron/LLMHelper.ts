@@ -76,6 +76,7 @@ import curl2Json from "@bany/curl-to-json";
 import { CustomProvider, CurlProvider } from './services/CredentialsManager';
 import { TRIAL_SENTINEL_KEY } from './config/constants';
 import { emitNativelyPlanLimit, nativelyLimitErrorMessage } from './llm/nativelyPlanLimitEvents';
+import { interactiveSeedFor } from './llm/interactiveSeed';
 import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
 import { chatGptCompatibleModel, CodexCliConfig, CodexCliService, codexSignedOutMessage, DEFAULT_CODEX_CLI_CONFIG, getCodexAuthStatus } from './services/CodexCliService';
@@ -211,6 +212,16 @@ const CLAUDE_MODEL = "claude-sonnet-4-6"
 // judge budget for the ladder beneath. The variance here is real and the deeper
 // lever is prompt size: JUDGE_PROMPT_RULES alone is 7420 chars of the ~12.2k
 // total, so trimming the boilerplate would buy more than any timeout tuning.
+/**
+ * A non-streaming Natively answer that may be long (chatWithGemini: the
+ * follow-up email, the suggestion path). The server lets a JSON DeepSeek
+ * answer run up to 30 s (natively-api DEEPSEEK_JSON_CAP_MS) so a long one is
+ * not thrown away; generateWithNatively's 8 s default hung up first. Live,
+ * 10-12 Nov: 180 requests in 50 h cancelled at 7.8-7.9 s while DeepSeek was
+ * still writing (body read aborted), paid for and lost; a Natively-only user
+ * has no other provider for chatWithGemini to fall back to.
+ */
+export const NATIVELY_LONG_TEXT_TIMEOUT_MS = 30_000
 const FAST_MODEL_JUDGE_RUNG_TIMEOUT_MS = 1800
 /** OpenRouter's judge model: the small tier Natively's decision route also runs. */
 export const OPENROUTER_JUDGE_MODEL = 'openrouter/google/gemini-3.1-flash-lite'
@@ -483,7 +494,11 @@ const MIN_USEFUL_RUNG_MS = 3_000;
 // run-to-run variance and keeps the race winner's STYLE consistent with the
 // primary. Vision/multimodal temps are left untouched.
 const INTERACTIVE_TEMPERATURE = 0.2; // "very low" per report; avoids degenerate-0 loops some models show
-const INTERACTIVE_SEED = 7;          // fixed seed where the SDK supports it (Groq/DeepSeek; Gemini via config). NOT sent to OpenAI: reasoning models (gpt-5/o-series) reject non-default seed/temperature with a 400.
+// Fixed seed where the SDK supports it (Groq/DeepSeek; Gemini via config), as
+// interactiveSeedFor's BASE: an identical prompt sent again within minutes (a
+// retry after a hang or an empty answer) gets the next seed, so one prompt
+// that makes a model hang cannot hang on every retry. NOT sent to OpenAI:
+// reasoning models (gpt-5/o-series) reject non-default seed/temperature with a 400.
 
 // Canned-fallback phrases that mean the model gave up entirely, not phrases
 // that might legitimately appear inside a real answer. Matched only when the
@@ -3238,35 +3253,43 @@ export class LLMHelper {
     // unconditionally, so without this the whole turn throws rather than merely
     // losing its health tracking.
     if (!this.textHealth) this.textHealth = new Map();
-    const stream = runStreamingTextFallback(
-      [primary, ...fittedSpares],
-      this.textHealth,
-      {
-        ...DEFAULT_TEXT_FALLBACK_CONFIG,
-        // One attempt per rung: the hedge is already a second concurrent call,
-        // and maxAttempts 2 would make a single-provider turn four billed
-        // requests before the chain even ends.
-        maxAttempts: 1,
-        rethrowAfterCommit: true,
-        ttftTimeoutMs: budgetMs,
-        hedgeEnabled: hedging,
-        hedgeDelayDefaultMs: this.hedgeDelayForBudget(budgetMs),
-        hedgeDelayMinMs: Math.round(budgetMs * 0.4),
-        hedgeDelayMaxMs: Math.round(budgetMs * 0.9),
-      },
-      {},
-      opts.abortSignal,
-    );
-    let committed = false;
+    // Post-commit failures must REACH this method. The shared engine's default
+    // is to end the stream silently when the committed provider dies, which
+    // read as a complete answer: forensics 2026-11-13 (F-ACC-01) replayed
+    // "Raw spans are kept for 14" and "…When a node joins or" shown and stored
+    // as finished answers. With rethrowAfterCommit the engine still never
+    // switches providers mid-answer; it only tells us, and the turn ends with
+    // the truncation marker that _streamChatTracked turns into the outcome.
+    const commit = { emitted: false };
     try {
-      for await (const token of stream) {
-        committed = true;
-        yield token;
+      yield* this.trackCommit(runStreamingTextFallback(
+        [primary, ...fittedSpares],
+        this.textHealth,
+        {
+          ...DEFAULT_TEXT_FALLBACK_CONFIG,
+          // One attempt per rung: the hedge is already a second concurrent call,
+          // and maxAttempts 2 would make a single-provider turn four billed
+          // requests before the chain even ends.
+          maxAttempts: 1,
+          ttftTimeoutMs: budgetMs,
+          hedgeEnabled: hedging,
+          hedgeDelayDefaultMs: this.hedgeDelayForBudget(budgetMs),
+          hedgeDelayMinMs: Math.round(budgetMs * 0.4),
+          hedgeDelayMaxMs: Math.round(budgetMs * 0.9),
+          rethrowAfterCommit: true,
+        },
+        {},
+        opts.abortSignal,
+      ), commit);
+    } catch (e: any) {
+      if (commit.emitted) {
+        // A cancel is not a truncation: end quietly, as before.
+        if (opts.abortSignal?.aborted) return;
+        console.warn(`[LLMHelper] ${opts.name} failed AFTER first token — ending stream as incomplete: ${e?.message || e}`);
+        yield LLMHelper.TRUNCATION_SENTINEL;
+        return;
       }
-    } catch (error) {
-      if (opts.abortSignal?.aborted) return;
-      if (!committed) throw error;
-      yield LLMHelper.TRUNCATION_SENTINEL;
+      throw e;
     }
   }
 
@@ -4583,6 +4606,7 @@ ANSWER DIRECTLY:`;
 Detect the language of the user's most recent message and ALWAYS respond in that exact same language.
 If the user writes in Hindi, respond in Hindi. If in Spanish, respond in Spanish. If in English, respond in English.
 If the language is ambiguous, default to English.
+If an ACTIVE SKILL the user switched on asks for a specific response language, answer in that language instead.
 You may mix scripts naturally (e.g. code stays in English even when the explanation is in another language).
 [END LANGUAGE INSTRUCTION]`;
     }
@@ -5327,7 +5351,7 @@ let isMultimodal = !!(imagePaths?.length);
         const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
         if (nativelyKey) {
           try {
-            return await this.generateWithNatively(cloudUserContent, openaiSystemPrompt, cloudImagePaths);
+            return await this.generateWithNatively(cloudUserContent, openaiSystemPrompt, cloudImagePaths, { timeoutMs: NATIVELY_LONG_TEXT_TIMEOUT_MS });
           } catch (err: any) {
             console.warn('[LLMHelper] Natively API failed in chatWithGemini, falling back to Gemini:', err.message);
             // Fall through to smart dynamic fallback below
@@ -5443,7 +5467,7 @@ let isMultimodal = !!(imagePaths?.length);
         if (routedProvider.status !== 'available') continue;
         switch (routedProvider.provider) {
           case 'natively':
-            providers.push({ name: routedProvider.name, execute: () => this.generateWithNatively(cloudUserContent, openaiSystemPrompt, cloudIsMultimodal ? cloudImagePaths : undefined) });
+            providers.push({ name: routedProvider.name, execute: () => this.generateWithNatively(cloudUserContent, openaiSystemPrompt, cloudIsMultimodal ? cloudImagePaths : undefined, { timeoutMs: NATIVELY_LONG_TEXT_TIMEOUT_MS }) });
             break;
           case 'groq':
             if (cloudIsMultimodal) {
@@ -7605,11 +7629,11 @@ let isMultimodal = !!(imagePaths?.length);
    * DeepSeek ran at 0.2 / seed 7 / 8192 — same prompt, different generation.
    * `opts` is the fast-model seam's override (a small cap, temperature 0).
    */
-  private agentRouterOpenAIParams(model: string, opts?: AgentRouterCallOptions): Record<string, unknown> {
+  private agentRouterOpenAIParams(model: string, opts?: AgentRouterCallOptions, promptParts: Array<string | undefined> = []): Record<string, unknown> {
     if (isDeepseekModelId(model)) {
       return {
         temperature: opts?.temperature ?? INTERACTIVE_TEMPERATURE,
-        seed: INTERACTIVE_SEED,
+        seed: interactiveSeedFor('agentrouter', [model, ...promptParts]),
         max_tokens: opts?.maxTokens ?? this.getDeepseekMaxOutput(model),
         ...DEEPSEEK_NO_THINKING,
       };
@@ -7762,7 +7786,7 @@ let isMultimodal = !!(imagePaths?.length);
     let stream: any;
     try {
       stream = await client.chat.completions.create(
-        { model, messages, stream: true, ...this.agentRouterOpenAIParams(model, opts) } as any,
+        { model, messages, stream: true, ...this.agentRouterOpenAIParams(model, opts, [systemPrompt, userMessage, (imagePaths ?? []).join('|')]) } as any,
         { signal: abortSignal },
       );
     } catch (e: any) {
@@ -11993,7 +12017,10 @@ let isMultimodal = !!(imagePaths?.length);
             },
           }));
           try {
-            yield* this.trackCommit(runStreamingTextFallback(instrumented, this.textHealth, DEFAULT_TEXT_FALLBACK_CONFIG, {}, abortSignal), commit);
+            // rethrowAfterCommit: the catch below assumed the engine throws when
+            // the committed rung dies, but its default is a silent return — the
+            // partial answer then read as complete (forensics 2026-11-13, F-ACC-01).
+            yield* this.trackCommit(runStreamingTextFallback(instrumented, this.textHealth, { ...DEFAULT_TEXT_FALLBACK_CONFIG, rethrowAfterCommit: true }, {}, abortSignal), commit);
             return;
           } catch (raceErr: any) {
             // runStreamingTextFallback is commit-point-safe INTERNALLY (it never
@@ -12005,6 +12032,8 @@ let isMultimodal = !!(imagePaths?.length);
             // already read. This is the primary text path, so it is the site
             // where that would happen most often.
             if (commit.emitted) {
+              // A cancel is not a truncation: end quietly, as before.
+              if (abortSignal?.aborted) return;
               console.warn('[LLMHelper] Text TTFT race failed AFTER first token — ending stream rather than appending a second answer:', raceErr?.message);
               yield LLMHelper.TRUNCATION_SENTINEL;
               return;
@@ -12638,7 +12667,7 @@ let isMultimodal = !!(imagePaths?.length);
       messages,
       stream: true as const,
       temperature: INTERACTIVE_TEMPERATURE,
-      seed: INTERACTIVE_SEED, // Groq honors seed for near-deterministic output
+      seed: interactiveSeedFor('groq', [modelId, systemPrompt, userMessage]), // Groq honors seed for near-deterministic output
       max_tokens: 8192,
     };
     require('./llm/providerPayloadCapture').captureProviderPayload({
@@ -12851,7 +12880,7 @@ let isMultimodal = !!(imagePaths?.length);
         messages,
         stream: true,
         temperature: INTERACTIVE_TEMPERATURE,
-        seed: INTERACTIVE_SEED, // DeepSeek is OpenAI-compatible and honors seed
+        seed: interactiveSeedFor('deepseek', [model, systemPrompt, userMessage, (imagePaths ?? []).join('|')]), // DeepSeek is OpenAI-compatible and honors seed
         max_tokens: this.getDeepseekMaxOutput(model),
         ...DEEPSEEK_NO_THINKING, // else the first token waits out the default reasoning
       }, { signal: abortSignal });
@@ -13213,10 +13242,13 @@ let isMultimodal = !!(imagePaths?.length);
       : null;
     if (_gmeasure) console.log(`[Gemini.stream] +${Date.now() - _gt0}ms  cache resolve done (cacheHit=${Boolean(cacheName)}, sysPrompt=${systemInstruction?.length ?? 0}c, model=${model})`);
 
+    // Once per request (buildConfig runs again on a cache miss retry, which must
+    // not count as a repeat of the prompt).
+    const requestSeed = interactiveSeedFor('gemini', [model, systemInstruction, fullMessage, (imagePaths ?? []).join('|')]);
     const buildConfig = (useCacheName: string | null) => ({
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       temperature: INTERACTIVE_TEMPERATURE,
-      seed: INTERACTIVE_SEED, // Gemini v1alpha honors seed in generationConfig
+      seed: requestSeed, // Gemini v1alpha honors seed in generationConfig
       // Per-request thinking config (doc-correct 3.x thinkingLevel): 'minimal'
       // (off, fast) for budget≤0, 'low' for Pro (which can't disable), or an
       // explicit numeric budget when a caller passes a positive one. Threaded
@@ -13364,10 +13396,21 @@ let isMultimodal = !!(imagePaths?.length);
     // let the caller fall through to a DIFFERENT provider, instead of burning
     // latency on two more doomed calls. Transient errors (429 rate, 503 overload,
     // timeout, 5xx) still walk lite→flash→pro normally.
-    const cfg: VisionFallbackConfig = { ...DEFAULT_TEXT_FALLBACK_CONFIG, stopChainOnError: isPermanentKeyError };
+    // rethrowAfterCommit: the caller's `geminiYielded` branch turns a rung that
+    // dies mid-answer into the truncation marker; the engine's default silent
+    // return never reached it (forensics 2026-11-13, F-ACC-01).
+    const cfg: VisionFallbackConfig = { ...DEFAULT_TEXT_FALLBACK_CONFIG, stopChainOnError: isPermanentKeyError, rethrowAfterCommit: true };
 
     const ordered = orderTextByHealth(providers, this.textHealth, Date.now());
-    yield* runStreamingTextFallback(ordered, this.textHealth, cfg, {}, abortSignal);
+    try {
+      yield* runStreamingTextFallback(ordered, this.textHealth, cfg, {}, abortSignal);
+    } catch (e) {
+      // A caller cancel mid-answer ends quietly, as it did before the flag:
+      // the engine now rethrows the aborted read, and the caller's catch
+      // rethrows any error under an aborted signal.
+      if (abortSignal?.aborted) return;
+      throw e;
+    }
   }
 
   // --- OLLAMA STREAMING (uses /api/chat with proper messages array) ---
@@ -15914,20 +15957,23 @@ let isMultimodal = !!(imagePaths?.length);
     }
 
     // ATTEMPT 1: Natively API (if configured — first in chain)
-    // Inner fetch timeout: caller's timeoutMs, default 8s (AbortSignal.timeout in
-    // generateWithNatively). Outer safety net: timeoutMs + 5s (default 10s when the
-    // caller passes no opts, so uninvolved callers are unaffected) — the extra slack
-    // covers JSON parsing and any overhead after the fetch resolves, mirroring the
-    // headroom generateWithNatively's own OVERALL_DEADLINE_MS gives the body read.
+    // Inner fetch timeout: caller's timeoutMs, default NATIVELY_LONG_TEXT_TIMEOUT_MS.
+    // Outer safety net: timeoutMs + 5s — the extra slack covers JSON parsing and
+    // any overhead after the fetch resolves, mirroring the headroom
+    // generateWithNatively's own OVERALL_DEADLINE_MS gives the body read. The
+    // default was generateWithNatively's 8 s, which hung up on a long summary the
+    // server was still writing (it allows a JSON DeepSeek answer 30 s); only this
+    // rung's default changes, the other rungs keep theirs.
     if (this.hasNatively()) {
       try {
         console.log(`[LLMHelper] Attempting Natively API for summary...`);
+        const nativelySummaryTimeoutMs = opts?.timeoutMs || NATIVELY_LONG_TEXT_TIMEOUT_MS;
         const text = await this.withTimeout(
           this.generateWithNatively(`Context:\n${context}`, systemPrompt, undefined, {
             ...(opts?.purpose ? { purpose: opts.purpose } : {}),
-            ...(opts?.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
+            timeoutMs: nativelySummaryTimeoutMs,
           }),
-          opts?.timeoutMs ? opts.timeoutMs + 5000 : 10000,
+          nativelySummaryTimeoutMs + 5000,
           'Natively Summary'
         );
         if (text.trim().length > 0) {

@@ -314,6 +314,14 @@ export interface StoredCredentials {
     trialStartedAt?: string;   // ISO timestamp
     trialClaimed?: boolean;  // set true on first claim, never cleared — hides start card permanently
     /**
+     * Set once the trial is over by the server's word or by the trial clock
+     * (services/trialClock.ts). Pro then stays off for this trial even when the
+     * computer's clock is wound back below trialExpiresAt. Cleared by a new trial.
+     */
+    trialEndedAt?: string;
+    /** The furthest time the trial clock reached (epoch ms); it never runs backwards. */
+    trialClockMs?: number;
+    /**
      * Companion-extension pairing token. LOOPBACK-SCOPED — only the extension uses
      * it, over 127.0.0.1, and it never travels the wire off-box. Persisted
      * (encrypted via safeStorage) so the extension pairs ONCE and survives
@@ -2101,6 +2109,57 @@ export class CredentialsManager {
         return this.credentials.trialClaimed === true;
     }
 
+    public getTrialEndedAt(): string | undefined {
+        return this.credentials.trialEndedAt;
+    }
+
+    /**
+     * The trial is over (the server said so, or the trial clock passed its
+     * expiry). Memory always, disk only on a healthy store, as setTrialToken
+     * does. A no-op without a trial, or once already marked.
+     */
+    public markTrialEnded(): void {
+        if (!this.credentials.trialToken || this.credentials.trialEndedAt) return;
+        this.credentials.trialEndedAt = new Date().toISOString();
+        console.log('[CredentialsManager] Trial marked ended');
+        this.saveSoon('persist trial ended');
+    }
+
+    public getTrialClockMs(): number | undefined {
+        const v = this.credentials.trialClockMs;
+        return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+    }
+
+    /** Memory always, disk only on a healthy store. The caller spaces the writes. */
+    public setTrialClockMs(ms: number): void {
+        if (!this.credentials.trialToken || !Number.isFinite(ms)) return;
+        this.credentials.trialClockMs = ms;
+        this.saveSoon('persist trial clock');
+    }
+
+    private saveSoonPending = false;
+    /**
+     * Save on the next turn of the event loop, not inside the caller. The trial
+     * clock and the trial-ended mark are written from proAccess.isProOrTrialActive,
+     * which sits on the live-answer and MCP request paths; a full encrypt and
+     * write there (slow under antivirus on Windows) held those up. Several
+     * calls before it runs make one write of the latest state. Memory is
+     * already updated, so every read sees the new value at once.
+     */
+    private saveSoon(op: string): void {
+        if (this.saveSoonPending) return;
+        this.saveSoonPending = true;
+        setTimeout(() => {
+            this.saveSoonPending = false;
+            try {
+                if (this.refuseWriteWhileDegraded(op)) return;
+                this.saveCredentials();
+            } catch (e: any) {
+                console.warn(`[CredentialsManager] ${op} failed:`, e?.message || e);
+            }
+        }, 0);
+    }
+
     /**
      * Store a started trial.
      *
@@ -2129,6 +2188,11 @@ export class CredentialsManager {
         this.credentials.trialExpiresAt = expiresAt;
         this.credentials.trialStartedAt = startedAt;
         this.credentials.trialClaimed = true;
+        // A new trial starts its own clock at the server's start time.
+        delete this.credentials.trialEndedAt;
+        const startedMs = Date.parse(startedAt);
+        if (Number.isFinite(startedMs)) this.credentials.trialClockMs = startedMs;
+        else delete this.credentials.trialClockMs;
 
         if (this.refuseWriteWhileDegraded('persist trial token')) {
             console.warn('[CredentialsManager] Trial token held in MEMORY ONLY — the credential store is degraded, '
@@ -2152,6 +2216,8 @@ export class CredentialsManager {
         delete this.credentials.trialToken;
         delete this.credentials.trialExpiresAt;
         delete this.credentials.trialStartedAt;
+        delete this.credentials.trialEndedAt;
+        delete this.credentials.trialClockMs;
         // trialClaimed intentionally NOT cleared — keeps start card hidden after token wipe
         this.saveCredentials();
         console.log('[CredentialsManager] Trial token cleared');
@@ -2197,6 +2263,8 @@ export class CredentialsManager {
         delete c.trialExpiresAt;
         delete c.trialStartedAt;
         delete c.trialClaimed;
+        delete c.trialEndedAt;
+        delete c.trialClockMs;
         const persisted = this.saveCredentials();
         console.log(persisted
             ? '[CredentialsManager] Trial claim reset (trial campaign)'

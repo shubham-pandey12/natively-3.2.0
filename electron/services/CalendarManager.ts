@@ -11,6 +11,13 @@ import type { CalendarEvent, CalendarEventProvider, CalendarSourceId, CalendarSo
 import { CalendarSourceError } from './calendar/providers/types';
 import { calendarSourcesFor, createCalendarProviders } from './calendar/providers/registry';
 import { mergeCalendarEvents } from './calendar/providers/mergeEvents';
+import {
+    CALENDAR_BACKGROUND_REFRESH_MS,
+    backgroundRefreshDecision,
+    lastGoodCalendarItems,
+    reminderSourceLists,
+    type BackgroundRefreshReason,
+} from './calendar/calendarReminderPlan';
 
 export type { CalendarAttendee, CalendarEvent, CalendarSourceId, CalendarSourceStatus } from './calendar/providers/types';
 
@@ -272,6 +279,7 @@ export class CalendarManager extends EventEmitter {
 
     /** `platform` picks the other sources (calendar/providers/registry.ts); a test passes its own. */
     public init(platform: NodeJS.Platform = process.platform) {
+        this.platform = platform;
         this.loadTokens();
         this.initSources(platform);
     }
@@ -378,6 +386,7 @@ export class CalendarManager extends EventEmitter {
         this.accountEmail = null;
         this.accountName = null;
         this.forgetSource('google');
+        this.googleItemsByCalendar.clear();
         this.lastCalendars = null;
 
         if (fs.existsSync(TOKEN_PATH)) {
@@ -464,21 +473,18 @@ export class CalendarManager extends EventEmitter {
     public async refreshState(): Promise<boolean> {
         console.log('[CalendarManager] Refreshing state (Reality Reconciliation)...');
 
-        // 1. Reset Soft Heuristics
-        // Clear existing reminder timeouts to prevent double scheduling or stale alerts
-        this.reminderTimeouts.forEach(t => clearTimeout(t));
-        this.reminderTimeouts = [];
-
-        // 2. Calendar Re-sync & Temporal Re-evaluation
+        // 1. Calendar Re-sync & Temporal Re-evaluation. The fetch re-plans the
+        // reminders itself (scheduleReminders clears the old timers); they are
+        // not cleared before it, or one due during the fetch (up to 15 s) was lost.
         const landedBefore = this.fetchesLanded;
         if (this.anyConnected()) {
-            // Force fetch will also re-schedule reminders based on NEW time
             await this.getUpcomingEvents(true);
         } else {
             console.log('[CalendarManager] Calendar not connected, skipping fetch.');
+            this.clearReminderTimers();
         }
 
-        // 3. Emit update to UI
+        // 2. Emit update to UI
         // We emit 'updated' so the frontend knows to re-fetch via getUpcomingEvents
         // or we could push the data. usually ipcHandlers just call getUpcomingEvents.
         this.emit('events-updated');
@@ -591,12 +597,86 @@ export class CalendarManager extends EventEmitter {
     // Reminders
     // =========================================================================
 
-    private reminderTimeouts: NodeJS.Timeout[] = [];
-    // Injected by main.ts (Undetectable mode). Asked when a reminder fires.
+    /** Each occurrence's pending reminder (reminderKey), so a source's can go with it. */
+    private reminderTimeouts = new Map<string, NodeJS.Timeout>();
+    /** The platform init() was given: how a notification's close is read. */
+    private platform: NodeJS.Platform = process.platform;
+    // Injected by main.ts (Undetectable or a disguise; a Natively meeting
+    // running). Asked when a reminder fires.
     private notificationSuppressed: () => boolean = () => false;
+    private meetingActive: () => boolean = () => false;
 
-    public setNotificationSuppressor(isSuppressed: () => boolean): void {
+    public setNotificationSuppressor(isSuppressed: () => boolean, isMeetingActive?: () => boolean): void {
         this.notificationSuppressed = isSuppressed;
+        if (isMeetingActive) this.meetingActive = isMeetingActive;
+    }
+
+    /** The occurrences with a reminder pending (reminderKey), for the tests. */
+    public pendingReminderKeys(): string[] {
+        return [...this.reminderTimeouts.keys()];
+    }
+
+    private clearReminderTimers(): void {
+        this.reminderTimeouts.forEach((t) => clearTimeout(t));
+        this.reminderTimeouts.clear();
+    }
+
+    /**
+     * Reminders re-planned from each connected source's last good list, no
+     * fetch: after a source goes away, or a wake (timers do not count sleep).
+     */
+    private replanRemindersFromLastGood(nowMs: number): void {
+        if (!this.anyConnected()) {
+            this.clearReminderTimers();
+            this.reminderEvents = [];
+            return;
+        }
+        const connected = new Map<CalendarSourceId, CalendarEvent[] | null>(
+            [...this.lastBySource.keys()].filter((source) => this.sourceConnected(source)).map((source) => [source, null]),
+        );
+        this.scheduleReminders(mergeCalendarEvents(reminderSourceLists(connected, this.lastBySource, this.lastGoodAt, nowMs)));
+    }
+
+    // ── Main's own refresh (2026-11-09) ──
+    // Reminders no longer wait for the Launcher to ask for the list: main
+    // re-fetches every few minutes, and at once on wake and unlock.
+    private backgroundTimer: NodeJS.Timeout | null = null;
+    private egressBlocked: () => boolean = () => false;
+    private fetchesInFlight = 0;
+
+    /** Starts main's periodic refresh. `isEgressBlocked`: Undetectable is on (no calendar traffic then). */
+    public startBackgroundRefresh(isEgressBlocked: () => boolean, intervalMs: number = CALENDAR_BACKGROUND_REFRESH_MS): void {
+        this.egressBlocked = isEgressBlocked;
+        if (this.backgroundTimer) clearInterval(this.backgroundTimer);
+        this.backgroundTimer = setInterval(() => { void this.refreshInBackground('interval'); }, intervalMs);
+        this.backgroundTimer.unref?.();
+    }
+
+    /** One background refresh: on the timer, or after a wake or an unlock. */
+    public async refreshInBackground(reason: BackgroundRefreshReason): Promise<void> {
+        const now = Date.now();
+        // Asleep, the reminders' timers stood still: re-plan from what is
+        // known first (no network, so also while Undetectable or offline).
+        if (reason !== 'interval') this.replanRemindersFromLastGood(now);
+        let blocked = true;
+        try { blocked = this.egressBlocked() === true; } catch { blocked = true; }
+        const decision = backgroundRefreshDecision({
+            reason,
+            nowMs: now,
+            connected: this.anyConnected(),
+            egressBlocked: blocked,
+            inFlight: this.fetchesInFlight > 0,
+            lastLandedAt: this.lastEventsAt,
+        });
+        if (decision !== 'fetch') {
+            if (reason !== 'interval') console.log(`[CalendarManager] Background refresh (${reason}) skipped: ${decision}`);
+            return;
+        }
+        try {
+            await this.getUpcomingEvents(true);
+        } catch (error: any) {
+            console.warn(`[CalendarManager] Background refresh (${reason}) failed:`, error?.message ?? error);
+        }
     }
 
     /** Occurrences (event id + start) already reminded: a re-plan never repeats one. */
@@ -605,7 +685,7 @@ export class CalendarManager extends EventEmitter {
     /** The events the reminders were last scheduled for, so a new lead time re-plans them. */
     private reminderEvents: CalendarEvent[] = [];
 
-    /** Settings › Calendar's reminder lead time (1, 2 or 5 minutes; unset = 2). */
+    /** Settings › Calendar's reminder lead time (1, 2 or 5 minutes, 0 = Off; unset = 2). */
     private reminderLeadMinutes(): number {
         try {
             const { reminderMinutes } = require('./meetingDetection/meetingOffer');
@@ -623,8 +703,7 @@ export class CalendarManager extends EventEmitter {
 
     private scheduleReminders(events: CalendarEvent[]) {
         // Clear existing
-        this.reminderTimeouts.forEach(t => clearTimeout(t));
-        this.reminderTimeouts = [];
+        this.clearReminderTimers();
         this.reminderEvents = events;
 
         const now = Date.now();
@@ -633,28 +712,77 @@ export class CalendarManager extends EventEmitter {
         pruneReminded(this.remindedOccurrences, now);
 
         // The chosen lead before each start (2 minutes unless changed), within
-        // the next 24h, skipping occurrences already reminded.
+        // the next 24h, skipping occurrences already reminded, declined ones,
+        // and all of them when reminders are Off.
         for (const { event, delayMs } of planReminders(events, now, leadMinutes, this.remindedOccurrences) as Array<{ event: CalendarEvent; delayMs: number }>) {
-            const timeout = setTimeout(() => {
-                this.remindedOccurrences.add(reminderKey(event));
-                this.showNotification(event, leadMinutes);
-            }, delayMs);
-            this.reminderTimeouts.push(timeout);
+            this.armReminder(event, delayMs);
         }
     }
 
-    /** The last reminder shown, kept referenced so its buttons still work. */
-    private reminderNotification: unknown = null;
+    private armReminder(event: CalendarEvent, delayMs: number): void {
+        const { reminderKey } = require('./meetingDetection/meetingOffer');
+        const key: string = reminderKey(event);
+        const earlier = this.reminderTimeouts.get(key);
+        if (earlier) clearTimeout(earlier);
+        this.reminderTimeouts.set(key, setTimeout(() => this.fireReminder(event), delayMs));
+    }
+
+    /**
+     * A reminder's timer fired. Checked against the wall clock (a Mac asleep
+     * does not advance timers): a late one is skipped rather than saying
+     * "starts in N minutes" over a meeting about to start or started.
+     */
+    private fireReminder(event: CalendarEvent): void {
+        const { reminderFire, reminderKey } = require('./meetingDetection/meetingOffer');
+        this.reminderTimeouts.delete(reminderKey(event));
+        const leadMinutes = this.reminderLeadMinutes();
+        const fire = reminderFire(new Date(event.startTime).getTime(), Date.now(), leadMinutes);
+        if (fire.kind === 'early') {
+            this.armReminder(event, fire.delayMs);
+            return;
+        }
+        this.remindedOccurrences.add(reminderKey(event));
+        if (fire.kind === 'skip') {
+            console.log(`[CalendarManager] Reminder skipped: ${fire.reason === 'off' ? 'reminders are off' : fire.reason === 'started' ? 'the meeting has started' : 'it came late (the computer was asleep)'}`);
+            return;
+        }
+        this.showNotification(event, leadMinutes);
+    }
+
+    /** Reminders on screen, by occurrence (reminderKey): each kept referenced so its buttons work. */
+    private reminderNotifications = new Map<string, { notification: any; closeTimer: NodeJS.Timeout | null }>();
+
+    /** Closes this app's reminder for an occurrence, if it is still up. */
+    private closeReminderNotification(key: string): void {
+        const entry = this.reminderNotifications.get(key);
+        if (!entry) return;
+        this.reminderNotifications.delete(key);
+        if (entry.closeTimer) clearTimeout(entry.closeTimer);
+        try { entry.notification.close(); } catch { /* already gone */ }
+    }
+
+    private forgetReminderNotification(key: string, notification: unknown): void {
+        const entry = this.reminderNotifications.get(key);
+        if (!entry || entry.notification !== notification) return;
+        this.reminderNotifications.delete(key);
+        if (entry.closeTimer) clearTimeout(entry.closeTimer);
+    }
 
     private showNotification(event: CalendarEvent, leadMinutes: number = 2) {
         // A system notification is its own OS window (and it chimes), outside
         // the content protection Undetectable mode relies on, so it would show
-        // in a screen share. The launcher's calendar card still counts down.
+        // in a screen share, and it says "Natively" under a disguise. The
+        // launcher's calendar card still counts down.
         if (this.notificationSuppressed()) {
-            console.log('[CalendarManager] Reminder skipped: Undetectable is on');
+            console.log('[CalendarManager] Reminder skipped: Undetectable or a disguise is on');
             return;
         }
         const { Notification } = require('electron');
+        if (typeof Notification?.isSupported === 'function' && !Notification.isSupported()) {
+            console.log('[CalendarManager] Reminder skipped: this system has no notifications');
+            return;
+        }
+        const { reminderContent, reminderKey, reminderStartAllowed, closeMeansNotNow, REMINDER_CLOSE_AFTER_START_MS } = require('./meetingDetection/meetingOffer');
         // A recurring meeting recalls its last instance (recurringMeetings.ts,
         // stored notes only, no model call); otherwise the usual question.
         let lastTime: string | null = null;
@@ -664,33 +792,53 @@ export class CalendarManager extends EventEmitter {
         } catch { /* a recap never blocks the reminder */ }
         let lead = leadMinutes === 1 ? '1 minute' : `${leadMinutes} minutes`;
         try { lead = require('./meetingDetection/meetingOffer').reminderLeadText(leadMinutes); } catch { /* the plain wording above */ }
+        let meetingActive = false;
+        try { meetingActive = this.meetingActive() === true; } catch { meetingActive = false; }
+        // During a Natively meeting there is no Start (it would do nothing):
+        // only Running late, and nothing at all for a meeting with no one else.
+        // "Running late" drafts a note for the people on it in the launcher,
+        // for the user to send (services/assist; never sent here).
+        const content = reminderContent({
+            title: event.title,
+            lead,
+            lastTime,
+            hasAttendees: Array.isArray(event.attendees) && event.attendees.length > 0,
+            meetingActive,
+        }) as { title: string; body: string; actions: Array<{ kind: 'start' | 'dismiss' | 'late'; text: string }> } | null;
+        if (!content) {
+            console.log('[CalendarManager] Reminder skipped: a Natively meeting is running');
+            return;
+        }
+        const key: string = reminderKey(event);
+        this.closeReminderNotification(key);
         const notif = new Notification({
-            title: 'Meeting starting soon',
-            body: lastTime ? `"${event.title}" starts in ${lead}.\n${lastTime}` : `"${event.title}" starts in ${lead}. Start Natively?`,
-            actions: [
-                { type: 'button', text: 'Start Meeting' },
-                { type: 'button', text: 'Dismiss' },
-                // A "running late" note for the people on it, drafted in the
-                // launcher for the user to send (services/assist; never sent here).
-                ...(Array.isArray(event.attendees) && event.attendees.length > 0 ? [{ type: 'button' as const, text: 'Running late' }] : []),
-            ],
+            title: content.title,
+            body: content.body,
+            actions: content.actions.map((a) => ({ type: 'button' as const, text: a.text })),
             // Not silent: the OS's default sound. (`sound` names a macOS sound
             // file; `true` was never a valid value.)
         });
-        // Electron drops a Notification nothing references; keep the latest.
-        this.reminderNotification = notif;
+        // Electron drops a Notification nothing references: each one is kept
+        // until it is closed, by the user or here once its meeting has been on
+        // a few minutes (so the Notification Center does not keep yesterday's).
+        const startMs = new Date(event.startTime).getTime();
+        const closeTimer = setTimeout(() => this.closeReminderNotification(key), Math.max(0, startMs + REMINDER_CLOSE_AFTER_START_MS - Date.now()));
+        this.reminderNotifications.set(key, { notification: notif, closeTimer });
 
         // Electron 43: the index is `details.actionIndex`; the positional one is deprecated.
         notif.on('action', (details: any, legacyIndex?: number) => {
             const index = typeof details?.actionIndex === 'number' ? details.actionIndex : legacyIndex;
-            if (index === 2) {
+            const kind = typeof index === 'number' ? content.actions[index]?.kind : undefined;
+            if (kind === 'late') {
                 this.emit('reminder-draft-requested', event);
                 return;
             }
-            if (index === 0) {
-                // Start Meeting
-                // We need to tell the main process to open window and start meeting
-                // Ideally we emit an event that AppState listens to
+            if (kind === 'start') {
+                // A reminder still listed after its meeting ended starts nothing.
+                if (!reminderStartAllowed(event, Date.now())) {
+                    console.log('[CalendarManager] Reminder Start ignored: the meeting is over');
+                    return;
+                }
                 this.emit('start-meeting-requested', event);
             }
         });
@@ -698,6 +846,18 @@ export class CalendarManager extends EventEmitter {
         notif.on('click', () => {
             // Just open window
             this.emit('open-requested');
+        });
+
+        // The user removed it (on Windows, not a toast that timed out into the
+        // Action Center: that one is still there and closed by the timer).
+        notif.on('close', (details: any) => {
+            if (closeMeansNotNow(this.platform, details?.reason)) this.forgetReminderNotification(key, notif);
+        });
+        // macOS refuses an app that isn't allowed to notify (unsigned build,
+        // or switched off in System Settings › Notifications).
+        notif.on('failed', (_e: unknown, error: string) => {
+            console.warn(`[CalendarManager] the OS did not show the reminder: ${error}`);
+            this.forgetReminderNotification(key, notif);
         });
 
         notif.show();
@@ -715,19 +875,47 @@ export class CalendarManager extends EventEmitter {
     private lastEvents: CalendarEvent[] = [];
     private lastEventsAt = 0;
     private lastBySource = new Map<CalendarSourceId, CalendarEvent[]>();
+    /** When each source's lastBySource list was fetched (a failed source's reminders use it for a day). */
+    private lastGoodAt = new Map<CalendarSourceId, number>();
     /** Fetches a source answered; refreshState compares it (two can share a Date.now()). */
     private fetchesLanded = 0;
+    /** When the last applied upcoming fetch started. */
+    private lastAppliedFetchAt = 0;
+    /**
+     * Each synced Google calendar's last good items (upcoming fetches only):
+     * one calendar failing among several keeps its last list instead of
+     * counting as an empty one (lastGoodCalendarItems).
+     */
+    private googleItemsByCalendar = new Map<string, { items: any[]; at: number }>();
 
     public async getUpcomingEvents(force: boolean = false): Promise<CalendarEvent[]> {
-        if (!this.anyConnected()) return [];
+        if (!this.anyConnected()) {
+            // Nothing connected: no reminder may stay armed.
+            if (this.reminderTimeouts.size > 0) this.replanRemindersFromLastGood(Date.now());
+            return [];
+        }
 
         const now = Date.now();
-        const results = await this.fetchFromSources(now, now + 7 * 24 * 60 * 60 * 1000);
+        this.fetchesInFlight++;
+        let results: Map<CalendarSourceId, CalendarEvent[] | null>;
+        try {
+            results = await this.fetchFromSources(now, now + 7 * 24 * 60 * 60 * 1000, true);
+        } finally {
+            this.fetchesInFlight--;
+        }
+        // The Launcher's fetch and main's can overlap: one started before the
+        // last one applied is older news, and is not applied over it.
+        if (now < this.lastAppliedFetchAt) {
+            console.log('[CalendarManager] A calendar fetch finished after a newer one: not applied');
+            return this.lastEvents.filter((ev) => new Date(ev.endTime).getTime() > Date.now());
+        }
+        this.lastAppliedFetchAt = now;
         let landed = false;
         for (const [source, events] of results) {
             this.lastRefresh.set(source, { at: now, ok: !!events });
             if (events) {
                 this.lastBySource.set(source, events);
+                this.lastGoodAt.set(source, now);
                 landed = true;
             }
         }
@@ -736,10 +924,10 @@ export class CalendarManager extends EventEmitter {
             this.lastEventsAt = now;
             this.fetchesLanded++;
         }
-        // Reminders for what the sources that answered returned.
-        this.scheduleReminders(mergeCalendarEvents(
-            [...results].filter(([, events]) => !!events).map(([source, events]) => ({ source, events: events! })),
-        ));
+        // Reminders for what the sources that answered returned, and for one
+        // that failed (offline, a timeout) from its last good list, up to a day
+        // old: a failed fetch no longer cancels its pending reminders.
+        this.scheduleReminders(mergeCalendarEvents(reminderSourceLists(results, this.lastBySource, this.lastGoodAt, now)));
         // A failed fetch (offline, Google timing out) is not an empty week: the
         // Launcher and Settings keep showing the last list, less what has ended.
         const anyFailed = [...results.values()].some((events) => !events);
@@ -765,19 +953,19 @@ export class CalendarManager extends EventEmitter {
     }
 
     /** Google's events overlapping [fromMs, toMs]; null when the fetch failed outright. */
-    private async fetchGoogle(fromMs: number, toMs: number): Promise<CalendarEvent[] | null> {
+    private async fetchGoogle(fromMs: number, toMs: number, upcoming: boolean = false): Promise<CalendarEvent[] | null> {
         if (!this.isConnected || !this.accessToken) return [];
         // Check expiry
         if (this.expiryDate && Date.now() >= this.expiryDate - 60000) {
             await this.refreshAccessToken();
         }
-        return this.fetchEventsInternal(fromMs, toMs);
+        return this.fetchEventsInternal(fromMs, toMs, upcoming);
     }
 
-    /** Each connected source's events (null for one that failed), in parallel. */
-    private async fetchFromSources(fromMs: number, toMs: number): Promise<Map<CalendarSourceId, CalendarEvent[] | null>> {
+    /** Each connected source's events (null for one that failed), in parallel. `upcoming`: the upcoming list (getUpcomingEvents). */
+    private async fetchFromSources(fromMs: number, toMs: number, upcoming: boolean = false): Promise<Map<CalendarSourceId, CalendarEvent[] | null>> {
         const jobs: Array<Promise<[CalendarSourceId, CalendarEvent[] | null]>> = [];
-        if (this.isConnected) jobs.push(this.fetchGoogle(fromMs, toMs).then((events) => ['google', events]));
+        if (this.isConnected) jobs.push(this.fetchGoogle(fromMs, toMs, upcoming).then((events) => ['google', events]));
         for (const provider of this.providers) {
             if (!provider.isConnected()) continue;
             jobs.push(provider.fetchEvents(fromMs, toMs)
@@ -796,7 +984,7 @@ export class CalendarManager extends EventEmitter {
     }
 
     /** Events overlapping [fromMs, toMs]; null when the fetch failed outright. */
-    private async fetchEventsInternal(fromMs: number, toMs: number): Promise<CalendarEvent[] | null> {
+    private async fetchEventsInternal(fromMs: number, toMs: number, upcoming: boolean = false): Promise<CalendarEvent[] | null> {
         if (!this.accessToken) return [];
 
         try {
@@ -824,10 +1012,15 @@ export class CalendarManager extends EventEmitter {
                 if (!response?.ok) {
                     if (response) console.error(`[CalendarManager] Google Calendar fetch failed: HTTP ${response.status} ${await googleErrorReason(response)}`);
                     failed++;
-                    return [];
+                    // One calendar failing is not that calendar emptied: its
+                    // last good items (up to a day old) stand in, so its
+                    // reminders and the list keep them.
+                    return upcoming ? lastGoodCalendarItems(this.googleItemsByCalendar.get(calendarId), Date.now(), fromMs) : [];
                 }
                 const data = await response.json() as any;
-                return (data.items || []) as any[];
+                const items = (data.items || []) as any[];
+                if (upcoming) this.googleItemsByCalendar.set(calendarId, { items, at: Date.now() });
+                return items;
             }));
             // Nothing came back at all (offline, say): that is a failed fetch,
             // not an empty week, so callers keep what they had.
@@ -1061,12 +1254,15 @@ export class CalendarManager extends EventEmitter {
     /** A source went away: its events leave the lists at once. */
     private forgetSource(source: CalendarSourceId): void {
         this.lastBySource.delete(source);
+        this.lastGoodAt.delete(source);
         this.lastRefresh.delete(source);
         this.lastEvents = this.mergedLastEvents();
         if (!this.anyConnected() || this.lastBySource.size === 0) {
             this.lastEvents = [];
             this.lastEventsAt = 0;
         }
+        // Its reminders go with it (all of them when nothing is left).
+        this.replanRemindersFromLastGood(Date.now());
     }
 
     /** Announces whether ANY calendar is connected (the Launcher and Settings follow it). */

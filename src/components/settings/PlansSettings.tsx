@@ -6,6 +6,8 @@ import { HowItWorksRefund, PartnerPrograms } from './HowItWorksRefund';
 import { getLicenseSnapshot, setLicenseSnapshot } from '../../lib/licenseCache';
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from 'framer-motion';
 import { BEAT, EASE_ENTER, EASE_LEAVE, INK, SETTLE } from '../../lib/plansMotion';
+import { plansVisit } from '../../lib/funnel/plansVisit.mjs';
+import { usePlansSeen } from '../../lib/funnel/usePlansSeen';
 
 // ─── Thin container ─────────────────────────────────────────
 // Natively API (managed AI/STT/search usage) and Natively Pro (a device
@@ -169,6 +171,9 @@ export const PlansSettings: React.FC<PlansSettingsProps> = ({
     }, [readLicense]);
 
     const isPremium = !!licenseDetails?.isPremium;
+    // Funnel (plans_visit): the end of the page (partner programs, refund
+    // policy) was on screen, i.e. the visit scrolled all the way down.
+    const bottomSeenRef = usePlansSeen(() => plansVisit.seen('bottom'));
     // Natively API is the primary/default-visible path (it's the managed
     // subscription this product sells). The app-only license is always the
     // secondary option UNLESS it's the user's actual active entitlement —
@@ -231,7 +236,7 @@ export const PlansSettings: React.FC<PlansSettingsProps> = ({
             This tab already animates; it does not need the generic cascade. */}
         <div className="space-y-6 animated fadeIn">
             <header>
-                <h2 className="text-lg font-bold text-text-primary mb-1">{t('Plans & Billing')}</h2>
+                <h2 className="settings-heading text-text-primary mb-1">{t('Plans & Billing')}</h2>
                 <p className="text-xs text-text-secondary">
                     {t('Natively API covers AI, knowledge, voice, and research. Pro, Max, and Ultra include the Pro app license at no extra cost. You can also buy Pro on its own if you prefer to use your own AI keys.')}
                 </p>
@@ -318,6 +323,7 @@ export const PlansSettings: React.FC<PlansSettingsProps> = ({
                 layout="position"
                 transition={{ layout: reduceMotion ? { duration: 0 } : { duration: SETTLE.remove, ease: EASE_ENTER } }}
                 className="space-y-6"
+                ref={bottomSeenRef}
             >
                 {/* The affiliate and creator programs ride in the same region:
                     they shift with it and never appear on their own. */}

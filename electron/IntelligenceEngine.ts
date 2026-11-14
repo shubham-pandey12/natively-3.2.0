@@ -229,6 +229,12 @@ interface SpeculativeAnswer {
      */
     answerType?: AnswerType;
     answerStyle?: string;
+    /**
+     * Why the stream stopped early, when it did: the same value the live path
+     * sends with its final, so an adopted answer that was cut off says so
+     * under the text instead of reading as finished (forensics 2026-11-13, F-ACC-01).
+     */
+    stopReason?: string;
 }
 
 export class IntelligenceEngine extends EventEmitter {
@@ -409,11 +415,17 @@ export class IntelligenceEngine extends EventEmitter {
         // message comes first); without one, the V3 user message stands in.
         const h: any = this.llmHelper;
         const canReplay = Boolean(h.replayAnswerCall?.(opts.turnKey, ''));
+        // The answer's own system prompt + user message first, the pass's
+        // instructions after them, so the provider's prompt cache reuses what
+        // the answer sent a second ago (cv.claimVerifierInlineMessage).
+        const shared = canReplay && cv.claimVerifierSharesAnswerPrefix();
         const run = await cv.runClaimVerifier({
             answer: opts.answer,
             material: opts.material,
             budgetMs: h.replayedAnswerHasImages?.(opts.turnKey) === true ? cv.CLAIM_VERIFIER_IMAGE_BUDGET_MS : cv.CLAIM_VERIFIER_BUDGET_MS,
-            startStream: (body, signal) => this.llmHelper.streamChat(...(canReplay
+            startStream: (body, signal) => this.llmHelper.streamChat(...(shared
+                ? this.repairCallArgs(opts.turnKey, cv.claimVerifierInlineMessage(system, body), signal, undefined, [], cv.CLAIM_VERIFIER_MATERIAL_MAX_CHARS)
+                : canReplay
                 ? this.repairCallArgs(opts.turnKey, cv.claimVerifierDraftMessage(body), signal, system, [], cv.CLAIM_VERIFIER_MATERIAL_MAX_CHARS)
                 : this.repairCallArgs(undefined, cv.claimVerifierStandaloneMessage(opts.material, body), signal, system))) as AsyncGenerator<string>,
             parentSignal: opts.signal,
@@ -421,7 +433,7 @@ export class IntelligenceEngine extends EventEmitter {
             clean: cleanAnswerArtifacts,
             observe: secondaryStreamObserver('verification'),
         });
-        console.log(`[ClaimVerifier] hotkey kind=${kind} ${run.changed ? 'edited' : 'kept'} (${run.outcome}) ${run.ms}ms`);
+        console.log(`[ClaimVerifier] hotkey kind=${kind} ${run.changed ? 'edited' : 'kept'} (${run.outcome}) ${run.ms}ms${shared ? ' shared_prefix' : ''}`);
         opts.trace.mark('repair_used', { reason: 'claim_verifier', outcome: run.outcome, changed: run.changed, ms: run.ms });
         return run.text;
     }
@@ -616,6 +628,20 @@ export class IntelligenceEngine extends EventEmitter {
      * hold the meeting's raw questions and answers in memory for no reader, and
      * (before every meeting had its own key) hand them to the next meeting.
      */
+    /**
+     * The meeting stopped: nothing it started may keep painting into the next
+     * one, or finish and be recorded there. Stop never cancelled the live
+     * answer (forensics 2026-11-13, F-CTX-07: the old meeting's answer kept
+     * streaming for 5.5 s after a new meeting began); what cut it short was a
+     * new-meeting interim speculation aborting it, the defect fixed alongside
+     * this. Same cancellation as reset(), plus the mode event reset() skips.
+     */
+    public cancelAnswersForMeetingEnd(): void {
+        const wasBusy = this.activeMode !== 'idle';
+        this.reset();
+        if (wasBusy) this.emit('mode_changed', 'idle');
+    }
+
     public endMeetingConversation(): void {
         const key = this.conversationSessionId();
         this.meetingConversationId = null;
@@ -1468,9 +1494,14 @@ export class IntelligenceEngine extends EventEmitter {
         this.releaseExpiredSpeculation();
         // The engine's OWN speculation (from an interviewer interim) is not a
         // busy engine: the candidate below is the same speech, finished.
+        // Unless the dispatch ADOPTED it: then it is the answer on screen, and
+        // starting a prefetch here would abort it before the judge has ruled on
+        // the new speech. Forensics 2026-11-13 (P3-s18, s17c): an aside or a
+        // second question spoken mid-answer wiped the visible answer.
         const ownSpeculationStreaming = this.activeMode === 'what_to_say'
             && this.speculativeGenerationId !== null
-            && this.speculativeGenerationId === this.currentGenerationId;
+            && this.speculativeGenerationId === this.currentGenerationId
+            && this.speculativeAdoptedGenerationId !== this.currentGenerationId;
         if (this.activeMode !== 'idle' && this.activeMode !== 'assist' && !ownSpeculationStreaming) return;
         if (Date.now() - this.lastTriggerTime < this.triggerCooldown) return;
         // A debounced interim speculation that has not fired yet would start on
@@ -1559,12 +1590,13 @@ export class IntelligenceEngine extends EventEmitter {
         generationId: number, question: string | undefined, confidence: number, text: string,
         writeDecision: SessionWriteDecision | undefined,
         streamed?: SpeculativeStreamed,
-        plan?: { answerType?: AnswerType; answerStyle?: string },
+        plan?: { answerType?: AnswerType; answerStyle?: string; stopReason?: string },
     ): string {
         const finished: SpeculativeAnswer = {
             generationId, question: question || 'inferred', confidence, text, writeDecision,
             ...(plan?.answerType ? { answerType: plan.answerType } : {}),
             ...(plan?.answerStyle ? { answerStyle: plan.answerStyle } : {}),
+            ...(plan?.stopReason ? { stopReason: plan.stopReason } : {}),
         };
         const adoptedInFlight = this.speculativeAdoptedGenerationId === generationId && this.currentGenerationId === generationId;
         if (this.speculativeAdoptedGenerationId === generationId) this.speculativeAdoptedGenerationId = null;
@@ -1707,7 +1739,7 @@ export class IntelligenceEngine extends EventEmitter {
         const outcome: WhatToSayOutcome = finished.writeDecision?.policy === 'do_not_store'
             ? { status: 'failed', retryable: true, reason: finished.writeDecision.reason }
             : { status: 'success', retryable: false };
-        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, undefined, undefined, outcome);
+        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, undefined, finished.stopReason, outcome);
     }
 
     /** Auto Answer V3: identity of the speculative cache, for keyed/embedding reuse. */
@@ -4283,8 +4315,9 @@ export class IntelligenceEngine extends EventEmitter {
                     const _ctx = this.v3ModeRetrievalContext(_screenPortText);
                     if (!_ctx) return undefined;
                     const _v3 = await buildV3Prompt({
-                        // "About you" (Cue Cards, Pro): every surface, every mode.
-                        userBio: (require('./services/proAccess') as typeof import('./services/proAccess')).userBioForAnswers(),
+                        // What the user told the app about themselves: About you (Cue Cards, Pro),
+                        // the facts in the mode's Real-time prompt, "Use in every answer" skills.
+                        ...(require('./services/answerPersonalContext') as typeof import('./services/answerPersonalContext')).personalContextForAnswers({ answerType: answerPlan.answerType, modeId: snapshotModeInfo?.id, explicitSkillId: options?.activeSkill?.id ?? null }),
                         surface: 'what-to-answer',
                         // The user's own spoken line was chosen above: its "we" is theirs.
                         questionSpeaker: questionSpokenByUser && !question?.trim() ? 'user' : 'other',
@@ -5301,12 +5334,22 @@ export class IntelligenceEngine extends EventEmitter {
                 console.warn(`[IntelligenceEngine] wta answer stalled mid-stream (${fullAnswer.length} chars) — shown as cut off, not stored`);
             }
 
-            if (streamAborted) {
+            // A replaced run hands everything to its successor. Used for an
+            // abort mid-stream and, below, for a run replaced AFTER its stream
+            // ended (claim verifier, guards): its successor owns the mode, the
+            // speculative slot and the visible row from here on.
+            //
+            // `discardOpenRow` only at the abort itself. The renderer clears
+            // the CURRENT what-to-answer row on a discard (by intent, no
+            // generation id: NativelyInterface onIntelligenceSuggestedAnswerDiscard),
+            // so a discard sent once the successor may be painting would wipe
+            // the successor's answer — the very failure this guards against.
+            const yieldToSupersedingRun = (discardOpenRow: boolean): null => {
                 recordWtaCancellation();
-                // Aborted mid-stream — don't update session or emit final event.
+                // Don't update session or emit final event.
                 // If we opened a streaming row, discard it so the superseding
                 // generation's row is the only one (no orphaned partial answer).
-                if (openedStreamRow) this.emit('suggested_answer_discard', 'superseded', generationId);
+                if (discardOpenRow && openedStreamRow) this.emit('suggested_answer_discard', 'superseded', generationId);
                 if (isSpeculative && this.ownsSpeculativeSlot(generationId)) {
                     this.speculativeText = null;
                     this.speculativeTextExpiry = Infinity;
@@ -5324,7 +5367,9 @@ export class IntelligenceEngine extends EventEmitter {
                     this.setMode('idle');
                 }
                 return null;
-            }
+            };
+
+            if (streamAborted) return yieldToSupersedingRun(true);
 
             if (!fullAnswer || fullAnswer.trim().length < 5) {
                 // ALWAYS ANSWER (2026-09-07): an empty or aborted stream is retried
@@ -6745,6 +6790,9 @@ export class IntelligenceEngine extends EventEmitter {
                     this.setMode('idle');
                     return honestFallback;
                 }
+                // A run replaced while it was being checked leaves the
+                // speculative slot, the cooldown and the mode to its successor.
+                if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 // Declined as a non-answer. Discard any open streaming row so it
                 // isn't left as an orphaned partial on the auto path (the manual
                 // path also resolves null via the renderer, but the discard is
@@ -7081,6 +7129,14 @@ export class IntelligenceEngine extends EventEmitter {
             }
 
             if (isSpeculative) {
+                // Replaced AFTER its stream ended (during the claim verifier or a
+                // guard above): the newer run owns the engine now. Completing
+                // here set the mode to idle under the newer run's live answer —
+                // after which any interviewer interim could start a speculation
+                // that aborted it — and parked this stale text as the finished
+                // draft a later dispatch would reveal (forensics 2026-11-13,
+                // F-CTX-01 / F-CTX-02).
+                if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 // If the dispatch adopted this stream mid-flight it has been
                 // painting live; the reveal must then finish THAT row (flush the
                 // held prefix, replace by the same id) instead of opening a new one.
@@ -7096,6 +7152,9 @@ export class IntelligenceEngine extends EventEmitter {
                 return this.completeSpeculativeRun(generationId, question, confidence, fullAnswer, wtaWriteDecision, streamed, {
                     answerType: answerPlan.answerType,
                     answerStyle: answerPlan.answerStyle as string,
+                    // Same rule as the live final below: not when the cut-off
+                    // text was replaced, because the user reads the replacement.
+                    stopReason: wtaTruncation.truncated && !streamedAnswerReplaced ? wtaTruncation.reason : undefined,
                 });
             }
 
@@ -7401,7 +7460,10 @@ export class IntelligenceEngine extends EventEmitter {
 
             trace.mark('ui_render_completed', { chars: fullAnswer.length });
             trace.finish({ answerType: answerPlan.answerType, chars: fullAnswer.length });
-            this.setMode('idle');
+            // Only the live run may end the engine's busy state: a run replaced
+            // during its post-stream passes must not mark the engine idle while
+            // its successor is streaming (same rule as the abort path above).
+            if (!isWtaSuperseded()) this.setMode('idle');
             return fullAnswer;
 
         } catch (error) {
@@ -7795,8 +7857,9 @@ export class IntelligenceEngine extends EventEmitter {
             if (!ctx) return null;
             const { buildV3Prompt } = require('./context-intelligence/orchestration/engine-bridge');
             const _v3 = await buildV3Prompt({
-                // "About you" (Cue Cards, Pro): every surface, every mode.
-                userBio: (require('./services/proAccess') as typeof import('./services/proAccess')).userBioForAnswers(),
+                // What the user told the app about themselves: About you (Cue Cards, Pro),
+                // the facts in the mode's Real-time prompt, "Use in every answer" skills.
+                ...(require('./services/answerPersonalContext') as typeof import('./services/answerPersonalContext')).personalContextForAnswers({ modeId: ctx.modeUniqueId }),
                 surface: pinned?.surface ?? 'assist',
                 // Low-confidence query rewrite: the user's fast model, 1.5 s hard cap.
                 // Not for Brainstorm, which only wants the evidence: a model
@@ -8610,8 +8673,9 @@ export class IntelligenceEngine extends EventEmitter {
                     const _ctx = this.v3ModeRetrievalContext();
                     if (!_ctx) return null;
                     return await buildV3Prompt({
-                        // "About you" (Cue Cards, Pro): every surface, every mode.
-                        userBio: (require('./services/proAccess') as typeof import('./services/proAccess')).userBioForAnswers(),
+                        // What the user told the app about themselves: About you (Cue Cards, Pro),
+                        // the facts in the mode's Real-time prompt, "Use in every answer" skills.
+                        ...(require('./services/answerPersonalContext') as typeof import('./services/answerPersonalContext')).personalContextForAnswers({ answerType: answerPlan.answerType, modeId: _ctx.modeUniqueId }),
                         surface: 'manual-chat',
                         diagramTurn: (() => {
                             try {
@@ -8676,9 +8740,21 @@ export class IntelligenceEngine extends EventEmitter {
                 const _docEnforced = (activeModeInfo as any)?.strictDocumentGroundedActive === true
                     || (activeModeInfo?.documentGroundedCustomModeActive === true
                         && Boolean((activeModeInfo as any)?.hasReferenceFiles));
-                const context = _docEnforced || isCodingAnswerType(answerPlan.answerType)
+                const transcriptContext = _docEnforced || isCodingAnswerType(answerPlan.answerType)
                     ? undefined
                     : this.session.getFormattedContext(120);
+                // About you, the mode's Real-time prompt facts and "Use in every
+                // answer" skills, which the V3 branch above carries (2026-11-09).
+                // Scoped by this turn's answer type, so a coding turn gets the
+                // skills but none of the user's facts (About you included, see
+                // personalContextBlockForAnswers). AFTER the transcript: an
+                // over-budget context is trimmed from its head, and the block
+                // must outlive an old transcript line.
+                const personalBlock = (require('./services/answerPersonalContext') as typeof import('./services/answerPersonalContext')).personalContextBlockForAnswers({
+                    answerType: answerPlan.answerType,
+                    modeId: (activeModeInfo as any)?.id ?? null,
+                });
+                const context = [transcriptContext, personalBlock].filter(Boolean).join('\n\n') || undefined;
                 answer = await this.answerLLM.generate(question, context, answerPlan, undefined, manualDiagramTurn);
             }
             const _manualSignals = require('./llm/codingPromptSignals').resolveCodingPromptSignals({

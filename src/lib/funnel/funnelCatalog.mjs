@@ -30,6 +30,9 @@ export const ENTITLEMENTS = Object.freeze([
 /** Everything the app can send a buyer to. */
 export const CHECKOUT_PRODUCTS = Object.freeze([
   'api_standard', 'api_pro', 'api_max', 'api_ultra', 'pro_lifetime', 'pro_yearly',
+  // 2026-11-06: yearly API plans and the two one-time Pro packs.
+  'api_standard_yearly', 'api_pro_yearly', 'api_max_yearly', 'api_ultra_yearly',
+  'pack_light', 'pack_heavy',
 ])
 
 /** Every place in the app that can open a checkout page or offer a trial. */
@@ -195,6 +198,33 @@ export const FUNNEL_CATALOG = Object.freeze({
     minutes: INT,
     first: BOOL,
   },
+  // How the previous run of the app ended, reported once by the next launch
+  // (added 2026-11-14; the app's src/lib/funnel/runEnd.mjs). The first measure
+  // of crashes: meeting_cut_off cannot tell a crash from a force quit.
+  //   quit         the user quit, or closed the last window
+  //   restart      the app restarted itself ("Restart now")
+  //   update       quit to install an update
+  //   os_shutdown  the computer shut down, restarted or logged off
+  //   signal       the OS or another program asked it to stop
+  //   crash        the app's main process hit a fatal error
+  //   vanished     it ended without a word: a native crash, a force quit,
+  //                a power cut, or the OS killing it
+  // The counts are processes that died and that the app survived (windows
+  // reloaded, helpers respawned), before any quit began. Absent from runs of
+  // builds before 2026-11-14, as is `updated`; a run of such a build that left
+  // no marker (found through the debug log) reports only how, and whether the
+  // computer restarted.
+  app_run_ended: {
+    how: ['quit', 'restart', 'update', 'os_shutdown', 'signal', 'crash', 'vanished'],
+    minutes: INT,           // up to its last sign of life
+    in_meeting: BOOL,       // a meeting was still running: the app never saw it end (a quit ends it first)
+    renderer_crashes: INT,
+    gpu_crashes: INT,
+    helper_crashes: INT,
+    out_of_memory: BOOL,    // one of those ran out of memory
+    updated: BOOL,          // that run was another version than the one reporting it
+    computer_restarted: BOOL, // the computer has started since its last sign of life
+  },
   // An answer was asked for and did not come. At most once per cause per local
   // day per install: which kinds of failure someone met that day, not how often.
   answer_failed: {
@@ -280,6 +310,35 @@ export const FUNNEL_CATALOG = Object.freeze({
   },
   paywall_hit: {
     feature: ['modes', 'profile_intelligence'],
+  },
+  // Settings › Plans & Billing came into view (added 2026-11-06), once each
+  // time it does. With checkout_opened from api_settings / pro_settings this
+  // counts who looked at the plans and left without opening a checkout.
+  // sidebar: picked from the Settings sidebar. link: Settings opened straight
+  // on it (a card, the trial meter, a banner, Help, a meeting page).
+  plans_viewed: {
+    from: ['sidebar', 'link'],
+  },
+  // One visit to Settings › Plans & Billing, summed up when it leaves view
+  // (added 2026-11-09; the app's src/lib/funnel/plansVisit.mjs). What people
+  // do on the pricing page, to judge its design: how far down they got,
+  // whether they moved the plan rail, tried Yearly, how long they stayed and
+  // how many checkouts they opened from it. The event's entitlement says
+  // what they already had.
+  plans_visit: {
+    from: ['sidebar', 'link'],
+    seconds: INT,            // while the window was visible and in front, at most 1800
+    saw_api_plans: BOOL,     // the API plan cards were on screen
+    saw_packs: BOOL,         // the Pro packs
+    saw_pro: BOOL,           // the Natively Pro licence cards
+    saw_bottom: BOOL,        // the end of the page (partner programs, refunds)
+    plan_cards: INT,         // how many of the four plan cards were on screen
+    saw_max_ultra: BOOL,     // Max or Ultra was on screen
+    rail_scrolled: BOOL,     // moved the plan rail themselves
+    cycle: ['monthly', 'yearly'], // the Monthly / Yearly switch when they left
+    cycle_switched: BOOL,
+    checkouts: INT,          // checkout links opened from the tab
+    refund_opened: BOOL,     // opened "How it works & refund policy"
   },
 
   // ── The notepad ──────────────────────────────────────────────────────────

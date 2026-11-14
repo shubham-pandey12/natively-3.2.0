@@ -2,6 +2,7 @@ import React, { useLayoutEffect, useRef, useState } from 'react';
 import { animate, motion, useMotionValue, useReducedMotion } from 'framer-motion';
 import { CalendarClock, CalendarX, CirclePlay, Clock3, FileText, Gauge, HandCoins, Heart, KeyRound, Mail, Megaphone, Power, Receipt, Ticket } from 'lucide-react';
 import { AccordionSection } from '../ui/AccordionSection';
+import { plansVisit } from '../../lib/funnel/plansVisit.mjs';
 import { LiquidGlassButton } from '../../ui-components/LiquidGlassButton';
 import { AFFILIATE_PROGRAM_URL, CREATORS_PROGRAM_URL } from '../../lib/partnerLinks';
 import './HowItWorksRefund.css';
@@ -216,7 +217,7 @@ const IconRow: React.FC<{
       <div className="flex items-center gap-4 min-w-0 flex-1">
         <div className={`${TILE} text-text-primary`}>{icon}</div>
         <div className="min-w-0">
-          <h4 className="text-sm font-bold text-text-primary">{title}</h4>
+          <h4 className="settings-title text-text-primary">{title}</h4>
           <div className="text-xs text-text-secondary mt-0.5">{description}</div>
         </div>
       </div>
@@ -238,7 +239,7 @@ const StepRow: React.FC<{ n: number; title: string; body: string }> = ({ n, titl
         {n}
       </span>
       <div className="min-w-0">
-        <h4 className="text-sm font-bold text-text-primary">{title}</h4>
+        <h4 className="settings-title text-text-primary">{title}</h4>
         <div className="text-xs text-text-secondary mt-0.5">{body}</div>
       </div>
     </div>
@@ -468,6 +469,7 @@ export const HowItWorksRefund: React.FC = () => {
     <AccordionSection
       title="How it works & refund policy"
       description="Setup steps, refund rules and how to cancel."
+      onOpenChange={(open) => { if (open) plansVisit.refundOpened(); }}
       className="natively-key-card bg-bg-item-surface rounded-2xl border-border-subtle !mb-0"
       divider={false}
       hoverFill={false}

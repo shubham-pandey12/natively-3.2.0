@@ -368,7 +368,7 @@ export const capPickerLabel = (label: string, max: number = PICKER_LABEL_MAX_CHA
 // Audio's section heading.
 export const SettingsSectionHeading: React.FC<{ title: string; subtitle?: React.ReactNode }> = ({ title, subtitle }) => (
   <>
-    <h3 className="text-lg font-bold text-text-primary mb-1">{title}</h3>
+    <h3 className="settings-heading text-text-primary mb-1">{title}</h3>
     {subtitle ? <p className="text-xs text-text-secondary mb-2">{subtitle}</p> : null}
   </>
 );
@@ -401,7 +401,7 @@ export const SettingsRow: React.FC<{
         </div>
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h4 className={`text-sm font-bold text-text-primary ${truncateTitle ? 'truncate max-w-full' : ''}`}>{title}</h4>
+            <h4 className={`settings-title text-text-primary ${truncateTitle ? 'truncate max-w-full' : ''}`}>{title}</h4>
             {badge}
           </div>
           {description && (
@@ -513,10 +513,11 @@ export const SettingsNotice: React.FC<{
     <div
       key={alert ? shakeKey : undefined}
       role={alert ? 'alert' : undefined}
-      className={`${className} flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed ${tone}${shake ? ' t-notice-shake' : ''}`}
+      className={`${className} flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 text-xs leading-relaxed ${tone}${shake ? ' t-notice-shake' : ''}`}
     >
-      <span className="mt-px shrink-0">{icon}</span>
-      <span className="min-w-0">{children}</span>
+      {/* One line tall, so the icon centres on the first line however many the text wraps to. */}
+      <span className="flex h-[1.625em] shrink-0 items-center">{icon}</span>
+      <span className="min-w-0 flex-1 [text-wrap:pretty]">{children}</span>
     </div>
   );
 };

@@ -174,7 +174,7 @@ test('late legacy provider, RAG, phone and intelligence events cannot mix into a
     'window.electronAPI.onGeminiStreamToken((token, meta) => {',
     'window.electronAPI.onGeminiStreamDone((data) => {',
     'window.electronAPI.onGeminiStreamError((error, meta?',
-    'window.electronAPI.onPhoneMirrorIncomingChat(({ message }) => {',
+    'window.electronAPI.onPhoneMirrorIncomingChat(({ message, streamId }) => {',
     'window.electronAPI.onRAGStreamChunk((data: { chunk: string }) => {',
     'window.electronAPI.onRAGStreamComplete(() => {',
     'window.electronAPI.onRAGStreamError((data: { error: string }) => {',
@@ -189,7 +189,7 @@ test('late legacy provider, RAG, phone and intelligence events cannot mix into a
     assert.ok(start >= 0, `missing callback: ${marker}`);
     assert.match(
       interfaceSource.slice(start, start + 700),
-      /if \(activeDirectAssistRef\.current\) return/,
+      /if \(activeDirectAssistRef\.current(?:\) return| \|\|)/,
       `legacy callback is not Direct-isolated: ${marker}`,
     );
   }

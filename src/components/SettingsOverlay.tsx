@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useLayoutEffect, useCallback } from 'react';
 import { LANG_NATIVE_NAMES, useLanguage, useT } from '../i18n';
+import { AutoAnswerModelCard } from '../premium';
 import { CalendarSettings } from './settings/CalendarSettings';
 import { ConnectionsSettings } from './settings/ConnectionsSettings';
 import packageJson from '../../package.json';
@@ -47,6 +48,7 @@ import { setGenieAnimationEnabled, useGenieAnimationEnabled } from '../lib/genie
 import { setKeepOverlaySizeEnabled, useKeepOverlaySizeEnabled } from '../lib/overlaySizeSetting';
 import { KeyRecorder } from './ui/KeyRecorder';
 import { useConfirmDialog } from './ui/ConfirmDialog';
+import { AutoAnswerAccessDialog } from './AutoAnswerAccessDialog';
 import { ModelSelectorLabel } from './ui/ModelSelectorLabel';
 import { MODEL_SELECTOR_WIDTH } from './ui/modelSelectorLabelText';
 import { Disclosure, DisclosureChevron } from './ui/AccordionSection';
@@ -59,6 +61,8 @@ import { LiquidGlassBadge } from '../ui-components/LiquidGlassBadge';
 import { LiquidGlassButton } from '../ui-components/LiquidGlassButton';
 import icon from './icon.png';
 import { WELCOME_BUTTON_TOKENS } from './onboarding/welcomeButtonTokens';
+import { isPlansTab, plansViewTransition } from '../lib/funnel/plansViewed.mjs';
+import { plansVisit } from '../lib/funnel/plansVisit.mjs';
 
 // Process Disguise tiles: Liquid Glass fed this card's own tokens. `.lg-action`
 // otherwise reads the legacy action blue, and `.lg-clear`'s defaults are the
@@ -672,6 +676,53 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
            click of a deep link did nothing at all. */
     }, [isOpen, initialTab, initialTabSeq]);
 
+    /* Funnel: Plans & Billing came into view (plans_viewed), once each time.
+       Set by the sidebar's Plans & Billing item, so the view says whether the
+       person went there themselves or was sent there by a card or banner. */
+    const plansFromSidebarRef = useRef(false);
+    const plansInViewRef = useRef(false);
+    const plansWasOpenRef = useRef(false);
+    useEffect(() => {
+        /* On the render Settings opens, activeTab can still hold the previous
+           session's tab: the initialTab sync above switches it one render
+           later. Judge that render by the tab Settings is opening on, so a
+           stale Plans tab is not counted as a view. */
+        const opening = isOpen && !plansWasOpenRef.current;
+        plansWasOpenRef.current = isOpen;
+        const tab = opening && initialTab ? initialTab : activeTab;
+        const view = plansViewTransition(plansInViewRef.current, { open: isOpen, tab, fromSidebar: plansFromSidebarRef.current });
+        const wasInView = plansInViewRef.current;
+        plansInViewRef.current = isOpen && isPlansTab(tab);
+        plansFromSidebarRef.current = false;
+        if (view) {
+            window.electronAPI?.funnelTrack?.('plans_viewed', view)?.catch?.(() => {});
+            // plans_visit: what this visit does on the page, sent when it leaves.
+            plansVisit.start(view.from, { visible: document.visibilityState !== 'hidden' && document.hasFocus() });
+        } else if (wasInView && !plansInViewRef.current) {
+            plansVisit.end();
+        }
+    }, [isOpen, activeTab, initialTab]);
+
+    /* plans_visit: time counts only while the window is visible and in front,
+       and a visit still open when the window goes away (quit, reload) is sent
+       then. Focus as well as visibility: the launcher can run with background
+       throttling off, and then a hidden window still reports "visible". */
+    useEffect(() => {
+        const onVisibility = () => plansVisit.visibility(document.visibilityState !== 'hidden' && document.hasFocus());
+        const onGone = () => { plansVisit.end(); };
+        document.addEventListener('visibilitychange', onVisibility);
+        window.addEventListener('focus', onVisibility);
+        window.addEventListener('blur', onVisibility);
+        window.addEventListener('pagehide', onGone);
+        return () => {
+            document.removeEventListener('visibilitychange', onVisibility);
+            window.removeEventListener('focus', onVisibility);
+            window.removeEventListener('blur', onVisibility);
+            window.removeEventListener('pagehide', onGone);
+            plansVisit.end();
+        };
+    }, []);
+
     const { shortcuts, updateShortcut, resetShortcuts, conflicts, globalShortcutsEnabled, setGlobalShortcutsEnabled } = useShortcuts();
     // Small badge shown next to a shortcut row when globalShortcut.register()
     // failed for it (another app/OS already owns that key combo). The
@@ -735,6 +786,24 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [exportResult, setExportResult] = useState<string | null>(null);
     const [ambientChatEnabled, setAmbientChatEnabled] = useState(false);
     const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
+    // Auto Answer is Pro, or free with transcript sharing (autoAnswerAccess.ts).
+    const [autoAnswerAccess, setAutoAnswerAccess] = useState<{ basis: 'pro' | 'sharing' | 'none'; uploads: boolean } | null>(null);
+    // False in builds without the premium submodule: the Auto Answer rows are hidden.
+    const [autoAnswerAvailable, setAutoAnswerAvailable] = useState(true);
+    const [autoAnswerDialog, setAutoAnswerDialog] = useState<null | 'free' | 'pro'>(null);
+    const [autoAnswerDialogBusy, setAutoAnswerDialogBusy] = useState(false);
+    const refreshAutoAnswerAccess = useCallback(() => {
+        window.electronAPI?.getAutoAnswerAccess?.().then((a) => { if (a) { setAutoAnswerAvailable(a.available !== false); setAutoAnswerAccess({ basis: a.basis, uploads: a.uploads }); setAutoAnswerEnabled(a.enabled); } }).catch(() => { });
+    }, []);
+    /** The sharing switch: off → ask (consent dialog); on → stop, warning a free user it stops Auto Answer too. */
+    const toggleAutoAnswerSharing = async () => {
+        if (!autoAnswerAccess) return;
+        if (!autoAnswerAccess.uploads) { setAutoAnswerDialog('pro'); return; }
+        if (autoAnswerAccess.basis === 'sharing' && autoAnswerEnabled
+            && !(await askConfirm({ title: t('Stop sharing?'), description: t('Auto Answer turns off too, unless you get Pro.'), confirmLabel: t('Stop sharing') }))) return;
+        await window.electronAPI?.setAutoAnswerTrainingConsent?.(false);
+        refreshAutoAnswerAccess();
+    };
     const [meetingRetention, setMeetingRetention] = useState<'forever' | '7d' | '30d' | 'never'>('forever');
     const [codeVerification, setCodeVerification] = useState(false);
     const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
@@ -763,6 +832,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
             window.electronAPI?.getUsageStatistics?.().then((v) => setUsageStatistics(v !== false)).catch(() => { });
             window.electronAPI?.getAmbientChatEnabled?.().then(setAmbientChatEnabled).catch(() => { });
             window.electronAPI?.getAutoAnswerEnabled?.().then(setAutoAnswerEnabled).catch(() => { });
+            refreshAutoAnswerAccess();
             window.electronAPI?.getCodeVerification?.().then((v) => setCodeVerification(v === true)).catch(() => { });
             window.electronAPI?.getMeetingRetention?.().then(setMeetingRetention).catch(() => { });
         }
@@ -2284,6 +2354,27 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     return (
         <>
             {confirmDialog}
+            <AutoAnswerAccessDialog
+                open={autoAnswerDialog !== null}
+                proOptIn={autoAnswerDialog === 'pro'}
+                busy={autoAnswerDialogBusy}
+                onOpenChange={(o) => { if (!o) setAutoAnswerDialog(null); }}
+                onUpgrade={() => { setAutoAnswerDialog(null); setActiveTab('plans'); }}
+                onShare={async () => {
+                    setAutoAnswerDialogBusy(true);
+                    try {
+                        const c = await window.electronAPI?.setAutoAnswerTrainingConsent?.(true);
+                        if (c?.success && autoAnswerDialog === 'free') {
+                            const r = await window.electronAPI?.setAutoAnswerEnabled?.(true);
+                            if (r && !r.success) console.error('[Settings] Auto Answer not turned on:', r.error);
+                        }
+                    } finally {
+                        setAutoAnswerDialogBusy(false);
+                        setAutoAnswerDialog(null);
+                        refreshAutoAnswerAccess();
+                    }
+                }}
+            />
             {/* Settings pours out of, and back into, the bottom of the window
                 like every other popup (GenieModal). */}
             <GenieModal
@@ -2344,7 +2435,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         <Monitor size={16} /> {t('General')}
                                     </button>
                                     <button
-                                        onClick={() => setActiveTab('plans')}
+                                        onClick={() => { plansFromSidebarRef.current = true; setActiveTab('plans'); }}
                                         className={navItemClass(activeTab === 'plans' || activeTab === 'natively-api' || activeTab === 'natively-pro')}
                                     >
                                         {(activeTab === 'plans' || activeTab === 'natively-api' || activeTab === 'natively-pro') && navActivePill}
@@ -2501,7 +2592,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                 <div className="space-y-6 animated fadeIn">
                                     <div className="space-y-3.5">
                                         <div data-settings-stagger>
-                                            <h3 className="text-lg font-bold text-text-primary mb-1">{t('General settings')}</h3>
+                                            <h3 className="settings-heading text-text-primary mb-1">{t('General settings')}</h3>
                                             <p className="text-xs text-text-secondary mb-2">{t('Customize how Natively works for you')}</p>
 
                                             <div className="rounded-xl border bg-transparent border-transparent divide-y divide-border-subtle/20">
@@ -2534,7 +2625,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             </Presence>
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">
+                                                            <h3 className="settings-title text-text-primary">
                                                                 <Presence kind="text" id={isUndetectable ? 'undetectable' : 'detectable'}>
                                                                     {isUndetectable ? t('Undetectable') : t('Detectable')}
                                                                 </Presence>
@@ -2569,7 +2660,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <Power size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">{t('Open Natively when you log in')}</h3>
+                                                            <h3 className="settings-title text-text-primary">{t('Open Natively when you log in')}</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t('Natively will open automatically when you log in to your computer')}</p>
                                                         </div>
                                                     </div>
@@ -2596,7 +2687,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <Keyboard size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Protect Natively shortcuts')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Protect Natively shortcuts')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">{t('Keeps shortcuts from typing into the app below. Turn off if antivirus flags it.')}</p>
                                                             </div>
                                                         </div>
@@ -2623,7 +2714,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     </div>
                                                 )}
 
-                                                {/* Auto Answer */}
+                                                {/* Auto Answer (premium/electron/autoAnswer; absent from builds without premium) */}
+                                                {autoAnswerAvailable && (
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
@@ -2631,7 +2723,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                         </div>
                                                         <div>
                                                             <div className="flex items-center gap-2">
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Auto Answer')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Auto Answer')}</h3>
                                                                 {/* The same Liquid Glass tag as Direct Assist's, so the two
                                                                     Beta features read as one decision rather than two. It
                                                                     replaces a bespoke solid-yellow span whose --badge-beta-*
@@ -2639,18 +2731,35 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <LiquidGlassBadge variant="sky">{t('Beta')}</LiquidGlassBadge>
                                                             </div>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t('Answers appear as soon as the interviewer finishes a question')}</p>
+                                                            {autoAnswerAccess?.basis === 'none' && (
+                                                                <p className="text-xs text-text-tertiary mt-0.5">{t('Pro, or free when you share meeting transcripts to improve it')}</p>
+                                                            )}
+                                                            {/* Panel closed but still sharing: stopping must stay one click away. */}
+                                                            {!autoAnswerEnabled && autoAnswerAccess?.uploads && (
+                                                                <p className="text-xs text-text-tertiary mt-0.5">
+                                                                    {t('Sharing transcripts is on.')}{' '}
+                                                                    <button type="button" onClick={toggleAutoAnswerSharing} className="underline hover:text-text-primary transition-colors cursor-pointer">{t('Stop sharing')}</button>
+                                                                </p>
+                                                            )}
                                                         </div>
                                                     </div>
                                                     <SettingsToggle
-                                                        checked={autoAnswerEnabled}
+                                                        checked={autoAnswerEnabled && autoAnswerAccess?.basis !== 'none'}
                                                         label={t('Auto Answer')}
                                                         onChange={async () => {
                                                             const previous = autoAnswerEnabled;
                                                             const newState = !previous;
+                                                            // Free and not sharing: ask first (share or upgrade), never flip.
+                                                            if (newState && autoAnswerAccess?.basis === 'none') { setAutoAnswerDialog('free'); return; }
                                                             setAutoAnswerEnabled(newState); // Optimistic update
                                                             try {
                                                                 const result = await window.electronAPI?.setAutoAnswerEnabled?.(newState);
-                                                                if (result && !result.success) {
+                                                                if (result && !result.success && result.error === 'auto_answer_access_required') {
+                                                                    // Access changed since Settings opened (trial ended, licence lapsed).
+                                                                    setAutoAnswerEnabled(previous);
+                                                                    refreshAutoAnswerAccess();
+                                                                    setAutoAnswerDialog('free');
+                                                                } else if (result && !result.success) {
                                                                     // Rollback on explicit failure (settings store degraded)
                                                                     setAutoAnswerEnabled(previous);
                                                                     console.error('[Settings] Failed to set Auto Answer:', result.error);
@@ -2663,6 +2772,58 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                         className={autoAnswerEnabled ? 'bg-accent-primary border border-transparent' : 'bg-bg-toggle-switch border border-border-muted'}
                                                     />
                                                 </div>
+                                                )}
+
+                                                {/* Under the Auto Answer switch, only while it is on (Evin 2026-11-13):
+                                                    the on-device model and transcript sharing, as the same plain
+                                                    sub-rows Settings uses everywhere (indented to the title). */}
+                                                <AnimatePresence initial={false}>
+                                                    {autoAnswerAvailable && autoAnswerEnabled && autoAnswerAccess && autoAnswerAccess.basis !== 'none' && (
+                                                        <motion.div
+                                                            key="auto-answer-subrows"
+                                                            initial={reduceMotion ? { opacity: 0 } : { opacity: 0, height: 0 }}
+                                                            animate={reduceMotion ? { opacity: 1 } : { opacity: 1, height: 'auto' }}
+                                                            exit={reduceMotion
+                                                                ? { opacity: 0, transition: { duration: 0.15 } }
+                                                                : { opacity: 0, height: 0, transition: { duration: 0.15, ease: [0.22, 1, 0.36, 1] } }}
+                                                            transition={{ duration: reduceMotion ? 0.15 : 0.25, ease: [0.22, 1, 0.36, 1] }}
+                                                            className="overflow-hidden"
+                                                        >
+                                                            <AutoAnswerModelCard />
+
+                                                            {/* Transcript sharing (autoAnswerAccess.ts): opt-in with Pro,
+                                                                what keeps Auto Answer free for a free user. */}
+                                                            <div className="flex items-center justify-between px-4 py-3">
+                                                                <div className="pl-14">
+                                                                    <h3 className="settings-title text-text-primary">{t('Share transcripts to improve Auto Answer')}</h3>
+                                                                    <p className="text-xs text-text-secondary mt-0.5">
+                                                                        {autoAnswerAccess.basis === 'sharing'
+                                                                            ? t('Auto Answer is free while this is on. Turning it off stops Auto Answer unless you have Pro.')
+                                                                            : t('Optional with Pro. Only meetings where Auto Answer runs.')}
+                                                                    </p>
+                                                                    {autoAnswerAccess.uploads && (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="text-xs text-text-tertiary hover:text-text-primary underline mt-1"
+                                                                            onClick={async () => {
+                                                                                if (!(await askConfirm({ title: t('Delete everything you shared?'), description: t('Stops sharing and deletes the transcripts already sent from this computer.'), confirmLabel: t('Delete') }))) return;
+                                                                                const r = await window.electronAPI?.deleteAutoAnswerSharedData?.();
+                                                                                refreshAutoAnswerAccess();
+                                                                                if (r && !r.success) console.error('[Settings] Shared data not deleted:', r.error);
+                                                                            }}
+                                                                        >{t('Delete shared transcripts')}</button>
+                                                                    )}
+                                                                </div>
+                                                                <SettingsToggle
+                                                                    checked={autoAnswerAccess.uploads}
+                                                                    label={t('Share transcripts to improve Auto Answer')}
+                                                                    onChange={toggleAutoAnswerSharing}
+                                                                    className={autoAnswerAccess.uploads ? 'bg-accent-primary border border-transparent' : 'bg-bg-toggle-switch border border-border-muted'}
+                                                                />
+                                                            </div>
+                                                        </motion.div>
+                                                    )}
+                                                </AnimatePresence>
 
                                                 {/* Ambient AI Chat */}
                                                 <div className="flex items-center justify-between px-4 py-3">
@@ -2671,7 +2832,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <MicOff size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">{t('Ambient AI Chat')}</h3>
+                                                            <h3 className="settings-title text-text-primary">{t('Ambient AI Chat')}</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t('Meetings start without capturing mic or system audio')}</p>
                                                         </div>
                                                     </div>
@@ -2694,7 +2855,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <Palette size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">{t('Theme')}</h3>
+                                                            <h3 className="settings-title text-text-primary">{t('Theme')}</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t('Customize how Natively looks on your device')}</p>
                                                         </div>
                                                     </div>
@@ -2756,7 +2917,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <Globe size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">{t('Language')}</h3>
+                                                            <h3 className="settings-title text-text-primary">{t('Language')}</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t('Interface language for Natively')}</p>
                                                         </div>
                                                     </div>
@@ -2822,7 +2983,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <BadgeCheck size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">{t('Version')}</h3>
+                                                            <h3 className="settings-title text-text-primary">{t('Version')}</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">
                                                                 {t('You are currently using Natively version')} {packageJson.version}
                                                             </p>
@@ -2899,7 +3060,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <Shield size={20} />
                                                             </div>
                                                             <div className="flex-1">
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Do not save meetings')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Do not save meetings')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5 leading-normal">{t('Nothing is saved after the meeting ends')}</p>
                                                             </div>
                                                         </div>
@@ -2922,7 +3083,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <PointerOff size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Mouse Passthrough')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Mouse Passthrough')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">
                                                                     {t('Pass all mouse clicks through to the app beneath.')}
                                                                 </p>
@@ -2947,7 +3108,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <PanelBottomClose size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Genie animation')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Genie animation')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">
                                                                     {t('Popups pour in and out. Turn off for a simple fade and lower memory use.')}
                                                                 </p>
@@ -2968,7 +3129,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <Maximize2 size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Keep overlay size')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Keep overlay size')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">
                                                                     {t('The overlay stays as wide and tall as it got or you set it. Turn off to shrink it back after each answer.')}
                                                                 </p>
@@ -2989,7 +3150,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <Code2 size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Verify coding answers')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Verify coding answers')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">{t('Run generated code against test cases and self-correct')}</p>
                                                             </div>
                                                         </div>
@@ -3015,7 +3176,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <MessageSquare size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Interviewer Transcript')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Interviewer Transcript')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">{t('Show real-time transcription of the interviewer')}</p>
                                                             </div>
                                                         </div>
@@ -3039,7 +3200,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <Activity size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Usage statistics')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Usage statistics')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">
                                                                     {t('Sends which features are used and how often. Never what you say, see or type.')}
                                                                 </p>
@@ -3070,7 +3231,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <Terminal size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Debug logging')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Debug logging')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">
                                                                     {t('Logs audio, STT, routing, questions and answers. API keys removed.')}
                                                                 </p>
@@ -3137,7 +3298,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <Download size={20} />
                                                             </div>
                                                             <div>
-                                                                <h3 className="text-sm font-bold text-text-primary">{t('Export debug logs')}</h3>
+                                                                <h3 className="settings-title text-text-primary">{t('Export debug logs')}</h3>
                                                                 <p className="text-xs text-text-secondary mt-0.5">
                                                                     <Presence kind="text" id={exportResult ?? 'idle'}>
                                                                         {exportResult ?? t('Collect this session\u2019s logs into one folder to share')}
@@ -3184,7 +3345,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle`}>
                                         <div className="flex flex-col gap-1 mb-3">
                                             <div className="flex items-center gap-2">
-                                                <h3 className="text-lg font-bold text-text-primary">{t('Process Disguise')}</h3>
+                                                <h3 className="settings-heading text-text-primary">{t('Process Disguise')}</h3>
                                             </div>
                                             <p className="text-xs text-text-secondary">
                                                 {t('Disguise Natively as another application to prevent detection during screen sharing.')}
@@ -3278,7 +3439,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                 <div className="space-y-5 animated fadeIn select-text pb-4">
                                     <div className="flex items-start justify-between">
                                         <div>
-                                            <h3 className="text-lg font-bold text-text-primary mb-1">{t('Keyboard shortcuts')}</h3>
+                                            <h3 className="settings-heading text-text-primary mb-1">{t('Keyboard shortcuts')}</h3>
                                             <p className="text-xs text-text-secondary">{t('Natively works with these easy to remember commands.')}</p>
                                         </div>
                                         <button
@@ -3295,7 +3456,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         --border-subtle is transparent. */}
                                     <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-xl border border-border-subtle bg-bg-card">
                                         <div>
-                                            <h4 className="text-sm font-bold text-text-primary">{t('Global shortcuts')}</h4>
+                                            <h4 className="settings-title text-text-primary">{t('Global shortcuts')}</h4>
                                             <p className="text-xs text-text-secondary mt-0.5">
                                                 <DescriptionSwap id={globalShortcutsEnabled ? 'global' : 'focused'}>
                                                     {globalShortcutsEnabled
@@ -3328,7 +3489,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     <div className="grid gap-6" data-settings-stagger>
                                         {/* General Category */}
                                         <div>
-                                            <h4 className="text-sm font-bold text-text-primary mb-3">{t('General')}</h4>
+                                            <h4 className="settings-title text-text-primary mb-3">{t('General')}</h4>
                                             <div className="space-y-1">
                                                 <div className="flex items-center justify-between py-1.5 group">
                                                     <div className="flex items-center gap-3">
@@ -3454,7 +3615,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         {/* Chat Category */}
                                         <div>
                                             <div className="mb-3">
-                                                <h4 className="text-sm font-bold text-text-primary">{t('Chat')}</h4>
+                                                <h4 className="settings-title text-text-primary">{t('Chat')}</h4>
                                             </div>
                                             <div className="space-y-1">
                                                 {[
@@ -3491,7 +3652,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
                                         {/* Window Category */}
                                         <div>
-                                            <h4 className="text-sm font-bold text-text-primary mb-3">{t('Window')}</h4>
+                                            <h4 className="settings-title text-text-primary mb-3">{t('Window')}</h4>
                                             <div className="space-y-1">
                                                 {[
                                                     { id: 'moveWindowUp', label: 'Move Window Up', icon: <ArrowUp size={14} /> },
@@ -3523,7 +3684,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                 <div className="space-y-6 animated fadeIn" data-settings-stagger>
                                     {/* ── Speech Provider Section ── */}
                                     <div>
-                                        <h3 className="text-lg font-bold text-text-primary mb-1">{t('Speech Provider')}</h3>
+                                        <h3 className="settings-heading text-text-primary mb-1">{t('Speech Provider')}</h3>
                                         <p className="text-xs text-text-secondary mb-4">{t('Choose the engine that transcribes audio to text.')}</p>
 
                                         <div className="space-y-4">
@@ -3550,7 +3711,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             { id: 'nvidia_nim', label: 'Nvidia Nim', badge: hasStoredNvidiaNimKey ? 'Saved' : null, desc: t('Low-latency Nemotron / Parakeet streaming ASR'), color: 'green', icon: <BrandMark provider="nvidia_nim" />, neutralTile: true },
                                                             { id: 'openai', label: 'OpenAI Whisper', badge: hasStoredSttOpenaiKey ? 'Saved' : null, desc: t('OpenAI-compatible Whisper API'), color: 'green', icon: <BrandMark provider="openai" />, neutralTile: true },
                                                             { id: 'deepgram', label: 'Deepgram', badge: hasStoredDeepgramKey ? 'Saved' : null, desc: `${STT_MODEL_CATALOG.deepgram.models.find((m) => m.id === sttModels.deepgram)?.label ?? 'Nova-3'} · ${t('300 ms endpointing')}`, color: 'purple', icon: <BrandMark provider="deepgram" />, neutralTile: true },
-                                                            { id: 'elevenlabs', label: 'ElevenLabs Scribe', badge: hasStoredElevenLabsKey ? 'Saved' : null, desc: t('Scribe v2 Realtime API'), color: 'teal', icon: <BrandMark provider="elevenlabs" />, neutralTile: true },
+                                                            { id: 'elevenlabs', label: 'ElevenLabs Scribe', badge: hasStoredElevenLabsKey ? 'Saved' : null, desc: t('Scribe v3 Realtime API'), color: 'teal', icon: <BrandMark provider="elevenlabs" />, neutralTile: true },
                                                             { id: 'azure', label: 'Azure Speech', badge: hasStoredAzureKey ? 'Saved' : null, desc: t('Microsoft Cognitive Services STT'), color: 'cyan', icon: <BrandMark provider="azure" />, neutralTile: true },
                                                             { id: 'ibmwatson', label: 'IBM Watson', badge: hasStoredIbmWatsonKey ? 'Saved' : null, desc: t('IBM Watson cloud STT service'), color: 'indigo', icon: <BrandMark provider="ibmwatson" />, neutralTile: true },
                                                             /* Soniox has no licence-compatible mark, so its monogram reproduces the brand's
@@ -4229,7 +4390,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                             and Check use): the selects' bg-input vanishes on this background. */}
                                         <div className="flex items-start justify-between gap-4 mb-4">
                                             <div>
-                                                <h3 className="text-lg font-bold text-text-primary mb-1">{t('Audio Configuration')}</h3>
+                                                <h3 className="settings-heading text-text-primary mb-1">{t('Audio Configuration')}</h3>
                                                 <p className="text-xs text-text-secondary">{t('Manage input and output devices.')}</p>
                                             </div>
                                             <button
@@ -4405,7 +4566,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <MicOff size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">{t("Follow the meeting app's mute")}</h3>
+                                                            <h3 className="settings-title text-text-primary">{t("Follow the meeting app's mute")}</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t("While you're muted in Zoom, Teams or Meet, Natively doesn't transcribe your microphone.")}</p>
                                                         </div>
                                                     </div>
@@ -4435,7 +4596,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             <Mic size={20} />
                                                         </div>
                                                         <div>
-                                                            <h3 className="text-sm font-bold text-text-primary">{t('Dictation')}</h3>
+                                                            <h3 className="settings-title text-text-primary">{t('Dictation')}</h3>
                                                             <p className="text-xs text-text-secondary mt-0.5">
                                                                 {t('Press {keys}, speak, then press it again. Natively tidies what you said and copies it, ready to paste with {paste}. Not during a meeting.')
                                                                     .replace('{keys}', (shortcuts.dictation ?? []).join(isMac ? '' : '+') || t('the dictation shortcut'))

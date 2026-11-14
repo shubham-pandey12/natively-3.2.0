@@ -706,6 +706,7 @@ agent-browser.json
 # Dev harnesses, benchmark datasets, and prototype docs
 /actionCardHarness.html
 /aboutSettingsHarness.html
+/unlockProHarness.html
 /aiProvidersTablistHarness.html
 /CLUELY_FONTS.md
 /CLUELY_MEETING_DETECTION.md
@@ -730,3 +731,6 @@ agent-browser.json
 /spotlightArrowsHarness.html
 /thinkingDotHarness.html
 /trialCardHarness.html
+
+# Auto Answer decider graph: a paid, private download (userData), never in the repo or installer
+resources/models/auto-answer-decider/*.onnx

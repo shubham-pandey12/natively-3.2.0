@@ -26,6 +26,7 @@ import { AutoSendSection } from './connectors/AutoSendSection';
 import { WebhooksPanel } from './connectors/WebhooksPanel';
 import { GmailPanel } from './connectors/GmailPanel';
 import { McpCard } from './connectors/McpCard';
+import { ConnectorsProCard } from './connectors/ProCard';
 import type { AutoSendDestination, AutoSendRuleInfo, ConnectorsApi, FolderOption, GmailStatus, WebhookEndpointInfo } from '../../types/connectors';
 import {
     Collapse, SETTINGS_FIELD_LABEL, SETTINGS_INPUT,
@@ -305,7 +306,7 @@ const NotionParentPicker: React.FC<{ current?: { title: string; type: string }; 
             <div className="flex items-center gap-4">
                 <Tile><ConnectorMark id="notion" size={20} /></Tile>
                 <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-bold text-text-primary">{current ? current.title : t('Nothing picked yet')}</span>
+                    <span className="block truncate settings-title text-text-primary">{current ? current.title : t('Nothing picked yet')}</span>
                     <span className="mt-0.5 block text-xs text-text-secondary">
                         {current ? (current.type === 'database' ? t('Database') : t('Page')) : t('Pick where new pages go.')}
                     </span>
@@ -470,7 +471,7 @@ const SlackPanel: React.FC<{ webhooks: ConnectionsStatus['slack']['webhooks']; b
                         {webhooks.map((w) => (
                             <div key={w.id} className={ROW}>
                                 <Tile><ConnectorMark id="slack" size={20} /></Tile>
-                                <span className="min-w-0 flex-1 truncate text-sm font-bold text-text-primary">{w.label}</span>
+                                <span className="min-w-0 flex-1 truncate settings-title text-text-primary">{w.label}</span>
                                 <GlassPill onClick={() => void test(w.id)} disabled={!!busy} icon={<BusyIcon busy={busy === w.id} icon={<RefreshCw size={14} />} />}>
                                     {t('Test')}
                                 </GlassPill>
@@ -560,6 +561,9 @@ export const ConnectionsSettings: React.FC = () => {
         return s?.account || t('Connected');
     };
 
+    // Connectors are Pro or trial; main enforces it. Absent (an older main) reads as allowed.
+    const locked = status.pro === false;
+
     const storageNotice = !status.secureStorage && (
         <SettingsNotice tone={tones.warn} icon={<AlertCircle size={14} />}>
             {t('This computer has no secure storage available, so connections are kept until Natively quits.')}
@@ -628,6 +632,7 @@ export const ConnectionsSettings: React.FC = () => {
                 <ConnectorPageContext.Provider value={pageInfo}>
                     <div className="animated fadeIn" key={page}>
                         <BackLink onBack={back} />
+                        {locked && <ConnectorsProCard className="mb-4" />}
                         {body}
                         {pageInfo.steps && <HowItWorks lines={pageInfo.steps} />}
                         {page !== 'gmail' && page !== 'zapier' && page !== 'webhooks' && (
@@ -651,6 +656,7 @@ export const ConnectionsSettings: React.FC = () => {
                         subtitle={t('Connect Natively to the tools you use. Meeting notes stay on this computer until you send them, or until a rule you made sends them.')}
                     />
                     {storageNotice}
+                    {locked && <ConnectorsProCard />}
                 </section>
 
                 {CONNECTOR_GROUPS.map((g) => (
@@ -673,7 +679,7 @@ export const ConnectionsSettings: React.FC = () => {
 
                 <section>
                     <GroupLabel>{t('MCP')}</GroupLabel>
-                    <McpCard mcp={status.mcp} onStatus={(mcp) => setStatus((s) => (s ? { ...s, mcp } : s))} />
+                    <McpCard mcp={status.mcp} onStatus={(mcp) => setStatus((s) => (s ? { ...s, mcp } : s))} locked={locked} />
                 </section>
             </div>
         </SettingsMotionReady.Provider>
