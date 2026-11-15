@@ -16570,12 +16570,9 @@ export function initializeIpcHandlers(appState: AppState): void {
                 : undefined,
             domContext: effectiveDomContext,
             overlayQuestionId: typeof options?.overlayQuestionId === 'string' ? options.overlayQuestionId : undefined,
-            // One answer per spoken question: with Auto Answer on, a press that
-            // only asks "answer what was just said" joins the automatic answer
-            // for the same turn instead of generating a second one. The engine
-            // decides whether the press qualifies (no question, image, page,
-            // screen text or prompt) and whether a matching answer exists.
-            joinAutomatic: appState.getAutoAnswerEnabled(),
+            // No joinAutomatic: every press answers fresh, as in the shipped
+            // 3.1.0 app. Joining the automatic answer swallowed a press after
+            // that answer had finished and waited up to 60 s on a stuck one.
             // Auto Answer V3: a manual What-to-Answer (hotkey, button, or an
             // accepted offer card) commits whatever Auto Answer was offering.
             // Called only when this press really answers — a press that joined

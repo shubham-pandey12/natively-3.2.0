@@ -505,10 +505,16 @@ export class SimpleAutoAnswerEngine {
     /**
      * The local voice detector saw the interviewer start talking again. A stop
      * the stall cap was counting on is over: frozen text now means a slow
-     * transcriber mid-speech, not a finished speaker. Every pending decision is
-     * void until the next stop: a verdict, a parked dispatch, and an automatic
-     * answer already started for the first half of the question are dropped,
-     * so the question is answered once, after the interviewer finishes.
+     * transcriber mid-speech, not a finished speaker. Decisions not yet acted
+     * on are void until the next stop: a verdict and a parked dispatch are
+     * dropped, so the question is judged once, after the interviewer finishes.
+     *
+     * An answer already dispatched is left alone (as in the shipped 3.1.0
+     * engine). A voice start carries no words: a cough, "mm-hmm" or "take your
+     * time" used to cancel the answer the user was reading, and clearing the
+     * in-flight request made its completion unrecorded, so the same question
+     * was answered again with the next remark. That answer still settles its
+     * own words; anything said after it is judged on its own.
      */
     onLocalSpeechStart(): void {
         if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
@@ -521,9 +527,7 @@ export class SimpleAutoAnswerEngine {
         this.dropParked();
         this.held = null;
         this.lastJudgedKey = '';
-        this.dispatchInFlight = null;
         this.bumpJudgeSeq('speech_resumed');
-        this.host.cancelAutomaticAnswer?.('interviewer_resumed');
     }
 
     ingest(segment: TranscriptSegment & { speaker: string; final: boolean }): void {
@@ -820,9 +824,20 @@ export class SimpleAutoAnswerEngine {
             // (review 2026-08-25): clear the key so the next stoppage retries.
             this.lastJudgedKey = '';
             if (standInReplaced()) { this.arm(ENDPOINT_CONFIRM_MS); return; }
-            // No verdict, no guess: a judge failure is retried once, then
-            // reported (the host offers a manual answer). Answering on a '?'
-            // alone answered half-finished questions.
+            // No verdict: fall back to the question's shape, as the shipped
+            // 3.1.0 engine does. A judge outage (or a slow judge) otherwise
+            // silenced every question for the whole interview. Half-finished
+            // questions are kept out by the speaking guard in deliver(): no
+            // dispatch while the interviewer is still talking.
+            const fresh = sentencesOf(unjudged);
+            const asked = /\?\s*$/.test(candidate) || fresh.some(s => /\?\s*$/.test(s));
+            const interrogative = fresh.some(s => FALLBACK_INTERROGATIVE.test(s));
+            if (asked || (!this.punctuationGuaranteed && interrogative)) {
+                this.host.log?.(`[AutoAnswer:simple] judge ${outcome} — fallback dispatch`);
+                this.deliver(id, candidate, 0.9, 'general_question', committedAt);
+                return;
+            }
+            // Not shaped like a question: one more try, then let it go.
             if (outcome !== 'absent' && this.scheduleRecovery(candidate)) return;
             this.host.cancelAutomaticAnswer?.('judge_unavailable');
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'judge_unavailable', question: candidate });
@@ -950,9 +965,8 @@ export class SimpleAutoAnswerEngine {
                 stalled: promoted ? { text: promoted.text, speaker: promoted.speaker } : null,
                 meetingGeneration: this.host.meetingGeneration(),
             };
-            // The candidate stays pending until the answer settles: if the
-            // interviewer resumes, the answer is cancelled and these words are
-            // judged again together with the rest of the question.
+            // The candidate stays pending until the answer settles: a failed
+            // or cancelled answer leaves these words to be judged again.
             this.dispatchInFlight = request;
             this.emit({ name: 'auto_answer_decision', questionId: id, action: 'auto', answerability });
             if (reuseSpeculative) this.host.log?.(`[AutoAnswer:simple] reusing the prefetched answer for ${id}`);
@@ -1005,8 +1019,8 @@ export class SimpleAutoAnswerEngine {
                     return;
                 }
                 if (status === 'cancelled') {
-                    // Usually the interviewer resumed: these words are judged
-                    // again together with the rest of the question.
+                    // Cancelled before it was shown (transcript revised, Auto
+                    // Answer turned off): these words are judged again.
                     this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'dispatch_cancelled', question: text });
                     return;
                 }

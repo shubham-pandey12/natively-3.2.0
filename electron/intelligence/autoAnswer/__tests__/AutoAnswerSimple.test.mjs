@@ -215,32 +215,32 @@ test('the user\'s own speech never suppresses or cancels an automatic answer (us
   assert.deepEqual(h.state.cancelled, [], 'and never cancels the streaming answer');
 });
 
-test('judge unavailable → silent, never a guess: no hook stays quiet; an erroring judge is retried once, then gives up', async () => {
-  // Was: a trailing '?' fired without a verdict. Shipped removed that fallback
-  // — it answered half-questions mid-speech — and retries the judge instead.
+test('judge unavailable → falls back to the question shape (shipped 3.1.0); a statement stays silent', async () => {
+  // A judge outage must not silence every question in the interview.
   const h = makeSimple(null);                               // no judge hook at all
   h.interviewer('So the way this works is that every day a word is picked.');
   await h.advance(STABILITY_MS + 200);
+  assert.deepEqual(h.texts(), [], 'no judge, no question shape: no answer');
+  assert.ok(h.state.skips.includes('judge_unavailable'));
   h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await h.advance(STABILITY_MS + 200);
-  assert.deepEqual(h.texts(), [], 'no judge, no answer');
-  assert.ok(h.state.skips.includes('judge_unavailable'));
-  assert.ok(h.state.cancelled.includes('judge_unavailable'), 'and any speculative answer for it is cancelled');
+  assert.equal(h.texts().length, 1, 'no judge, but a question: answered');
 
   const g = makeSimple(async () => { throw new Error('quota'); });  // judge erroring
   g.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await g.advance(STABILITY_MS + RETRY_TTL_MS + 1000);
-  assert.deepEqual(g.texts(), [], 'error → no answer');
-  assert.equal(g.state.judgeCalls.length, 2, 'retried exactly once');
-  assert.ok(g.state.events.some(e => e.name === 'auto_answer_retrying'), 'the retry is visible in telemetry');
-  assert.ok(g.state.skips.includes('judge_unavailable'));
-  const skip = g.state.events.find(e => e.skipReason === 'judge_unavailable');
-  assert.equal(skip.question, 'Why did you choose PostgreSQL over the alternatives here?', 'the host gets the words to show (and strips them from telemetry)');
+  assert.equal(g.texts().length, 1, 'error → the question is still answered');
+  assert.equal(g.state.judgeCalls.length, 1, 'answered at once, no retry wait');
 
-  const r = makeSimple(async (_req, n) => { if (n === 1) throw new Error('blip'); return YES(); });
-  r.interviewer('Why did you choose PostgreSQL over the alternatives here?');
-  await r.advance(STABILITY_MS + RETRY_TTL_MS);
-  assert.equal(r.texts().length, 1, 'a transient judge failure is recovered by the retry');
+  const s = makeSimple(async () => { throw new Error('quota'); });
+  s.interviewer('We moved the whole platform onto the new cluster last year.');
+  await s.advance(STABILITY_MS + RETRY_TTL_MS + 1000);
+  assert.deepEqual(s.texts(), [], 'error on a statement → no answer');
+  assert.equal(s.state.judgeCalls.length, 2, 'retried exactly once');
+  assert.ok(s.state.events.some(e => e.name === 'auto_answer_retrying'), 'the retry is visible in telemetry');
+  assert.ok(s.state.skips.includes('judge_unavailable'));
+  const skip = s.state.events.find(e => e.skipReason === 'judge_unavailable');
+  assert.equal(skip.question, 'We moved the whole platform onto the new cluster last year.', 'the host gets the words to show (and strips them from telemetry)');
 });
 
 test('a provider endpoint confirms the stop early', async () => {

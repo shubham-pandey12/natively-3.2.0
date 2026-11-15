@@ -5,8 +5,9 @@
  * in parts while the interviewer was still talking. The quiet window measured
  * gaps between TRANSCRIPT ARRIVALS, so a slow transcriber looked like a pause.
  * The shipped engine also listens to the voice detector: between a speech
- * start and its stop nothing is judged or dispatched, and speech resuming
- * cancels an answer already in flight. These tests drive the real engine with
+ * start and its stop nothing is judged or dispatched. An answer already in
+ * flight is left alone, as in the shipped 3.1.0 engine: a voice start carries
+ * no words (a cough, "mm-hmm"). These tests drive the real engine with
  * a fake clock and a fake judge; the speech edges stand in for the native
  * `speech_edge` / `speech_ended` events, which both the macOS and the Windows
  * capture pipelines emit to main.ts.
@@ -27,6 +28,7 @@ const YES = JSON.stringify({ is_ask: true, directed_at_user: true, complete: tru
 
 const PART_1 = 'So walk me through how you would design the ingestion pipeline for the events service,';
 const PART_2 = 'and how you would handle back pressure when the downstream store slows down?';
+const NEXT_EARLY = 'How would you test that pipeline under a sudden spike in traffic?';
 
 /** `results` decides each dispatch's reply in order; a Promise holds it open. */
 function rig({ judge = async () => YES, results = [] } = {}) {
@@ -70,26 +72,41 @@ test('no pause, slow transcriber: nothing is judged or answered until the voice 
   assert.ok(h.state.dispatched[0].includes('ingestion pipeline') && h.state.dispatched[0].includes('back pressure'), 'for the whole question');
 });
 
-test('speech resuming cancels the answer in flight and re-judges the grown question', async () => {
+test('a cough or "mm-hmm" while the answer streams does not cancel it (shipped 3.1.0)', async () => {
   let release;
   const held = new Promise((r) => { release = r; });
   const h = rig({ results: [held] });
-  h.say(PART_1);
+  h.say(PART_1 + ' ' + PART_2);
   h.engine.onLocalSpeechEnd();
   await h.advance(ENDPOINT_CONFIRM_MS + 200);
-  assert.equal(h.state.dispatched.length, 1, 'the first half looked finished and was dispatched');
+  assert.equal(h.state.dispatched.length, 1);
 
-  h.engine.onLocalSpeechStart();                 // …but the interviewer carries on
-  assert.deepEqual(h.state.cancelled, ['interviewer_resumed'], 'the streaming answer is cancelled');
-  release({ status: 'cancelled' });
+  h.engine.onLocalSpeechStart();                 // a cough: a start and a stop with no words
+  h.engine.onLocalSpeechEnd();
+  assert.deepEqual(h.state.cancelled, [], 'the answer the user is reading stays on screen');
+  release(true);
+  await h.advance(STABILITY_MS * 4);
+  assert.equal(h.state.dispatched.length, 1, 'and it is not generated again');
+});
+
+test('the answer finishes as the interviewer speaks again: the question is not answered twice', async () => {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const h = rig({ results: [held] });
+  h.say(PART_1 + ' ' + PART_2);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(ENDPOINT_CONFIRM_MS + 200);
+  assert.equal(h.state.dispatched.length, 1);
+
+  h.engine.onLocalSpeechStart();                 // "Okay, great." starts…
+  release(true);                                 // …just before the stream ends
   await h.advance(100);
-
-  h.say(PART_2);
+  h.say('Okay, great. ' + NEXT_EARLY);
   h.engine.onLocalSpeechEnd();
   await h.advance(ENDPOINT_CONFIRM_MS + STABILITY_MS);
-  assert.equal(h.state.dispatched.length, 2);
-  assert.ok(h.state.dispatched[1].includes('ingestion pipeline') && h.state.dispatched[1].includes('back pressure'),
-    'the cancelled half is kept and answered together with the rest');
+  assert.deepEqual(h.state.cancelled, []);
+  assert.equal(h.state.dispatched.length, 2, 'the new remark is judged on its own');
+  assert.ok(!h.state.dispatched[1].includes('ingestion pipeline'), 'the completed question did not ride along');
 });
 
 test('a speech start drops a verdict still being judged', async () => {

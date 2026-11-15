@@ -75,25 +75,24 @@ test('a question that is still pending (never ruled) keeps counting — only RUL
   assert.equal(h.state.prefetched.length, before + 1, 'an incomplete verdict leaves its words unjudged');
 });
 
-test('judge failure: a question after a silent lead-in is re-judged once, and answered if the retry lands', async () => {
-  // Was: a timed-out judge fell back to the interrogative lead. Shipped removed
-  // the fallback (it fired on half-questions) and retries the judge once.
-  const h = rig(async (_req, n) => (n === 1 ? NO : n === 2 ? new Promise(() => {}) : YES), { punctuation: 'none' });
-  h.say('Great so I am Sarah and I lead the platform team here.');
-  await h.advance(STABILITY_MS + 2000);
-  h.say('How would you shard the sessions table');
-  await h.advance(STABILITY_MS + JUDGE_DEADLINE_MS + 2000);
-  assert.equal(h.state.judgeCalls, 3, 'the timed-out call was retried once');
-  assert.equal(h.state.dispatched.length, 1, 'judge timed out and the question was not lost');
-});
-
-test('judge failure twice: silent, never a guess', async () => {
+test('judge failure: a question after a silent lead-in falls back to its own interrogative (shipped 3.1.0)', async () => {
+  // A judge outage must not silence the interview: the unjudged finals carry
+  // an interrogative lead, so the question is answered without a verdict.
   const h = rig(async (_req, n) => (n === 1 ? NO : new Promise(() => {})), { punctuation: 'none' });
   h.say('Great so I am Sarah and I lead the platform team here.');
   await h.advance(STABILITY_MS + 2000);
   h.say('How would you shard the sessions table');
+  await h.advance(STABILITY_MS + JUDGE_DEADLINE_MS + 500);
+  assert.equal(h.state.judgeCalls, 2, 'no retry needed: the shape decides');
+  assert.equal(h.state.dispatched.length, 1, 'judge timed out and the question was still answered');
+  assert.match(h.state.dispatched[0], /shard the sessions table/);
+});
+
+test('judge failure on a statement: retried once, then silent (no guess without a question shape)', async () => {
+  const h = rig(async () => new Promise(() => {}), { punctuation: 'none' });
+  h.say('We moved the whole platform onto the new cluster last year.');
   await h.advance(STABILITY_MS + 2 * JUDGE_DEADLINE_MS + 3000);
-  assert.equal(h.state.judgeCalls, 3, 'one retry, no more');
+  assert.equal(h.state.judgeCalls, 2, 'one retry, no more');
   assert.equal(h.state.dispatched.length, 0);
 });
 

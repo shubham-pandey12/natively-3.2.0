@@ -8466,29 +8466,19 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     }
 
-    // One answer per spoken question. A press that only asks "answer what was
-    // just said" may be answered by the automatic answer for the same turn
-    // (main joins it rather than generating a second one), so with Auto Answer
-    // on it goes through the shared engine — never Direct, which would start
-    // a second stream — and opens no streaming row of its own: a placeholder
-    // would take over the automatic answer's live row. The card shows
-    // "Thinking" until main says which answer it is.
-    const spokenOnly = !retry && currentAttachments.length === 0 && !dynamicPromptInstruction
-      && !(window as any).lastCapturedDOM && !pendingPageCaptureAtRef.current;
-    const shareAutomaticStream = spokenOnly
-      && await (window.electronAPI.getAutoAnswerEnabled?.() ?? Promise.resolve(false)).catch(() => false);
-    const useDirectAssist = directAssistEnabled && !shareAutomaticStream;
+    // Every press produces its own fresh answer, as in the shipped 3.1.0 app,
+    // whether or not Auto Answer already answered the same turn. A press that
+    // joined the automatic answer was swallowed when that answer had already
+    // finished, waited on it when it was stuck, and lost its card when it was
+    // cancelled.
+    const useDirectAssist = directAssistEnabled;
 
     // Create AI response placeholder AFTER user message so thinking dots + response
     // appear BELOW the question card (not above it)
     if (!useDirectAssist) {
       legacyIntelligenceTombstonedRef.current = false;
-      if (shareAutomaticStream) {
-        setMessages((prev) => prev.map((message) => message.id === questionCardId ? { ...message, answerPending: true } : message));
-      } else {
-        liveAnswerGenIdRef.current = null;
-        prepareIntelligenceStreamPlaceholder('what_to_answer');
-      }
+      liveAnswerGenIdRef.current = null;
+      prepareIntelligenceStreamPlaceholder('what_to_answer');
     }
     analytics.trackCommandExecuted('what_to_say');
 
@@ -8637,11 +8627,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
       settleScreenshotRetry(screenshotAttempt.id, result.outcome?.reason === 'attachment_unavailable'
         ? 'cancelled' : result.outcome?.status ?? 'failed');
-      if (result.outcome?.reason === 'automatic_answer_exists') {
-        // The automatic answer to this question is the answer: no second card.
-        setMessages((prev) => prev.filter((message) => message.id !== questionCardId));
-        return;
-      }
       setScreenContextStatus(result.screenContextStatus || 'not_available');
       setLatestUsedImageInput(Boolean(result.usedImageInput));
       setLatestVisionProviderUsed(result.visionProviderUsed);
@@ -8652,13 +8637,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       // and suggests the selective screenshot for next time; the retried
       // answer has already replaced the refusal in `result.answer`.
       setRefusalRetryNotice(result.refusalRetry ? { ...result.refusalRetry, at: Date.now() } : null);
-      if (result.answer == null && shareAutomaticStream) {
-        // This press opened no streaming row of its own, so the open row (if
-        // any) belongs to the automatic answer: leave it and its refs alone.
-        setMessages((prev) => prev.map((message) => message.id === questionCardId
-          ? { ...message, answerPending: false, answerFailed: true } : message));
-        pinAnswerPanel();
-      } else if (result.answer == null) {
+      if (result.answer == null) {
         // A quiet note, not a sentence at reading size where an answer would
         // be: main's own reason when it gives one, ours otherwise.
         const feedback = result.error ?? CHAT_NOTES.noneYet;
@@ -8711,11 +8690,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       // A Direct stream outlives the start IPC acknowledgement; its correlated
       // terminal event owns the processing state. Legacy WTA is request/response.
       if (!useDirectAssist && screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) setIsProcessing(false);
-      // The press is over however it ended: its card stops saying "Thinking".
-      if (shareAutomaticStream) {
-        setMessages((prev) => prev.map((message) => message.id === questionCardId && message.answerPending
-          ? { ...message, answerPending: false } : message));
-      }
     }
   };
 
