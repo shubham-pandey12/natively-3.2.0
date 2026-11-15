@@ -203,6 +203,16 @@ export const HELD_MAX_AGE_MS = 15_000;
 export const RETRY_MS = 500;
 export const RETRY_TTL_MS = 8000;
 /**
+ * The voice detector said the interviewer started talking, and then neither a
+ * stop nor any interviewer transcript arrived for this long. The stop was lost
+ * (a capture restart or an audio-device switch drops it), and without this
+ * Auto Answer would wait for it for the rest of the meeting. Speech that is
+ * really going on keeps producing interims well inside this window; it is
+ * long enough that a transcriber sending only finals, one per long segment,
+ * is not mistaken for silence.
+ */
+export const SPEAKING_STALE_MS = 8000;
+/**
  * Pending interviewer finals older than this no longer belong to the current
  * thought. Raised 30s -> 90s on 2026-08-25: a coding-interview problem
  * statement runs 45-60 s ("design a class that supports these three
@@ -363,6 +373,8 @@ export class SimpleAutoAnswerEngine {
      * transcript gaps while they talk are transcriber latency, not a pause.
      */
     private interviewerSpeaking = false;
+    /** Clears a speaking state whose stop never came (see SPEAKING_STALE_MS). */
+    private speakingTimer: ClockTimer | null = null;
     /** speakerId of the latest interviewer interim, carried onto a promoted stand-in. */
     private lastInterviewerSpeaker: string | undefined = undefined;
     /** The interim last promoted: one stand-in per frozen interim, however many stops follow. */
@@ -396,6 +408,8 @@ export class SimpleAutoAnswerEngine {
         parts: SimpleAutoAnswerEngine['pending'];
         stalled: { text: string; speaker?: string } | null;
         meetingGeneration: number;
+        /** A manual press started while this was in flight (see onManualAnswerStarted). */
+        handedOver?: boolean;
     } | null = null;
     private lastAnsweredText: string | null = null;
     private lastAnsweredAt = 0;
@@ -467,6 +481,7 @@ export class SimpleAutoAnswerEngine {
      */
     onLocalSpeechEnd(confirmEndpoint = true): void {
         this.interviewerSpeaking = false;
+        this.clearSpeakingTimer();
         if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
         this.lastInterviewerAt = this.clock.now();
         // A provider whose finals are not trusted to end a turn (see
@@ -499,6 +514,7 @@ export class SimpleAutoAnswerEngine {
         if (!this.host.isEnabled() || !this.host.isMeetingActive()) return;
         this.speechStartsSeen = true;
         this.interviewerSpeaking = true;
+        this.armSpeakingTimer();
         this.localStopAt = 0;
         this.clearStallCap();
         this.disarm();
@@ -516,6 +532,8 @@ export class SimpleAutoAnswerEngine {
         const now = this.clock.now();
 
         if (segment.speaker === 'interviewer') {
+            // Words are arriving: the interviewer really is talking.
+            if (text && this.interviewerSpeaking) this.armSpeakingTimer();
             if (!segment.final) {
                 // Still talking: every interim pushes the stoppage out — and
                 // supersedes any in-flight verdict (review 2026-08-25: a
@@ -569,6 +587,21 @@ export class SimpleAutoAnswerEngine {
         // speech must not cancel the stream, clear the candidate, or drop a
         // parked / deferred verdict — the answer is wanted precisely while
         // they are talking. Nothing to do on this channel.
+    }
+
+    private armSpeakingTimer(): void {
+        this.clearSpeakingTimer();
+        this.speakingTimer = this.clock.setTimeout(() => {
+            this.speakingTimer = null;
+            if (!this.interviewerSpeaking) return;
+            this.host.log?.(`[AutoAnswer:simple] no voice stop after ${SPEAKING_STALE_MS}ms of silence from the transcript: treating it as lost`);
+            // An untrusted stop: it only restarts the full quiet window.
+            this.onLocalSpeechEnd(false);
+        }, SPEAKING_STALE_MS);
+    }
+
+    private clearSpeakingTimer(): void {
+        if (this.speakingTimer !== null) { this.clock.clearTimeout(this.speakingTimer); this.speakingTimer = null; }
     }
 
     // ── the stoppage ──────────────────────────────────────────────────────
@@ -912,7 +945,7 @@ export class SimpleAutoAnswerEngine {
             const snapshot = this.host.speculativeSnapshot?.();
             const reuseSpeculative = Boolean(snapshot && snapshot.questionId === id && snapshot.text);
             const promoted = this.pending.find(p => p.provisional);
-            const request = {
+            const request: NonNullable<SimpleAutoAnswerEngine['dispatchInFlight']> = {
                 id, parts: [...this.pending],
                 stalled: promoted ? { text: promoted.text, speaker: promoted.speaker } : null,
                 meetingGeneration: this.host.meetingGeneration(),
@@ -934,25 +967,87 @@ export class SimpleAutoAnswerEngine {
                 this.dispatchInFlight = null;
                 this.lastJudgedKey = '';
                 const status = dispatchStatus(result);
-                if (status !== 'completed') {
-                    const retryable = (result as AutoAnswerDispatchResult | undefined)?.retryable !== false;
-                    if (status === 'failed' && retryable && this.scheduleRecovery(text)) return;
-                    this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: status === 'cancelled' ? 'dispatch_cancelled' : 'dispatch_failed', question: text });
+                const outcome = result as AutoAnswerDispatchResult | undefined;
+                // 'partial': part of the answer was shown. The engine keeps its
+                // cooldown for it too; answering these words again would put a
+                // second card under the first.
+                if (status === 'completed' || status === 'partial') {
+                    this.settleParts(request, text, true);
+                    this.armFeedback(id, act, answerability);
                     return;
                 }
-                this.clearRecovery();
-                this.lastAnsweredText = text;
-                this.lastAnsweredAt = this.clock.now();
-                this.stallAnswered = this.stallAnswered.filter(record => this.clock.now() - record.at <= STALL_ANSWERED_TTL_MS);
-                if (request.stalled) this.stallAnswered.push({ ...request.stalled, at: this.clock.now() });
-                this.stallAnswered = this.stallAnswered.slice(-64);
-                this.pending = this.pending.filter(part => !request.parts.includes(part));
-                this.judgedParts = 0;
-                this.armFeedback(id, act, answerability);
-                if (this.pending.length) this.arm(STABILITY_MS);
+                // A manual press took over while this answer was in flight. The
+                // user asked for that answer instead, so these words are not
+                // answered again afterwards.
+                if (request.handedOver) {
+                    this.settleParts(request, text, true);
+                    this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'dispatch_cancelled', question: text });
+                    return;
+                }
+                if (status === 'skipped') {
+                    // An earlier automatic answer still held the engine: nothing
+                    // was decided about this question, so it is sent again.
+                    if (outcome?.reason === 'busy') {
+                        if (this.scheduleRecovery(text)) return;
+                        this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling', question: text });
+                        this.giveUpParts(request, text);
+                        return;
+                    }
+                    // A decision about these words (the planner stayed silent, or
+                    // a manual answer owns them): they are done. Kept pending,
+                    // they joined the next question and were answered with it.
+                    this.settleParts(request, text, outcome?.reason === 'already_answered');
+                    this.emit({
+                        name: 'auto_answer_ignored', questionId: id,
+                        skipReason: outcome?.reason === 'already_answered' ? 'already_answered' : 'dispatch_declined',
+                        question: text,
+                    });
+                    return;
+                }
+                if (status === 'cancelled') {
+                    // Usually the interviewer resumed: these words are judged
+                    // again together with the rest of the question.
+                    this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'dispatch_cancelled', question: text });
+                    return;
+                }
+                const retryable = outcome?.retryable !== false;
+                if (retryable && this.scheduleRecovery(text)) return;
+                this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'dispatch_failed', question: text });
+                this.giveUpParts(request, text);
             });
         };
         attempt();
+    }
+
+    /**
+     * The words a dispatch carried are done with: answered, handed to a manual
+     * answer, or deliberately not answered. They leave `pending`, so they never
+     * join the next question. Newer words that arrived meanwhile stay and get
+     * their own quiet window.
+     */
+    private settleParts(request: NonNullable<SimpleAutoAnswerEngine['dispatchInFlight']>, text: string, answered: boolean): void {
+        this.clearRecovery();
+        if (answered) {
+            this.lastAnsweredText = text;
+            this.lastAnsweredAt = this.clock.now();
+            this.stallAnswered = this.stallAnswered.filter(record => this.clock.now() - record.at <= STALL_ANSWERED_TTL_MS);
+            if (request.stalled) this.stallAnswered.push({ ...request.stalled, at: this.clock.now() });
+            this.stallAnswered = this.stallAnswered.slice(-64);
+        }
+        this.pending = this.pending.filter(part => !request.parts.includes(part));
+        this.judgedParts = 0;
+        if (this.pending.length && !this.interviewerSpeaking) this.arm(STABILITY_MS);
+    }
+
+    /**
+     * Auto Answer gave up on these words (the retry was used). While the
+     * interviewer is still talking they stay, to be judged with the rest of
+     * the question; otherwise they are dropped so the next question is not
+     * answered together with an old one.
+     */
+    private giveUpParts(request: NonNullable<SimpleAutoAnswerEngine['dispatchInFlight']>, text: string): void {
+        if (this.interviewerSpeaking) return;
+        this.settleParts(request, text, false);
     }
 
     /**
@@ -1017,7 +1112,11 @@ export class SimpleAutoAnswerEngine {
         // dispatched before the press goes out after it.
         this.disarm();
         this.dropParked();
-        this.dispatchInFlight = null;
+        // An automatic answer in flight is NOT forgotten here: forgetting it
+        // ignored how it ended, so a shown answer was never recorded and its
+        // words were answered a second time. It is marked handed over instead;
+        // when it settles, its words are done with whether it was shown or cut.
+        if (this.dispatchInFlight) this.dispatchInFlight.handedOver = true;
         this.lastJudgedKey = '';
         this.held = null;
         this.bumpJudgeSeq('manual_answer');
@@ -1202,6 +1301,7 @@ export class SimpleAutoAnswerEngine {
         this.clearStallCap();
         this.stallAnswered = [];
         this.interviewerSpeaking = false;
+        this.clearSpeakingTimer();
         this.lastInterviewerSpeaker = undefined;
         this.promotedInterim = null;
         this.speechStartsSeen = false;

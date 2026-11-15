@@ -20,7 +20,7 @@ import { FakeClock } from './fakeClock.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS } = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/SimpleAutoAnswer.js'));
+const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS, SPEAKING_STALE_MS } = require(path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer/SimpleAutoAnswer.js'));
 
 const flush = () => new Promise((r) => setImmediate(r));
 const YES = JSON.stringify({ is_ask: true, directed_at_user: true, complete: true, act: 'question', answerability: 0.95, question_text: null });
@@ -158,4 +158,98 @@ test('Auto Answer off: speech edges are inert', async () => {
   h.engine.host.isEnabled = () => false;
   h.engine.onLocalSpeechStart();
   assert.deepEqual(h.state.cancelled, [], 'no cancel when Auto Answer is off — a manual answer keeps streaming');
+});
+
+// ── Live-interview fixes (2026-11-15 review) ───────────────────────────────
+
+const NEXT = 'What metrics would you watch first after that pipeline goes live in production?';
+
+test('a question the engine declined is dropped, not merged into the next one', async () => {
+  const h = rig({ results: [{ status: 'skipped', reason: 'declined' }] });
+  h.say(PART_1 + ' ' + PART_2);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(ENDPOINT_CONFIRM_MS + 200);
+  assert.equal(h.state.dispatched.length, 1);
+  assert.ok(h.state.skips.includes('dispatch_declined'), 'reported as a decision, not a failure');
+
+  h.say(NEXT);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(ENDPOINT_CONFIRM_MS + STABILITY_MS);
+  assert.equal(h.state.dispatched.length, 2);
+  assert.ok(!h.state.dispatched[1].includes('ingestion pipeline'), 'the declined words did not ride along');
+});
+
+test('a dispatch that found the engine busy is sent again, not lost', async () => {
+  const h = rig({ results: [{ status: 'skipped', reason: 'busy' }, true] });
+  h.say(PART_1 + ' ' + PART_2);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(ENDPOINT_CONFIRM_MS + RETRY_MS + 1500);
+  assert.equal(h.state.dispatched.length, 2, 'retried after the busy skip');
+  assert.equal(h.state.dispatched[1], h.state.dispatched[0], 'the same question');
+  assert.ok(!h.state.skips.includes('dispatch_failed'));
+});
+
+test('a manual press during an automatic answer: its words are not answered again', async () => {
+  for (const ending of [true, { status: 'cancelled' }]) {
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const h = rig({ results: [held] });
+    h.say(PART_1 + ' ' + PART_2);
+    h.engine.onLocalSpeechEnd();
+    await h.advance(ENDPOINT_CONFIRM_MS + 200);
+    assert.equal(h.state.dispatched.length, 1);
+
+    h.engine.onManualAnswerStarted();             // typed question or screenshot press
+    release(ending);
+    await h.advance(100);
+    h.engine.onLocalSpeechStart();
+    h.engine.onLocalSpeechEnd();                   // a cough
+    await h.advance(STABILITY_MS * 4);
+    assert.equal(h.state.dispatched.length, 1, `no second answer (automatic answer ended: ${JSON.stringify(ending)})`);
+  }
+});
+
+test('a lost voice stop does not silence Auto Answer for the rest of the meeting', async () => {
+  const h = rig();
+  h.engine.onLocalSpeechStart();
+  h.say(PART_1 + ' ' + PART_2);                  // …and the speech_ended event never arrives
+  await h.advance(SPEAKING_STALE_MS - 500);
+  assert.deepEqual(h.state.dispatched, [], 'still waiting while the stop could just be late');
+  await h.advance(500 + STABILITY_MS + 300);
+  assert.equal(h.state.dispatched.length, 1, 'answered once the stop is treated as lost');
+});
+
+test('words keep the speaking state alive: a long question is not cut by the stale-stop timer', async () => {
+  const h = rig();
+  h.engine.onLocalSpeechStart();
+  for (let i = 0; i < 4; i++) {
+    h.engine.ingest({ speaker: 'interviewer', text: `part ${i} of a long question`, final: false, timestamp: 0 });
+    await h.advance(SPEAKING_STALE_MS - 1000);
+  }
+  assert.deepEqual(h.state.judgeCalls, [], 'still speaking after far longer than the stale window');
+});
+
+test('a partly shown answer counts as answered', async () => {
+  const h = rig({ results: [{ status: 'partial' }] });
+  h.say(PART_1 + ' ' + PART_2);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(ENDPOINT_CONFIRM_MS + 200);
+  h.engine.onLocalSpeechStart();
+  h.engine.onLocalSpeechEnd();
+  await h.advance(STABILITY_MS * 4);
+  assert.equal(h.state.dispatched.length, 1, 'no second card under the partial one');
+});
+
+test('after the retry fails too, the words are dropped so the next question is answered alone', async () => {
+  const h = rig({ results: [{ status: 'failed' }, { status: 'failed' }] });
+  h.say(PART_1 + ' ' + PART_2);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(ENDPOINT_CONFIRM_MS + STABILITY_MS * 6);
+  assert.equal(h.state.dispatched.length, 2);
+
+  h.say(NEXT);
+  h.engine.onLocalSpeechEnd();
+  await h.advance(ENDPOINT_CONFIRM_MS + STABILITY_MS);
+  assert.equal(h.state.dispatched.length, 3);
+  assert.ok(!h.state.dispatched[2].includes('ingestion pipeline'), 'the failed question did not ride along');
 });

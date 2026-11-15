@@ -33,6 +33,10 @@ async function makeEngine({ plan = [] } = {}) {
             const step = plan[calls.length] ?? 'ok';
             calls.push(step);
             if (step === 'fail') throw new Error('provider exploded');
+            if (step === 'fail-after-other-card') {
+                engine.emit('suggested_answer', 'an answer from another generation', 'q', 1, 987654);
+                throw new Error('provider exploded');
+            }
             if (step === 'net') throw Object.assign(new Error('fetch failed: ECONNRESET'), { status: 503 });
             if (step && typeof step.then === 'function') {
                 yield ANSWER.slice(0, 40);
@@ -119,5 +123,36 @@ test('a cancel that lands while the trigger is still at the planner stops it bef
     const result = await running;
     assert.equal(result.status, 'cancelled');
     assert.equal(h.calls.length, 0);
+    h.engine.reset();
+});
+
+test('a card from ANOTHER generation does not turn this failure into completed', async () => {
+    const h = await makeEngine({ plan: ['fail-after-other-card'] });
+    const result = await autoAnswer(h.engine);
+    assert.equal(result.status, 'failed', 'only this run\'s own cards count as shown');
+    h.engine.reset();
+});
+
+test('the planner staying silent reports skipped / declined', async () => {
+    const h = await makeEngine();
+    h.engine.planSuggestionTrigger = async () => ({ kind: 'silent', reason: 'not_a_question', confidence: 0.2 });
+    const result = await autoAnswer(h.engine);
+    assert.equal(result.status, 'skipped');
+    assert.equal(result.reason, 'declined');
+    h.engine.reset();
+});
+
+test('while an automatic trigger is still pending the engine refuses, and a dispatch anyway is skipped / busy', async () => {
+    let releasePlanner;
+    const planner = new Promise((r) => { releasePlanner = r; });
+    const h = await makeEngine();
+    h.engine.planSuggestionTrigger = async () => { await planner; return { kind: 'answer', reason: 'answerable_question', confidence: 0.9 }; };
+    const first = autoAnswer(h.engine);
+    await flush();
+    assert.equal(h.engine.canAutoAnswer(), false, 'Auto Answer parks the next question instead of dispatching into a skip');
+    const second = await autoAnswer(h.engine);
+    assert.deepEqual({ status: second.status, reason: second.reason }, { status: 'skipped', reason: 'busy' });
+    releasePlanner();
+    await first;
     h.engine.reset();
 });

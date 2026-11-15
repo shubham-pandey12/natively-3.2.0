@@ -1377,6 +1377,11 @@ export class IntelligenceEngine extends EventEmitter {
             if (!ownPrefetchLive) return false;
         }
         if (Date.now() - this.lastTriggerTime < this.automaticTriggerCooldown) return false;
+        // An earlier automatic trigger is still at the planner or settling (for
+        // example one the interviewer's resumed speech just cancelled). A
+        // dispatch now would only come back 'skipped'; refusing here makes Auto
+        // Answer park the question and send it once this one has settled.
+        if (this.automaticTriggerPending) return false;
         return true;
     }
 
@@ -1397,7 +1402,7 @@ export class IntelligenceEngine extends EventEmitter {
 
         // One automatic answer at a time: a second dispatch while one is at the
         // planner or streaming would answer the same question twice.
-        if (this.automaticTriggerPending) return { status: 'skipped' };
+        if (this.automaticTriggerPending) return { status: 'skipped', reason: 'busy' };
         this.automaticTriggerPending = true;
         this.automaticTriggerCancelled = false;
         try {
@@ -1432,9 +1437,9 @@ export class IntelligenceEngine extends EventEmitter {
     }
 
     private async handleSuggestionTriggerInner(trigger: SuggestionTrigger): Promise<AutomaticAnswerResult> {
-        if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped' };
+        if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         const plannerDecision = await this.planSuggestionTrigger(trigger);
-        if (this.skipOwnedAutomaticTrigger(trigger, plannerDecision.confidence)) return { status: 'skipped' };
+        if (this.skipOwnedAutomaticTrigger(trigger, plannerDecision.confidence)) return { status: 'skipped', reason: 'already_answered' };
         // Cancelled while at the planner (the interviewer resumed, a barge-in,
         // the judge failed): do not start an answer to half a question.
         if (trigger.automatic && this.automaticTriggerCancelled) {
@@ -1458,7 +1463,7 @@ export class IntelligenceEngine extends EventEmitter {
                     confidence: plannerDecision.confidence,
                 });
             } catch { /* a listener must never break the trigger path */ }
-            return { status: 'skipped' };
+            return { status: 'skipped', reason: 'declined' };
         }
 
         if (plannerDecision.kind !== 'answer') {
@@ -1573,11 +1578,21 @@ export class IntelligenceEngine extends EventEmitter {
         // artifact's fallback, the non-answer fallback, a stream cut short).
         // Shipped counts any shown answer as delivered; reporting it as a
         // retryable failure made Auto Answer retry and put a second card under it.
+        // Only THIS run's cards count: runWhatShouldISay mints its generation id
+        // before its first await, so it is known as soon as the call returns. A
+        // card from another generation (a manual press, a speculative reveal)
+        // must not turn this run's failure into "completed".
         let shown = false;
-        const onShown = (answer: unknown) => { if (typeof answer === 'string' && answer.trim()) shown = true; };
+        let ownGeneration: number | null = null;
+        const onShown = (answer: unknown, _question?: unknown, _confidence?: unknown, generationId?: unknown) => {
+            if (ownGeneration !== null && generationId === ownGeneration && typeof answer === 'string' && answer.trim()) shown = true;
+        };
         this.on('suggested_answer', onShown);
         try {
-            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, { outcomeOut });
+            const generationBefore = this.currentGenerationId;
+            const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined, { outcomeOut });
+            if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
+            await run;
             const outcome = outcomeOut.value;
             if (outcome?.status === 'success') return { status: 'completed' };
             if (outcome?.status === 'cancelled') return { status: 'cancelled' };

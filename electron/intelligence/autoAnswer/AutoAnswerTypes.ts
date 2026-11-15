@@ -145,7 +145,9 @@ export type AutoAnswerSkipReason =
     /** The automatic answer was cancelled before it was shown (interviewer resumed, manual press, transcript revised). */
     | 'dispatch_cancelled'
     /** The automatic answer failed and its one retry did too (or it was not retryable). */
-    | 'dispatch_failed';
+    | 'dispatch_failed'
+    /** The engine chose not to answer (the planner stayed silent). */
+    | 'dispatch_declined';
 
 /** Why the automatic answer in flight was stopped. */
 export type AutoAnswerCancelReason =
@@ -159,11 +161,17 @@ export type AutoAnswerCancelReason =
 
 /**
  * What an automatic dispatch resolved to. `true` also means completed.
- * 'skipped': another answer owns the engine; 'partial': the stream was cut.
+ * 'partial': the stream was cut after part of the answer was shown.
+ * 'skipped' says why in `reason`:
+ *   - 'busy': an earlier automatic answer still holds the engine. Nothing was
+ *     decided about this question, so Auto Answer tries it again.
+ *   - 'declined': the planner chose not to answer it.
+ *   - 'already_answered': a manual answer owns this question.
  */
 export interface AutoAnswerDispatchResult {
     status: 'completed' | 'cancelled' | 'failed' | 'skipped' | 'partial';
     retryable?: boolean;
+    reason?: 'busy' | 'declined' | 'already_answered';
 }
 
 /** The ternary policy output (V3 Amendment 4) plus the orthogonal V2 actions. */
