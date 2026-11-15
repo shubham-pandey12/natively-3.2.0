@@ -25,7 +25,7 @@ function rig(judgeMs) {
   const state = { dispatched: [] };
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
-    recentTurns: () => [], dispatch: (q) => { state.dispatched.push({ text: q.text, at: clock.now() }); },
+    recentTurns: () => [], dispatch: (q) => { state.dispatched.push({ text: q.text, at: clock.now() }); return true; },
     judgeCandidate: () => new Promise((resolve) => clock.setTimeout(() => resolve(YES), judgeMs)),
     telemetry: () => {}, log: () => {},
   };

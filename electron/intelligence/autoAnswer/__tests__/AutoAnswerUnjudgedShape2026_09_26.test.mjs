@@ -32,7 +32,7 @@ function rig(judge, { punctuation = 'provider' } = {}) {
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
     recentTurns: () => [],
-    dispatch: (q) => { state.dispatched.push(q.text); },
+    dispatch: (q) => { state.dispatched.push(q.text); return true; },
     prefetchAnswer: (id, text) => { state.prefetched.push(text); },
     speculativeSnapshot: () => ({ questionId: null, text: null }),
     judgeCandidate: (req) => { state.judgeCalls++; return judge(req, state.judgeCalls); },
@@ -75,15 +75,26 @@ test('a question that is still pending (never ruled) keeps counting — only RUL
   assert.equal(h.state.prefetched.length, before + 1, 'an incomplete verdict leaves its words unjudged');
 });
 
-test('judge failure: a question after a silent lead-in still takes the fallback on a punctuation-less provider', async () => {
-  // Punctuation-less provider (no '?'): the fallback is the interrogative lead,
-  // and it now reads the sentences after the ruled lead-in.
+test('judge failure: a question after a silent lead-in is re-judged once, and answered if the retry lands', async () => {
+  // Was: a timed-out judge fell back to the interrogative lead. Shipped removed
+  // the fallback (it fired on half-questions) and retries the judge once.
+  const h = rig(async (_req, n) => (n === 1 ? NO : n === 2 ? new Promise(() => {}) : YES), { punctuation: 'none' });
+  h.say('Great so I am Sarah and I lead the platform team here.');
+  await h.advance(STABILITY_MS + 2000);
+  h.say('How would you shard the sessions table');
+  await h.advance(STABILITY_MS + JUDGE_DEADLINE_MS + 2000);
+  assert.equal(h.state.judgeCalls, 3, 'the timed-out call was retried once');
+  assert.equal(h.state.dispatched.length, 1, 'judge timed out and the question was not lost');
+});
+
+test('judge failure twice: silent, never a guess', async () => {
   const h = rig(async (_req, n) => (n === 1 ? NO : new Promise(() => {})), { punctuation: 'none' });
   h.say('Great so I am Sarah and I lead the platform team here.');
   await h.advance(STABILITY_MS + 2000);
   h.say('How would you shard the sessions table');
-  await h.advance(STABILITY_MS + JUDGE_DEADLINE_MS + 500);
-  assert.equal(h.state.dispatched.length, 1, 'judge timed out and the question was not lost');
+  await h.advance(STABILITY_MS + 2 * JUDGE_DEADLINE_MS + 3000);
+  assert.equal(h.state.judgeCalls, 3, 'one retry, no more');
+  assert.equal(h.state.dispatched.length, 0);
 });
 
 test('judge failure: a lead-in already ruled silent does not by itself fire the fallback', async () => {

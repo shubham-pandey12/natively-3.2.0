@@ -37,7 +37,10 @@ test('prompt: candidate fenced, context capped at JUDGE_CONTEXT_TURNS oldest-fir
 
 test('prompt: the already-answered ask appears only when provided, and AFTER the candidate', () => {
   const with_ = buildJudgePrompt({ candidateText: CAND, recentTurns: [], modeName: null, questionId: 'x', lastAnsweredText: 'your task is to recreate this game in React' });
-  assert.ok(with_.includes('Already answered for the USER moments ago: "your task is to recreate this game in React"'));
+  assert.ok(with_.includes('Already answered for the USER recently: "your task is to recreate this game in React"'));
+  const aged = buildJudgePrompt({ candidateText: CAND, recentTurns: [], modeName: null, questionId: 'x', lastAnsweredText: 'your task is to recreate this game in React', lastAnsweredAgeMs: 12_400 });
+  assert.ok(aged.includes('Already answered for the USER 12 seconds ago:'), 'the judge is told how long ago, so an old answer weighs less');
+  assert.ok(/explicit request to repeat, explain differently, or correct/.test(aged), 'a repeat or correction request still counts as an ask');
   assert.ok(/RESTATES that ask/.test(with_));
   // Position is load-bearing: measured 2026-08-25, with this rule in the
   // preamble the judge fired on five separate elaborations of the ask it
@@ -98,11 +101,15 @@ test('parse: question_text must be GROUNDED in the candidate — a hallucinated 
 
 // ── consult policy ────────────────────────────────────────────────────────
 
-test('consult: incomplete/backchannel/pause/confirmation and tiny non-questions never cost a call; statements and questions do', () => {
+test('consult: incomplete/backchannel/pause/confirmation never cost a call; short text with words does (shipped 2026-11)', () => {
   for (const act of ['incomplete', 'backchannel', 'pause_request', 'confirmation']) {
     assert.equal(shouldConsultJudge(act, CAND), false, act);
   }
-  assert.equal(shouldConsultJudge('statement', 'Cool, right'), false, `under ${JUDGE_MIN_WORDS} words, no '?'`);
+  // Was: under JUDGE_MIN_WORDS words with no '?' never reached the judge. That
+  // dropped short real asks on punctuation-less providers ("Sorting next");
+  // the shipped rule only skips text with no letter or digit at all.
+  assert.equal(shouldConsultJudge('statement', 'Cool, right'), true, 'short, but it has words');
+  assert.equal(shouldConsultJudge('statement', '... —'), false, 'no letter or digit');
   assert.equal(shouldConsultJudge('general_question', 'You ready?'), true, "short but carries a '?'");
   assert.equal(shouldConsultJudge('statement', CAND), true, 'statements are where live tasks hid');
   assert.equal(shouldConsultJudge('general_question', 'Why did you choose PostgreSQL over the rest?'), true);

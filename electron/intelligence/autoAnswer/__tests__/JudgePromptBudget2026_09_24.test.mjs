@@ -25,10 +25,14 @@ const { buildJudgePrompt, JUDGE_CONTEXT_TURNS, JUDGE_PROMPT_MAX_VARIABLE_CHARS }
 
 const longTurn = (tag) => tag + ' ' + 'word '.repeat(600);   // ~3000 chars each
 
-test('a budget constant exists and is documented in tokens the measurement used', () => {
+test('a budget constant exists and is the sum of the declared caps', () => {
+  // Shipped raised the candidate cap to JUDGE_CANDIDATE_CHAR_CAP and stopped
+  // trimming it: a long question is judged whole, and only a candidate past the
+  // hard cap is refused (RangeError) rather than silently cut.
+  const { JUDGE_CANDIDATE_CHAR_CAP, JUDGE_TURN_CHAR_CAP, JUDGE_ANSWERED_CHAR_CAP } = mod;
   assert.ok(typeof JUDGE_PROMPT_MAX_VARIABLE_CHARS === 'number', 'the variable part must have a declared ceiling');
-  assert.ok(JUDGE_PROMPT_MAX_VARIABLE_CHARS <= 8000,
-    `budget too loose: ${JUDGE_PROMPT_MAX_VARIABLE_CHARS} chars on top of ~7819 boilerplate lands well past the flat band`);
+  assert.equal(JUDGE_PROMPT_MAX_VARIABLE_CHARS, JUDGE_CONTEXT_TURNS * JUDGE_TURN_CHAR_CAP + JUDGE_CANDIDATE_CHAR_CAP + JUDGE_ANSWERED_CHAR_CAP);
+  assert.throws(() => buildJudgePrompt({ recentTurns: [], candidateText: 'x'.repeat(JUDGE_CANDIDATE_CHAR_CAP + 1) }), RangeError);
 });
 
 test('eight rambling turns cannot blow the prompt open', () => {

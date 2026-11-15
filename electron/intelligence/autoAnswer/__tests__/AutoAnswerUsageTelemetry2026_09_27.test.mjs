@@ -45,7 +45,7 @@ function meeting(replies, { mode = 'team-meet', model = { provider: 'natively', 
   });
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
-    recentTurns: () => [], dispatch: () => {},
+    recentTurns: () => [], dispatch: () => true,
     judgeCandidate: async (req, signal) => {
       const r = replies[n++] ?? SILENT;
       return typeof r === 'function' ? r(req, signal) : r;
@@ -121,12 +121,13 @@ test('the meeting row counts candidates, answers, silences and judge failures', 
   const [row] = meetings(m.rows);
   assert.ok(row, 'one meeting row');
   assert.equal(row.feature_session_id, 'meeting-1', 'joins the meeting\'s answer rows');
-  // 5, not 4: after an unparseable verdict the engine re-judges at the next
-  // stoppage (lastJudgedKey is cleared), and that retry is a candidate too.
+  // 5, not 4: the roadmap remark's judge timed out and the engine retried it
+  // once (shipped scheduleRecovery); the retry got the unparseable reply and
+  // gave up (judge_unavailable). The agenda remark is then judged silent.
   assert.equal(row.reported_count, 5, 'candidates judged');
   assert.equal(typeof row.reported_duration_ms, 'number');
   assert.equal(row.metadata.answered, 1);
-  assert.equal(row.metadata.silent, 2, 'the thanks, and the retried agenda remark');
+  assert.equal(row.metadata.silent, 3, 'the thanks, the roadmap remark given up after its retry, and the agenda remark');
   assert.equal(row.metadata.judge_timeouts, 1);
   assert.equal(row.metadata.judge_errors, 1);
   assert.ok(Object.keys(row.metadata).length <= 8);

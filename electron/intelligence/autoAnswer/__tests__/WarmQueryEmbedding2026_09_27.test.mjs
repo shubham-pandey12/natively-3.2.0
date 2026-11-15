@@ -107,7 +107,7 @@ test('the engine warms the candidate-to-be when the interviewer stops with words
   const warmed = [];
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
-    recentTurns: () => [], dispatch: () => {}, judgeCandidate: async () => null, log: () => {},
+    recentTurns: () => [], dispatch: () => true, judgeCandidate: async () => null, log: () => {},
     warmQuery: (t) => warmed.push(t),
   };
   const engine = new SimpleAutoAnswerEngine(host, clock);

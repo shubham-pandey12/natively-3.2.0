@@ -32,7 +32,7 @@ function rig(replies = [], { judgeMs = 0 } = {}) {
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
     recentTurns: () => [],
-    dispatch: (q) => { s.dispatched.push(q.text); },
+    dispatch: (q) => { s.dispatched.push(q.text); return true; },
     judgeCandidate: (req) => {
       s.judged.push(req);
       const r = replies[n++] ?? verdict();
@@ -57,7 +57,9 @@ function rig(replies = [], { judgeMs = 0 } = {}) {
 }
 
 const ASK = 'Why not just restart the whole cluster on a smaller node?';
-const CLIPPED = 'Why not just restart the whole cluster on a s';
+// Clipped mid-word: same words, the last one cut short. Shipped isSameUtterance
+// is word-for-word — a final with MORE words is new speech, not the stalled one.
+const CLIPPED = 'Why not just restart the whole cluster on a smaller nod';
 
 test('the normal path is unchanged: a final inside the cap gives the same judging, no lagging flag', async () => {
   const run = async (withStop) => {
@@ -183,6 +185,8 @@ test('isSameUtterance: the late final of a clipped interim, not new speech', () 
   assert.equal(isSameUtterance('How would you shard the orders table', 'How would you shard the orders table?'), true);
   assert.equal(isSameUtterance(CLIPPED, 'Why not just restart the whole cluster on a smaller node and then drain the old one first?'), false, 'many more words: new speech');
   assert.equal(isSameUtterance(CLIPPED, 'Okay, moving on to the next topic now.'), false);
+  assert.equal(isSameUtterance('Why not just restart the whole cluster on a s', ASK), false, 'a final that adds words is new speech');
+  assert.equal(isSameUtterance('How would you shard the orders table?', 'How would you shard the orders tables?'), false, 'a finished sentence is not a clip');
 });
 
 test('the judge prompt carries the lagging note only when asked, byte-identical otherwise', () => {

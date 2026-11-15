@@ -126,11 +126,15 @@ test('13-q6: the engine accepts a dispatch while its OWN prefetch is streaming, 
     assert.equal(engine.canAutoAnswer(), true,
         'a live prefetch is not "busy": the dispatch adopts it — refusing it parked the verdict until the next candidate killed it');
 
-    await dispatch(engine, 'q6');
+    // The dispatch settles only when the adopted stream does (shipped
+    // 2026-11): Auto Answer keeps the question until its answer is shown.
+    const dispatched = dispatch(engine, 'q6');
+    await flush(); await flush();
     assert.deepEqual(finals, [], 'adopted mid-stream: nothing to show until the stream finishes');
     release();
     await untilIdle(engine);
     await flush();
+    assert.equal((await dispatched)?.status, 'completed', 'the dispatch reports the adopted answer as shown');
     assert.equal(finals.length, 1, 'the adopted stream is revealed at completion');
     assert.equal(finals[0].answer, ANSWER);
     engine.reset();
@@ -182,10 +186,12 @@ test('adoption of an IN-FLIGHT prefetch is not conditional on the trigger being 
     await flush();
     assert.equal(engine.getActiveMode(), 'what_to_say', 'the prefetch is in flight');
 
-    await dispatchNonAutomatic(engine);
+    const dispatched = dispatchNonAutomatic(engine);
+    await flush(); await flush();
     release();
     await untilIdle(engine);
     await flush();
+    await dispatched;
     assert.equal(finals.length, 1, 'the adopted stream is revealed at completion for a non-automatic trigger too');
     assert.equal(finals[0].answer, ANSWER);
     assert.equal(engine.automaticGenerationId, null, 'but it is not marked automatic: nothing may barge-in-cancel it');
@@ -216,7 +222,7 @@ test('an adopted IN-FLIGHT prefetch paints the buffered text at adoption and str
     await flush(); await flush();
     assert.deepEqual(tokens, [], 'until the judge rules, a speculative stream paints nothing');
 
-    await dispatch(engine, 'q10');
+    const dispatched = dispatch(engine, 'q10');
     await flush(); await flush();
     assert.ok(tokens.length >= 1, 'adoption paints what was already generated, without waiting for the stream to finish');
     assert.equal(tokens.join(''), LONG_PREFIX, 'exactly the text generated so far');
@@ -231,6 +237,7 @@ test('an adopted IN-FLIGHT prefetch paints the buffered text at adoption and str
     const ids = new Set(tokens.generationIds);
     assert.equal(ids.size, 1, 'every token belongs to one generation');
     assert.equal(finals[0].generationId, [...ids][0], 'and the final replaces THAT row rather than opening a second one');
+    assert.equal((await dispatched)?.status, 'completed');
     engine.reset();
 });
 

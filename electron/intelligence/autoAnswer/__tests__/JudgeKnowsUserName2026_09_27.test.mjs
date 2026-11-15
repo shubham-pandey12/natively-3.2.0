@@ -111,7 +111,7 @@ test('the engine hands the host\'s user name to the judge', async () => {
   const seen = [];
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
-    recentTurns: () => [], dispatch: () => {},
+    recentTurns: () => [], dispatch: () => true,
     judgeCandidate: async (req) => { seen.push(req.userName); return null; },
     userName: () => 'Alex Rivera',
     telemetry: () => {}, log: () => {},

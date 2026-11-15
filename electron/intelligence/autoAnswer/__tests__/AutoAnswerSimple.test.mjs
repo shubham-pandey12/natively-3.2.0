@@ -45,7 +45,7 @@ function makeSimple(judgeImpl, overrides = {}) {
     engineAccepting: () => state.accepting,
     answerStreamActive: () => state.streaming,
     recentTurns: () => state.turns,
-    dispatch: (q, opts) => { state.dispatched.push(q); state.dispatchOpts = opts; state.streaming = true; },
+    dispatch: (q, opts) => { state.dispatched.push(q); state.dispatchOpts = opts; state.streaming = true; return true; },
     offer: (q) => state.offered.push(q),
     cancelAutomaticAnswer: (r) => { state.cancelled.push(r); return true; },
     telemetry: (e) => { state.events.push(e); if (e.name === 'auto_answer_ignored') state.skips.push(e.skipReason); },
@@ -73,6 +73,9 @@ test('a monologue costs ONE judge call, not one per final', async () => {
   }
   assert.equal(h.state.judgeCalls.length, 0, 'no call while speech continues');
   await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 0, 'the last words are still an interim: nothing is judged before their final');
+  h.interviewer('part 5 continues', true);                  // the trailing interim's final lands
+  await h.advance(STABILITY_MS + 200);
   assert.equal(h.state.judgeCalls.length, 1, 'one call for the whole utterance');
   assert.ok(/part 0 .* part 5/s.test(h.state.judgeCalls[0].candidateText.replace(/\n/g, ' ')), 'the call carries the WHOLE utterance');
 });
@@ -94,10 +97,15 @@ test('interims also hold the window open (the interviewer is still talking)', as
   await h.advance(60);
   assert.equal(h.state.judgeCalls.length, 0, 'speech is still flowing: nothing asked yet');
   h.interviewer('about the indexes', false);
-  await h.advance(600);                                    // they stop mid-thought
+  await h.advance(STABILITY_MS + 600);                     // the transcriber has not finalised those words
+  assert.equal(h.state.judgeCalls.length, 0, 'a dangling interim means the question is not over: nothing is judged');
+  assert.deepEqual(h.texts(), [], 'and nothing is answered in parts');
+  h.interviewer('And also how about the indexes?');        // their final lands
+  await h.advance(60);
   assert.deepEqual(h.texts(), [], 'an early verdict must never COMMIT inside the window');
-  await h.advance(STABILITY_MS);
+  await h.advance(STABILITY_MS + 200);
   assert.equal(h.texts().length, 1, 'it commits when the window finally completes');
+  assert.ok(/PostgreSQL.*indexes/s.test(h.texts()[0]), 'as ONE answer for the whole question');
 });
 
 test('judge yes → dispatch (extracted question when grounded); judge no → silent; verdicts stand without re-judging', async () => {
@@ -106,7 +114,9 @@ test('judge yes → dispatch (extracted question when grounded); judge no → si
     : NO);
   h.interviewer('Okay, have you heard of the popular word game called wordle? Yeah I played it.');
   await h.advance(STABILITY_MS + 300);
-  assert.deepEqual(h.texts(), ['have you heard of the popular word game called wordle?']);
+  // Shipped: the answer is generated for the words the judge saw, not its
+  // paraphrase — question_text only steers the ruled-out check.
+  assert.deepEqual(h.texts(), ['Okay, have you heard of the popular word game called wordle? Yeah I played it.']);
   h.state.streaming = false; h.state.accepting = true;
   await h.advance(3000);
   h.interviewer('So this is on the New York Times website as you can see.');
@@ -137,14 +147,19 @@ test('new speech supersedes an in-flight verdict; the next stoppage judges the f
   assert.ok(/hardest bug .* how you found it\?/s.test(h.texts()[0]));
 });
 
-test('prefilter: backchannels and tiny fragments never cost a call', async () => {
-  const h = makeSimple(async () => YES());
+test('prefilter: backchannels never cost a call; a short fragment with words is the judge\'s call', async () => {
+  // Was: tiny fragments ("And so.") were dropped by a word-count prefilter.
+  // Shipped only drops backchannels and text with no letter or digit, so a
+  // short real ask on a punctuation-less provider is not lost.
+  const h = makeSimple(async () => NO);
   h.interviewer('Cool.');
   await h.advance(STABILITY_MS + 200);
+  assert.equal(h.state.judgeCalls.length, 0, `no call for a backchannel (skips: ${h.state.skips.join(',')})`);
+  assert.ok(h.state.skips.includes('backchannel'));
   h.interviewer('And so.');
   await h.advance(STABILITY_MS + 200);
-  assert.equal(h.state.judgeCalls.length, 0, `no calls for chatter (skips: ${h.state.skips.join(',')})`);
-  assert.deepEqual(h.texts(), []);
+  assert.equal(h.state.judgeCalls.length, 1, 'a fragment with words is judged');
+  assert.deepEqual(h.texts(), [], 'and the judge keeps it silent');
 });
 
 test('above ANSWER_FLOOR it answers; at or below it stays silent — no card, no asking', async () => {
@@ -200,19 +215,32 @@ test('the user\'s own speech never suppresses or cancels an automatic answer (us
   assert.deepEqual(h.state.cancelled, [], 'and never cancels the streaming answer');
 });
 
-test('judge unavailable → only a trailing ? fires (near-legacy fallback, no fire-on-everything)', async () => {
+test('judge unavailable → silent, never a guess: no hook stays quiet; an erroring judge is retried once, then gives up', async () => {
+  // Was: a trailing '?' fired without a verdict. Shipped removed that fallback
+  // — it answered half-questions mid-speech — and retries the judge instead.
   const h = makeSimple(null);                               // no judge hook at all
   h.interviewer('So the way this works is that every day a word is picked.');
   await h.advance(STABILITY_MS + 200);
-  assert.deepEqual(h.texts(), [], 'statement without judge stays silent');
   h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await h.advance(STABILITY_MS + 200);
-  assert.equal(h.texts().length, 1);
+  assert.deepEqual(h.texts(), [], 'no judge, no answer');
+  assert.ok(h.state.skips.includes('judge_unavailable'));
+  assert.ok(h.state.cancelled.includes('judge_unavailable'), 'and any speculative answer for it is cancelled');
 
   const g = makeSimple(async () => { throw new Error('quota'); });  // judge erroring
   g.interviewer('Why did you choose PostgreSQL over the alternatives here?');
-  await g.advance(STABILITY_MS + 300);
-  assert.equal(g.texts().length, 1, 'error → ? fallback');
+  await g.advance(STABILITY_MS + RETRY_TTL_MS + 1000);
+  assert.deepEqual(g.texts(), [], 'error → no answer');
+  assert.equal(g.state.judgeCalls.length, 2, 'retried exactly once');
+  assert.ok(g.state.events.some(e => e.name === 'auto_answer_retrying'), 'the retry is visible in telemetry');
+  assert.ok(g.state.skips.includes('judge_unavailable'));
+  const skip = g.state.events.find(e => e.skipReason === 'judge_unavailable');
+  assert.equal(skip.question, 'Why did you choose PostgreSQL over the alternatives here?', 'the host gets the words to show (and strips them from telemetry)');
+
+  const r = makeSimple(async (_req, n) => { if (n === 1) throw new Error('blip'); return YES(); });
+  r.interviewer('Why did you choose PostgreSQL over the alternatives here?');
+  await r.advance(STABILITY_MS + RETRY_TTL_MS);
+  assert.equal(r.texts().length, 1, 'a transient judge failure is recovered by the retry');
 });
 
 test('a provider endpoint confirms the stop early', async () => {
@@ -335,16 +363,20 @@ test('a user INTERIM never cancels the streaming answer either', async () => {
 });
 
 test('review#4: punctuation provenance — no-\'?\' is negative evidence only when the provider guarantees marks', async () => {
-  // Punctuation-less provider (Soniox): interrogative-led question without '?' still fires via the no-judge fallback.
-  const h = makeSimple(null);
+  // Punctuation-less provider (Soniox): an interrogative lead without '?' still reaches the judge.
+  const h = makeSimple(async () => YES());
   h.interviewer('why did you choose PostgreSQL over the alternatives here today');
   await h.advance(STABILITY_MS + 200);
-  assert.equal(h.texts().length, 1, 'interrogative fallback on a punctuation-less provider');
-  // Punctuating provider: the same missing '?' IS evidence — short fragment waits.
-  const g = makeSimple(async () => YES());
+  assert.equal(h.state.judgeCalls.length, 1, 'judged on a punctuation-less provider');
+  assert.equal(h.texts().length, 1);
+  // Punctuating provider: a short unpunctuated fragment is no longer pre-dropped;
+  // the judge sees it (and its "incomplete" verdict keeps it waiting).
+  const INCOMPLETE = JSON.stringify({ is_ask: false, directed_at_user: true, complete: false, act: 'incomplete', answerability: 0.1, question_text: null });
+  const g = makeSimple(async () => INCOMPLETE);
   g.engine.ingest({ speaker: 'interviewer', text: 'And the cache', final: true, timestamp: g.clock.now(), origin: 'stt', punctuationSource: 'provider' });
   await g.advance(STABILITY_MS + 200);
-  assert.equal(g.state.judgeCalls.length, 0, 'short unpunctuated fragment on a punctuating provider never costs a call');
+  assert.ok(g.state.judgeCalls.length >= 1, 'judged (the early ask, and again at commit after "incomplete")');
+  assert.deepEqual(g.texts(), [], 'and an incomplete fragment is not answered');
 });
 
 test('the offer card is gone: nothing is ever offered or retracted, whatever the score', async () => {
@@ -703,21 +735,29 @@ test('a park dropped by supersession says so — never a silent exit (live sessi
 
 // ── deferred verdicts (live run 2026-08-25: 25 of 28 verdicts discarded) ─────
 
-test('an INTERIM supersede defers the verdict instead of discarding it — and costs no second call', async () => {
+test('an INTERIM supersede discards the verdict; the whole question is judged again once the speaker stops', async () => {
+  // Was: the superseded verdict was held and reused. Shipped discards it — an
+  // interim means the interviewer is still talking, and the words that follow
+  // may turn the question into a different one.
   const resolvers = [];
   const h = makeSimple(() => new Promise((r) => resolvers.push(r)));
   h.interviewer('Why did you choose PostgreSQL over the alternatives on that project?');
   await h.advance(STABILITY_MS + 100);
   assert.equal(resolvers.length, 1, 'the stoppage judged');
-  h.interviewer('uh', false);                     // an interim: cannot change the candidate
-  resolvers[0](YES({ answerability: 0.9 }));      // …so this verdict is still exactly about it
+  h.interviewer('and', false);                    // the interviewer carries on
+  resolvers[0](YES({ answerability: 0.9 }));
   await flush(); await flush();
   assert.deepEqual(h.texts(), [], 'not dispatched mid-sentence — the interviewer is audibly still there');
-  await h.advance(STABILITY_MS + 200);            // they stop for real
-  assert.equal(resolvers.length, 1, 'the deferred verdict is REUSED, not re-judged');
-  assert.equal(h.texts().length, 1, 'and it dispatches at the quiet point');
-  assert.ok(/PostgreSQL/.test(h.texts()[0]));
-  assert.ok(h.state.events.some(e => e.judgeOutcome === 'held_applied'), 'recorded as held_applied');
+  assert.ok(h.state.events.some(e => e.judgeOutcome === 'stale'), 'recorded as a stale verdict, not held');
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(resolvers.length, 1, 'nothing is judged while the interim dangles');
+  h.interviewer('and what would you pick today?'); // the final for those words
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(resolvers.length, 2, 'the grown question is judged once');
+  assert.ok(/PostgreSQL.*pick today/s.test(h.state.judgeCalls[1].candidateText));
+  resolvers[1](YES());
+  await flush(); await flush();
+  assert.equal(h.texts().length, 1, 'ONE answer for the whole question');
 });
 
 test('growth is never held across: a completed question re-judges rather than answering the fragment', async () => {
@@ -736,17 +776,21 @@ test('growth is never held across: a completed question re-judges rather than an
   assert.ok(/how you found it\?/.test(h.texts()[0]), 'the WHOLE question is answered');
 });
 
-test('a deferred verdict survives the user talking over it', async () => {
+test('a question re-judged after an interim still answers while the user talks over it', async () => {
   const resolvers = [];
   const h = makeSimple(() => new Promise((r) => resolvers.push(r)));
   h.interviewer('So how would you scale that service to ten times the traffic?');
   await h.advance(STABILITY_MS + 100);
   h.interviewer('mm', false);
-  resolvers[0](YES({ answerability: 0.9 }));      // held
+  resolvers[0](YES({ answerability: 0.9 }));      // stale: superseded by the interim
   await flush(); await flush();
   h.user('I would start by adding a read replica and caching the hot keys.');
-  await h.advance(STABILITY_MS * 3);
-  assert.equal(h.texts().length, 1, `the held verdict still fires at the next stoppage (skips: ${h.state.skips.join(',')})`);
+  h.interviewer('mm.');                           // the interim's final
+  await h.advance(STABILITY_MS + 200);
+  assert.equal(resolvers.length, 2, 're-judged once the interviewer stopped');
+  resolvers[1](YES({ answerability: 0.9 }));
+  await flush(); await flush();
+  assert.equal(h.texts().length, 1, `the user's speech does not block it (skips: ${h.state.skips.join(',')})`);
 });
 
 test('a deferred verdict expires, and a SILENT verdict is never deferred at all', async () => {
@@ -803,7 +847,7 @@ test('the dev content trace names the exact words judged, and the engine works w
     meetingGeneration: () => 1,
     engineAccepting: () => true,
     recentTurns: () => [],
-    dispatch: (q) => out.push(q),
+    dispatch: (q) => { out.push(q); return true; },
     judgeCandidate: async () => YES(),
   }, clock);
   bare.onMeetingStart();

@@ -3802,9 +3802,13 @@ export class AppState {
       if (!this.contentTraceEnabled()) return;
       console.log(`[AutoAnswer:text] ${label}\n    “${text}”`);
     },
+    // Resolves to the answer's status (completed / cancelled / failed /
+    // skipped): Auto Answer keeps the question until it was shown, retries a
+    // failure once, and re-judges a cancelled one with the rest of the speech.
     dispatch: (question, { reuseSpeculative }) => {
       return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
+        return { status: 'failed' as const };
       });
     },
     cancelAutomaticAnswer: (reason) => this.intelligenceManager.cancelAutomaticAnswer(reason),
@@ -3842,7 +3846,8 @@ export class AppState {
     telemetry: (event) => {
       try {
         const { telemetryService } = require('./services/telemetry/TelemetryService');
-        const { name, meetingGeneration, provider, ...properties } = event;
+        // `question` is transcript text: never persisted or sent as telemetry.
+        const { name, meetingGeneration, provider, question: _question, ...properties } = event;
         telemetryService.track({ name, provider, properties: { meetingGeneration, ...properties } });
       } catch { /* telemetry must never break the pipeline */ }
       this.autoAnswerUsage.observe(event);
@@ -3993,6 +3998,9 @@ export class AppState {
 
   private cancelAutoAnswer(): void {
     this.simpleAutoAnswer.onMeetingStop();
+    // Auto Answer off or the meeting ended: an automatic answer still at the
+    // planner or streaming is not wanted any more.
+    this.intelligenceManager.cancelAutomaticAnswer('auto_disabled_or_meeting_ended');
   }
 
   /** Stable id prefix so the renderer can replace the card in place and retract it by id. */
@@ -4290,6 +4298,7 @@ export class AppState {
       if (this._autoAnswerEnabled) {
         this.simpleAutoAnswer.ingest({
           speaker,
+          ...(speakerId ? { speakerId } : {}),
           text: segment.text,
           timestamp: Date.now(),
           final: segment.isFinal,
@@ -4880,14 +4889,18 @@ export class AppState {
         // endpoint anyway) and the local models (their own VAD closes the
         // segment, then inference runs). For those the stop always precedes
         // the text, so it would judge the turn without its last words.
+        // Every provider still reports the stop, so Auto Answer knows the
+        // interviewer is no longer speaking; only the trusted ones confirm
+        // the end of the turn early (the others restart the quiet window).
         if (this._autoAnswerEnabled && this.isMeetingActive) {
           try {
             const { CredentialsManager } = require('./services/CredentialsManager');
             const provider = CredentialsManager.getInstance().getSttProvider();
-            if (acceptsLocalSpeechEndHint(provider)) {
-              this.simpleAutoAnswer.onLocalSpeechEnd();
-            }
-          } catch { /* an endpoint hint must never break capture */ }
+            this.simpleAutoAnswer.onLocalSpeechEnd(acceptsLocalSpeechEndHint(provider));
+          } catch {
+            /* an endpoint hint must never break capture */
+            this.simpleAutoAnswer.onLocalSpeechEnd(false);
+          }
         }
       }
     });

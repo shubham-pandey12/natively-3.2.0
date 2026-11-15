@@ -29,7 +29,7 @@ function rig(replies) {
   let n = 0;
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
-    recentTurns: () => [], dispatch: (q) => { state.dispatched.push(q.text); },
+    recentTurns: () => [], dispatch: (q) => { state.dispatched.push(q.text); return true; },
     judgeCandidate: async () => replies[n++] ?? SILENT,
     telemetry: (e) => { if (e.name === 'auto_answer_ignored') state.skipped.push(e.skipReason); },
     log: () => {},
@@ -59,7 +59,9 @@ test('a NEW question after a ruled-out remark is still answered', async () => {
   const h = rig([SILENT, verdict({ question_text: ask })]);
   await h.say('Take your time with this one, there is no rush at all.');
   await h.say(ask);
-  assert.deepEqual(h.state.dispatched, [ask]);
+  // Shipped dispatches the judged words (the ruled-out remark stays as context).
+  assert.equal(h.state.dispatched.length, 1);
+  assert.ok(h.state.dispatched[0].endsWith(ask), 'the new question is what gets answered');
 });
 
 test('an incomplete ask finished by later speech is still answered (incomplete is never ruled out)', async () => {

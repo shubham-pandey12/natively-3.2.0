@@ -42,7 +42,7 @@ test('a report inside the ration window still gets the head start', async () => 
   const prefetched = [];
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
-    recentTurns: () => [], dispatch: () => {}, log: () => {},
+    recentTurns: () => [], dispatch: () => true, log: () => {},
     judgeCandidate: async () => JSON.stringify({ is_ask: true, directed_at_user: true, complete: true, act: 'question', action: 'answer', answerability: 0.9, question_text: null }),
     prefetchAnswer: (id, text) => prefetched.push(text),
   };

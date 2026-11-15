@@ -31,7 +31,7 @@ function makeSimple(judgeImpl, overrides = {}) {
         meetingGeneration: () => 1,
         engineAccepting: () => state.accepting,
         recentTurns: () => state.turns,
-        dispatch: (q) => { state.dispatched.push(q.text); },
+        dispatch: (q) => { state.dispatched.push(q.text); return true; },
         telemetry: (e) => { if (e.name === 'auto_answer_ignored') state.skips.push(e.skipReason); },
         log: () => {},
         judgeCandidate: (req, signal) => { state.judgeCalls.push({ req, signal }); return judgeImpl(req); },

@@ -267,7 +267,7 @@ export class IntelligenceManager extends EventEmitter {
         return inserted;
     }
 
-    async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): Promise<void> {
+    async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): ReturnType<IntelligenceEngine['handleSuggestionTrigger']> {
         return this.engine.handleSuggestionTrigger(trigger);
     }
 
@@ -276,8 +276,8 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.canAutoAnswer();
     }
 
-    /** Barge-in: abort the streaming AUTOMATIC answer only. See IntelligenceEngine.cancelAutomaticAnswer. */
-    cancelAutomaticAnswer(reason: 'user_barge_in'): boolean {
+    /** Stop the AUTOMATIC answer only (never a manual one). See IntelligenceEngine.cancelAutomaticAnswer. */
+    cancelAutomaticAnswer(reason: Parameters<IntelligenceEngine['cancelAutomaticAnswer']>[0]): boolean {
         return this.engine.cancelAutomaticAnswer(reason);
     }
 
@@ -321,7 +321,7 @@ export class IntelligenceManager extends EventEmitter {
     runAutoAnswer(
         question: Parameters<IntelligenceEngine['runAutoAnswer']>[0],
         options: { reuseSpeculative: boolean },
-    ): Promise<void> {
+    ): ReturnType<IntelligenceEngine['runAutoAnswer']> {
         return this.engine.runAutoAnswer(question, { ...options, context: this.getFormattedContext(120) });
     }
     /**

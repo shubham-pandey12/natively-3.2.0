@@ -139,7 +139,32 @@ export type AutoAnswerSkipReason =
     | 'already_answered'
     | 'engine_busy_or_cooling'
     | 'pending_expired'
-    | 'pending_superseded';
+    | 'pending_superseded'
+    /** The judge failed (timeout, error, unparseable) twice: no guess is dispatched. */
+    | 'judge_unavailable'
+    /** The automatic answer was cancelled before it was shown (interviewer resumed, manual press, transcript revised). */
+    | 'dispatch_cancelled'
+    /** The automatic answer failed and its one retry did too (or it was not retryable). */
+    | 'dispatch_failed';
+
+/** Why the automatic answer in flight was stopped. */
+export type AutoAnswerCancelReason =
+    | 'user_barge_in'
+    | 'interviewer_resumed'
+    | 'judge_unavailable'
+    | 'transcript_revised'
+    | 'manual_answer'
+    | 'auto_disabled_or_meeting_ended'
+    | 'engine_reset';
+
+/**
+ * What an automatic dispatch resolved to. `true` also means completed.
+ * 'skipped': another answer owns the engine; 'partial': the stream was cut.
+ */
+export interface AutoAnswerDispatchResult {
+    status: 'completed' | 'cancelled' | 'failed' | 'skipped' | 'partial';
+    retryable?: boolean;
+}
 
 /** The ternary policy output (V3 Amendment 4) plus the orthogonal V2 actions. */
 export type AutoAnswerPolicyAction = 'auto' | 'offer' | 'silent' | 'wait' | 'speculate' | 'queue';
@@ -181,7 +206,9 @@ export type AutoAnswerTelemetryEventName =
     | 'auto_answer_feedback'
     | 'auto_answer_cancelled'
     | 'auto_answer_completed'
-    | 'auto_answer_offered';
+    | 'auto_answer_offered'
+    /** A judge or answer failure: the same words are tried once more. */
+    | 'auto_answer_retrying';
 
 export interface AutoAnswerTelemetryEvent {
     name: AutoAnswerTelemetryEventName;
@@ -233,5 +260,12 @@ export interface AutoAnswerTelemetryEvent {
      * for the same reason as the retired skip reasons above — recorded runs
      * contain them.
      */
-    supersededBy?: 'interim' | 'final' | 'user_answering' | 'meeting_reset' | 'meeting_ended' | 'manual_answer';
+    supersededBy?: 'interim' | 'final' | 'user_answering' | 'meeting_reset' | 'meeting_ended' | 'manual_answer' | 'speech_resumed';
+    /**
+     * The question text, on auto_answer_retrying and on the ignored reasons the
+     * host reports to the user (judge_unavailable, engine_busy_or_cooling,
+     * dispatch_failed). TRANSCRIPT TEXT: the host must strip it before the
+     * event is persisted or sent as telemetry.
+     */
+    question?: string;
 }
