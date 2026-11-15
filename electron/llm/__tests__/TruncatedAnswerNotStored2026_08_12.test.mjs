@@ -318,7 +318,7 @@ describe('the WTA path is protected too, not just manual chat', () => {
 
   test('the gate precedes the addAssistantMessage call it governs', () => {
     const guard = engineSrc.indexOf('if (wtaTruncation.truncated) {');
-    const write = engineSrc.indexOf("addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer')");
+    const write = engineSrc.indexOf("addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer'");
     assert.ok(guard > 0 && write > 0);
     assert.ok(guard < write, 'the write policy must be decided BEFORE the session write');
   });

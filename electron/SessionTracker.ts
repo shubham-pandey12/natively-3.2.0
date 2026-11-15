@@ -111,6 +111,15 @@ export interface ContextItem {
     sttProvider?: string;
     /** Punctuation provenance (WTA audit F9, additive; see TranscriptSegment). */
     punctuationSource?: import('./llm/punctuationProvenance').PunctuationSource;
+    /** Assistant items: when the answer STARTED generating. `timestamp` is
+     *  when it finished, so interviewer speech that began while the answer was
+     *  still streaming sits before it in this list but belongs to the NEXT
+     *  question. Absent = boundary at `timestamp` (legacy). */
+    startedAt?: number;
+    /** Assistant items: the question this answer answered. Interviewer finals
+     *  are stamped on ARRIVAL, so the last words of the answered question can
+     *  land just after `startedAt`; this tells them apart from new speech. */
+    answeredQuestion?: string;
 }
 
 /**
@@ -519,6 +528,8 @@ export class SessionTracker {
         // same surface has already committed (see
         // lastCommittedAttemptBySurface above).
         identity?: TurnIdentity,
+        // When the answer started and what it answered (see ContextItem.startedAt).
+        answered?: { startedAt: number; question?: string },
     ): boolean {
         // A diagram of this answer that the overlay already repaired (the
         // repair can land while the answer is still streaming, before any of
@@ -586,10 +597,17 @@ export class SessionTracker {
             return false;
         }
 
+        const recordedAt = Date.now();
         this.contextItems.push({
             role: 'assistant',
             text: cleanText,
-            timestamp: Date.now()
+            timestamp: recordedAt,
+            ...(answered && Number.isFinite(answered.startedAt) && answered.startedAt <= recordedAt
+                ? {
+                    startedAt: answered.startedAt,
+                    ...(answered.question?.trim() ? { answeredQuestion: answered.question.trim() } : {}),
+                }
+                : {}),
         });
 
         // Also add to the transcript so it persists in the session history (and summaries)

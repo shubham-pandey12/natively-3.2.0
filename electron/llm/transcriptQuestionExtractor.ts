@@ -67,6 +67,51 @@ const GREETING_ONLY = /^(hi|hello|hey|good (morning|afternoon|evening)|how are y
 const SPLIT_CONSTRAINT_LEAD = /^(?:you\s+(?:can|may|should|could)\s+(?:safely\s+)?assume|assume\b|note\s+that|the\s+constraints?\b|constraints?\s*:|the\s+input\s+(?:is|will|can|may)|inputs?\s+(?:are|is|will)|do\s+it\s+(?:in|without)|without\s+using\b|in\s+o\s*\(|with\s+o\s*\()/i;
 const SPLIT_CONSTRAINT_MAX_GAP_MS = 30_000;
 
+// WHOLE-UTTERANCE JOIN (opt-in, manual What-to-Answer press). Speech-to-text
+// cuts one spoken question into a final at every pause, so the newest
+// interviewer turn is often only its tail ("What's your confident simple
+// answer?"). Auto Answer never had this problem: it joins every interviewer
+// final since the last answer (SimpleAutoAnswer `pending`, aged out after
+// PENDING_MAX_AGE_MS = 90 s). The join below applies that same rule to the
+// transcript: walk back over interviewer turns and stop at the previous
+// ANSWER (assistant turn). The candidate's own speech is skipped, not a stop:
+// Auto Answer ignores the user channel too. Same 90 s age bound as Auto
+// Answer; the character cap only keeps a runaway monologue out of the prompt.
+export const UTTERANCE_JOIN_MAX_AGE_MS = 90_000;
+export const UTTERANCE_JOIN_MAX_CHARS = 1_200;
+/** Without the answered question on record, interviewer finals arriving this
+ *  soon after an answer started are taken as that question's late tail
+ *  (finals are stamped on arrival; endpointing + utterance end ≈ 1.3 s). */
+export const ANSWER_START_TAIL_GRACE_MS = 3_000;
+/** Share of a turn's words found in the answered question that marks it as
+ *  that question's tail rather than new speech. */
+const ANSWERED_TAIL_OVERLAP = 0.6;
+/** A late final arrives within seconds of the press (provider latency, the
+ *  stalled-transcript fallback). Past this, speech is new even when it reuses
+ *  the answered question's words ("…for logged-in users?" follow-up). */
+export const ANSWERED_TAIL_MAX_LAG_MS = 8_000;
+
+const joinWords = (s: string): string[] =>
+    (s.toLowerCase().match(/[a-z0-9']+/g) ?? []).filter(w => w.length > 1);
+
+/** Is `text` part of the question an answer already answered? */
+function isAnsweredTail(text: string, at: number, answer: { startedAt: number; answeredQuestion?: string }): boolean {
+    if (at - answer.startedAt > ANSWERED_TAIL_MAX_LAG_MS) return false;
+    if (answer.answeredQuestion) {
+        const words = joinWords(text);
+        if (words.length === 0) return true;
+        const answered = new Set(joinWords(answer.answeredQuestion));
+        const hit = words.filter(w => answered.has(w)).length;
+        return hit / words.length >= ANSWERED_TAIL_OVERLAP;
+    }
+    return at - answer.startedAt <= ANSWER_START_TAIL_GRACE_MS;
+}
+
+export interface ExtractLatestQuestionOptions {
+    /** Join the interviewer's whole current utterance, not only its newest segment. */
+    joinUtterance?: boolean;
+}
+
 // Social-pleasantry chit-chat that is grammatically a question ("did you have
 // any trouble finding parking?", "how was your weekend?", "did you find us
 // okay?") but is NOT a substantive interview question. These pass QUESTION_MARK
@@ -317,7 +362,8 @@ function classifyType(q: string): ExtractedQuestionType {
  */
 export function extractLatestQuestion(
     turns: TranscriptTurn[],
-    windowTurns: number = 6
+    windowTurns: number = 6,
+    options: ExtractLatestQuestionOptions = {},
 ): ExtractedQuestion {
     const empty: ExtractedQuestion = {
         detectedSpeaker: 'unknown',
@@ -460,7 +506,64 @@ export function extractLatestQuestion(
             latestQuestion = `${prevRaw} ${latestQuestion}`;
         }
     }
-    const hasMark = QUESTION_MARK.test(scoringText) || QUESTION_MARK.test(latestQuestion);
+    // WHOLE-UTTERANCE JOIN (see UTTERANCE_JOIN_MAX_AGE_MS). Only the EMITTED
+    // question grows: shape scoring keeps the chosen turn (plus the split
+    // constraint above), so confidence, type and the grounding gates score
+    // exactly as before. The walk covers the split-constraint turn too, so
+    // the joined text replaces it rather than repeating it. Shape scoring
+    // below reads the question as it was BEFORE the join.
+    const unjoinedQuestion = latestQuestion;
+    if (options.joinUtterance) {
+        const parts: string[] = [rawTextAt(chosenIdx) || chosen.text.trim()];
+        let chars = parts[0].length;
+        // ANSWER BOUNDARIES. An answer is recorded when it FINISHES but carries
+        // when it STARTED (`startedAt`); speech from before any start is an
+        // older, answered question. Every answer that started before the newest
+        // interviewer turn counts, wherever it sits in the list: one still
+        // streaming when the next question began is recorded after that
+        // question. Finals are stamped on ARRIVAL, so the answered question's
+        // own last words can land after the start (even after a fast answer is
+        // recorded): `isAnsweredTail` cuts those too. Answers without a start
+        // (legacy writers) stay a plain stop where they sit.
+        const hasStart = (t: TranscriptTurn): t is TranscriptTurn & { startedAt: number } =>
+            t.role === 'assistant' && typeof t.startedAt === 'number' && Number.isFinite(t.startedAt) && t.startedAt <= t.timestamp;
+        // One listed BEFORE the newest turn was recorded before that speech
+        // arrived: always a stop, whatever the clocks say.
+        const answers = cleaned
+            .map((t, idx) => ({ t, idx }))
+            .filter(({ t, idx }) => hasStart(t) && (idx < chosenIdx || t.startedAt! <= chosen!.timestamp))
+            .map(({ t }) => ({ startedAt: t.startedAt!, answeredQuestion: t.answeredQuestion }));
+        const floor = answers.reduce((max, a) => Math.max(max, a.startedAt), -Infinity);
+        for (let i = chosenIdx - 1; i >= 0; i--) {
+            const turn = cleaned[i];
+            if (hasStart(turn)) continue;
+            // The candidate's own speech ("hmm, okay", thinking aloud) does not
+            // end the interviewer's question: Auto Answer ignores the user
+            // channel for the same reason. Answered questions are still cut
+            // off by the answer boundaries above.
+            if (turn.role === 'user') continue;
+            if (turn.role !== 'interviewer') break;
+            if (turn.timestamp < floor) break;
+            if (chosen.timestamp - turn.timestamp > UTTERANCE_JOIN_MAX_AGE_MS) break;
+            const raw = rawTextAt(i) || turn.text.trim();
+            if (!raw) continue;
+            if (answers.some(a => turn.timestamp >= a.startedAt && isAnsweredTail(raw, turn.timestamp, a))) break;
+            // A whole-turn greeting is not part of the question ("Hi" → ask).
+            if (GREETING_ONLY.test(turn.text.trim()) || GREETING_ONLY.test(raw)) continue;
+            // Two whole questions in a row ("What is a B-Tree?" then "What is
+            // an LSM Tree?") are two asks, not one: the earlier one finished
+            // with '?' and the newer part opens as a question of its own. A
+            // continuation ("…again, what's your answer?", "and how would you
+            // measure it?") does not open that way and is still joined. Read
+            // on RAW text: cleaning strips a leading "and"/"so".
+            if (/\?\s*$/.test(raw) && INTERROGATIVE_LEAD.test(parts[0])) break;
+            if (chars + raw.length + 1 > UTTERANCE_JOIN_MAX_CHARS) break;
+            parts.unshift(raw);
+            chars += raw.length + 1;
+        }
+        if (parts.length > 1) latestQuestion = parts.join(' ').replace(/\s+/g, ' ').trim();
+    }
+    const hasMark = QUESTION_MARK.test(scoringText) || QUESTION_MARK.test(unjoinedQuestion);
     const hasLead = INTERROGATIVE_LEAD.test(scoringText);
     // F9: on providers that never guarantee punctuation, the absence of '?'
     // (and of clause-separating commas) is NEUTRAL — see the clause patterns

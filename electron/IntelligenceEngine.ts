@@ -2778,6 +2778,8 @@ export class IntelligenceEngine extends EventEmitter {
                 timestamp: item.timestamp,
                 // F9: provenance flows to the extractor's confidence scoring.
                 ...(item.punctuationSource ? { punctuationSource: item.punctuationSource } : {}),
+                ...(typeof item.startedAt === 'number' ? { startedAt: item.startedAt } : {}),
+                ...(item.answeredQuestion ? { answeredQuestion: item.answeredQuestion } : {}),
             }));
 
             let preparedTranscript = prepareTranscriptForWhatToAnswer(transcriptTurns, 12);
@@ -2789,7 +2791,12 @@ export class IntelligenceEngine extends EventEmitter {
             );
 
             const lastInterviewerTurn = this.session.getLastInterviewerTurn();
-            const extractedQuestion = extractLatestQuestion(transcriptTurns);
+            // A press with no question of its own answers what the interviewer
+            // just said: take the whole utterance, as Auto Answer does, not only
+            // the last speech-to-text segment (which was often just its tail).
+            const extractedQuestion = extractLatestQuestion(transcriptTurns, undefined, {
+                joinUtterance: !isSpeculative && !question?.trim(),
+            });
             // Set when the user's OWN spoken line is chosen as the question below.
             let questionSpokenByUser = false;
             // SPEAKER-MISATTRIBUTION FALLBACK (2026-09-07, always answer). Real
@@ -7525,7 +7532,14 @@ export class IntelligenceEngine extends EventEmitter {
 
             setOutcome(wtaWriteDecision.policy !== 'do_not_store' && finalWtaAnswer.trim() ? 'success' : 'failed',
                 wtaWriteDecision.policy === 'do_not_store' ? wtaWriteDecision.reason : undefined);
-            this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer');
+            // `now` is when this run started: a question the interviewer began
+            // while this answer was streaming is not cut at this answer. The
+            // answered question tells the late-arriving tail of THIS question
+            // apart from that new speech.
+            this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer', undefined, {
+                startedAt: now,
+                question: question || extractedQuestion.latestQuestion || lastInterviewerTurn || undefined,
+            });
 
             // Full-JIT write-gating law (§6): a provider-error/no-answer WTA
             // fallback (deadline timeout, leaked-schema-stub) carries a
