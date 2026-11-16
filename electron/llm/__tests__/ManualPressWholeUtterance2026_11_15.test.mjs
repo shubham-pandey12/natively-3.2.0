@@ -315,3 +315,58 @@ describe('manual press — whole interviewer utterance', () => {
     assert.equal(extractLatestQuestion(t, undefined, JOIN).latestQuestion, 'And how would you cache tenant pages for logged-in users?');
   });
 });
+
+// Codex review 2026-11-16, finding 5: the candidate's own spoken answer
+// (picked up on the user channel) is a boundary, even when the interviewer's
+// next question has no question mark. Short fillers are still skipped.
+describe('manual press — spoken candidate answer is a boundary', () => {
+  test('a full spoken answer stops the join before an unpunctuated follow-up', () => {
+    const t = turns([
+      ['interviewer', 'How would you index the custom JSONB fields on the orders table?', 0],
+      ['user', 'I would look at the query patterns first and add a GIN index on the fields we filter by most often.', 4_000],
+      ['interviewer', 'Tell me about caching', 14_000],
+    ]);
+    assert.equal(extractLatestQuestion(t, undefined, JOIN).latestQuestion, 'Tell me about caching');
+  });
+
+  test('mic echo of the interviewer (or the candidate reading the question aloud) does not cut the question', () => {
+    const t = turns([
+      ['interviewer', 'Imagine traffic from ten brands spikes at once during a big sale event,', 0],
+      ['user', 'imagine traffic from ten brands spikes at once during a big sale event', 300],
+      ['interviewer', 'what is your Redis strategy', 2_000],
+    ]);
+    assert.equal(extractLatestQuestion(t, undefined, JOIN).latestQuestion,
+      'Imagine traffic from ten brands spikes at once during a big sale event, what is your Redis strategy');
+  });
+
+  test('a short filler from the candidate is still skipped', () => {
+    const t = turns([
+      ['interviewer', 'Design a rate limiter for each tenant of the API.', 0],
+      ['user', 'hmm okay', 1_000],
+      ['interviewer', 'Just explain it simply', 2_000],
+    ]);
+    assert.equal(extractLatestQuestion(t, undefined, JOIN).latestQuestion, 'Design a rate limiter for each tenant of the API. Just explain it simply');
+  });
+});
+
+// Codex review 2026-11-16, finding 4: a prefetched answer revealed for a press
+// now carries when it started, so a reveal recorded after the next question
+// started still stops the next press from joining the old question.
+describe('manual press — revealed prefetch answer is a boundary', () => {
+  test('an answer recorded after the next question started still cuts the old question', () => {
+    const t = [
+      { role: 'interviewer', text: 'How would you index the custom JSONB fields?', timestamp: T0 },
+      { role: 'interviewer', text: 'And how would you cache tenant pages for logged-in users', timestamp: T0 + 6_000 },
+      { role: 'assistant', text: 'A GIN index on the fields we filter by.', timestamp: T0 + 7_000, startedAt: T0 + 1_000, answeredQuestion: 'How would you index the custom JSONB fields?' },
+    ];
+    assert.equal(extractLatestQuestion(t, undefined, JOIN).latestQuestion, 'And how would you cache tenant pages for logged-in users');
+  });
+
+  test('the reveal records startedAt and the answered question', async () => {
+    const fs = await import('node:fs');
+    const src = fs.readFileSync(path.resolve(__dirname, '../../IntelligenceEngine.ts'), 'utf8');
+    const reveal = src.slice(src.indexOf('private revealSpeculativeAnswer('), src.indexOf('private revealSpeculativeAnswer(') + 8000);
+    assert.match(reveal, /startedAt: finished\.startedAt/);
+    assert.match(src, /completeSpeculativeRun\([\s\S]{0,600}startedAt: now/);
+  });
+});

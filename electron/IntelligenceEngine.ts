@@ -234,6 +234,8 @@ interface SpeculativeAnswer {
      */
     answerType?: AnswerType;
     answerStyle?: string;
+    /** When the prefetch run started: the answer boundary for question joining (see SessionTracker ContextItem.startedAt). */
+    startedAt?: number;
 }
 
 /** The answer that owns an interviewer turn (see IntelligenceEngine.spokenAnswer). */
@@ -1744,12 +1746,13 @@ export class IntelligenceEngine extends EventEmitter {
         generationId: number, question: string | undefined, confidence: number, text: string,
         writeDecision: SessionWriteDecision | undefined,
         streamed?: SpeculativeStreamed,
-        plan?: { answerType?: AnswerType; answerStyle?: string },
+        plan?: { answerType?: AnswerType; answerStyle?: string; startedAt?: number },
     ): string {
         const finished: SpeculativeAnswer = {
             generationId, question: question || 'inferred', confidence, text, writeDecision,
             ...(plan?.answerType ? { answerType: plan.answerType } : {}),
             ...(plan?.answerStyle ? { answerStyle: plan.answerStyle } : {}),
+            ...(typeof plan?.startedAt === 'number' ? { startedAt: plan.startedAt } : {}),
         };
         const adoptedInFlight = this.speculativeAdoptedGenerationId === generationId && this.currentGenerationId === generationId;
         if (this.speculativeAdoptedGenerationId === generationId) this.speculativeAdoptedGenerationId = null;
@@ -1865,7 +1868,12 @@ export class IntelligenceEngine extends EventEmitter {
         if (designNote && 'question' in designNote) this.session.noteDesignQuestion(designNote.question);
         else if (designNote && 'mayFollowUp' in designNote) this.session.touchActiveDesign(false, true);
         else if (designNote) this.session.touchActiveDesign();
-        this.session.addAssistantMessage(text, finished.writeDecision, 'what_to_answer');
+        // Recorded with the PREFETCH's start, not the reveal time, so a question
+        // begun while it was generating is not joined onto this one.
+        this.session.addAssistantMessage(text, finished.writeDecision, 'what_to_answer', undefined,
+            typeof finished.startedAt === 'number'
+                ? { startedAt: finished.startedAt, question: finished.question !== 'inferred' ? finished.question : undefined }
+                : undefined);
         if (finished.writeDecision?.policy !== 'do_not_store') {
             this.session.pushUsage({ type: 'assist', timestamp: Date.now(), question: finished.question, answer: text });
             // THE ADOPTED ANSWER'S ONLY RECORDING POINT.
@@ -2285,7 +2293,7 @@ export class IntelligenceEngine extends EventEmitter {
         })();
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2303,7 +2311,19 @@ export class IntelligenceEngine extends EventEmitter {
             this.speculativeRunsInFlight.add(tracked);
             void tracked.finally(() => this.speculativeRunsInFlight.delete(tracked));
         }
-        const answer = await run;
+        let answer: string | null = null;
+        try {
+            answer = await run;
+        } finally {
+            // Tells Auto Answer how a manual press ended (answered or not, and
+            // what it answered), so a failed press gives its question back.
+            try {
+                options?.onSettled?.({
+                    answered: Boolean(answer?.trim()) && outcomeOut.value?.status === 'success',
+                    question: question?.trim() || turnOut.question?.trim() || undefined,
+                });
+            } catch { /* never block the answer */ }
+        }
         // With no question, the turn is recorded only once the run got as far as
         // resolving one (turnOut is set there). A press that returned earlier
         // ("configure your API keys", "nothing to answer yet") answered nothing,
@@ -2714,7 +2734,7 @@ export class IntelligenceEngine extends EventEmitter {
                     return null;
                 }
                 if (isSpeculative) {
-                    return this.completeSpeculativeRun(generationId, question, confidence, answer || buildGracefulRetry(question), answer ? undefined : decideSessionWritePolicy({ finalGenerationMode: 'provider_error_no_answer' }));
+                    return this.completeSpeculativeRun(generationId, question, confidence, answer || buildGracefulRetry(question), answer ? undefined : decideSessionWritePolicy({ finalGenerationMode: 'provider_error_no_answer' }), undefined, { startedAt: now });
                 }
                 if (answer && IntelligenceEngine.isNonAnswerSentinel(answer)) {
                     this.setMode('idle');
@@ -7370,6 +7390,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return this.completeSpeculativeRun(generationId, question, confidence, fullAnswer, wtaWriteDecision, streamed, {
                     answerType: answerPlan.answerType,
                     answerStyle: answerPlan.answerStyle as string,
+                    startedAt: now,
                 });
             }
 

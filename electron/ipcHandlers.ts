@@ -16540,6 +16540,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const phonePress = startPhonePress();
         const outcomeOut: WhatToSayOutcomeOut = {};
+        // Set when this press really starts (onStart); its settle carries it.
+        let manualPressId: number | undefined;
         const effectiveQuestion = (typeof question === 'string' && question.trim().length > 0)
           ? question
           : (validatedImagePaths?.length ? 'What should I say about this?' : question);
@@ -16580,7 +16582,15 @@ export function initializeIpcHandlers(appState: AppState): void {
             // also takes the question over from Auto Answer.
             // The engine decides `spoken` with the same test it uses for joining.
             onStart: (press) => {
-              try { appState.onManualWhatToAnswer?.(press); } catch { /* never block the answer */ }
+              try { manualPressId = appState.onManualWhatToAnswer?.(press); } catch { /* never block the answer */ }
+            },
+            // How the press ended: a failed or cancelled press gives a spoken
+            // question back to Auto Answer instead of leaving it "answered".
+            // Only a press that started reports, tagged with ITS id, so an
+            // older press ending late cannot clear a newer press's handover.
+            onSettled: (result) => {
+              if (manualPressId === undefined) return;
+              try { appState.onManualWhatToAnswerSettled?.({ ...result, pressId: manualPressId }); } catch { /* never block the answer */ }
             },
           },
         ));

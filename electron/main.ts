@@ -3980,13 +3980,20 @@ export class AppState {
   });
 
   /** A manual What-to-Answer started (hotkey / button / accepted offer): the offer card is committed. */
-  public onManualWhatToAnswer(press?: { spoken?: boolean }): void {
+  /** Returns the press id its settle call must carry. */
+  public onManualWhatToAnswer(press?: { spoken?: boolean }): number {
     // What streams next is the manual answer, not the automatic one.
     this.autoAnswerUsage.stopAwaitingAnswer();
-    this.simpleAutoAnswer.onManualAnswerStarted();
+    const pressId = this.simpleAutoAnswer.onManualAnswerStarted();
     // A press that answers what was just said takes the question over from
     // Auto Answer, so nothing it still held for it dispatches afterwards.
     if (press?.spoken) this.simpleAutoAnswer.onManualSpokenAnswer();
+    return pressId;
+  }
+
+  /** The manual What-to-Answer ended (answered, failed or cancelled). */
+  public onManualWhatToAnswerSettled(result: { answered: boolean; question?: string; pressId?: number }): void {
+    this.simpleAutoAnswer.onManualAnswerSettled({ answered: result.answered, answeredQuestion: result.question, pressId: result.pressId });
   }
 
   /** Per-mode ternary thresholds (V3 Amendment 4), resolved from the mode policy registry. */

@@ -203,6 +203,23 @@ export const HELD_MAX_AGE_MS = 15_000;
 export const RETRY_MS = 500;
 export const RETRY_TTL_MS = 8000;
 /**
+ * While a MANUAL answer is streaming, a question parked behind it waits up to
+ * this long (from when it was committed) instead of RETRY_TTL_MS: a long
+ * manual answer used to outlive the 8 s park and the question asked during it
+ * was dropped (engine_busy_or_cooling). onEngineIdle still wakes it the
+ * moment the manual answer ends; a newer question still supersedes it.
+ */
+export const MANUAL_PARK_MAX_MS = 45_000;
+/**
+ * The engine goes idle a moment BEFORE the manual press reports how it ended
+ * (onManualAnswerSettled). A dispatch parked behind that press waits this long
+ * for the report, so the handed-over question is settled first; if no report
+ * comes, the parked dispatch goes anyway.
+ */
+export const MANUAL_SETTLE_WAIT_MS = 1500;
+/** New speech this much covered by what a manual answer answered is that same question, not a continuation. */
+const MANUAL_COVERED_CONTAINMENT = 0.6;
+/**
  * The voice detector said the interviewer started talking, and then neither a
  * stop nor any interviewer transcript arrived for this long. The stop was lost
  * (a capture restart or an audio-device switch drops it), and without this
@@ -413,6 +430,27 @@ export class SimpleAutoAnswerEngine {
     } | null = null;
     private lastAnsweredText: string | null = null;
     private lastAnsweredAt = 0;
+    /** A manual answer is running (onManualAnswerStarted → onManualAnswerSettled / onEngineIdle). */
+    private manualActive = false;
+    /** Id of the latest manual press; a settle from an older press is ignored. */
+    private manualPressSeq = 0;
+    /** onEngineIdle deferred a parked dispatch until the press settles. */
+    private settleWaitTimer: ClockTimer | null = null;
+    /**
+     * The candidate a spoken manual press took over, kept until that answer
+     * settles: a failed press gives it back, and a press made while the
+     * interviewer was still talking lets the rest of the question through.
+     */
+    private manualHandoff: {
+        candidate: string;
+        /** The press that took it over (manualPressSeq). */
+        pressId: number;
+        parts: SimpleAutoAnswerEngine['pending'];
+        at: number;
+        /** The interviewer was still talking when the user pressed. */
+        unfinished: boolean;
+        meetingGeneration: number;
+    } | null = null;
     /** The automatic answer currently inside its feedback window. */
     private feedbackPending: { id: string; at: number; act: AutoAnswerQuestion['dialogueAct']; answerability: number } | null = null;
     private feedbackTimer: ClockTimer | null = null;
@@ -459,9 +497,36 @@ export class SimpleAutoAnswerEngine {
      */
     onEngineIdle(): void {
         const parked = this.parkedAttempt;
+        // A spoken manual press is still to report how it ended (its settle
+        // call follows idle). Settle the question it took over FIRST: woken
+        // now, the parked dispatch went out and the settle found an answer in
+        // flight, so a failed press's question was never given back.
+        if (this.manualHandoff && parked) {
+            this.clearRetry();          // its poll would dispatch it too
+            this.clearSettleWait();
+            this.settleWaitTimer = this.clock.setTimeout(() => {
+                this.settleWaitTimer = null;
+                this.manualActive = false;
+                this.host.log?.('[AutoAnswer:simple] the manual press never reported its end: releasing the parked question');
+                this.wakeParked();
+            }, MANUAL_SETTLE_WAIT_MS);
+            return;
+        }
+        // Idle means no manual answer is running any more (its settle call may
+        // still follow; it is a no-op for the park).
+        this.manualActive = false;
+        this.wakeParked();
+    }
+
+    private wakeParked(): void {
+        const parked = this.parkedAttempt;
         if (!parked) return;
         this.clearRetry();
         parked();
+    }
+
+    private clearSettleWait(): void {
+        if (this.settleWaitTimer !== null) { this.clock.clearTimeout(this.settleWaitTimer); this.settleWaitTimer = null; }
     }
 
     /** Provider says the interviewer's turn ended: confirm the stop sooner. */
@@ -942,7 +1007,10 @@ export class SimpleAutoAnswerEngine {
                 return;
             }
             if (!this.host.engineAccepting()) {
-                if (this.clock.now() >= deadline) {
+                // Behind a manual answer the park outlives RETRY_TTL_MS (see
+                // MANUAL_PARK_MAX_MS); onEngineIdle wakes it when that ends.
+                const until = this.manualActive ? Math.max(deadline, committedAt + MANUAL_PARK_MAX_MS) : deadline;
+                if (this.clock.now() >= until) {
                     this.parkedAttempt = null;
                     this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling', question: text });
                     return;
@@ -1121,7 +1189,11 @@ export class SimpleAutoAnswerEngine {
      * user telling us the automatic answer missed; the offer card (if any) is
      * committed either way.
      */
-    onManualAnswerStarted(): void {
+    onManualAnswerStarted(): number {
+        const pressId = ++this.manualPressSeq;
+        // A newer press replaces an older one's unsettled handover (the older
+        // press's settle is then ignored), and any wait for that settle.
+        this.clearSettleWait();
         // The manual answer owns the screen now: nothing judged, parked or
         // dispatched before the press goes out after it.
         this.disarm();
@@ -1131,11 +1203,12 @@ export class SimpleAutoAnswerEngine {
         // words were answered a second time. It is marked handed over instead;
         // when it settles, its words are done with whether it was shown or cut.
         if (this.dispatchInFlight) this.dispatchInFlight.handedOver = true;
+        this.manualActive = true;
         this.lastJudgedKey = '';
         this.held = null;
         this.bumpJudgeSeq('manual_answer');
         const pending = this.feedbackPending;
-        if (!pending) return;
+        if (!pending) return pressId;
         this.clearFeedback();
         const feedbackMs = this.clock.now() - pending.at;
         this.emit({
@@ -1143,6 +1216,7 @@ export class SimpleAutoAnswerEngine {
             dialogueAct: pending.act, answerability: pending.answerability,
         });
         this.host.log?.(`[AutoAnswer:simple] superseded by a manual answer after ${feedbackMs}ms`);
+        return pressId;
     }
 
     /**
@@ -1158,11 +1232,18 @@ export class SimpleAutoAnswerEngine {
     onManualSpokenAnswer(): void {
         const candidate = this.pending.length > 0 ? joinTranscriptParts(this.pending) : '';
         const hadWork = Boolean(candidate) || this.parkedAttempt !== null || this.held !== null || this.judgeAbort !== null;
+        // Read BEFORE anything is cleared: was the interviewer mid-question?
+        const unfinished = this.interviewerSpeaking || Boolean(this.lastInterviewerInterim);
         this.dropParked();
         this.disarm();
         this.held = null;
         this.bumpJudgeSeq('manual_answer');
+        // Provisional until the manual answer settles (onManualAnswerSettled):
+        // while it streams, a restatement of these words is not dispatched.
         if (candidate) { this.lastAnsweredText = candidate; this.lastAnsweredAt = this.clock.now(); }
+        this.manualHandoff = candidate
+            ? { candidate, pressId: this.manualPressSeq, parts: [...this.pending], at: this.clock.now(), unfinished, meetingGeneration: this.host.meetingGeneration() }
+            : null;
         // A stalled interim stood in for its final: that late final is the
         // same question, already handed over (see absorbStalledFinal).
         const promoted = this.pending.find(p => p.provisional);
@@ -1171,6 +1252,81 @@ export class SimpleAutoAnswerEngine {
         this.judgedParts = 0;
         this.lastJudgedKey = '';
         if (hadWork) this.host.log?.('[AutoAnswer:simple] the question was handed over to a manual answer');
+    }
+
+    /**
+     * The manual answer ended. Only now is the handed-over question decided:
+     * - failed / cancelled / empty: it was NOT answered, so its words go back
+     *   to Auto Answer (ahead of anything said since) and are judged again;
+     * - answered, but pressed while the interviewer was still talking and they
+     *   went on with words the answer did not cover: the answer covered only
+     *   the start, so the whole question is judged again (as one candidate);
+     * - answered otherwise: the question it answered is remembered as answered.
+     * `answeredQuestion` is what the manual answer actually answered (it may
+     * include an interim the candidate did not have).
+     */
+    onManualAnswerSettled(outcome: { answered: boolean; answeredQuestion?: string; pressId?: number }): void {
+        // An older press settling after a newer one started: the newer press
+        // owns the state (its handover, its running answer). Leave it alone.
+        if (outcome.pressId !== undefined && outcome.pressId !== this.manualPressSeq) return;
+        this.manualActive = false;
+        this.clearSettleWait();
+        const handoff = this.manualHandoff;
+        this.manualHandoff = null;
+        if (!handoff || handoff.meetingGeneration !== this.host.meetingGeneration() || !this.host.isMeetingActive()) {
+            this.wakeParked();
+            return;
+        }
+        // An automatic answer already went out for something newer: leave it be.
+        if (this.dispatchInFlight) {
+            if (outcome.answered) this.rememberAnswered(outcome.answeredQuestion?.trim() || handoff.candidate);
+            else if (this.lastAnsweredText === handoff.candidate) { this.lastAnsweredText = null; this.lastAnsweredAt = 0; }
+            return;
+        }
+        const now = this.clock.now();
+        // Everything pending now was said after the press (the handover took the rest).
+        const later = this.pending.filter(p => !handoff.parts.includes(p));
+        const answeredText = outcome.answeredQuestion?.trim() || handoff.candidate;
+        if (outcome.answered) {
+            const covered = (p: { text: string }) => tokenContainment(p.text, answeredText) >= MANUAL_COVERED_CONTAINMENT;
+            const continued = handoff.unfinished && later.some(p => !covered(p));
+            if (!continued) {
+                this.rememberAnswered(answeredText);
+                // The interviewer only finished the words the answer already
+                // covered: that tail is the answered question, not a new one.
+                if (handoff.unfinished && later.length > 0) {
+                    this.pending = this.pending.filter(p => !later.includes(p));
+                    this.judgedParts = 0;
+                    this.lastJudgedKey = '';
+                    this.held = null;
+                    this.dropParked();
+                    this.bumpJudgeSeq('manual_answer');
+                    if (this.pending.length === 0) this.disarm();
+                }
+                // Something newer was parked behind the press: it goes now.
+                this.wakeParked();
+                return;
+            }
+            this.host.log?.('[AutoAnswer:simple] the interviewer finished the question after the manual press: judging the whole question');
+        } else {
+            this.host.log?.('[AutoAnswer:simple] the manual answer did not complete: the question goes back to Auto Answer');
+        }
+        if (this.lastAnsweredText === handoff.candidate) { this.lastAnsweredText = null; this.lastAnsweredAt = 0; }
+        // Give the handed-over words back, ahead of what was said since, within the usual age bound.
+        const restored = handoff.parts.filter(p => now - p.at <= PENDING_MAX_AGE_MS && !this.pending.includes(p));
+        this.pending = [...restored, ...this.pending];
+        this.judgedParts = 0;
+        this.lastJudgedKey = '';
+        this.held = null;
+        this.dropParked();
+        this.bumpJudgeSeq('manual_answer');
+        if (this.pending.length > 0 && !this.interviewerSpeaking) this.arm(ENDPOINT_CONFIRM_MS);
+    }
+
+    private rememberAnswered(text: string): void {
+        if (!text) return;
+        this.lastAnsweredText = text;
+        this.lastAnsweredAt = this.clock.now();
     }
 
     private armFeedback(id: string, act: AutoAnswerQuestion['dialogueAct'], answerability: number): void {
@@ -1323,6 +1479,9 @@ export class SimpleAutoAnswerEngine {
         this.lastJudgedKey = '';
         this.lastAnsweredText = null;
         this.lastAnsweredAt = 0;
+        this.manualActive = false;
+        this.manualHandoff = null;
+        this.clearSettleWait();
         this.lastPrefetchAt = null;
         this.held = null;
         this.bumpJudgeSeq('meeting_reset');

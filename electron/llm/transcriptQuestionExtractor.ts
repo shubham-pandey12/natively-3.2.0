@@ -90,6 +90,14 @@ const ANSWERED_TAIL_OVERLAP = 0.6;
  *  stalled-transcript fallback). Past this, speech is new even when it reuses
  *  the answered question's words ("…for logged-in users?" follow-up). */
 export const ANSWERED_TAIL_MAX_LAG_MS = 8_000;
+/** A candidate turn this long is a spoken answer (a stop for the join), not
+ *  thinking aloud ("Hmm, okay, let me think about that one" is 8 words). */
+export const CANDIDATE_ANSWER_MIN_WORDS = 12;
+/** A candidate turn whose words are mostly the interviewer's own nearby words
+ *  is mic echo / bleed or the candidate reading the question aloud, not an
+ *  answer: it does not end the join. */
+const CANDIDATE_ECHO_OVERLAP = 0.6;
+const CANDIDATE_ECHO_WINDOW_MS = 30_000;
 
 const joinWords = (s: string): string[] =>
     (s.toLowerCase().match(/[a-z0-9']+/g) ?? []).filter(w => w.length > 1);
@@ -537,11 +545,21 @@ export function extractLatestQuestion(
         for (let i = chosenIdx - 1; i >= 0; i--) {
             const turn = cleaned[i];
             if (hasStart(turn)) continue;
-            // The candidate's own speech ("hmm, okay", thinking aloud) does not
+            // The candidate's brief speech ("hmm, okay, let me think") does not
             // end the interviewer's question: Auto Answer ignores the user
-            // channel for the same reason. Answered questions are still cut
-            // off by the answer boundaries above.
-            if (turn.role === 'user') continue;
+            // channel for the same reason. A substantive spoken ANSWER does:
+            // whatever the interviewer said before it was answered aloud.
+            if (turn.role === 'user') {
+                const said = joinWords(rawTextAt(i) || turn.text);
+                if (said.length >= CANDIDATE_ANSWER_MIN_WORDS) {
+                    const near = new Set(cleaned
+                        .filter(t => t.role === 'interviewer' && Math.abs(t.timestamp - turn.timestamp) <= CANDIDATE_ECHO_WINDOW_MS)
+                        .flatMap(t => joinWords(t.text)));
+                    const echoed = said.filter(w => near.has(w)).length / said.length;
+                    if (echoed < CANDIDATE_ECHO_OVERLAP) break;
+                }
+                continue;
+            }
             if (turn.role !== 'interviewer') break;
             if (turn.timestamp < floor) break;
             if (chosen.timestamp - turn.timestamp > UTTERANCE_JOIN_MAX_AGE_MS) break;
