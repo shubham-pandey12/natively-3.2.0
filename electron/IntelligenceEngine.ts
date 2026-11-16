@@ -2293,7 +2293,34 @@ export class IntelligenceEngine extends EventEmitter {
         })();
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    /**
+     * Start of a manual Cmd/Ctrl+Enter press, before the renderer opens its
+     * answer row. Returns the newest generation id already minted, so the
+     * renderer can refuse any event from an older request (a late token or
+     * final must never fill the new press's row), and — when the renderer holds
+     * a screenshot question asked at `screenshotAskedAt` — whether that
+     * screenshot or newer interviewer speech is the question to answer.
+     */
+    beginWhatToSayPress(screenshotAskedAt?: number): { generationFloor: number; source?: import('./llm/whatToSaySourceSelector').WhatToSaySourceDecision } {
+        const generationFloor = this.currentGenerationId;
+        if (typeof screenshotAskedAt !== 'number' || !Number.isFinite(screenshotAskedAt)) return { generationFloor };
+        const { selectWhatToSaySource } = require('./llm/whatToSaySourceSelector') as typeof import('./llm/whatToSaySourceSelector');
+        const interim = this.session.getLastInterimInterviewer();
+        const source = selectWhatToSaySource({
+            askedAt: screenshotAskedAt,
+            contextItems: this.session.getContext(180).map((item) => ({
+                role: item.role,
+                text: item.text,
+                timestamp: item.timestamp,
+                ...(item.punctuationSource ? { punctuationSource: item.punctuationSource } : {}),
+            })),
+            interim: interim ? { text: interim.text, timestamp: interim.timestamp, ...(interim.punctuationSource ? { punctuationSource: interim.punctuationSource } : {}) } : null,
+            now: Date.now(),
+        });
+        return { generationFloor, source };
+    }
+
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2348,7 +2375,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2770,13 +2797,20 @@ export class IntelligenceEngine extends EventEmitter {
             // novel tail against recent finals, caps length, and skips stale ones.
             const lastInterim = this.session.getLastInterimInterviewer();
             if (lastInterim && lastInterim.text.trim().length > 0) {
-                const { resolveInterimInjection } = require('./llm/interimInjectionGuard') as typeof import('./llm/interimInjectionGuard');
-                const verdict = resolveInterimInjection({
+                const { resolveInterimInjection, resolvePressInterimInjection } = require('./llm/interimInjectionGuard') as typeof import('./llm/interimInjectionGuard');
+                const interimInput = {
                     interim: { text: lastInterim.text, timestamp: lastInterim.timestamp },
                     recentInterviewerFinals: contextItems.filter(item => item.role === 'interviewer'),
                     lastContextItem: contextItems[contextItems.length - 1] ?? null,
                     now: Date.now(),
-                });
+                };
+                // A manual press with no question of its own answers the newest
+                // speech: a partial the provider never finalized is kept past
+                // the 30 s stale window, so the press does not fall back to the
+                // previous (already answered) question n−1.
+                const verdict = !isSpeculative && !question?.trim()
+                    ? resolvePressInterimInjection(interimInput)
+                    : resolveInterimInjection(interimInput);
                 if (verdict.action === 'inject') {
                     console.log(`[IntelligenceEngine] Injecting interim transcript`, { length: verdict.text.length, rawLength: lastInterim.text.length, reason: verdict.reason });
                     contextItems.push({
@@ -2817,6 +2851,17 @@ export class IntelligenceEngine extends EventEmitter {
             const extractedQuestion = extractLatestQuestion(transcriptTurns, undefined, {
                 joinUtterance: !isSpeculative && !question?.trim(),
             });
+            // A press whose source main already chose (beginWhatToSayPress picked
+            // newer interviewer speech over a held screenshot) answers exactly
+            // that question: re-extracting here could pick a different turn or
+            // a different span of the same one if the transcript moved since.
+            const lockedSpokenQuestion = !isSpeculative && !question?.trim()
+                ? options?.spokenQuestion?.trim() || undefined : undefined;
+            if (lockedSpokenQuestion) {
+                extractedQuestion.latestQuestion = lockedSpokenQuestion;
+                extractedQuestion.confidence = Math.max(extractedQuestion.confidence ?? 0, 0.6);
+                trace.mark('repair_used', { reason: 'question_locked_at_press' });
+            }
             // Set when the user's OWN spoken line is chosen as the question below.
             let questionSpokenByUser = false;
             // SPEAKER-MISATTRIBUTION FALLBACK (2026-09-07, always answer). Real
@@ -2827,7 +2872,7 @@ export class IntelligenceEngine extends EventEmitter {
             // fully catch that — could you rephrase the question?". The user
             // pressed the key: the most recent utterance from anyone is the
             // thing to answer. Speculative runs keep the strict extractor.
-            if (!isSpeculative && !question?.trim() && !extractedQuestion.latestQuestion && !lastInterviewerTurn) {
+            if (!isSpeculative && !question?.trim() && !lockedSpokenQuestion && !extractedQuestion.latestQuestion && !lastInterviewerTurn) {
                 const lastAnyTurn = [...transcriptTurns].reverse().find((t) => t.role !== 'assistant' && String(t.text || '').trim().length >= 3);
                 if (lastAnyTurn) {
                     extractedQuestion.latestQuestion = String(lastAnyTurn.text).trim();
@@ -2847,7 +2892,7 @@ export class IntelligenceEngine extends EventEmitter {
             // utterance is the thing they want looked up. A clarification
             // thrown back at the other party ("what do you mean by that?") and
             // a plain statement keep the extractor's choice.
-            if (!isSpeculative && !question?.trim()) {
+            if (!isSpeculative && !question?.trim() && !lockedSpokenQuestion) {
                 const lastIdx = (role: 'user' | 'interviewer') => { for (let i = transcriptTurns.length - 1; i >= 0; i--) if (transcriptTurns[i].role === role && String(transcriptTurns[i].text || '').trim()) return i; return -1; };
                 const ui = lastIdx('user'), ii = lastIdx('interviewer');
                 const userText = ui >= 0 ? String(transcriptTurns[ui].text).trim() : '';
@@ -5642,6 +5687,17 @@ export class IntelligenceEngine extends EventEmitter {
                 // back, press again" line, never a request to repeat.
                 fullAnswer = regenerated ?? buildGracefulRetry(question || extractedQuestion.latestQuestion || lastInterviewerTurn);
                 streamedAnswerReplaced = true;
+                // The "couldn't generate, press again" line is a failure notice,
+                // not an answer: like the deadline fallback above it must report
+                // a failed outcome and stay out of session and turn history, or
+                // the next press (and Auto Answer) treat this question as answered.
+                if (regenerated === null) {
+                    wtaWriteDecision = decideSessionWritePolicy({
+                        finalGenerationMode: 'provider_error_no_answer',
+                        validationOk: false,
+                        criticalViolations: ['empty_stream_no_answer'],
+                    });
+                }
             }
 
             // LEAKED-SCHEMA-STUB GUARD + PROVIDER-TRANSPORT-ERROR GUARD — MUST run

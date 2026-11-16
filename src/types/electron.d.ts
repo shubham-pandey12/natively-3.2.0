@@ -463,7 +463,8 @@ export interface ElectronAPI {
   generateAssist: () => Promise<{ insight: string | null }>
   retainScreenshotRetry: (imagePaths: string[]) => Promise<string>;
   releaseScreenshotRetry: (lease: string) => Promise<void>;
-  generateWhatToSay: (question?: string, imagePaths?: string[], options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: ContextEnvelope; overlayQuestionId?: string }) => Promise<{
+  beginWhatToSayPress: (screenshotAskedAt?: number) => Promise<import('./whatToSayOutcome').WhatToSayPressStart>;
+  generateWhatToSay: (question?: string, imagePaths?: string[], options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: ContextEnvelope; overlayQuestionId?: string; spokenQuestion?: string }) => Promise<{
     answer: string | null;
     outcome?: WhatToSayOutcome;
     question?: string;

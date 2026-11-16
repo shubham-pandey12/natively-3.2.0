@@ -457,6 +457,7 @@ import { AutoStopNoticeBanner, useMeetingAutoStopNotice } from './overlay/AutoSt
 import { useAmbientChatMeeting } from './overlay/AmbientChatNotice';
 import { LastTimeRecapBanner, useLastTimeRecap } from './overlay/LastTimeRecapNotice';
 import type { LiveHelperAction } from '../types/assist';
+import type { WhatToSayPressStart } from '../types/whatToSayOutcome';
 import { useMeetingMute } from './overlay/useMeetingMute';
 import { HeroGlassButton } from './overlay/heroGlass/HeroGlassButton';
 
@@ -631,6 +632,10 @@ interface DirectAssistHistoryTurn {
 
 interface ScreenshotRetrySnapshot {
   audioRevision: number;
+  /** When this screenshot question was first asked. Main compares newer
+   *  interviewer speech against it to decide which question a bare
+   *  Cmd/Ctrl+Enter answers. */
+  askedAt?: number;
   attachments: { path: string; preview: string; formulaCapture?: string }[];
   question?: string;
   promptInstruction?: string;
@@ -6069,6 +6074,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // generation. null = no id adopted yet (id-less items are always accepted →
   // backward compatible with the code-hint / brainstorm streams that omit it).
   const liveAnswerGenIdRef = useRef<number | null>(null);
+  // Newest generation main had minted when the latest legacy press began.
+  // Until a newer generation is adopted, an id at or below it is an earlier
+  // request's late token/final and must not fill the press's row. Only grows.
+  const liveAnswerFloorRef = useRef<number | null>(null);
   // Direct Assist supersedes every legacy WTA generation visible to this
   // renderer. The numeric MAX tombstone rejects tagged generations through the
   // existing newest-wins guard; this companion flag also rejects older/id-less
@@ -7366,6 +7375,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (screenshotAttemptId === undefined) {
       const snapshot = imagePaths?.length ? {
         audioRevision: audioInputRevisionRef.current,
+        askedAt: Date.now(),
         attachments: imagePaths.map((path) => ({ path, preview: '' })),
         question: currentRequest,
         domContext: directPageContext?.dom,
@@ -7846,6 +7856,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         const decision = resolveLiveAnswerBatch(
           legacyIntelligenceTombstonedRef.current ? null : liveAnswerGenIdRef.current,
           generationId,
+          liveAnswerFloorRef.current,
         );
         if (!decision.accept) return;
         legacyIntelligenceTombstonedRef.current = false;
@@ -7931,6 +7942,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         const decision = resolveLiveAnswerBatch(
           liveAnswerGenIdRef.current,
           (data as { generationId?: number }).generationId,
+          liveAnswerFloorRef.current,
         );
         liveAnswerGenIdRef.current = decision.activeId;
         if (!decision.accept) return;
@@ -7976,7 +7988,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(({ generationId }) => {
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
-        if (!resolveLiveAnswerBatch(liveAnswerGenIdRef.current, generationId).accept) return;
+        if (!resolveLiveAnswerBatch(liveAnswerGenIdRef.current, generationId, liveAnswerFloorRef.current).accept) return;
         setIsProcessing(false);
         if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
         streamingNodeRef.current = null;
@@ -8071,6 +8083,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             const decision = resolveLiveAnswerBatch(
               liveAnswerGenIdRef.current,
               (it as any).generationId,
+              liveAnswerFloorRef.current,
             );
             liveAnswerGenIdRef.current = decision.activeId;
             if (!decision.accept) continue;
@@ -8412,9 +8425,53 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       currentAttachments = addAttachment(currentAttachments, pending);
     }
     for (const shot of lateShots) currentAttachments = addAttachment(currentAttachments, shot);
-    const retry = (retryExplicitly || (currentAttachments.length === 0 && !dynamicPromptInstruction && !inputValue.trim()
-      && !(window as any).lastCapturedDOM && !pendingPageCaptureAtRef.current))
-      ? screenshotRetryRef.current.pending(audioInputRevisionRef.current, retryExplicitly) : null;
+    const barePress = currentAttachments.length === 0 && !dynamicPromptInstruction && !inputValue.trim()
+      && !(window as any).lastCapturedDOM && !pendingPageCaptureAtRef.current;
+    // Legacy flow: ask main where this press starts. It reports the newest
+    // generation already minted (the late-event floor) and, for a screenshot
+    // question still held here, whether newer interviewer speech replaced it.
+    // The screenshot stays the question after a failed OR successful answer;
+    // unrelated audio (the candidate's "umm", "take your time") does not
+    // displace it, a genuine new question — even a usable partial — does.
+    const heldScreenshot = !directAssistEnabled && !retryExplicitly && barePress
+      ? screenshotRetryRef.current.latest() : null;
+    let pressStart: WhatToSayPressStart | null = null;
+    if (!directAssistEnabled) {
+      try {
+        pressStart = await window.electronAPI.beginWhatToSayPress(
+          typeof heldScreenshot?.snapshot.askedAt === 'number' ? heldScreenshot.snapshot.askedAt : undefined,
+        );
+      } catch { pressStart = null; }
+      if (typeof pressStart?.generationFloor === 'number') {
+        liveAnswerFloorRef.current = Math.max(liveAnswerFloorRef.current ?? 0, pressStart.generationFloor);
+      }
+    }
+    let retry: ReturnType<typeof screenshotRetryRef.current.pending> = null;
+    let lockedSpokenQuestion: string | undefined;
+    if (retryExplicitly) {
+      retry = screenshotRetryRef.current.pending(audioInputRevisionRef.current, true);
+    } else if (barePress && directAssistEnabled) {
+      retry = screenshotRetryRef.current.pending(audioInputRevisionRef.current, false);
+    } else if (heldScreenshot && screenshotRetryRef.current.latest() === heldScreenshot) {
+      const decision = pressStart?.source;
+      if (decision?.source === 'unidentified') {
+        setIsProcessing(false);
+        endOverlayAction('what_to_say');
+        setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', text: 'The interviewer is still asking something new. Press again when they finish, so the answer is not for the earlier screenshot.' }]);
+        return;
+      }
+      if (decision?.source === 'speech') {
+        clearScreenshotRetry();
+        // Answer exactly the question main chose, not a re-extraction of a
+        // transcript that may have moved on by the time generation starts.
+        lockedSpokenQuestion = decision.question;
+      } else {
+        // 'screenshot', or main could not choose (the call failed): the held
+        // screenshot is still the newest question we know of. Never drop it
+        // silently and fall back to older transcript speech.
+        retry = heldScreenshot;
+      }
+    }
     if (retryExplicitly && !retry) {
       for (const shot of lateShots) handleScreenshotAttach(shot);
       setIsProcessing(false);
@@ -8429,10 +8486,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const retrySnapshot: ScreenshotRetrySnapshot | null = currentAttachments.length ? {
       ...(retry?.snapshot ?? {}),
       audioRevision: audioInputRevisionRef.current,
+      askedAt: retry?.snapshot.askedAt ?? Date.now(),
       attachments: currentAttachments.map((shot) => ({ ...shot })),
       promptInstruction: dynamicPromptInstruction,
     } : null;
-    const screenshotAttempt = screenshotRetryRef.current.begin(retrySnapshot, Boolean(retry));
+    // Legacy answers keep the screenshot after success too: it is still the
+    // newest question until something replaces it (see heldScreenshot above).
+    const screenshotAttempt = screenshotRetryRef.current.begin(retrySnapshot, Boolean(retry), { keepOnSuccess: !directAssistEnabled });
     legacyScreenshotAttemptRef.current = null;
     setScreenshotRetryAvailable(false);
 
@@ -8622,7 +8682,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       const result = await window.electronAPI.generateWhatToSay(
         questionForWta,
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
-        { ...options, overlayQuestionId: questionCardId },
+        { ...options, overlayQuestionId: questionCardId, ...(lockedSpokenQuestion ? { spokenQuestion: lockedSpokenQuestion } : {}) },
       );
       if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
       settleScreenshotRetry(screenshotAttempt.id, result.outcome?.reason === 'attachment_unavailable'
@@ -9853,6 +9913,7 @@ Provide only the answer, nothing else.`;
 
     const manualRetrySnapshot: ScreenshotRetrySnapshot | null = currentAttachments.length ? {
       audioRevision: audioInputRevisionRef.current,
+      askedAt: Date.now(),
       attachments: currentAttachments.map((shot) => ({ ...shot })),
       question: userText || 'Analyze this screenshot',
     } : null;

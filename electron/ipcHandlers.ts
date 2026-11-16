@@ -1676,6 +1676,19 @@ export function initializeIpcHandlers(appState: AppState): void {
     await appState.getScreenshotHelper().releaseScreenshots(lease);
   });
 
+  // Start of a legacy Cmd/Ctrl+Enter press: the generation floor for the
+  // renderer's late-event guard and, for a screenshot question the renderer
+  // still holds, whether newer interviewer speech has replaced it.
+  safeHandle('begin-what-to-say-press', async (event, screenshotAskedAt: unknown) => {
+    if (event.sender.id !== appState.getWindowHelper().getOverlayWindow()?.webContents.id) {
+      throw new Error('What to say is only available from the overlay');
+    }
+    const intelligenceManager = appState.getIntelligenceManager();
+    return intelligenceManager.beginWhatToSayPress(
+      typeof screenshotAskedAt === 'number' && Number.isFinite(screenshotAskedAt) ? screenshotAskedAt : undefined,
+    );
+  });
+
   safeHandle('delete-screenshot', async (event, filePath: string) => {
     // Guard: only allow deletion of files within the app's own userData directory
     const userDataDir = app.getPath('userData');
@@ -16340,7 +16353,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       _,
       question?: string,
       imagePaths?: string[],
-      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
+      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string; spokenQuestion?: string },
     ) => {
       // The press, for the answer's latency trace (PiTraceInit.startedAt).
       const pressedAt = tracerNow();
@@ -16572,6 +16585,10 @@ export function initializeIpcHandlers(appState: AppState): void {
                 : undefined,
             domContext: effectiveDomContext,
             overlayQuestionId: typeof options?.overlayQuestionId === 'string' ? options.overlayQuestionId : undefined,
+            // The spoken question main chose at the start of this press
+            // (begin-what-to-say-press), answered as chosen.
+            ...(typeof options?.spokenQuestion === 'string' && options.spokenQuestion.trim()
+              ? { spokenQuestion: options.spokenQuestion.trim().slice(0, 4000) } : {}),
             // No joinAutomatic: every press answers fresh, as in the shipped
             // 3.1.0 app. Joining the automatic answer swallowed a press after
             // that answer had finished and waited up to 60 s on a stuck one.

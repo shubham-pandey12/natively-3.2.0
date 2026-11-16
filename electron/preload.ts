@@ -1,4 +1,4 @@
-import type { WhatToSayOutcome } from '../src/types/whatToSayOutcome';
+import type { WhatToSayOutcome, WhatToSayPressStart } from '../src/types/whatToSayOutcome';
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SkillUploadPayload } from './services/skills/SkillValidator';
 import type { NativelyUsageResponse, NativelyPlansResponse } from '../src/types/nativelyUsage';
@@ -547,10 +547,11 @@ interface ElectronAPI {
   generateAssist: () => Promise<{ insight: string | null }>;
   retainScreenshotRetry: (imagePaths: string[]) => Promise<string>;
   releaseScreenshotRetry: (lease: string) => Promise<void>;
+  beginWhatToSayPress: (screenshotAskedAt?: number) => Promise<WhatToSayPressStart>;
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string; spokenQuestion?: string },
   ) => Promise<{
     answer: string | null;
     outcome?: WhatToSayOutcome;
@@ -2324,10 +2325,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   generateAssist: () => ipcRenderer.invoke('generate-assist'),
   retainScreenshotRetry: (imagePaths: string[]) => ipcRenderer.invoke('retain-screenshot-retry', imagePaths),
   releaseScreenshotRetry: (lease: string) => ipcRenderer.invoke('release-screenshot-retry', lease),
+  beginWhatToSayPress: (screenshotAskedAt?: number) => ipcRenderer.invoke('begin-what-to-say-press', screenshotAskedAt),
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
-    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string },
+    options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string; spokenQuestion?: string },
   ) => ipcRenderer.invoke('generate-what-to-say', question, imagePaths, options),
   startDirectAssist: (request: DirectAssistRequest) =>
     ipcRenderer.invoke('direct-assist-stream', request),
