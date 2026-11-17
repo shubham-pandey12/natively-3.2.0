@@ -217,8 +217,6 @@ Every module whose compiled output differs from 3.2.0 was diffed (48 with 3+ hun
 - Preload additions.
 
 **Deferred, needs a decision**
-- SectionPromptCompiler: drop the "Not discussed." placeholder. This changes summary output and the renderer reads it.
-- RateLimiter background lane (`runAsBackgroundLlmWork`) together with the ModesManager wrap. This is a new scheduling feature.
 - featureGate `markPremiumAbsent`: porting it alone would make premium always available in source builds.
 - Guide `guideFactsFromSources` / `meetingSurface` / `guide_stop_locked`.
 - codingPromptSignals screen-only word list: the 3.2.0 and local lists differ in intent.
@@ -250,3 +248,14 @@ Every module whose compiled output differs from 3.2.0 was diffed (48 with 3+ hun
 - Three source-shape tests were updated to the 3.2.0 contract: CodingTemplateContract, SyntaxCheckAndShapeRepair and WholePackReadOnRetrievingTurn.
 - Reviewed but not executed on Windows. Automated tests ran on macOS only.
 - None of the ported changes adds a platform branch. The STT failover and watchdog change and the Auto Answer hint still require physical macOS and Windows verification.
+
+## Follow-up — deferred items ported (2026-11-17)
+- SectionPromptCompiler: an absent section is left out, with no "Not discussed." placeholder. A compiled instruction that asks for a placeholder is rejected. This matches the chunk extractor's existing "omit the section" contract.
+- RateLimiter: a background lane (`runAsBackgroundLlmWork` / `isBackgroundLlmWork`, AsyncLocalStorage).
+  - Background acquires never take the last 25% of the bucket.
+  - They wait until live acquires have been quiet for 10 s.
+  - `destroy()` rejects both queues.
+- ModesManager: section-prompt compiles run in the background lane.
+- Tests: MeetingNotesV3 and ModesManagerColdStartCompile were updated, and RateLimiterBackgroundLane2026_11_17 was added.
+- Results: 16215 tests, 16159 pass, 1 fail. The failure is the pre-existing FastModelPreferFast check.
+- Platform: no platform branches. `node:async_hooks` is available on both. Reviewed but not executed on Windows.

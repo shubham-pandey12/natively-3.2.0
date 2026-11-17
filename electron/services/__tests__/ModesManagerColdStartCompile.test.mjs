@@ -91,7 +91,7 @@ test('compileAllSectionsAsync still compiles when stored keys load right after s
     hasAnyConfiguredProvider() { return providerReady; },
     async generateMeetingSummary() {
       generateMeetingSummaryCalls++;
-      return JSON.stringify({ instruction: 'Extract the relevant points. Use ONLY the transcript provided; do not use outside knowledge. If this was not discussed, output exactly: Not discussed.' });
+      return JSON.stringify({ instruction: 'Extract the relevant points. Use ONLY the transcript provided; do not use outside knowledge. If nothing fits, leave this section out.' });
     },
   });
 

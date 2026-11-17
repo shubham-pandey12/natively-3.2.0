@@ -22,7 +22,9 @@ export interface CompileSectionParams {
   meetingMode?: string;
 }
 
-const EMPTY_SENTINEL = 'Not discussed.';
+// A compiled instruction must never ask for placeholder text: an absent section
+// is left out, matching the chunk extractor's contract (3.2.0).
+const PLACEHOLDER_ASK_RE = /\b(?:output|write|return|say|respond with|answer)\b[^.]{0,30}?["“']?(?:not discussed|not mentioned|none|n\/a|na)\b/i;
 
 // The meta-prompt that writes the per-section extraction instruction. Derived from the
 // Phase-16b prompting research (Anthropic grounding-by-quotation + permission-to-be-empty +
@@ -41,16 +43,16 @@ Interpret the definition:
 1. SCOPE — read the title's noun and the description's verbs to infer the concrete, observable signals to capture. Name them explicitly; do not merely restate the title. Resolve ambiguity using the meeting mode as domain context.
 2. ANTI-SCOPE — state what to EXCLUDE: statements by other speakers when the section is speaker-specific, the model's own inferences, generic commentary, and anything off-topic.
 3. FORMAT — choose a compact shape implied by the definition: discrete one-sentence bullets for lists; a short paragraph for summaries; an item-with-owner list for next-steps. State item-count range and length concretely.
-4. ABSENCE — when the subject was not discussed, the section must output exactly "${EMPTY_SENTINEL}".
+4. ABSENCE — when the subject was not discussed, the section is left out: nothing is written for it, never a placeholder such as "Not discussed", "None" or "N/A".
 
-When unsure how broad the scope is, choose the NARROWEST defensible reading and rely on the empty-if-absent rule. Never widen scope by guessing.
+When unsure how broad the scope is, choose the NARROWEST defensible reading and rely on the leave-it-out rule. Never widen scope by guessing.
 
 The instruction you emit MUST, by construction:
 - Start with one line stating exactly what to extract for this section.
 - Say: "Use ONLY the transcript provided. Do not use outside knowledge, assumptions, or typical-meeting patterns."
 - Forbid inference/embellishment and forbid attributing a statement to a speaker unless the transcript clearly shows it; forbid inventing names, numbers, dates, or fields.
 - Specify the output format (and speaker attribution rule if relevant).
-- Include the explicit empty-output contract using the exact sentinel "${EMPTY_SENTINEL}".
+- Say that when nothing in the transcript fits, the section is left out, with no placeholder text.
 - Be self-contained (it will be used with no other context).
 
 Never instruct fabrication, estimation, or filling gaps with assumptions. Keep the instruction under 120 words.`;
@@ -69,7 +71,7 @@ export function deterministicSectionInstruction(params: CompileSectionParams): s
   return [
     `Extract content for the section "${params.sectionTitle}"${desc ? `: ${desc}` : '.'}`,
     `Use ONLY the transcript provided. Do not use outside knowledge or assumptions, and do not infer or attribute statements to a speaker unless the transcript clearly shows it. Do not invent names, numbers, or dates.`,
-    `Output concise one-sentence bullet points, each traceable to the transcript. If this was not discussed, output exactly: ${EMPTY_SENTINEL}`,
+    `Output concise one-sentence bullet points, each traceable to the transcript. If nothing fits, leave this section out.`,
   ].join(' ');
 }
 
@@ -77,7 +79,8 @@ function isUsableInstruction(text: string): boolean {
   if (!text || text.trim().length < 40) return false;
   // Guardrail: a usable compiled instruction must carry the empty-if-absent contract and a
   // source-only/no-outside-knowledge clause; otherwise reject and fall back.
-  const hasEmpty = text.includes(EMPTY_SENTINEL) || /empty|not discussed|nothing/i.test(text);
+  if (PLACEHOLDER_ASK_RE.test(text)) return false;
+  const hasEmpty = /left out|leave (?:it|this section|the section) out|\bomit|output nothing|write nothing|nothing fits/i.test(text);
   const hasSourceOnly = /only the transcript|only use the transcript|do not use outside|no outside knowledge/i.test(text);
   return hasEmpty && hasSourceOnly;
 }

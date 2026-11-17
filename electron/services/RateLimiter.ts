@@ -9,12 +9,34 @@
  *   2. destroy() now rejects waiters instead of resolving them — the old behaviour
  *      called resolve() with no token, silently bypassing the rate limit on shutdown.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+// Background LLM work (section-prompt compiles and the like) runs in its own
+// lane: it never takes the last LIVE_RESERVE_FRACTION of the bucket, and waits
+// until live answers have been quiet for a while, so it cannot delay one (3.2.0).
+const llmWorkLane = new AsyncLocalStorage<'background'>();
+const LIVE_RESERVE_FRACTION = 0.25;
+const DEFAULT_LIVE_QUIET_MS = 10_000;
+
+/** Run `fn` (and every LLM call it makes) in the background lane. */
+export function runAsBackgroundLlmWork<T>(fn: () => T): T {
+    return llmWorkLane.run('background', fn);
+}
+
+export function isBackgroundLlmWork(): boolean {
+    return llmWorkLane.getStore() === 'background';
+}
+
 export class RateLimiter {
     private tokens: number;
     private readonly maxTokens: number;
     private readonly refillRatePerSecond: number;
     private lastRefillTime: number;
     private waitQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+    private backgroundQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+    private readonly liveReserve: number;
+    private readonly liveQuietMs: number;
+    private lastLiveAcquireAt = Number.NEGATIVE_INFINITY;
     private refillTimer: ReturnType<typeof setInterval> | null = null;
 
     // Hard cap on pending waiters — beyond this depth, new callers get an immediate
@@ -27,8 +49,10 @@ export class RateLimiter {
      * @param maxTokens - Maximum burst capacity (e.g. 30 for Groq free tier)
      * @param refillRatePerSecond - Tokens added per second (e.g. 0.5 = 30/min)
      */
-    constructor(maxTokens: number, refillRatePerSecond: number) {
+    constructor(maxTokens: number, refillRatePerSecond: number, opts: { liveQuietMs?: number } = {}) {
         this.maxTokens = maxTokens;
+        this.liveReserve = Math.max(1, Math.ceil(maxTokens * LIVE_RESERVE_FRACTION));
+        this.liveQuietMs = Math.max(0, opts.liveQuietMs ?? DEFAULT_LIVE_QUIET_MS);
         this.tokens = maxTokens;
         this.refillRatePerSecond = refillRatePerSecond;
         this.lastRefillTime = Date.now();
@@ -49,6 +73,8 @@ export class RateLimiter {
      * Throws RateLimitQueueFullError if the queue is full — callers should catch and fail-fast.
      */
     public async acquire(): Promise<void> {
+        if (isBackgroundLlmWork()) return this.acquireBackground();
+        this.lastLiveAcquireAt = Date.now();
         this.refill();
 
         if (this.tokens >= 1) {
@@ -68,6 +94,27 @@ export class RateLimiter {
         });
     }
 
+    /** May a background acquire take a token right now? */
+    private backgroundMayTake(): boolean {
+        return this.waitQueue.length === 0
+            && this.tokens >= 1 + this.liveReserve
+            && Date.now() - this.lastLiveAcquireAt >= this.liveQuietMs;
+    }
+
+    private async acquireBackground(): Promise<void> {
+        this.refill();
+        if (this.backgroundQueue.length === 0 && this.backgroundMayTake()) {
+            this.tokens -= 1;
+            return;
+        }
+        if (this.backgroundQueue.length >= this.MAX_QUEUE_DEPTH) {
+            throw new Error(`Rate limiter background queue full (${this.MAX_QUEUE_DEPTH} waiters) — request rejected`);
+        }
+        return new Promise<void>((resolve, reject) => {
+            this.backgroundQueue.push({ resolve, reject });
+        });
+    }
+
     private refill(): void {
         const now = Date.now();
         const elapsed = (now - this.lastRefillTime) / 1000;
@@ -83,6 +130,10 @@ export class RateLimiter {
                 const waiter = this.waitQueue.shift()!;
                 waiter.resolve();
             }
+            while (this.backgroundQueue.length > 0 && this.backgroundMayTake()) {
+                this.tokens -= 1;
+                this.backgroundQueue.shift()!.resolve();
+            }
         }
     }
 
@@ -94,9 +145,11 @@ export class RateLimiter {
         // BUG-4 fix: reject (not resolve) all queued waiters on destroy.
         // Previously called resolve() which let callers proceed without a token —
         // silently bypassing the rate limit on app shutdown.
-        while (this.waitQueue.length > 0) {
-            const waiter = this.waitQueue.shift()!;
-            waiter.reject(new Error('RateLimiter destroyed — request cancelled'));
+        for (const queue of [this.waitQueue, this.backgroundQueue]) {
+            while (queue.length > 0) {
+                const waiter = queue.shift()!;
+                waiter.reject(new Error('RateLimiter destroyed — request cancelled'));
+            }
         }
     }
 }

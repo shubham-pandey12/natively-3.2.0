@@ -1548,11 +1548,12 @@ export class ModesManager {
                 } catch { /* default allow */ }
                 const mode = this.getModes().find(m => m.id === modeId);
                 const { SectionPromptCompiler } = require('./meeting/SectionPromptCompiler');
-                const { instruction, compiled } = await new SectionPromptCompiler(llmHelper).compile({
+                const { runAsBackgroundLlmWork } = require('./RateLimiter');
+                const { instruction, compiled } = await runAsBackgroundLlmWork(() => new SectionPromptCompiler(llmHelper).compile({
                     sectionTitle: title,
                     sectionDescription: description,
                     meetingMode: mode?.templateType,
-                });
+                }));
                 if (compiled && instruction) {
                     DatabaseManager.getInstance().updateNoteSection(sectionId, { compiledPrompt: instruction });
                 }
