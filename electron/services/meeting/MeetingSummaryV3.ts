@@ -737,6 +737,7 @@ export function isEmptyPlaceholder(text: string): boolean {
   const raw = String(text || '');
   if (/^[\p{P}\s]*$/u.test(raw)) return true;
   if (/^\s*n\s*[/.]\s*a\s*\.?\s*$/i.test(raw)) return true;
+  if (/^\s*["'“]?\s*(?:na|not (?:discussed|mentioned|covered|raised))\s*\.?\s*["'”]?\s*\.?\s*$/i.test(raw)) return true;
   const t = placeholderKey(raw);
   if (!t) return false; // symbols only ("✅", "$") are not empty
   return PLACEHOLDER_NOTHING_RE.test(t)

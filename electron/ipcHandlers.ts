@@ -2976,7 +2976,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                     // boundary skips non-coding screenshots.
                     if (!resolved.codingTask
                         && (imagePaths?.length ?? 0) > 0
-                        && (!v3Question.trim() || require('./llm/codingPromptSignals').isDeicticAsk(v3Question))) {
+                        && require('./llm/codingPromptSignals').isImageCodingAsk(v3Question)) {
                       // The screenshot grounds the problem; the words decide
                       // the shape ("explain this" is not "solve this").
                       return require('./llm/codingPromptSignals').screenPromotedCodingSignals(v3Question) as import('./llm/codingPromptSignals').CodingPromptSignals;
@@ -6381,8 +6381,9 @@ export function initializeIpcHandlers(appState: AppState): void {
               // deterministic trimmer was REMOVED because it cropped the conclusion off long
               // answers — so we NEVER trim here, we only measure the answer for telemetry (the
               // coarse length class + word count). The answer text is left exactly as produced.
-              const budget = applySpeakabilityBudget(fullResponse, answerPlan.answerType, answerPlan.answerStyle as any, message, isCodingChat, (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength());
-              piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'speakability_measured', speakabilityClass: budget.speakability_class, markerCount: budget.spoken_word_count });
+              const measuredLength = (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength();
+              const budget = applySpeakabilityBudget(fullResponse, answerPlan.answerType, answerPlan.answerStyle as any, message, isCodingChat, measuredLength);
+              piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'speakability_measured', speakabilityClass: budget.speakability_class, markerCount: budget.spoken_word_count, answerLength: measuredLength });
               // Visible scaffold in a DEFAULT-style answer (user didn't ask for
               // structure): compress to the speakable form. detectAnswerStyle
               // already ran inside planAnswer (answerStyle on the plan).

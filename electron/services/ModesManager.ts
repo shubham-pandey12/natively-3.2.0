@@ -1513,6 +1513,8 @@ export class ModesManager {
         // If the section's meaning changed (title/description), recompile its instruction.
         // Skip when we are only writing the compiledPrompt itself (avoids a loop).
         if ((updates.title !== undefined || updates.description !== undefined) && updates.compiledPrompt === undefined) {
+            // The old instruction describes the old section: clear it until the recompile lands.
+            DatabaseManager.getInstance().updateNoteSection(id, { compiledPrompt: '' });
             const owner = DatabaseManager.getInstance().getNoteSectionOwnerMode(id);
             if (owner) {
                 this.compileSectionPromptAsync(id, owner.modeId, updates.title ?? owner.title, updates.description ?? owner.description);
@@ -1532,6 +1534,9 @@ export class ModesManager {
     private compileSectionPromptAsync(sectionId: string, modeId: string, title: string, description: string): void {
         void (async () => {
             try {
+                // A built-in section ships with its instruction; nothing to compile.
+                const { builtinSectionInstruction } = require('./meeting/sectionInstructions');
+                if (builtinSectionInstruction(title, description)) return;
                 const llmHelper = ModesManager.llmHelperForCompiler;
                 if (!llmHelper || !llmHelper.hasAnyConfiguredProvider?.()) return; // compiler not available or no provider configured
                 // Scope gate: never call a cloud LLM for prompt compilation when post_call_summary

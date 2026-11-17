@@ -8,6 +8,7 @@ import { analyzeUserInstructions, getRegisteredUserInstructions, userInstruction
 import { applyModeFallback, type ActiveModeInfo } from './modeProfiles';
 import { classifyDocumentQuestionShape } from './documentGroundedPrompt';
 import { includesPlannerTerm } from '../services/modes/retrievalTextMatch';
+import { isActiveCodingProblemFollowUp } from './codingFollowup';
 // Classification regex tables (PR #427 §1.3) — moved verbatim to a sibling
 // module to cut this file down; imported under identical names so no
 // reference below changes.
@@ -1643,6 +1644,9 @@ export const planAnswer = (input: PlanAnswerInput): AnswerPlan => {
 
   if (!question) {
     answerType = 'unknown_answer';
+  } else if (isActiveCodingProblemFollowUp(question)) {
+    // A follow-up carrying the active coding problem note stays a coding turn.
+    answerType = includesAny(textNoTechStack, DSA_PATTERNS) ? 'dsa_question_answer' : 'coding_question_answer';
   } else if (wantsSourceEvidence) {
     answerType = 'source_code_evidence_answer';
   } else if (wantsProjectLink) {

@@ -219,7 +219,7 @@ export function isScreenOnlyAsk(question: string | undefined | null): boolean {
   if (!q) return true;
   if (BARE_TRIGGER_ASK_RE.test(q)) return true;
   if (!isDeicticAsk(q)) return false;
-  const words = q.toLowerCase().replace(/['']/g, '').split(/[^a-z]+/).filter(Boolean);
+  const words = q.toLowerCase().replace(/['\u2019]/g, '').split(/[^a-z]+/).filter(Boolean);
   return words.length > 0 && words.every(w => SCREEN_ONLY_WORDS.has(w));
 }
 

@@ -80,7 +80,7 @@ export interface RetrievalConfidence {
 }
 
 /** See ModeRetrievedContext.degradedReason. */
-export type RetrievalDegradedReason = 'embedding_unavailable' | 'local_lexical' | 'hybrid_threw';
+export type RetrievalDegradedReason = 'embedding_unavailable' | 'local_lexical' | 'hybrid_threw' | 'no_chunk_vectors';
 
 export interface ModeRetrievedContext {
     chunks: ModeRetrievedChunk[];
@@ -1832,8 +1832,15 @@ export class ModeHybridRetriever {
         if (this.isEmbeddingAvailable() && !usingLexicalForLocalManualQuery) {
             try {
                 markH4HybridStage('perform_hybrid_enter', { candidateCount: allCandidates.length });
-                candidates = await this.performHybridRetrieval(allCandidates, queryWords, queryText, adaptiveThreshold, files, queryEmbedRetryBudgetMs);
+                const vectorStats = { scored: 0, withVector: 0 };
+                candidates = await this.performHybridRetrieval(allCandidates, queryWords, queryText, adaptiveThreshold, files, queryEmbedRetryBudgetMs, vectorStats);
                 markH4HybridStage('perform_hybrid_exit', { candidateCount: candidates.length });
+                // Every candidate lacked a vector in the active space: cosine
+                // contributed nothing, so this turn is lexical, not hybrid (F-ACC-06).
+                if (vectorStats.scored > 0 && vectorStats.withVector === 0) {
+                    degradedReason = 'no_chunk_vectors';
+                    console.warn(`[ModeHybridRetriever] no chunk of ${vectorStats.scored} has a vector in the active space yet; this turn is lexical-only (cosine contributed nothing), vectors are being built in the background`);
+                }
                 // EMPTY-HYBRID FLOOR (2026-09-07, always answer). A paraphrased live
                 // question ("did we get paged or did a customer tell us") against a
                 // two-chunk mode scored every chunk under MIN_COMBINED_SCORE and the
@@ -1887,9 +1894,9 @@ export class ModeHybridRetriever {
         } else {
             degradedReason = usingLexicalForLocalManualQuery ? 'local_lexical' : 'embedding_unavailable';
             if (usingLexicalForLocalManualQuery) {
-                console.warn('[ModeHybridRetriever] Local ONNX provider active for manual query; using lexical fallback');
+                console.warn('[ModeHybridRetriever] Local ONNX provider in a meeting with NATIVELY_KEYLESS_LEXICAL_MANUAL_RETRIEVAL=1: this turn is lexical-only (no query embed, cosine not used)');
             } else {
-                console.warn('[ModeHybridRetriever] Embedding provider unavailable, using lexical fallback');
+                console.warn('[ModeHybridRetriever] Embedding provider unavailable, using lexical fallback (no embeddings: this turn is lexical-only, not hybrid)');
             }
             this.emitFallbackTelemetry({
                 reason: 'embedding_unavailable',
@@ -2261,7 +2268,8 @@ export class ModeHybridRetriever {
                 })),
                 formattedContext: finalContext,
                 usedFallback,
-                usedHybrid: !usedFallback,
+                // A degraded turn is lexical whatever the provider is (F-ACC-06).
+                usedHybrid: !usedFallback && !degradedReason,
                 ...(degradedReason ? { degradedReason } : {}),
                 ...(confidence ? { confidence } : {})
             };
@@ -2283,7 +2291,10 @@ export class ModeHybridRetriever {
             })),
             formattedContext,
             usedFallback,
-            usedHybrid: this.isEmbeddingAvailable(),
+            // Was `isEmbeddingAvailable()`: a heard local-embedder turn, a query
+            // embed that threw, or a corpus with no vectors yet all reported
+            // "hybrid" while scoring lexically (F-ACC-06).
+            usedHybrid: !usedFallback && !degradedReason,
             ...(degradedReason ? { degradedReason } : {}),
             ...(confidence ? { confidence } : {})
         };
@@ -2549,6 +2560,7 @@ export class ModeHybridRetriever {
         minScore: number = MIN_COMBINED_SCORE,
         files: ModeReferenceFile[] = [],
         queryEmbedRetryBudgetMs?: number,
+        vectorStats?: { scored: number; withVector: number },
     ): Promise<ChunkCandidate[]> {
         // Embed query — the ONLY embedding round-trip on the hot path (PI v3,
         // W3). Chunk vectors are persisted at UPLOAD time (indexFile) and
@@ -2729,6 +2741,10 @@ export class ModeHybridRetriever {
         // own measured example (fts 0.109, floor 0.15) returned ZERO chunks on
         // the transition turn after an embedding-provider promotion, which is
         // exactly a mid-session "the résumé disappeared" symptom.
+        if (vectorStats) {
+            vectorStats.scored = candidates.length;
+            vectorStats.withVector = candidates.length - vectorless.size;
+        }
         return scored.filter(c => {
             // A chunk holding the query's rare terms is admitted on that alone:
             // the combined floor exists to drop chunks with no claim on the

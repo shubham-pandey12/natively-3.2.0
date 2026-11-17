@@ -838,7 +838,10 @@ export interface ResolvedReference {
     | 'VALUE_RECALL_FROM_HISTORY'
     // With screen context present, "What should I say?" / "What should I say about this?"
     // is a question about what is on screen, not a request to rephrase previous speech.
-    | 'SCREEN_CONTEXT_IS_PRIMARY_SUBJECT';
+    | 'SCREEN_CONTEXT_IS_PRIMARY_SUBJECT'
+    // The previous question named nothing, so the referent is the subject the
+    // previous ANSWER named.
+    | 'RESOLVED_FROM_PREVIOUS_ANSWER';
 }
 
 // "can you repeat the number" / "what was the percentage again" / "remind me
@@ -848,6 +851,49 @@ export interface ResolvedReference {
 // anchored to that answer and the model repeated it, number-less — while the
 // 0.8% / 24-hour answers sat two turns back in the same ring. The referent of
 // a value-recall is the most recent answer that HOLDS such a value.
+// Openers that start an answer sentence but never name its subject ("Sure, ...",
+// "The ...", "When I ..."). Skipped when picking the referent named in the
+// previous answer.
+const ANSWER_OPENERS = new Set([
+  'the', 'a', 'an', 'sure', 'yes', 'yeah', 'no', 'well', 'okay', 'ok', 'right', 'honestly',
+  'absolutely', 'great', 'good', 'we', 'it', 'its', 'my', 'our', 'at', 'in', 'on', 'for', 'when',
+  'while', 'after', 'before', 'during', 'there', 'here', 'one', 'first', 'second', 'third',
+  'both', 'each', 'every', 'they', 'he', 'she', 'you', 'i', "i'd", "i'm", 'that', 'this', 'these',
+  'those', 'definitely', 'certainly', 'actually', 'basically', 'mostly', 'mainly', 'primarily',
+  'thanks', 'thank', 'hi', 'hello', 'over', 'from', 'with', 'by', 'as', 'to', 'if',
+]);
+
+/**
+ * The subject named in the first sentence of the previous answer, used when the
+ * previous QUESTION named nothing ("What's your favourite tool?" -> "Kafka ...",
+ * then "Why that?"). Returns undefined when the previous question already
+ * carried an entity or no matching answer is in the ring.
+ */
+export function previousAnswerReferent(state: ConversationState | null | undefined): string | undefined {
+  const pq = state?.previousQuestion?.trim();
+  if (!state || !pq) return undefined;
+  if (extractEntities(pq).length > 0) return undefined;
+  const norm = (t: string): string => t.replace(/…$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const want = norm(pq);
+  let answer: string | undefined;
+  for (let i = (state.turns?.length ?? 0) - 1; i >= 0; i--) {
+    const tq = norm(state.turns[i].q);
+    if (tq && (tq === want || (state.turns[i].q.endsWith('…') && want.startsWith(tq)))) {
+      answer = state.turns[i].a;
+      break;
+    }
+  }
+  if (!answer?.trim()) return undefined;
+  const first = answer.trim().split(/(?<=[.!?;])\s+/)[0] ?? '';
+  for (const m of first.matchAll(/\b([A-Z][A-Za-z0-9]{2,}(?:\s+[A-Z][A-Za-z0-9]{2,})?|[a-z]+[A-Z]\w+)\b/g)) {
+    const token = m[1];
+    const head = token.split(/\s+/)[0].toLowerCase();
+    if (STOP.has(head) || SENTENCE_STARTERS.has(head) || ANSWER_OPENERS.has(head)) continue;
+    return token;
+  }
+  return undefined;
+}
+
 const VALUE_RECALL_RE = /\b(?:repeat|say (?:that )?again|remind me(?: of)?|what was|what were|recall|give me|tell me)\b[\s\S]{0,40}?\b(?:number|numbers|figure|figures|percentage|percent|amount|date|dates|value|rate|count|ttl|timeline|cost|price|salary|range|total|deadline|year|years|version)\b/i;
 const VALUE_RECALL_MAX_WORDS = 9;
 const CARRIES_VALUE_RE = /\d/;
@@ -1003,6 +1049,18 @@ export function resolveReference(
   // current question always takes precedence over inherited state.
   if (!pronoun && !rephrase && extractEntities(q).length > 0) {
     return { resolved: q, usedState: false, reason: 'CURRENT_QUESTION_CONTAINS_EXPLICIT_ENTITY' };
+  }
+
+  if (!personal && !rephrase && (pronoun || bare || fragment)) {
+    const fromAnswer = previousAnswerReferent(state);
+    if (fromAnswer) {
+      return {
+        resolved: `${q} (referring to: ${fromAnswer}, named in the previous answer)`,
+        usedState: true,
+        referent: fromAnswer,
+        reason: 'RESOLVED_FROM_PREVIOUS_ANSWER',
+      };
+    }
   }
 
   // Personal pronouns resolve ONLY to a person; everything else resolves to

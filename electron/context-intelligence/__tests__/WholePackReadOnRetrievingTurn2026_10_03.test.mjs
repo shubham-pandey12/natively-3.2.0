@@ -65,11 +65,13 @@ describe('decide(): the plan makes room for the whole pack on a turn that retrie
     const baseTokens = Math.max(MODE_POLICIES['call-center'].contextBudget.evidenceTokens, MULTI_FILE_EVIDENCE.tokens);
     assert.ok((d.retrievalPlan.evidenceTokens ?? 0) >= baseTokens + PACK_TOKENS + WHOLE_PACK_ITEM_OVERHEAD * PACK.length, String(d.retrievalPlan.evidenceTokens));
   });
-  test('a pack larger than the threshold changes nothing in the plan', () => {
+  // 3.2.0 parity (2026-11-17): a pack too large to hand over whole is retrieved
+  // with a wider budget (LARGE_PACK_*), so its chunks are not starved.
+  test('a pack larger than the threshold is retrieved with the large-pack budget', () => {
     const big = decide(req('call-center', Q, { attachedCorpusTokens: WHOLE_PACK_MAX_TOKENS + 1 }));
     const none = decide(req('call-center', Q, { attachedCorpusTokens: null }));
-    assert.equal(big.retrievalPlan.maximumAcceptedEvidence, none.retrievalPlan.maximumAcceptedEvidence);
-    assert.equal(big.retrievalPlan.evidenceTokens, none.retrievalPlan.evidenceTokens);
+    assert.ok(big.retrievalPlan.maximumAcceptedEvidence >= Math.max(16, none.retrievalPlan.maximumAcceptedEvidence));
+    assert.ok(big.retrievalPlan.evidenceTokens >= Math.max(10_000, none.retrievalPlan.evidenceTokens));
   });
   test('a small corpus keeps exactly the plan it had', () => {
     const d = decide(req('team-meet', "What's the crash-free bar?", { attachedSourceCount: 1, attachedCorpusTokens: 180 }));

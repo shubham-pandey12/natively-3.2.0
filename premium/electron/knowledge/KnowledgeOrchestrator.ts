@@ -5,6 +5,8 @@ import { buildGroundingBlock } from './ProfileContextBuilder';
 import { isProfileGroundingV2Enabled, isProfileGroundingV2JdFitCoverageEnabled } from '../../../electron/llm/profileGroundingV2';
 import { planAnswer, isJdFactualLookupNotNegotiationAdvice } from '../../../electron/llm/AnswerPlanner';
 import { isIntelligenceFlagEnabled } from '../../../electron/intelligence/intelligenceFlags';
+import { seedsCandidateBackground } from '../../../electron/llm/TurnPlanner';
+import { logSafeFileName } from '../../../electron/context-intelligence/debug/debug-config';
 import { isLayerAllowed } from '../../../electron/llm/contextRoute';
 import { extractDocumentText } from './DocumentReader';
 import { extractStructuredData } from './StructuredExtractor';
@@ -992,7 +994,7 @@ export class KnowledgeOrchestrator {
         }
 
         try {
-            console.log(`[KnowledgeOrchestrator] Starting ingestion for ${type} from: ${filePath}`);
+            console.log(`[KnowledgeOrchestrator] Starting ingestion for ${type} from: ${logSafeFileName(filePath)}`);
 
             // 1. Extract Text
             const rawText = await extractDocumentText(filePath);
@@ -1943,7 +1945,12 @@ export class KnowledgeOrchestrator {
         // Heuristic: a precise-value ask ("exact", "specific", "what was my ... %",
         // "how much exactly") wants a datum, not a pitch.
         const wantsPreciseValue = /\b(exact|exactly|specific|precise)\b|\bwhat was my\b.*\b(percentage|percent|%|rate|number|score|figure|amount)\b|\bhow much\b/i.test(question);
-        if (relevantNodes.length === 0 && !wantsPreciseValue && this.activeResume.structured_data) {
+        if (relevantNodes.length === 0 && !wantsPreciseValue && this.activeResume.structured_data && seedsCandidateBackground({
+            question,
+            answerType: (() => {
+                try { return planAnswer({ question, source: 'what_to_answer', speakerPerspective: 'interviewer' } as any).answerType; } catch { return null; }
+            })(),
+        })) {
             const fitPack = this.buildExperienceFallbackPack(this.activeResume.structured_data as StructuredResume);
             if (fitPack.length > 0) {
                 console.log(`[KnowledgeOrchestrator] Zero-node candidate-directed question — seeding ${fitPack.length} real experience/achievement node(s) to prevent fabrication`);

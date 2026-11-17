@@ -518,3 +518,7 @@ export function createModeRetrievalPort(input: ModePortInput): RetrievalPort {
     },
   };
 }
+
+/** A pack larger than WHOLE_PACK_MAX_TOKENS is retrieved with this wider budget (3.2.0). */
+export const LARGE_PACK_ACCEPTED_EVIDENCE = 16;
+export const LARGE_PACK_EVIDENCE_TOKENS = 10_000;

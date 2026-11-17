@@ -89,6 +89,7 @@ export interface AutoAnswerEngine {
     onEngineIdle(): void;
     onProviderEndpoint(): void;
     onLocalSpeechEnd(): void;
+    onLocalSpeechEndBeforeFinal(): void;
     onLocalSpeechStart(): void;
     onManualAnswerStarted(): void;
     ingest(segment: TranscriptSegment): void;
@@ -245,7 +246,7 @@ export const UNAVAILABLE_AUTO_ANSWER: AutoAnswerPremium = Object.freeze({
     available: false,
     createEngine: (): AutoAnswerEngine => ({
         setThresholds: noop, onMeetingStart: noop, onModeChanged: noop, onMeetingStop: noop, onEngineIdle: noop,
-        onProviderEndpoint: noop, onLocalSpeechEnd: noop, onLocalSpeechStart: noop,
+        onProviderEndpoint: noop, onLocalSpeechEnd: noop, onLocalSpeechEndBeforeFinal: noop, onLocalSpeechStart: noop,
         onManualAnswerStarted: noop, ingest: noop,
     }),
     createUsageTelemetry: (): AutoAnswerUsage => ({

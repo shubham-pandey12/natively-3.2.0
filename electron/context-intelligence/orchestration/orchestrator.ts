@@ -25,7 +25,9 @@ import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
 import { classifyTurn, isBareFollowUp, isCurrentScreenRequest, stripSttFillers, isProspectiveJobQuestion } from '../question/turn-classifier';
 import type { AnswerTrace, RetrievalAttemptTrace } from '../observability/answer-trace';
 import { mergeRewrittenEvidence, type QueryRewriter, type QueryRewriteOutcome } from '../retrieval/llm-query-rewrite';
-import { SMALL_CORPUS_MAX_TOKENS, WHOLE_PACK_MAX_TOKENS } from '../retrieval/mode-retrieval-port';
+import {
+  LARGE_PACK_ACCEPTED_EVIDENCE, LARGE_PACK_EVIDENCE_TOKENS, SMALL_CORPUS_MAX_TOKENS, WHOLE_PACK_MAX_TOKENS,
+} from '../retrieval/mode-retrieval-port';
 import { PROFILE_WHOLE_MAX_TOKENS } from '../retrieval/profile-retrieval-port';
 
 export interface AnswerRequest {
@@ -401,6 +403,10 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
     && typeof req.attachedCorpusTokens === 'number'
     && req.attachedCorpusTokens > SMALL_CORPUS_MAX_TOKENS && req.attachedCorpusTokens <= WHOLE_PACK_MAX_TOKENS;
   const packFiles = wholePack ? Math.max(1, req.attachedSourceCount ?? 1) : 0;
+  // A pack too large to hand over whole is retrieved, with a wider evidence
+  // budget than an ordinary turn so its chunks are not starved.
+  const largePack = retrieves && req.hasAttachedDocuments === true && req.profileOnlyDocuments !== true
+    && typeof req.attachedCorpusTokens === 'number' && req.attachedCorpusTokens > WHOLE_PACK_MAX_TOKENS;
   // The résumé and the job description, each handed over whole by the profile
   // port (PROFILE_WHOLE_MAX_TOKENS), ride on top in the same way: one item per
   // document, the budget grown by their size, and the pack keeps its own room.
@@ -409,9 +415,12 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   const wholeAnswers = retrieves && answersFit;
   const wholeAnswersTokens = wholeAnswers ? ownAnswersTokens : 0;
   const profileDocs = (wholeProfile ? (req.profileWhole as { docs: number }).docs : 0) + (wholeAnswers ? 1 : 0);
-  const acceptedBase = (multiFile
-    ? Math.max(policy.retrievalPolicy.maximumAcceptedEvidence, MULTI_FILE_EVIDENCE.accepted)
-    : policy.retrievalPolicy.maximumAcceptedEvidence) + packFiles + profileDocs;
+  const acceptedBase = Math.max(
+    multiFile
+      ? Math.max(policy.retrievalPolicy.maximumAcceptedEvidence, MULTI_FILE_EVIDENCE.accepted)
+      : policy.retrievalPolicy.maximumAcceptedEvidence,
+    largePack ? LARGE_PACK_ACCEPTED_EVIDENCE : 0,
+  ) + packFiles + profileDocs;
 
   // A source-primary turn reads the reference files, plus the meeting when one
   // is live (the meeting rule above would otherwise have been the whole plan).
@@ -489,10 +498,11 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
     maximumAcceptedEvidence: acceptedBase * (cls.exhaustive && cls.shouldRetrieve ? 3 : 1),
     // A whole small corpus must fit next to the meeting's evidence, or the
     // packer drops the file outright (it skips an item that does not fit).
-    ...(multiFile || (smallCorpus && retrieves) || wholePack || wholeProfile || wholeAnswers
+    ...(multiFile || (smallCorpus && retrieves) || wholePack || largePack || wholeProfile || wholeAnswers
       ? { evidenceTokens: Math.max(
         policy.contextBudget.evidenceTokens,
         multiFile ? MULTI_FILE_EVIDENCE.tokens : 0,
+        largePack ? LARGE_PACK_EVIDENCE_TOKENS : 0,
         smallCorpus && retrieves ? (req.attachedCorpusTokens as number) + SMALL_CORPUS_EVIDENCE_HEADROOM : 0,
       ) + (wholePack ? (req.attachedCorpusTokens as number) + WHOLE_PACK_ITEM_OVERHEAD * packFiles : 0)
         + (wholeProfile ? (req.profileWhole as { tokens: number }).tokens : 0)
@@ -935,9 +945,10 @@ export function evaluateAnswerability(
     (req.authoritativeSources ?? []).some((s) => plannedTypes.has(s));
   const family = (req: ClaimRequirement): string =>
     plannable(req) && String(req.claimType).startsWith('JOB_') ? 'job' : 'user';
+  const subjectKey = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').replace(/[\s?!.]+$/, '').trim();
   const bySubject = new Map<string, typeof required>();
   for (const req of required) {
-    const subject = `${req.subject ?? decision.resolvedQuestion} ${family(req)}`;
+    const subject = `${subjectKey(req.subject ?? decision.resolvedQuestion)} ${family(req)}`;
     if (!bySubject.has(subject)) bySubject.set(subject, []);
     bySubject.get(subject)!.push(req);
   }

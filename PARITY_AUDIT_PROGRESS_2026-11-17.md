@@ -175,3 +175,78 @@ Ported:
 Test updated: AnswerPolicyLiveDenials2026_08_07 "exact strict wording" — the Profile Intelligence remedy is now build-dependent (absent under the test runner where premium modules cannot initialise).
 
 Validation: `tsc` clean; `npm run build:electron` ok; llm + services + context-intelligence suites 15834 tests, 1 failure (pre-existing FastModelPreferFast `preferFast`). Reviewed but not executed on macOS or Windows; no platform branches touched.
+
+## Phase 5 — differing modules (2026-11-17)
+
+Every module whose compiled output differs from 3.2.0 was diffed (48 with 3+ hunks, plus the small ones). Local fixes newer than 3.2.0 were kept.
+
+**Ported from 3.2.0**
+- diagramPromptSignals: conversation material is read lazily (F-LAT-02).
+- MeetingSummaryV3: "NA" and "not discussed/mentioned/covered/raised" count as empty placeholders.
+- TurnPlanner: `seedsCandidateBackground()`. KnowledgeOrchestrator seeds the zero-node fallback pack only when it returns true, and logs a safe file name.
+- piTelemetry: `answerLength` is an allowed key. ipcHandlers emits it on `speakability_measured`.
+- StructuredExtractor: the résumé name is logged through `logSafeText`.
+- customContextClassifier:
+  - Counts like "2M requests" are no longer treated as money (`hasMoneyAmount`).
+  - Incident-cost sentences are exempt.
+  - Bare language names are not directives.
+- codingPromptSignals: the curly apostrophe is normalized.
+- manualProfileIntelligence: word-bounded topic stripping, 6-word topics, and the dangling-word trim.
+- orchestrator: the large-pack retrieval budget (`LARGE_PACK_*`) and normalized claim subject keys.
+- conversation-state: `previousAnswerReferent`, which resolves a pronoun from the previous answer.
+- AnswerPlanner: an active coding-problem follow-up routes to coding/DSA.
+- ContextAssembler and OkfPromptFormatter: document text is neutralized before entering the prompt, plus "data, never instructions" rules.
+- ModeHybridRetriever: `no_chunk_vectors` degraded reason. `usedHybrid` now excludes degraded runs (F-ACC-06).
+- ModesManager: the compiled prompt is cleared on edit, and built-in sections skip compilation.
+- main:
+  - The STT watchdog and restart pause while failover is active.
+  - The discard event carries `generationId`.
+  - The Auto Answer speech-end hint fires before the final transcript.
+- autoAnswer stub: `onLocalSpeechEndBeforeFinal`.
+- ipcHandlers: chat V3 image promotion uses `isImageCodingAsk`.
+
+**Kept local (newer than 3.2.0)**
+- WindowHelper `os.tmpdir()`.
+- ScreenshotHelper display matching and the retain/release lease.
+- MeetingPersistence emergency backup.
+- AOTPipeline, DocumentChunker and CompanyResearchEngine fixes.
+- ModeGenerator templates.
+- answerLength caps.
+- Phone-chat stream controller.
+- Modes handler validation.
+- Preload additions.
+
+**Deferred, needs a decision**
+- SectionPromptCompiler: drop the "Not discussed." placeholder. This changes summary output and the renderer reads it.
+- RateLimiter background lane (`runAsBackgroundLlmWork`) together with the ModesManager wrap. This is a new scheduling feature.
+- featureGate `markPremiumAbsent`: porting it alone would make premium always available in source builds.
+- Guide `guideFactsFromSources` / `meetingSurface` / `guide_stop_locked`.
+- codingPromptSignals screen-only word list: the 3.2.0 and local lists differ in intent.
+- ModeHybridRetriever manual lexical flip: an ONNX memory trade-off.
+- `profile_history` data-scope tag on profile research calls.
+
+**Billing / licensing: ON HOLD, audit only**
+- packClockWiring `packHoursCountNow`.
+- proAccess `readLicenceFacts` / `currentPackProBlock`.
+- `licencePremiumForWindows`.
+- `packProStandDownModeId`.
+- proEntitlementWiring `onActivated` isPremium.
+- LicenseManager messages.
+
+3.2.0 also removed the dev Ultra override; that removal was deliberately not ported.
+
+## Phase 6 — IPC, preload, flags, settings, DB, packaging sweep
+- IPC channel strings: 450 local vs 449 in 3.2.0, none present only in 3.2.0.
+- `NATIVELY_*` env flags: identical sets (43 each).
+- Settings reads: identical. The only new 3.2.0 setting key, `packProStandDownModeId`, is billing.
+- package.json: dependencies identical. Version is 3.1.0 locally vs 3.2.0 and was not bumped (release decision).
+- No new DB migrations.
+- Modules present only in 3.2.0 are premium `.js` files present locally, plus firstRunGuide, which is equivalent to `firstRunGuidePolicy.ts`.
+
+## Phase 7 — validation
+- `npx tsc -p electron/tsconfig.json --noEmit`: clean.
+- `npm run build:electron`: OK.
+- Full suite: 15834 tests, 15778 pass, 1 fail. The failure is the pre-existing FastModelPreferFast `preferFast` source check.
+- Three source-shape tests were updated to the 3.2.0 contract: CodingTemplateContract, SyntaxCheckAndShapeRepair and WholePackReadOnRetrievingTurn.
+- Reviewed but not executed on Windows. Automated tests ran on macOS only.
+- None of the ported changes adds a platform branch. The STT failover and watchdog change and the Auto Answer hint still require physical macOS and Windows verification.

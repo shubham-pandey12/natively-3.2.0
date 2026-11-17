@@ -3,6 +3,7 @@
 
 import { DocType, StructuredResume, StructuredJD, VALID_JD_LEVELS, VALID_JD_EMPLOYMENT_TYPES } from './types';
 import { callWithRetry } from './llmUtils';
+import { logSafeText } from '../../../electron/context-intelligence/debug/debug-config';
 import { coerceSkills, flattenSkills } from './skillsUtil';
 
 const RESUME_SCHEMA = `{
@@ -200,7 +201,7 @@ export async function extractStructuredData<T>(
       resume.achievements = resume.achievements || [];
       resume.certifications = resume.certifications || [];
       resume.leadership = resume.leadership || [];
-      console.log(`[StructuredExtractor] Successfully parsed resume for: ${resume.identity.name}`);
+      console.log(`[StructuredExtractor] Successfully parsed resume for: ${logSafeText(resume.identity.name)}`);
     } else if (type === DocType.JD) {
       const jd = parsed as unknown as StructuredJD;
 

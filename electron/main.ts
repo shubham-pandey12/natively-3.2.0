@@ -3825,10 +3825,13 @@ export class AppState {
     restartStt: (source) => {
       const stt = source === 'system' ? this.googleSTT : this.googleSTT_User;
       if (!stt || !this.isMeetingActive) return;
+      if (this._sttFailover[source]?.active) return;
       stt.stop();
       stt.start();
     },
-    watchdogEnabled: (source) => this._sttGapProvider[source].streaming,
+    // Not while a stand-in carries the channel: a slow one (batch, local)
+    // looks exactly like a stall.
+    watchdogEnabled: (source) => this._sttGapProvider[source].streaming && !this._sttFailover[source]?.active,
   });
 
   /** A recovered line goes into the session at the time it was said. */
@@ -5240,6 +5243,8 @@ export class AppState {
             const provider = CredentialsManager.getInstance().getSttProvider();
             if (loadAutoAnswerPremium().acceptsLocalSpeechEndHint(provider)) {
               this.simpleAutoAnswer.onLocalSpeechEnd();
+            } else if (provider && provider !== 'none') {
+              this.simpleAutoAnswer.onLocalSpeechEndBeforeFinal?.();
             }
           } catch { /* an endpoint hint must never break capture */ }
         }
@@ -8993,11 +8998,11 @@ export class AppState {
     // coding scaffold ended with no final answer (superseded/declined/errored).
     // Tell the renderer to drop the open scaffold row. Flush pending token
     // batches first so a late scaffold batch can't re-mount the row afterwards.
-    this.intelligenceManager.on('suggested_answer_discard', (reason: string) => {
+    this.intelligenceManager.on('suggested_answer_discard', (reason: string, generationId?: number) => {
       this.autoAnswerUsage.stopAwaitingAnswer();
       flushBatchesBeforeFinal();
       const win = answerWindow()
-      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason })
+      this.sendToWindow(win, 'intelligence-suggested-answer-discard', { reason, ...(typeof generationId === 'number' ? { generationId } : {}) })
     })
 
     // Verified code execution (background): a ✓ badge when the shown code passed
