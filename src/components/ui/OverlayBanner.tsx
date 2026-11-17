@@ -132,7 +132,7 @@ export const OverlayBannerButton: React.FC<OverlayBannerButtonProps> = ({
 
 // `title` is the banner HEADING, not the native tooltip attribute — hence the
 // Omit. The root div has no tooltip; the clamped body has one (messageTooltip).
-export type OverlayBannerTone = 'warning' | 'error' | 'ok';
+export type OverlayBannerTone = 'warning' | 'error' | 'ok' | 'guide';
 
 export interface OverlayBannerProps
   extends Omit<React.HTMLAttributes<HTMLDivElement>, 'title'> {

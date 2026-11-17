@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import { ArrowDown, Check, ChevronDown, ChevronUp, Copy, FileText, ImagePlus, LayoutGrid, Minus, MoreHorizontal, Paperclip, Pause, Play, RotateCcw, Scissors, Search, X } from 'lucide-react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { FirstRunGuideCard } from './onboarding/FirstRunGuideCard';
+import { useT } from '../i18n';
+import { useRecoveredGuide, useGuideHighlight } from './onboarding/useRecoveredGuide';
+import './onboarding/RecoveredGuide.css';
 import { applyTypedKeyAtEnd, plainAnswerText } from './meeting/notesView';
 import { NotepadAnswer } from './notes/NotepadAnswer';
 import { useLastTimeRecap } from './assist/useLastTimeRecap';
@@ -137,12 +139,45 @@ const RecipeIcon: React.FC = () => (
 
 const ink = (v: string): React.CSSProperties => ({ color: `var(${v})` });
 
+function useNotesGuide(off: boolean) {
+    const t = useT();
+    const { state, justDone, dispatch } = useRecoveredGuide();
+    const step = off ? null : ['notepad', 'ask', 'recipe', 'stop2'].find(value => state?.status === 'active' && state.step === value) ?? null;
+    const live = step && !justDone ? step : null;
+    const liveRef = useRef(live);
+    liveRef.current = live;
+    useGuideHighlight(live === 'ask' ? '[data-guide="notes-ask"]' : live === 'recipe' ? '[data-guide="notes-recipes"]' : live === 'stop2' ? '[data-guide="notes-stop"]' : null);
+    const onTyped = useCallback((value: string) => { if (liveRef.current === 'notepad' && value.trim()) { liveRef.current = null; dispatch({ type: 'note_typed' }); } }, [dispatch]);
+    const onAskOpened = useCallback(() => { if (liveRef.current === 'ask') { liveRef.current = null; dispatch({ type: 'ask_opened' }); } }, [dispatch]);
+    const onRecipeRun = useCallback(() => { if (liveRef.current === 'recipe') { liveRef.current = null; dispatch({ type: 'recipe_run' }); } }, [dispatch]);
+    const copy: Record<string, [string, string]> = {
+        notepad: ['Write while you talk.', 'Click “Write notes” at the top of the page and type a line.'],
+        ask: ['Ask about the meeting.', 'Click Ask anything. It knows everything said so far.'],
+        recipe: ['Try a recipe.', 'Recipes are ready-made asks. Pick one, or type / to see them all.'],
+        stop2: ['Stop the meeting when you’re ready.', 'Press the stop button ■ in the bar at the bottom. Natively writes up your notes.'],
+    };
+    const number: Record<string, number> = { notepad: 9, ask: 10, recipe: 11, stop2: 12 };
+    const node = step && <div className="guide-enter guide-notes-pill np-elevated rounded-[20px] pl-4 pr-1.5 py-1.5 flex items-center gap-3" role="status" data-guide-strip={step}>
+        <div className="guide-notes-swap min-w-0 flex-1 py-0.5" key={step}>
+            <p className="text-[13px] leading-[18px] font-medium flex items-center gap-1.5" style={ink('--np-ink')}>
+                {justDone && <Check className="guide-done-check w-3.5 h-3.5 shrink-0" strokeWidth={2.4} style={ink('--np-accent')} aria-label={t('Done')} />}
+                <span className="min-w-0">{t(copy[step][0])}</span>
+            </p>
+            <p className="text-[12px] leading-4" style={ink('--np-ink-secondary')}>{t(copy[step][1])}</p>
+        </div>
+        <span className="shrink-0 text-[12px] tabular-nums" style={ink('--np-ink-tertiary')}>{t('{n} of {total}').replace('{n}', String(number[step])).replace('{total}', '14')}</span>
+        {!justDone && <button type="button" aria-label={t('Skip guide')} title={t('Skip guide')} onClick={() => dispatch({ type: 'skip' })} className="w-7 h-7 shrink-0 rounded-full flex items-center justify-center np-wash" style={ink('--np-ink-secondary')}><X className="w-3.5 h-3.5" strokeWidth={1.75} /></button>}
+    </div>;
+    return { node, onTyped, onAskOpened, onRecipeRun };
+}
+
 const EMPTY_INFO: HeadingInfo & { speakers: { me: string; them: string } } = {
     title: null, people: 0, event: null, attendees: [], selfEmail: null, speakers: { me: 'You', them: 'Them' },
 };
 
 const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) => {
     const isLight = useResolvedTheme() === 'light';
+    const notesGuide = useNotesGuide(!!preview);
     const [text, setText] = useState(preview?.text ?? '');
     const [phase, setPhase] = useState<Phase>(preview ? 'live' : 'idle');
     // The notepad's demand (2026-11-01, FunnelTelemetry.notepadUsed): which parts of it are used,
@@ -467,17 +502,17 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     const commit = useCallback((next: string) => {
         setText(next);
         window.electronAPI?.liveNotesSetText?.(next);
-        if (!preview && next.trim()) void window.electronAPI?.guideDispatch?.({ type: 'note_typed' });
+        notesGuide.onTyped(next);
         const now = Date.now();
         if (phase === 'live' && now - lastTypingPing.current > TYPING_PING_MS) {
             lastTypingPing.current = now;
             window.electronAPI?.meetingAutoStopTyping?.();
         }
-    }, [phase, preview]);
+    }, [phase, notesGuide.onTyped]);
 
     useEffect(() => {
-        if (!preview && askEngaged) void window.electronAPI?.guideDispatch?.({ type: 'ask_opened' });
-    }, [askEngaged, preview]);
+        if (askEngaged) notesGuide.onAskOpened();
+    }, [askEngaged, notesGuide.onAskOpened]);
 
     // The answer streams to this window only (the handler replies to its sender).
     useEffect(() => {
@@ -575,7 +610,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     // (note-recipe:run reads a finished meeting whole, a live one so far with what was typed here).
     const runRecipe = useCallback((recipe: NoteRecipe, extra = '') => {
         if (turnsRef.current.some((t) => t.status === 'streaming')) return;
-        if (!preview) void window.electronAPI?.guideDispatch?.({ type: 'recipe_run' });
+        notesGuide.onRecipeRun();
         npTrack('recipe', recipe.id);
         setAllRecipes(false);
         setAsk('');
@@ -589,7 +624,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
         api.runNoteRecipe({ recipeId: recipe.id, extra, meetingId, phase: phase === 'ended' ? 'ended' : 'live', notes: textRef.current })
             .then((res) => settle(res?.text ? { text: res.text, status: 'done' } : { status: 'error' }))
             .catch(() => settle({ status: 'error' }));
-    }, [setAsk, runHelper, meetingId, phase, npTrack, preview]);
+    }, [setAsk, runHelper, meetingId, phase, npTrack, notesGuide.onRecipeRun]);
 
     const retry = (i: number) => {
         const turn = turns[i];
@@ -1063,6 +1098,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
             )}
             <button
                 type="button"
+                data-guide="notes-stop"
                 aria-label="Stop transcript"
                 title="Stop transcript"
                 onClick={() => { npTrack('stopped'); void window.electronAPI?.endMeeting?.(); }}
@@ -1199,7 +1235,6 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
             data-np-theme={isLight ? 'light' : 'dark'}
             inert={preview ? true : undefined}
         >
-            {!preview && <FirstRunGuideCard surface="notepad" />}
             {/* The top strip is the window's drag handle (frameless on both platforms), 44px as Granola's toolbar. */}
             <div className={`${preview ? '' : 'drag-region '}h-11 shrink-0 flex items-center justify-end gap-1.5 pr-3`}>
                 <div className="relative flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties} ref={menuRef}>
@@ -1376,6 +1411,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
                                 </button>
                             </div>
                         )}
+                        {phase === 'live' && stopsAt === null && notesGuide.node}
                         {phase === 'live' && problem && stopsAt === null && (
                             <p className="px-2 text-center text-balance text-[12px] leading-4" style={ink('--np-ink-secondary')} role="status">{problem}</p>
                         )}
@@ -1605,6 +1641,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
                                     ) : contentKind === 'ask' ? (
                                         /* Granola's recipe row: two recipes, All recipes at the end, 24px chips of 12px. */
                                         <motion.div
+                                            data-guide="notes-recipes"
                                             className="relative px-4 pt-[7px] pb-[3px] flex items-center gap-0.5"
                                             aria-label="Recipes"
                                             initial={{ opacity: 0, y: 4 }}
@@ -1699,6 +1736,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
                                                 )}
                                             </AnimatePresence>
                                             <motion.form
+                                                data-guide="notes-ask"
                                                 className={`np-ask ${askOpen ? '' : 'np-elevated np-glow '}[grid-area:1/1] w-full min-w-0 h-14 flex items-center rounded-[28px]`}
                                                 inert={showTranscript}
                                                 aria-hidden={showTranscript || undefined}

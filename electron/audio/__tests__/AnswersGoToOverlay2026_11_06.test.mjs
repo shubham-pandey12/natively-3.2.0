@@ -34,6 +34,6 @@ test('every answer channel sent there is one only the overlay\'s interface liste
     assert.ok(fn, `listener name for ${channel}`);
     const users = files.filter(([f, src]) => new RegExp(`\\b${fn}\\b`).test(src) && !f.endsWith('electron.d.ts')).map(([f]) => f);
     // None at all is fine (intelligence-mode-changed has no listener today).
-    assert.ok(users.every((f) => f === 'src/components/NativelyInterface.tsx' || (f === 'src/components/onboarding/FirstRunGuideCard.tsx' && /surface !== 'overlay'/.test(read(f)))), `${channel} (${fn}) listened on by: ${users.join(', ')}`);
+    assert.ok(users.every((f) => f === 'src/components/NativelyInterface.tsx' || f === 'src/components/overlay/useOverlayFirstRunGuide.tsx'), `${channel} (${fn}) listened on by: ${users.join(', ')}`);
   }
 });

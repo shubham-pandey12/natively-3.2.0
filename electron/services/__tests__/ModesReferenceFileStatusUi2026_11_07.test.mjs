@@ -9,8 +9,9 @@ const source = fs.readFileSync(path.join(repoRoot, 'premium/src/ModesSettings.ts
 
 test('Modes Manager reports semantic readiness and degraded reference-file states', () => {
   assert.match(source, /ready: \{ label: 'Indexed'[\s\S]*?title: 'Semantic search ready'/);
-  for (const status of ['indexing', 'lexical_only', 'failed', 'ocr_required', 'pending']) {
+  for (const status of ['indexing', 'lexical_only', 'failed', 'pending']) {
     assert.ok(source.includes(`${status}: { label:`), `missing visible ${status} state`);
   }
+  assert.doesNotMatch(source, /ocr_required: \{ label:/);
   assert.match(source, /<ReferenceFileStatus status=\{fileStatuses\[f.id\]\} fileName=\{f.fileName\}/);
 });

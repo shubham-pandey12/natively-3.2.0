@@ -288,6 +288,7 @@ export interface ElectronAPI {
   setOpenAtLogin: (open: boolean) => Promise<{ success: boolean; error?: string }>
   getOpenAtLogin: () => Promise<boolean>
   onSettingsVisibilityChange: (callback: (isVisible: boolean) => void) => () => void
+  onSettingsWindowShown: (callback: () => void) => () => void
   toggleSettingsWindow: (coords?: { x: number; y: number }) => Promise<void>
   closeSettingsWindow: () => Promise<void>
   closeAdvancedSettings: () => Promise<void>

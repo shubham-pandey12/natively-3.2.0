@@ -460,6 +460,7 @@ import { useAmbientChatMeeting } from './overlay/AmbientChatNotice';
 import { LastTimeRecapBanner, useLastTimeRecap } from './overlay/LastTimeRecapNotice';
 import type { LiveHelperAction } from '../types/assist';
 import { useMeetingMute } from './overlay/useMeetingMute';
+import { useOverlayFirstRunGuide } from './overlay/useOverlayFirstRunGuide';
 import { HeroGlassButton } from './overlay/heroGlass/HeroGlassButton';
 
 // PERF: hoisted plugin arrays. ReactMarkdown receives `remarkPlugins` and
@@ -2971,8 +2972,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     // Load the persisted default model (not the runtime model)
     // Each new meeting starts with the default from settings.
-    // StrictMode-safe: dev-mode mount→unmount→remount would otherwise set the
-    // runtime model twice, clobbering any session-only pick from `handleModelSelect`.
+    // StrictMode-safe: dev-mode mount→unmount→remount would otherwise set the runtime model twice.
     let cancelled = false;
     if (window.electronAPI?.getDefaultModel) {
       window.electronAPI
@@ -2989,14 +2989,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     }
     return () => { cancelled = true; };
   }, []);
-
-  const handleModelSelect = (modelId: string) => {
-    setCurrentModel(modelId);
-    // Session-only: update runtime but don't persist as default
-    window.electronAPI
-      .setModel(modelId)
-      .catch((err: any) => console.error('Failed to set model:', err));
-  };
 
   // Global State Sync
   useEffect(() => {
@@ -8996,8 +8988,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // was already queued before cancellation must never be adopted into it.
         if (activeDirectAssistRef.current) return;
         if (staleDesktopChatEvent(meta?.streamId, (meta as any)?.source)) return;
-        if ((meta as any)?.source === 'phone'
-            && streamingMsgIdRef.current !== `phone-${meta?.streamId}-reply`) return;
         const decision = resolveChatStreamToken(
           chatStreamIdRef.current, meta?.streamId,
           chatStreamSourceRef.current, (meta as any)?.source,
@@ -9016,8 +9006,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // Replaced by a newer typed question: the new question owns the card
         // and the spinner, so nothing here is released either.
         if (staleDesktopChatEvent(data?.streamId, (data as any)?.source)) return;
-        if ((data as any)?.source === 'phone'
-            && streamingMsgIdRef.current !== `phone-${data?.streamId}-reply`) return;
         // Ignore a done from a superseded stream (audit finding #3) so it can't
         // tear down a newer stream's row. A done without a streamId is honored
         // (back-compat). On an honored done we clear the adopted id.
@@ -9172,26 +9160,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       window.electronAPI.onGeminiStreamError((error, meta?: { streamId?: number | null; source?: string }) => {
         if (activeDirectAssistRef.current) return;
         if (meta?.source === 'phone-mirror') {
-          const replyId = `phone-${meta.streamId}-reply`;
-          if (chatStreamIdRef.current === meta.streamId
-              && resolveChatStreamSurfaceError(chatStreamSourceRef.current, meta.source).release) {
+          if (resolveChatStreamSurfaceError(chatStreamSourceRef.current, meta.source).release) {
             chatStreamIdRef.current = null;
             chatStreamSourceRef.current = null;
           }
-          if (streamingMsgIdRef.current === replyId) {
-            flushToken();
-            streamingMsgIdRef.current = null;
-            streamingTextRef.current = '';
-            streamingIntentRef.current = null;
-            requestStartTimeRef.current = null;
-            setIsProcessing(false);
-          }
-          const failed = failedLine(error);
-          setMessages((prev) => prev.map((message) => message.id !== replyId ? message : (
-            message.text.trim()
-              ? { ...message, isStreaming: false, failure: { ...failed.failure, partial: true } }
-              : { ...message, isStreaming: false, ...failed }
-          )));
           return;
         }
         if (staleDesktopChatEvent(meta?.streamId, meta?.source)) return;
@@ -9234,21 +9206,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Phone-initiated chat: main process streams tokens via gemini-stream-*; this
     // event adds the user turn + streaming placeholder before tokens arrive.
     cleanups.push(
-      window.electronAPI.onPhoneMirrorIncomingChat(({ message, streamId }) => {
+      window.electronAPI.onPhoneMirrorIncomingChat(({ message }) => {
         // Main sent the attached screenshots with this question (the phone
         // shows the same tray), so it takes them as a question typed here
         // does, even while a Direct answer keeps the question off this chat.
         const shots = attachedContextRef.current;
         if (shots.length) setAttachedContext([]);
-        if (activeDirectAssistRef.current || manualSubmitInFlightRef.current
-            || overlayActionInFlightRef.current.size || chatStreamSourceRef.current === 'desktop'
-            || (streamingMsgIdRef.current && !pendingFinalizeRef.current)) return;
+        if (activeDirectAssistRef.current) return;
         flushToken();
         requestStartTimeRef.current = Date.now();
         const userId = genMessageId();
-        const placeholderId = `phone-${streamId}-reply`;
-        chatStreamIdRef.current = Number(streamId);
-        chatStreamSourceRef.current = 'phone';
+        const placeholderId = `${userId}-reply`;
         streamingMsgIdRef.current = placeholderId;
         streamingIntentRef.current = 'chat';
         streamingTextRef.current = '';
@@ -10732,6 +10700,8 @@ Provide only the answer, nothing else.`;
     handleBrainstorm,
   };
 
+  const guide = useOverlayFirstRunGuide(() => handlersRef.current.handleWhatToSay());
+
   useEffect(() => {
     // ── Continuous, frame-rate-independent scroll with momentum ──
     // Velocity is integrated against real elapsed time so 60Hz, 120Hz, and
@@ -11792,6 +11762,7 @@ Provide only the answer, nothing else.`;
     'stt-not-configured': sttNotConfigured && !trialExplainsNoStt,
     'stt-warning': sttStatusBannerOpen && sttStatusBanner?.tone === 'warning',
     'ambient-mic': showAmbientMicNotice,
+    guide: guide.wants,
     trial: !!trial.banner,
     'auto-answer-access': autoAnswerAccessNotice,
     'auto-stop': autoStop.stopsAt !== null,
@@ -11837,47 +11808,6 @@ Provide only the answer, nothing else.`;
   const markExpandedRendered = useCallback(() => {
     hasRenderedExpandedRef.current = true;
   }, []);
-
-  const copyDiagnostics = async () => {
-    const version = import.meta.env.VITE_APP_VERSION || 'unknown';
-    const [arch, osVersion] = await Promise.all([
-      window.electronAPI?.getArch?.().catch(() => 'unknown'),
-      window.electronAPI?.getOsVersion?.().catch(() => 'unknown'),
-    ]);
-    const userCat = sttUserError ? categorizeSttError(sttUserError) : null;
-    const interviewerCat = sttInterviewerError ? categorizeSttError(sttInterviewerError) : null;
-    const report = [
-      '## STT Diagnostic Report',
-      `App Version: ${version}`,
-      `Build Commit: ${import.meta.env.VITE_BUILD_COMMIT || 'unknown'}`,
-      `Platform: ${osVersion} (${arch})`,
-      `---`,
-      `Microphone Provider: ${sttUserProvider}`,
-      `Microphone Status: ${sttUserStatus}`,
-      userCat ? `Microphone Category: ${userCat.title} [${userCat.category}]` : '',
-      `Microphone Error: ${sttUserError || 'N/A'}`,
-      `---`,
-      `System Audio Provider: ${sttInterviewerProvider}`,
-      `System Audio Status: ${sttInterviewerStatus}`,
-      interviewerCat
-        ? `System Audio Category: ${interviewerCat.title} [${interviewerCat.category}]`
-        : '',
-      `System Audio Error: ${sttInterviewerError || 'N/A'}`,
-      `Timestamp: ${new Date().toISOString()}`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-    try {
-      await copyText(report);
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = report;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
-  };
 
   // Skill picker: derived from inputValue — open when the user types / or $ followed
   // only by word chars (no space yet). Closes automatically once a space is typed.
@@ -12271,6 +12201,10 @@ Provide only the answer, nothing else.`;
                   (overlay/LastTimeRecapNotice.tsx; main: AssistService). */}
               <ChromeFold show={!!lastTime.recap && bannerSlots.has('last-time')} overlayVisible={isExpanded} requestHeightMotion={requestChromeHeightMotion} innerClassName="pt-3 pb-1" testId="fold-last-time">
               {lastTime.recap && <LastTimeRecapBanner state={lastTime} />}
+              </ChromeFold>
+
+              <ChromeFold show={guide.wants && bannerSlots.has('guide')} overlayVisible={isExpanded} requestHeightMotion={requestChromeHeightMotion} innerClassName="pt-3 pb-1" testId="fold-guide">
+                {guide.wants && guide.node}
               </ChromeFold>
 
               {/* The free trial that starts by itself with a meeting: it began,

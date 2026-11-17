@@ -53,18 +53,12 @@ test('wiring: token, done and error of a replaced stream are dropped before anyt
   assert.match(overlay, /if \(staleDesktopChatEvent\(meta\?\.streamId, meta\?\.source\)\) return;\s*if \(typeof meta\?\.streamId === 'number'/);
 });
 
-test('wiring: a phone question cannot replace a desktop-owned row in either direction', () => {
+test('wiring: phone incoming chat uses the recovered user-id placeholder and Direct guard', () => {
   const incoming = overlay.split('window.electronAPI.onPhoneMirrorIncomingChat(')[1].split('}),')[0];
-  const busy = incoming.indexOf("chatStreamSourceRef.current === 'desktop'");
-  const reserve = incoming.indexOf('streamingMsgIdRef.current = placeholderId;');
-  assert.ok(busy >= 0 && reserve > busy, 'leave the active desktop placeholder and spinner alone');
-  assert.match(incoming, /chatStreamIdRef\.current = Number\(streamId\)/);
-  const release = overlay.split('const releasePhoneOverlayAnswer =')[1].split('const tryBeginOverlayAction')[0];
-  assert.match(release, /message\.id !== replyId/);
-  assert.match(overlay, /releasePhoneOverlayAnswer\(\);\s*overlayActionInFlightRef\.current\.add/);
-  assert.match(overlay, /releasePhoneOverlayAnswer\(\);\s*flushToken\(\);\s*tokenBufRef/);
-  assert.match(overlay, /streamingMsgIdRef\.current !== `phone-\$\{meta\?\.streamId\}-reply`\) return;/);
-  assert.match(overlay, /streamingMsgIdRef\.current !== `phone-\$\{data\?\.streamId\}-reply`\) return;/);
+  assert.match(incoming, /if \(activeDirectAssistRef\.current\) return;/);
+  assert.match(incoming, /const placeholderId = `\$\{userId\}-reply`/);
+  assert.doesNotMatch(incoming, /manualSubmitInFlightRef|overlayActionInFlightRef|chatStreamSourceRef\.current === 'desktop'/);
+  assert.doesNotMatch(overlay, /streamingMsgIdRef\.current !== `phone-\$\{(?:meta|data)\?\.streamId\}-reply`\) return;/);
 });
 
 // The review's case (2026-11-06): Q1 still "Thinking" (no token, so no id

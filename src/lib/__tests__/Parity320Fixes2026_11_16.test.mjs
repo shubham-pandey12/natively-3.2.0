@@ -45,8 +45,3 @@ test('greetings never start an Auto Answer prefetch', () => {
   const eng = src('electron/IntelligenceEngine.ts');
   assert.match(eng, /prefetchAutoAnswer\(questionId: string, text: string\): void \{\s*const trimmed = \(text \?\? ''\)\.trim\(\);\s*if \(trimmed\.length < 12\) return;[\s\S]{0,120}if \(IntelligenceEngine\.onlySmallTalk\(trimmed\)\) return;/);
 });
-
-test('the guide stop lock is shown, not a silent refusal', () => {
-  const card = src('src/components/onboarding/FirstRunGuideCard.tsx');
-  assert.match(card, /Stop unlocks in \{Math\.ceil\(\(guide\.stopLockUntil - now\) \/ 1000\)\} s/);
-});

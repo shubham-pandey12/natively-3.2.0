@@ -57,6 +57,7 @@ interface Meeting {
  */
 export type LauncherRequest =
     | { kind: 'search'; seq: number }
+    | { kind: 'home'; seq: number }
     | { kind: 'meeting'; id: string; seq: number }
     // The calendar reminder's "Running late" (main: assist/reminderDraftWindow):
     // back to the list, with that event's draft open.
@@ -469,7 +470,12 @@ const Launcher: React.FC<LauncherProps> = ({ request, onStartMeeting, onOpenSett
     useEffect(() => {
         if (!request || request.seq === handledRequest.current) return;
         handledRequest.current = request.seq;
-        if (request.kind === 'search') setSearchOpenRequest(request.seq);
+        if (request.kind === 'home') {
+            setSelectedMeeting(null);
+            setSelectedMomentMs(null);
+            setIsGlobalChatOpen(false);
+        }
+        else if (request.kind === 'search') setSearchOpenRequest(request.seq);
         else if (request.kind === 'reminder-draft') {
             setSelectedMeeting(null);
             setSelectedMomentMs(null);

@@ -9,13 +9,14 @@
  * React/TypeScript syntax was necessarily rewritten since the source is compiled JS.
  */
 import { ThinkingOrb } from 'thinking-orbs';
+import { NOTE_TEMPLATES, NOTE_TEMPLATE_GROUPS, MODE_DEFAULT_NOTE_TEMPLATE_ID } from '../../electron/services/meeting/noteTemplates';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { AipSelect, AIP_CSS } from '../../src/components/settings/AIProvidersSettings';
 import {
   BookOpen,
   Briefcase,
   Check,
   ChevronRight,
+  ChevronDown,
   Code2,
   Headphones,
   LayoutGrid,
@@ -30,6 +31,7 @@ import {
   X,
   Paperclip,
   FileText,
+  Download,
 } from 'lucide-react';
 
 // ─── CSS ────────────────────────────────────────────────────────────────────
@@ -274,6 +276,111 @@ const CSS = `
     }
     .mm-panel-content, .mm-cascade { animation-name: mm-fade-only; }
 }
+    /* "Use a template" (NoteTemplateMenu). transitions.dev #05 menu dropdown,
+       grown upward from the trigger: 250ms in from 0.97 with a 4px rise,
+       150ms out to 0.99. */
+    @keyframes mm-nt-in {
+        from { opacity: 0; transform: translateY(4px) scale(0.97); }
+    }
+    @keyframes mm-nt-out {
+        to { opacity: 0; transform: translateY(2px) scale(0.99); }
+    }
+    .mm-nt-menu {
+        animation: mm-nt-in 250ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+        will-change: transform, opacity;
+    }
+    .mm-nt-menu[data-closing='true'] {
+        animation: mm-nt-out 150ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        pointer-events: none;
+    }
+    /* One highlight for the whole list, gliding between rows (#16 tabs
+       sliding, turned on its side). Fades in where it first lands; only
+       later moves travel. */
+    .mm-nt-highlight {
+        position: absolute;
+        top: 0;
+        left: 4px;
+        right: 4px;
+        border-radius: 6px;
+        background: var(--mm-btn-bg-hover);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 150ms ease-out, scale 140ms var(--mm-ease-out);
+    }
+    .mm-nt-highlight[data-placed='true'] {
+        transition:
+            transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+            height 200ms cubic-bezier(0.22, 1, 0.36, 1),
+            opacity 150ms ease-out,
+            scale 140ms var(--mm-ease-out);
+    }
+    .mm-nt-highlight[data-shown='true'] { opacity: 1; }
+    .mm-nt-highlight[data-pressed='true'] { scale: 0.98; }
+    .mm-nt-row { background: transparent; transition: background 180ms var(--mm-ease-out); }
+    .mm-nt-row[data-on='true'] { background: var(--mm-btn-bg-hover); }
+    /* The pick's check draws itself (#25's stroke), the rest sit drawn. */
+    .mm-nt-check path { stroke-dasharray: 1; stroke-dashoffset: 0; }
+    .mm-nt-check[data-draw='true'] path { animation: mm-nt-draw 220ms var(--mm-ease-out) backwards; }
+    @keyframes mm-nt-draw {
+        from { stroke-dashoffset: 1; }
+    }
+    /* The trigger: lights on hover and while open; the chevron leans 1px
+       toward where the list opens, and turns over once it has. */
+    .mm-nt-trigger { color: var(--mm-text-tertiary); }
+    .mm-nt-trigger:hover,
+    .mm-nt-trigger[data-open='true'] { color: var(--mm-text-primary); }
+    .mm-nt-chevron {
+        display: inline-flex;
+        transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .mm-nt-trigger:hover:not([data-open='true']) .mm-nt-chevron { transform: translateY(-1px); }
+    .mm-nt-trigger[data-open='true'] .mm-nt-chevron { transform: rotate(180deg); }
+    /* TemplatePicker (template type): the "Use a template"
+       recipe turned to open downward, so the list drops 4px out of the
+       trigger from 0.97 (250ms) and leaves quicker, up into it (150ms). */
+    @keyframes mm-tp-in {
+        from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+    }
+    @keyframes mm-tp-out {
+        to { opacity: 0; transform: translateY(-2px) scale(0.99); }
+    }
+    .mm-tp-menu {
+        animation: mm-tp-in 250ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+        will-change: transform, opacity;
+    }
+    .mm-tp-menu[data-closing='true'] {
+        animation: mm-tp-out 150ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        pointer-events: none;
+    }
+    .mm-tp-trigger { background: var(--mm-btn-bg); }
+    .mm-tp-trigger:hover,
+    .mm-tp-trigger[data-open='true'] { background: var(--mm-btn-bg-hover); }
+    .mm-tp-trigger:hover:not([data-open='true']) .mm-nt-chevron { transform: translateY(1px); }
+    .mm-tp-trigger[data-open='true'] .mm-nt-chevron { transform: rotate(180deg); }
+
+    .mm-morph {
+        position: relative;
+        display: inline-block;
+        white-space: nowrap;
+        transition: width 250ms var(--mm-ease-out);
+    }
+    .mm-morph-label {
+        position: absolute;
+        top: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        white-space: nowrap;
+        opacity: 0;
+        filter: blur(2px);
+        pointer-events: none;
+        transition: opacity 150ms ease-in-out, filter 150ms ease-in-out;
+    }
+    .mm-morph[data-align='start'] .mm-morph-label { left: 0; transform: none; }
+    .mm-morph-label[data-shown='true'] { opacity: 1; filter: none; }
+
 `;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -306,47 +413,107 @@ const STATUS_STYLES: Record<string, { label: string; color: string; bg: string; 
   pending: { label: 'Indexing…', color: '#3b82f6', bg: 'rgba(59,130,246,0.14)', title: 'Queued for indexing' },
   failed: { label: 'Failed', color: '#ef4444', bg: 'rgba(239,68,68,0.14)', title: 'Indexing failed — keyword search still works; re-activating the mode retries' },
   lexical_only: { label: 'Keyword', color: '#f59e0b', bg: 'rgba(245,158,11,0.14)', title: 'Keyword search is active; semantic indexing will retry when embeddings are ready' },
-  ocr_required: { label: 'OCR REQUIRED', color: '#f59e0b', bg: 'rgba(245,158,11,0.14)', title: 'No readable text was extracted. Run OCR on this scanned file, then upload it again.' },
 };
 function ReferenceFileStatus({ status, fileName }: { status?: string; fileName: string }) {
-  const [shown, setShown] = useState(status);
   const started = useRef<number | null>(null);
+  const [shown, setShown] = useState(status);
+  const delayTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const busy = status === 'pending' || status === 'indexing';
-    if (busy) { started.current ??= Date.now(); setShown(status); return; }
-    const remaining = started.current === null ? 0 : Math.max(0, 2000 - (Date.now() - started.current));
-    const timer = setTimeout(() => { setShown(status); started.current = null; }, remaining);
-    return () => clearTimeout(timer);
+    const wasBusy = shown === 'pending' || shown === 'indexing';
+    if (busy) {
+      if (delayTimer.current) { clearTimeout(delayTimer.current); delayTimer.current = null; }
+      if (started.current === null) started.current = Date.now();
+      setShown(status);
+      return;
+    }
+    if (wasBusy && started.current !== null) {
+      const remaining = 2000 - (Date.now() - started.current);
+      if (remaining > 0) {
+        if (delayTimer.current) clearTimeout(delayTimer.current);
+        delayTimer.current = setTimeout(() => { setShown(status); started.current = null; delayTimer.current = null; }, remaining);
+        return;
+      }
+    }
+    setShown(status);
+    started.current = null;
   }, [status]);
-  const [display, setDisplay] = useState(shown);
+  useEffect(() => () => { if (delayTimer.current) clearTimeout(delayTimer.current); }, []);
+  const currentConfig = shown ? STATUS_STYLES[shown] : undefined;
+  const previousLabel = useRef<string | undefined>(undefined);
+  const [display, setDisplay] = useState(currentConfig);
   const [fading, setFading] = useState(false);
   useEffect(() => {
-    if (shown === display) return;
+    if (!display || currentConfig?.label === display.label) { setDisplay(currentConfig); setFading(false); return; }
     setFading(true);
-    const timer = setTimeout(() => { setDisplay(shown); setFading(false); }, 150);
+    const timer = setTimeout(() => { setDisplay(currentConfig); setFading(false); }, 150);
     return () => clearTimeout(timer);
-  }, [shown, display]);
-  const config = display ? STATUS_STYLES[display] : undefined;
-  return <span style={{ display: 'grid', gridTemplateColumns: '20px 12px 72px', width: 104, alignItems: 'center' }}>
-    {config && <span title={config.title} style={{ gridColumn: 3, justifySelf: 'start', fontSize: 9.5, fontWeight: 600, letterSpacing: .2, padding: '2px 6px', borderRadius: 999, color: config.color, background: config.bg, textTransform: 'uppercase', opacity: fading ? 0 : 1, filter: fading ? 'blur(2px)' : 'blur(0px)', transition: 'opacity 150ms ease-in-out, filter 150ms ease-in-out' }}>{config.label}</span>}
-    <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{config ? `${fileName}: ${config.title}` : ''}</span>
+  }, [currentConfig, display]);
+  const [announcement, setAnnouncement] = useState('');
+  useEffect(() => {
+    const messages: Record<string, string> = { ready: 'indexing complete, semantic search ready', indexing: 'indexing started', pending: 'queued for indexing', failed: 'indexing failed, keyword search still works', lexical_only: 'keyword search active, semantic indexing will retry' };
+    if (previousLabel.current !== undefined && currentConfig?.label !== previousLabel.current && shown && messages[shown]) setAnnouncement(`${fileName ? `${fileName}: ` : ''}${messages[shown]}`);
+    previousLabel.current = currentConfig?.label;
+  }, [currentConfig?.label, shown, fileName]);
+  if (!currentConfig) return null;
+  const config = display ?? currentConfig;
+  return <span style={{ display: 'grid', gridTemplateColumns: '20px 12px 72px', alignItems: 'center', width: 104, flexShrink: 0 }}>
+    <span aria-hidden="true" style={{ gridColumn: 1, width: 20, height: 20 }} />
+    <span title={config.title} style={{ gridColumn: 3, justifySelf: 'start', fontSize: 9.5, fontWeight: 600, letterSpacing: .2, padding: '2px 6px', borderRadius: 999, color: config.color, background: config.bg, flexShrink: 0, textTransform: 'uppercase', opacity: fading ? 0 : 1, filter: fading ? 'blur(2px)' : 'blur(0px)', transition: 'opacity 150ms ease-in-out, filter 150ms ease-in-out' }}>{config.label}</span>
+    <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0 }}>{announcement}</span>
   </span>;
 }
 
-const KnowledgePanel: React.FC<{ file: ReferenceFile; pack: any; loading: boolean; regenerating: boolean; userEditableCardsEnabled: boolean; onApproveCard: (cardId: string) => void; onRejectCard: (cardId: string) => void; onRegenerate: () => void; onExport: () => void; onReview: (cardId: string, action: 'approve' | 'reject') => void }> = ({ file, pack, loading, regenerating, userEditableCardsEnabled, onApproveCard, onRejectCard, onRegenerate, onExport }) => (
-  <div data-knowledge-panel style={{ ...S.contentBox, padding: 12 }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-      <strong style={{ fontSize: 12 }}>Knowledge Pack</strong>
-      <div style={{ display: 'flex', gap: 8 }}><button disabled={loading || regenerating} className="mm-press-soft" style={S.addFileBtn} onClick={onRegenerate}><RefreshCw size={12} /> {regenerating ? 'Regenerating…' : 'Regenerate'}</button><button disabled={!pack} className="mm-press-soft" style={S.addFileBtn} onClick={onExport}>Export</button></div>
+const CONFIDENCE_COLOR: Record<string, string> = {
+  high: 'var(--mm-success, #4ade80)', medium: 'var(--mm-text-secondary)', low: 'var(--mm-text-tertiary)',
+};
+
+const KnowledgePanel: React.FC<{ file: ReferenceFile; pack: any; loading: boolean; regenerating: boolean; expandedCardId: string | null; userEditableCardsEnabled: boolean; onToggleCard: (cardId: string) => void; onApproveCard: (cardId: string) => void; onRejectCard: (cardId: string) => void; onRegenerate: () => void; onExport: () => void }> = ({ pack, loading, regenerating, expandedCardId, userEditableCardsEnabled, onToggleCard, onApproveCard, onRejectCard, onRegenerate, onExport }) => {
+  const groups = React.useMemo(() => {
+    if (!pack) return new Map<string, any[]>();
+    const result = new Map<string, any[]>();
+    for (const card of pack.cards) {
+      const cards = result.get(card.type) ?? [];
+      cards.push(card);
+      result.set(card.type, cards);
+    }
+    return result;
+  }, [pack]);
+  return <div data-knowledge-panel style={{ margin: '2px 0 8px 21px', padding: '12px 14px', borderRadius: 8, background: 'var(--mm-btn-bg, rgba(255,255,255,0.03))', border: '1px solid var(--mm-border, rgba(255,255,255,0.08))', display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+      <span style={{ fontSize: 11, color: 'var(--mm-text-tertiary)' }}>{loading ? 'Loading knowledge pack…' : pack ? `${pack.cards?.length ?? 0} cards · ${pack.entities?.length ?? 0} entities · ${pack.relations?.length ?? 0} relations (v${pack.packVersion})` : 'No knowledge pack generated yet.'}</span>
+      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+        <button onClick={onRegenerate} disabled={regenerating} className="mm-press-soft" title="Regenerate" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--mm-text-secondary)', background: 'transparent', border: 'none', cursor: regenerating ? 'default' : 'pointer', padding: '3px 6px' }}><RefreshCw size={11} className={regenerating ? 'mm-spinner' : undefined} />{regenerating ? 'Regenerating…' : 'Regenerate'}</button>
+        {pack && (pack.cards?.length ?? 0) > 0 && <button onClick={onExport} className="mm-press-soft" title="Export OKF bundle" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--mm-text-secondary)', background: 'transparent', border: 'none', cursor: 'pointer', padding: '3px 6px' }}><Download size={11} />Export</button>}
+      </div>
     </div>
-    {loading ? <p role="status">Loading knowledge pack…</p> : !pack ? <p style={{ fontSize: 11, color: 'var(--mm-text-secondary)' }}>No knowledge pack yet for {file.fileName}. Regenerate to create one.</p> : <>
-      <p style={{ fontSize: 11, color: 'var(--mm-text-secondary)' }}>{pack.cards?.length ?? 0} cards · {pack.entities?.length ?? 0} entities · {pack.relations?.length ?? 0} relations</p>
-      {(pack.cards ?? []).map((card: any) => <details key={card.id} style={{ opacity: card.approvalStatus === 'rejected' ? 0.5 : 1, padding: 8, borderTop: '1px solid var(--mm-border)', fontSize: 11 }}><summary style={{ textDecoration: card.approvalStatus === 'rejected' ? 'line-through' : 'none' }}>{card.title ?? card.conceptId} · {card.type} · {card.confidence}</summary><p style={{ whiteSpace: 'pre-wrap' }}>{card.body}</p>{(card.sourceQuotes ?? []).map((quote: string, index: number) => <blockquote key={index}>{quote}</blockquote>)}{userEditableCardsEnabled && (<div style={{ display: 'flex', gap: 8 }}><button style={S.addFileBtn} onClick={() => onApproveCard(card.id)}>Approve</button><button style={S.addFileBtn} onClick={() => onRejectCard(card.id)}>Reject</button></div>)}</details>)}
-      {pack.entities?.length > 0 && <details style={{ fontSize: 11 }}><summary>Entities</summary>{pack.entities.map((entity: any) => <p key={entity.id}>{entity.name} · {entity.type}</p>)}</details>}
-      {pack.relations?.length > 0 && <details style={{ fontSize: 11 }}><summary>Relations</summary>{pack.relations.map((relation: any) => <p key={relation.id}>{relation.sourceEntityId} → {relation.relationType ?? relation.type} → {relation.targetEntityId}</p>)}</details>}
-    </>}
-  </div>
-);
+    {pack && (pack.cards?.length ?? 0) > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
+      {[...groups.entries()].map(([type, cards]) => <div key={type} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        <span style={{ fontSize: 10, color: 'var(--mm-text-tertiary)', textTransform: 'uppercase', letterSpacing: .4, marginTop: 4 }}>{type.replace(/_/g, ' ')} ({cards.length})</span>
+        {cards.map(card => <div key={card.id} style={{ display: 'flex', flexDirection: 'column' }}>
+          <button onClick={() => onToggleCard(card.id)} className="mm-press-soft" style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', textAlign: 'left', background: 'transparent', border: 'none', cursor: 'pointer', padding: '4px 2px', opacity: card.approvalStatus === 'rejected' ? .5 : 1 }}>
+            <ChevronRight size={11} style={{ color: 'var(--mm-text-tertiary)', flexShrink: 0, transition: 'transform 150ms ease', transform: expandedCardId === card.id ? 'rotate(90deg)' : 'none' }} />
+            <span style={{ flex: 1, fontSize: 12, color: 'var(--mm-text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: card.approvalStatus === 'rejected' ? 'line-through' : 'none' }}>{card.title}</span>
+            {card.userEdited && <span style={{ fontSize: 9, color: 'var(--mm-text-tertiary)', flexShrink: 0 }} title="user-edited">✎</span>}
+            {card.approvalStatus === 'needs_review' && <span style={{ fontSize: 9, color: 'var(--mm-warning, #facc15)', flexShrink: 0 }} title="source changed since this edit — needs review">⚠</span>}
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: CONFIDENCE_COLOR[card.confidence] ?? 'var(--mm-text-tertiary)', flexShrink: 0 }} title={`confidence: ${card.confidence}`} />
+            <span style={{ fontSize: 10, color: 'var(--mm-text-tertiary)', flexShrink: 0 }}>p{card.sourcePages.join(',')}</span>
+          </button>
+          {expandedCardId === card.id && <div style={{ margin: '2px 0 6px 17px', padding: '8px 10px', borderRadius: 6, background: 'var(--mm-bg-secondary, rgba(0,0,0,0.15))', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <p style={{ margin: 0, fontSize: 12, color: 'var(--mm-text-secondary)', lineHeight: 1.5 }}>{card.body}</p>
+            {card.sourceSections.length > 0 && <span style={{ fontSize: 10, color: 'var(--mm-text-tertiary)' }}>Section: {card.sourceSections.join(', ')}</span>}
+            {card.sourceQuotes.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>{card.sourceQuotes.map((quote: { text: string; page: number }, index: number) => <span key={index} style={{ fontSize: 10, color: 'var(--mm-text-tertiary)', fontStyle: 'italic' }}>"{quote.text}" — p{quote.page}</span>)}</div>}
+            <span style={{ fontSize: 10, color: 'var(--mm-text-tertiary)' }}>confidence: {card.confidence} · generated from: {card.generatedFrom.replace(/_/g, ' ')}{card.approvalStatus ? ` · ${card.approvalStatus.replace(/_/g, ' ')}` : ''}</span>
+            {userEditableCardsEnabled && <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
+              {card.approvalStatus !== 'approved' && <button onClick={() => onApproveCard(card.id)} className="mm-press-soft" style={{ fontSize: 10, color: 'var(--mm-success, #4ade80)', background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>Approve</button>}
+              {card.approvalStatus !== 'rejected' && <button onClick={() => onRejectCard(card.id)} className="mm-press-soft" style={{ fontSize: 10, color: 'var(--mm-danger, #f87171)', background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>Reject</button>}
+            </div>}
+          </div>}
+        </div>)}
+      </div>)}
+    </div>}
+  </div>;
+};
 
 interface WritingSample {
   id: string;
@@ -440,18 +607,15 @@ const TEMPLATES: TemplateDefinition[] = [
 const TEMPLATE_MAP = Object.fromEntries(TEMPLATES.map(t => [t.type, t]));
 
 // xl() from bundle — only the default General mode is "locked" (no template change, shown differently)
-function isLockedGeneral(mode: Mode): boolean {
-  return Boolean(mode.isBuiltin && mode.templateType === 'general' && mode.name === 'General')
-    || mode.id === 'mode_general_default';
-}
+function isLockedGeneral(mode: Mode): boolean { return mode.templateType === 'general' && mode.name === 'General'; }
 
 function contextPlaceholder(templateType: string): string {
   return ({
-    general: 'Add your role, context, or anything Natively should know...',
-    sales: 'Add the product, deal stage, your ICP, and common objections...',
-    recruiting: 'Add the role, company, must-haves, and what good looks like...',
-    'team-meet': 'Add the meeting purpose, attendees, and what to track...',
-    'looking-for-work': 'Add the company, role, what you want to highlight...',
+    general: 'Tell Natively how to respond during the conversation.',
+    sales: 'Add product info, ICP, value props, and common objections...',
+    recruiting: 'Add the job description, competencies, and evaluation criteria...',
+    'team-meet': 'Add context about the team, project, or meeting agenda...',
+    'looking-for-work': 'Add your STAR stories, resume highlights, or job details...',
     lecture: 'Add course context, prerequisites, and what you want to capture...',
     'technical-interview': 'Add the role, company, topics to focus on, or your weak areas...',
     seminar: 'Add the talk title, audience, and the sections you expect questions on...',
@@ -685,6 +849,7 @@ function InlineEdit({
     <span
       style={{ cursor: disabled ? 'inherit' : 'text', ...style }}
       onDoubleClick={() => !disabled && setEditing(true)}
+      title={disabled ? undefined : 'Double-click to rename'}
     >
       {value}
     </span>
@@ -864,8 +1029,8 @@ function AnswerPolicyV3({ modeId, templateType, state, onRefresh }: {
   if (!state?.offered) return null;
 
   const opts = [
-    { value: 'use_references_when_relevant', label: state.labels?.use_references_when_relevant ?? 'Use references when relevant' },
-    { value: 'only_answer_from_references', label: state.labels?.only_answer_from_references ?? 'Only answer from references' },
+    { value: 'use_references_when_relevant', label: state.labels.use_references_when_relevant ?? 'use references when relevant' },
+    { value: 'only_answer_from_references', label: state.labels.only_answer_from_references ?? 'only answer from references' },
   ];
 
   const set = async (policy: string) => {
@@ -1039,71 +1204,167 @@ function WritingStyle({ modeId }: { modeId: string }) {
 }
 
 // ─── NotesTemplatePicker (cL from bundle) ────────────────────────────────────
+function useClosingPresence(open: boolean, delay: number) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    if (open) { setMounted(true); return; }
+    const timer = setTimeout(() => setMounted(false), delay);
+    return () => clearTimeout(timer);
+  }, [open, delay]);
+  return open || mounted;
+}
+
+function MorphLabel({ labels, shown, align = 'center' }: { labels: Record<string, string>; shown: string; align?: 'center' | 'start' }) {
+  const keys = Object.keys(labels);
+  const refs = useRef<Record<string, HTMLSpanElement | null>>({});
+  const [widths, setWidths] = useState<Record<string, number>>({});
+  useLayoutEffect(() => {
+    const next: Record<string, number> = {};
+    for (const key of keys) next[key] = refs.current[key]?.getBoundingClientRect().width ?? 0;
+    setWidths(next);
+  }, []);
+  return <span className="mm-morph" data-align={align} style={{ width: widths[shown] }}>{'​'}{keys.map(key => <span key={key} ref={node => { refs.current[key] = node; }} className="mm-morph-label" data-shown={key === shown ? 'true' : undefined} aria-hidden={key === shown ? undefined : true}>{labels[key]}</span>)}</span>;
+}
+
+function TemplateTypeSelect({ value, options, onChange }: { value: string; options: { value: string; label: string }[]; onChange: (value: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLSpanElement>(null);
+  const mounted = useClosingPresence(open, 150);
+  const [highlight, setHighlight] = useState({ y: 0, h: 0, shown: false, placed: false });
+  const [pressed, setPressed] = useState(false);
+  const [picked, setPicked] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const close = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } setOpen(false); trigger.current?.focus(); };
+  useEffect(() => {
+    if (!open) return;
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    setPicked(null);
+    setHighlight(old => ({ ...old, shown: false, placed: false }));
+    ((menu.current?.querySelector('[aria-selected="true"]') ?? menu.current?.querySelector('[role="option"]')) as HTMLElement | null)?.focus({ preventScroll: true });
+    const outside = (event: MouseEvent) => { if (root.current && !root.current.contains(event.target as Node)) setOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); close(); } };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape); };
+  }, [open]);
+  const keys = (event: React.KeyboardEvent<HTMLSpanElement>) => {
+    const rows = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
+    if (!rows.length) return;
+    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    let next = -1;
+    if (event.key === 'ArrowDown') next = current < 0 ? 0 : (current + 1) % rows.length;
+    else if (event.key === 'ArrowUp') next = current <= 0 ? rows.length - 1 : current - 1;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = rows.length - 1;
+    else if (event.key === 'Tab') { setOpen(false); return; }
+    if (next >= 0) { event.preventDefault(); rows[next].focus({ preventScroll: true }); }
+  };
+  const focusRow = (row: HTMLButtonElement) => {
+    const selected = row.getAttribute('aria-selected') === 'true';
+    const list = menu.current;
+    if (!list) return;
+    const rect = row.getBoundingClientRect();
+    const y = rect.top - list.getBoundingClientRect().top - list.clientTop + list.scrollTop;
+    setHighlight(old => ({ y, h: rect.height, shown: !selected, placed: old.placed || !selected }));
+  };
+  const pick = (next: string) => {
+    if (picked !== null) return;
+    if (next === value) { close(); return; }
+    setPicked(next);
+    setHighlight(old => ({ ...old, shown: false }));
+    onChange(next);
+    timer.current = setTimeout(close, 160);
+  };
+  const labels = Object.fromEntries(options.map(option => [option.value, option.label]));
+  return <span ref={root} style={{ position: 'relative', display: 'inline-flex' }}>
+    <button ref={trigger} type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)} onKeyDown={event => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); setOpen(true); } }} className="mm-press-soft mm-tp-trigger" data-open={open ? 'true' : undefined} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, color: 'var(--mm-text-secondary)', background: undefined, border: '1px solid var(--mm-border, rgba(255,255,255,0.08))', borderRadius: 6, padding: '2px 5px 2px 6px', cursor: 'pointer', outline: 'none' }}><MorphLabel labels={labels} shown={value} align="start" /><span className="mm-nt-chevron" aria-hidden="true"><ChevronDown size={11} /></span></button>
+    {mounted && <span ref={menu} role="listbox" className="mm-tp-menu" data-closing={open ? undefined : 'true'} style={{ display: 'block', position: 'absolute', top: 'calc(100% + 6px)', left: 0, transformOrigin: 'top left', background: 'var(--mm-bg)', border: '1px solid var(--mm-border)', borderRadius: 12, padding: 4, minWidth: 180, boxShadow: '0 12px 32px rgba(0,0,0,0.15)', zIndex: 100 }} onKeyDown={keys} onMouseLeave={() => setHighlight(old => ({ ...old, shown: false }))}>
+      <span aria-hidden="true" className="mm-nt-highlight" data-shown={highlight.shown ? 'true' : undefined} data-placed={highlight.placed ? 'true' : undefined} data-pressed={pressed ? 'true' : undefined} style={{ display: 'block', transform: `translateY(${highlight.y}px)`, height: highlight.h }} />
+      {options.map(option => { const selected = picked !== null ? picked === option.value : option.value === value; return <button key={option.value} type="button" role="option" aria-selected={selected} onClick={() => pick(option.value)} className="mm-nt-row" data-on={selected ? 'true' : undefined} style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '5px 8px', border: 'none', borderRadius: 6, color: 'var(--mm-text-primary)', fontSize: 11, fontWeight: 500, cursor: 'pointer', textAlign: 'left', whiteSpace: 'nowrap', outline: 'none', position: 'relative' }} onMouseEnter={event => event.currentTarget.focus({ preventScroll: true })} onFocus={event => focusRow(event.currentTarget)} onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}><span style={{ flex: 1 }}>{option.label}</span>{selected && <svg className="mm-nt-check" data-draw={picked === option.value ? 'true' : undefined} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}><path d="M20 6 9 17l-5-5" pathLength="1" /></svg>}</button>; })}
+    </span>}
+  </span>;
+}
+
 function NotesTemplatePicker({ currentTitles, modeDefault, onPick }: {
   currentTitles: string[];
   modeDefault: { label: string; titles: string[] } | null;
   onPick: (templateId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState<string | null>(null);
-  const ref = useRef<HTMLDivElement>(null);
-
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const mounted = useClosingPresence(open, 150);
+  const [highlight, setHighlight] = useState({ y: 0, h: 0, shown: false, placed: false });
+  const [pressed, setPressed] = useState(false);
+  const [picked, setPicked] = useState<string | null>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (closeTimer.current) clearTimeout(closeTimer.current); }, []);
+  const close = () => {
+    if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
+    setOpen(false);
+    trigger.current?.focus();
+  };
   useEffect(() => {
     if (!open) return;
-    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', h);
-    document.addEventListener('keydown', esc);
-    return () => { document.removeEventListener('mousedown', h); document.removeEventListener('keydown', esc); };
+    if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
+    setPicked(null);
+    setHighlight(h => ({ ...h, shown: false, placed: false }));
+    (menu.current?.querySelector('[aria-checked="true"]') ?? menu.current?.querySelector('[role="menuitemradio"]'))?.scrollIntoView({ block: 'nearest' });
+    ((menu.current?.querySelector('[aria-checked="true"]') ?? menu.current?.querySelector('[role="menuitemradio"]')) as HTMLElement | null)?.focus({ preventScroll: true });
+    const outside = (event: MouseEvent) => { if (root.current && !root.current.contains(event.target as Node)) setOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); close(); } };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape); };
   }, [open]);
-
-  const isActive = (titles: string[]) =>
-    titles.length === currentTitles.length && titles.every((t, i) => t === currentTitles[i]);
-
-  const pick = async (id: string, active: boolean) => {
-    if (loading || active) { setOpen(false); return; }
-    setLoading(id);
-    try { await onPick(id); }
-    finally { setLoading(null); setOpen(false); }
+  const keys = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const rows = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? []);
+    if (!rows.length) return;
+    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    let next = -1;
+    if (event.key === 'ArrowDown') next = current < 0 ? 0 : (current + 1) % rows.length;
+    else if (event.key === 'ArrowUp') next = current <= 0 ? rows.length - 1 : current - 1;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = rows.length - 1;
+    else if (event.key === 'Tab') { setOpen(false); return; }
+    if (next >= 0) { event.preventDefault(); rows[next].focus(); }
   };
-
-  const templates = [{ id: 'general', label: 'General' }, ...TEMPLATES.map(t => ({ id: t.type, label: t.label }))];
-
-  return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      <button onClick={() => setOpen(o => !o)} className="mm-press mm-pill mm-pill--ghost" style={{ gap: 4 }} aria-label="Use a template">
-        {loading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : null}
-        Use template
-      </button>
-      {open && (
-        <div style={{ position: 'absolute', top: '100%', right: 0, zIndex: 200, marginTop: 4, background: 'var(--mm-sidebar-bg)', border: '1px solid var(--mm-btn-border)', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.3)', minWidth: 200, maxHeight: 320, overflowY: 'auto', padding: '6px', animation: 'mm-pop-in 180ms var(--mm-ease-out) both' }}>
-          {modeDefault && (
-            <>
-              <button type="button" role="menuitemradio" aria-checked={isActive(modeDefault.titles)} onClick={() => pick('__mode_default__', isActive(modeDefault.titles))}
-                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, width: '100%', padding: '7px 10px', borderRadius: 6, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', color: isActive(modeDefault.titles) ? 'var(--mm-active-blue)' : 'var(--mm-text-primary)', transition: 'background 140ms var(--mm-ease-out)' }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--mm-item-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <span style={{ fontSize: 13, fontWeight: 500 }}>{modeDefault.label} (default)</span>
-                {isActive(modeDefault.titles) && <Check size={12} />}
-              </button>
-              <div style={{ height: 1, background: 'var(--mm-border)', margin: '4px 0' }} />
-            </>
-          )}
-          {templates.map(tpl => (
-            <button key={tpl.id} type="button" role="menuitemradio" onClick={() => pick(tpl.id, false)}
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, width: '100%', padding: '7px 10px', borderRadius: 6, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', color: loading === tpl.id ? 'var(--mm-active-blue)' : 'var(--mm-text-primary)', transition: 'background 140ms var(--mm-ease-out)' }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--mm-item-hover)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <span style={{ fontSize: 13, fontWeight: 500 }}>{tpl.label}</span>
-              {loading === tpl.id && <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  const matches = (titles: string[]) => titles.length === currentTitles.length && titles.every((title, index) => title === currentTitles[index]);
+  const focusRow = (row: HTMLButtonElement) => {
+    const selected = row.getAttribute('aria-checked') === 'true';
+    const list = menu.current;
+    if (!list) return;
+    const rect = row.getBoundingClientRect();
+    const y = rect.top - list.getBoundingClientRect().top - list.clientTop + list.scrollTop;
+    setHighlight(old => ({ y, h: rect.height, shown: !selected, placed: old.placed || !selected }));
+  };
+  const pick = (id: string, selected: boolean) => {
+    if (picked) return;
+    if (selected) { close(); return; }
+    setPicked(id);
+    setHighlight(old => ({ ...old, shown: false }));
+    onPick(id);
+    closeTimer.current = setTimeout(close, 160);
+  };
+  const row = (id: string, label: string, titles: string[]) => {
+    const selected = picked ? picked === id : matches(titles);
+    return <button key={id} type="button" role="menuitemradio" aria-checked={selected} onClick={() => pick(id, selected && !picked)} className="mm-nt-row" data-on={selected ? 'true' : undefined} style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '6px 8px', border: 'none', borderRadius: 6, color: 'var(--mm-text-primary)', fontSize: 11, fontWeight: 500, cursor: 'pointer', textAlign: 'left', outline: 'none', position: 'relative' }} onMouseEnter={e => e.currentTarget.focus({ preventScroll: true })} onFocus={e => focusRow(e.currentTarget)} onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}>
+      <span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+      {selected && <svg className="mm-nt-check" data-draw={picked === id ? 'true' : undefined} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}><path d="M20 6 9 17l-5-5" pathLength="1" /></svg>}
+    </button>;
+  };
+  return <div ref={root} style={{ position: 'relative', display: 'inline-flex' }}>
+    <button ref={trigger} type="button" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)} className="mm-press-soft mm-nt-trigger" data-open={open ? 'true' : undefined} style={{ ...S.removeTplBtn, color: undefined, display: 'inline-flex', alignItems: 'center', gap: 3 }}>{'Use a template'}<span className="mm-nt-chevron" aria-hidden="true"><ChevronDown size={12} /></span></button>
+    {mounted && <div ref={menu} role="menu" aria-label="Note templates" className="mm-nt-menu" data-closing={open ? undefined : 'true'} style={{ position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, transformOrigin: 'bottom right', background: 'var(--mm-bg)', border: '1px solid var(--mm-border)', borderRadius: 12, padding: 4, width: 220, maxHeight: 320, overflowY: 'auto', boxShadow: '0 12px 32px rgba(0,0,0,0.15)', zIndex: 100 }} onKeyDown={keys} onMouseLeave={() => setHighlight(old => ({ ...old, shown: false }))}>
+      <div aria-hidden="true" className="mm-nt-highlight" data-shown={highlight.shown ? 'true' : undefined} data-placed={highlight.placed ? 'true' : undefined} data-pressed={pressed ? 'true' : undefined} style={{ transform: `translateY(${highlight.y}px)`, height: highlight.h }} />
+      {modeDefault && <div><div style={{ padding: '4px 8px 4px', fontSize: 10.5, fontWeight: 500, color: 'var(--mm-text-tertiary)' }}>This mode</div>{row(MODE_DEFAULT_NOTE_TEMPLATE_ID, modeDefault.label, modeDefault.titles)}</div>}
+      {NOTE_TEMPLATE_GROUPS.map((group, index) => <div key={group}><div style={{ padding: `${index === 0 && !modeDefault ? 4 : 10}px 8px 4px`, fontSize: 10.5, fontWeight: 500, color: 'var(--mm-text-tertiary)' }}>{group}</div>{NOTE_TEMPLATES.filter(template => template.group === group).map(template => row(template.id, template.name, template.sections.map(section => section.title)))}</div>)}
+    </div>}
+  </div>;
 }
 
 // ─── TemplatePicker (eL from bundle) ─────────────────────────────────────────
@@ -1389,10 +1650,9 @@ export default function ModesSettings({
   const [fileStatuses, setFileStatuses] = useState<Record<string, string>>({});
   const [freshFiles, setFreshFiles] = useState<Set<string>>(() => new Set());
   const [uploading, setUploading] = useState(false);
-  const [removingFiles, setRemovingFiles] = useState<Set<string>>(() => new Set());
-  const [knowledgePacks, setKnowledgePacks] = useState<Array<{ id: string; sourceId: string; fileName: string; cardCount: number; entityCount: number; relationCount: number; packVersion: number; updatedAt: string }>>([]);
   const [knowledgeDetails, setKnowledgeDetails] = useState<Record<string, any>>({});
   const [knowledgeOpen, setKnowledgeOpen] = useState<string | null>(null);
+  const [expandedKnowledgeCardId, setExpandedKnowledgeCardId] = useState<string | null>(null);
   const [knowledgeBusy, setKnowledgeBusy] = useState<Set<string>>(() => new Set());
   const [okfKnowledgeUiEnabled, setOkfKnowledgeUiEnabled] = useState(false);
   const [editableCards, setEditableCards] = useState(false);
@@ -1453,15 +1713,6 @@ export default function ModesSettings({
     }).catch(() => { if (!cancelled) setOkfKnowledgeUiEnabled(false); });
     return () => { cancelled = true; };
   }, []);
-  useEffect(() => {
-    if (!selectedId) { setKnowledgePacks([]); return; }
-    let cancelled = false;
-    api()?.knowledgeListPacks?.(selectedId).then((result: any) => {
-      if (!cancelled) setKnowledgePacks(result?.success ? result.packs ?? [] : []);
-    }).catch(() => { if (!cancelled) setKnowledgePacks([]); });
-    return () => { cancelled = true; };
-  }, [selectedId]);
-
   useEffect(() => {
     const unsubCleared = api()?.onModesActiveCleared?.(() => loadModes());
     const unsubChanged = api()?.onModeChanged?.(() => loadModes());
@@ -1629,14 +1880,7 @@ export default function ModesSettings({
   const saveContext = async (): Promise<boolean> => {
     if (!selectedId) return false;
     try {
-      const res = await api()?.modesUpdate?.(selectedId, { customContext: context });
-      if (res && res.success === false) {
-        setSaveFailed(true);
-        setError(res.error === 'pro_required'
-          ? 'Editing this mode requires Natively Pro.'
-          : res.error ? `Failed to save instructions: ${res.error}` : 'Failed to save instructions.');
-        return false;
-      }
+      await api()?.modesUpdate?.(selectedId, { customContext: context });
       setContextSaved(true);
       setSaveFailed(false);
       setSavePulsing(true);
@@ -1672,10 +1916,6 @@ export default function ModesSettings({
         setSelectedId(result.mode.id);
         setShowTemplates(false);
         setError(null);
-      } else {
-        setError(result?.error === 'pro_required'
-          ? 'Creating custom modes requires Natively Pro.'
-          : result?.error ? `Failed to create mode: ${result.error}` : 'Failed to create mode.');
       }
     } catch (err: any) {
       console.error('[ModesSettings] createMode failed:', err);
@@ -1693,10 +1933,6 @@ export default function ModesSettings({
         setSelectedId(result.mode.id);
         setShowTemplates(false);
         setError(null);
-      } else {
-        setError(result?.error === 'pro_required'
-          ? 'Creating custom modes requires Natively Pro.'
-          : result?.error ? `Failed to create mode: ${result.error}` : 'Failed to create mode.');
       }
     } catch (err: any) {
       console.error('[ModesSettings] createEmptyMode failed:', err);
@@ -1707,14 +1943,7 @@ export default function ModesSettings({
   // ── Rename ──────────────────────────────────────────────────────────────────
   const renameMode = async (id: string, name: string) => {
     try {
-      const res = await api()?.modesUpdate?.(id, { name });
-      if (res && res.success === false) {
-        setError(res.error === 'pro_required'
-          ? 'Renaming this mode requires Natively Pro.'
-          : res.error ? `Failed to rename mode: ${res.error}` : 'Failed to rename mode.');
-        void loadModes();
-        return;
-      }
+      await api()?.modesUpdate?.(id, { name });
       setModes(prev => prev.map(m => m.id === id ? { ...m, name } : m));
     } catch (err: any) {
       console.error('[ModesSettings] renameMode failed:', err);
@@ -1729,14 +1958,7 @@ export default function ModesSettings({
     setModes(remaining);
     if (selectedId === id) setSelectedId(remaining[0]?.id ?? null);
     try {
-      const res = await api()?.modesDelete?.(id);
-      if (res && res.success === false) {
-        setError(res.error === 'pro_required'
-          ? 'Deleting this mode requires Natively Pro.'
-          : res.error ? `Failed to delete mode: ${res.error}` : 'Failed to delete mode.');
-        void loadModes();
-        return;
-      }
+      await api()?.modesDelete?.(id);
     } catch (err: any) {
       console.error('[ModesSettings] deleteMode failed:', err);
       setError('Failed to delete mode.');
@@ -1786,12 +2008,9 @@ export default function ModesSettings({
         setModes(prev => prev.map(m => m.id === selectedId
           ? { ...m, referenceFileCount: m.referenceFileCount + 1 } : m));
         setError(null);
-        setFileStatuses(p => ({ ...p, [result.file.id]: 'pending' }));
-        // Refresh source contract in case authority migrated (e.g. general mode with first file)
-        api()?.modesGetSourceContract?.(selectedId)
-          .then((c: any) => { if (c) setSourceContract(c); })
-          .catch(() => {});
+        setFileStatuses(p => p[result.file.id] ? p : ({ ...p, [result.file.id]: 'pending' }));
       } else if (result && !result.cancelled) {
+        console.error('[ModesSettings] uploadFile returned failure:', result);
         setError(result.error === 'pro_required'
           ? 'Reference files require Pro.'
           : result.error ? `Failed to upload file: ${result.error}` : 'Failed to upload file.');
@@ -1805,33 +2024,16 @@ export default function ModesSettings({
   };
 
   const deleteFile = async (fileId: string) => {
-    if (removingFiles.has(fileId)) return;
-    setRemovingFiles(prev => new Set(prev).add(fileId));
-    await new Promise(resolve => setTimeout(resolve, 320));
+    setRefFiles(prev => prev.filter(f => f.id !== fileId));
+    setModes(prev => prev.map(m => m.id === selectedId ? { ...m, referenceFileCount: Math.max(0, m.referenceFileCount - 1) } : m));
+    setKnowledgeDetails(prev => { const next = { ...prev }; delete next[fileId]; return next; });
+    if (knowledgeOpen === fileId) setKnowledgeOpen(null);
     try {
-      const res = await api()?.modesDeleteReferenceFile?.(fileId);
-      if (res && res.success === false) {
-        setError(res.error === 'pro_required'
-          ? 'Deleting reference files requires Natively Pro.'
-          : res.error ? `Failed to delete file: ${res.error}` : 'Failed to delete file.');
-        if (selectedId) { const files = await api()?.modesGetReferenceFiles?.(selectedId); setRefFiles(files ?? []); }
-        void loadModes();
-        return;
-      }
-      setRefFiles(prev => prev.filter(f => f.id !== fileId));
-      setModes(prev => prev.map(m => m.id === selectedId ? { ...m, referenceFileCount: Math.max(0, m.referenceFileCount - 1) } : m));
-      setKnowledgePacks(prev => prev.filter(pack => pack.sourceId !== fileId));
-      if (selectedId) {
-        api()?.modesGetSourceContract?.(selectedId)
-          .then((c: any) => { if (c) setSourceContract(c); })
-          .catch(() => {});
-      }
+      await api()?.modesDeleteReferenceFile?.(fileId);
     } catch (err: any) {
       console.error('[ModesSettings] deleteFile failed:', err);
       setError('Failed to delete file.');
       void loadModes();
-    } finally {
-      setRemovingFiles(prev => { const next = new Set(prev); next.delete(fileId); return next; });
     }
   };
 
@@ -1840,19 +2042,37 @@ export default function ModesSettings({
     if (fileId in knowledgeDetails) return;
     setKnowledgeLoading(prev => new Set(prev).add(fileId));
     try { const result = await api()?.knowledgeGetPack?.(fileId); setKnowledgeDetails(prev => ({ ...prev, [fileId]: result?.pack ?? null })); }
-    catch { setKnowledgeDetails(prev => ({ ...prev, [fileId]: null })); }
+    catch (error) { console.error('[ModesSettings] loadKnowledgePack failed:', error); setKnowledgeDetails(prev => ({ ...prev, [fileId]: null })); }
     finally { setKnowledgeLoading(prev => { const next = new Set(prev); next.delete(fileId); return next; }); }
   };
   const exportKnowledgePack = async (fileId: string) => {
-    try { const result = await api()?.knowledgeExportPack?.(fileId); if (result && !result.success && !result.cancelled) setError(result.error ?? 'Failed to export knowledge bundle.'); }
-    catch { setError('Failed to export knowledge bundle.'); }
-  };
-  const reviewKnowledgeCard = async (fileId: string, cardId: string, action: 'approve' | 'reject') => {
     try {
-      const result = action === 'approve' ? await api()?.knowledgeApproveCard?.(cardId) : await api()?.knowledgeRejectCard?.(cardId);
-      if (!result?.success) { setError(result?.error ?? `Failed to ${action} card.`); return; }
-      setKnowledgeDetails(prev => ({ ...prev, [fileId]: { ...prev[fileId], cards: (prev[fileId]?.cards ?? []).map((card: any) => card.id === cardId ? result.card : card) } }));
-    } catch { setError(`Failed to ${action} card.`); }
+      const result = await api()?.knowledgeExportPack?.(fileId);
+      if (result && !result.success && !result.cancelled) setError(result.error ? `Failed to export knowledge bundle: ${result.error}` : 'Failed to export knowledge bundle.');
+    } catch (error) {
+      console.error('[ModesSettings] exportKnowledgePack failed:', error);
+      setError('Failed to export knowledge bundle.');
+    }
+  };
+  const updateKnowledgeCard = (fileId: string, card: any) => {
+    setKnowledgeDetails(prev => {
+      const pack = prev[fileId];
+      return pack ? { ...prev, [fileId]: { ...pack, cards: pack.cards.map((entry: any) => entry.id === card.id ? { ...entry, ...card } : entry) } } : prev;
+    });
+  };
+  const approveKnowledgeCard = async (fileId: string, cardId: string) => {
+    try {
+      const result = await api()?.knowledgeApproveCard?.(cardId);
+      if (result?.success && result.card) updateKnowledgeCard(fileId, result.card);
+      else if (result && !result.success) setError(result.error ? `Failed to approve card: ${result.error}` : 'Failed to approve card.');
+    } catch (error) { console.error('[ModesSettings] approveKnowledgeCard failed:', error); setError('Failed to approve card.'); }
+  };
+  const rejectKnowledgeCard = async (fileId: string, cardId: string) => {
+    try {
+      const result = await api()?.knowledgeRejectCard?.(cardId);
+      if (result?.success && result.card) updateKnowledgeCard(fileId, result.card);
+      else if (result && !result.success) setError(result.error ? `Failed to reject card: ${result.error}` : 'Failed to reject card.');
+    } catch (error) { console.error('[ModesSettings] rejectKnowledgeCard failed:', error); setError('Failed to reject card.'); }
   };
 
   const regenerateKnowledgePack = async (file: ReferenceFile) => {
@@ -1860,9 +2080,9 @@ export default function ModesSettings({
     setKnowledgeBusy(prev => new Set(prev).add(file.id));
     try {
       const result = await api()?.knowledgeRegeneratePack?.({ fileId: file.id, modeId: selectedId, fileName: file.fileName });
-      if (result?.success && result.pack) setKnowledgeDetails(prev => ({ ...prev, [file.id]: result.pack }));
+      if (result?.success && result.pack) { setKnowledgeDetails(prev => ({ ...prev, [file.id]: result.pack })); setError(null); }
       else if (result && !result.success) setError(result.error ? `Failed to regenerate knowledge pack: ${result.error}` : 'Failed to regenerate knowledge pack.');
-    } catch { setError('Failed to regenerate knowledge pack.'); }
+    } catch (error) { console.error('[ModesSettings] regenerateKnowledgePack failed:', error); setError('Failed to regenerate knowledge pack.'); }
     finally { setKnowledgeBusy(prev => { const next = new Set(prev); next.delete(file.id); return next; }); }
   };
 
@@ -1873,10 +2093,6 @@ export default function ModesSettings({
     if (result?.success && result.section) {
       setNoteSections(prev => [...prev, result.section]);
       setFreshSections(s => new Set(s).add(result.section.id));
-    } else {
-      setError(result?.error === 'pro_required'
-        ? 'Custom note sections require Natively Pro.'
-        : result?.error ? `Failed to add section: ${result.error}` : 'Failed to add section.');
     }
     setAddingSection(false);
   };
@@ -1884,16 +2100,7 @@ export default function ModesSettings({
   const updateSectionTitle = async (id: string, title: string) => {
     setNoteSections(prev => prev.map(s => s.id === id ? { ...s, title } : s));
     try {
-      const res = await api()?.modesUpdateNoteSection?.(id, { title });
-      if (res && res.success === false) {
-        setError(res.error === 'pro_required'
-          ? 'Editing note sections requires Natively Pro.'
-          : res.error ? `Failed to update section: ${res.error}` : 'Failed to update section.');
-        if (selectedId) {
-          const fresh = await api()?.modesGetNoteSections?.(selectedId);
-          setNoteSections(fresh ?? []);
-        }
-      }
+      await api()?.modesUpdateNoteSection?.(id, { title });
     } catch (err: any) {
       console.error('[ModesSettings] updateSectionTitle failed:', err);
       setError('Failed to update section.');
@@ -1903,16 +2110,7 @@ export default function ModesSettings({
   const updateSectionDesc = async (id: string, description: string) => {
     setNoteSections(prev => prev.map(s => s.id === id ? { ...s, description } : s));
     try {
-      const res = await api()?.modesUpdateNoteSection?.(id, { description });
-      if (res && res.success === false) {
-        setError(res.error === 'pro_required'
-          ? 'Editing note sections requires Natively Pro.'
-          : res.error ? `Failed to update section: ${res.error}` : 'Failed to update section.');
-        if (selectedId) {
-          const fresh = await api()?.modesGetNoteSections?.(selectedId);
-          setNoteSections(fresh ?? []);
-        }
-      }
+      await api()?.modesUpdateNoteSection?.(id, { description });
     } catch (err: any) {
       console.error('[ModesSettings] updateSectionDesc failed:', err);
       setError('Failed to update section.');
@@ -1922,16 +2120,7 @@ export default function ModesSettings({
   const deleteSection = async (id: string) => {
     setNoteSections(prev => prev.filter(s => s.id !== id));
     try {
-      const res = await api()?.modesDeleteNoteSection?.(id);
-      if (res && res.success === false) {
-        setError(res.error === 'pro_required'
-          ? 'Deleting note sections requires Natively Pro.'
-          : res.error ? `Failed to delete section: ${res.error}` : 'Failed to delete section.');
-        if (selectedId) {
-          const fresh = await api()?.modesGetNoteSections?.(selectedId);
-          setNoteSections(fresh ?? []);
-        }
-      }
+      await api()?.modesDeleteNoteSection?.(id);
     } catch (err: any) {
       console.error('[ModesSettings] deleteSection failed:', err);
       setError('Failed to delete section.');
@@ -1978,10 +2167,11 @@ export default function ModesSettings({
       } else {
         setError(result?.error === 'pro_required'
           ? 'Note templates need Natively Pro.'
-          : "Couldn't use that template. Try again.");
+          : 'Couldn’t use that template. Try again.');
       }
     } catch (err: any) {
-      setError("Couldn't use that template. Try again.");
+      console.error('[ModesSettings] applyNoteTemplate failed:', err);
+      setError('Couldn’t use that template. Try again.');
     } finally {
       setApplyingTemplate(false);
     }
@@ -2194,7 +2384,6 @@ export default function ModesSettings({
                     <button
                       onClick={() => setDotsOpen(d => !d)}
                       className="mm-press-soft"
-                      aria-label="Mode options"
                       style={{ ...S.dotsBtn, background: dotsOpen ? 'var(--mm-btn-bg-hover)' : 'var(--mm-btn-bg)' }}
                       onMouseEnter={e => (e.currentTarget.style.background = 'var(--mm-btn-bg-hover)')}
                       onMouseLeave={e => { if (!dotsOpen) e.currentTarget.style.background = 'var(--mm-btn-bg)'; }}
@@ -2238,7 +2427,6 @@ export default function ModesSettings({
                   onFocus={() => { setContextFocused(true); setPendingSwitch(null); }}
                   onBlur={() => setContextFocused(false)}
                   placeholder={contextPlaceholder(mode.templateType)}
-                  aria-label="Real-time prompt instructions"
                   style={{ ...S.textarea, flex: 1, minHeight: 120, background: 'rgba(255,255,255,0.02)' }}
                 />
                 <div style={{ display: 'grid', alignItems: 'center', padding: '10px 12px', borderTop: '1px solid var(--mm-input-border)', width: '100%', boxSizing: 'border-box' }}>
@@ -2280,8 +2468,10 @@ export default function ModesSettings({
                     style={{ gap: 8, paddingLeft: 4 }}
                   >
                     <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'var(--mm-text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {pendingSwitch === '__templates__' || pendingSwitch === '__new__'
-                        ? 'Save changes before leaving?' : 'Save changes before switching?'}
+                      {saveFailed
+                        ? <span style={{ color: 'var(--mm-danger)' }}>Failed to save. Try again?</span>
+                        : pendingSwitch === '__templates__' || pendingSwitch === '__new__'
+                          ? 'Save changes before leaving?' : 'Save changes before switching?'}
                     </span>
                     <button onClick={() => setPendingSwitch(null)} className="mm-press mm-pill mm-pill--ghost">Keep editing</button>
                     <button onClick={discardAndSwitch} className="mm-press mm-pill mm-pill--danger">Discard</button>
@@ -2297,30 +2487,18 @@ export default function ModesSettings({
                 <div key={`subtitle-${mode.id}`} style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--mm-text-tertiary)', lineHeight: 1.5, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span>Powered by Natively's built-in</span>
                   {isLockedGeneral(mode) ? <span>General</span> : (
-                    <><style>{AIP_CSS}</style><AipSelect
-                      label="Built-in template"
+                    <TemplateTypeSelect
                       value={mode.templateType}
-                      options={[{ id: 'general', name: 'General' }, ...TEMPLATES.map(t => ({ id: t.type, name: t.label }))]}
+                      options={[{ value: 'general', label: 'General' }, ...TEMPLATES.map(t => ({ value: t.type, label: t.label }))]}
                       onChange={async type => {
                         try {
                           const result = await api()?.modesUpdate?.(mode.id, { templateType: type });
-                          if (result?.success) {
-                            setModes(prev => prev.map(m => m.id === mode.id ? { ...m, templateType: type } : m));
-                            const freshContract = await api()?.modesGetSourceContract?.(mode.id);
-                            if (freshContract) setSourceContract(freshContract);
-                            loadAnswerPolicy(mode.id, type);
-                          } else {
-                            setError(result?.error === 'pro_required'
-                              ? 'Changing template requires Natively Pro.'
-                              : 'Failed to change template.');
-                            void loadModes();
-                          }
+                          if (result?.success) setModes(prev => prev.map(m => m.id === mode.id ? { ...m, templateType: type } : m));
                         } catch (err) {
                           console.error('[ModesSettings] template change failed:', err);
-                          void loadModes();
                         }
                       }}
-                    /></>
+                    />
                   )}
                   <span>intelligence.</span>
                 </div>
@@ -2382,7 +2560,7 @@ export default function ModesSettings({
                     <React.Fragment key={f.id}><div
                       key={f.id}
                       data-file-row
-                      className={removingFiles.has(f.id) ? 'mm-file-removing' : freshFiles.has(f.id) ? 'mm-fresh-row' : undefined}
+                      className={freshFiles.has(f.id) ? 'mm-fresh-row' : undefined}
                       style={{ ...S.fileRow, gridTemplateColumns: okfKnowledgeUiEnabled ? '13px minmax(0, 1fr) 104px 42px 20px 20px' : '13px minmax(0, 1fr) 104px 42px 20px' }}
                     >
                       <FileText size={13} style={{ color: 'var(--mm-text-secondary)', flexShrink: 0 }} />
@@ -2405,7 +2583,7 @@ export default function ModesSettings({
                         <X size={12} />
                       </button>
                     </div>
-                    {okfKnowledgeUiEnabled && knowledgeOpen === f.id && <KnowledgePanel file={f} pack={knowledgeDetails[f.id]} loading={knowledgeLoading.has(f.id)} regenerating={knowledgeBusy.has(f.id)} userEditableCardsEnabled={editableCards} onApproveCard={cardId => void reviewKnowledgeCard(f.id, cardId, 'approve')} onRejectCard={cardId => void reviewKnowledgeCard(f.id, cardId, 'reject')} onRegenerate={() => void regenerateKnowledgePack(f)} onExport={() => void exportKnowledgePack(f.id)} onReview={(cardId, action) => void reviewKnowledgeCard(f.id, cardId, action)} />}
+                    {okfKnowledgeUiEnabled && knowledgeOpen === f.id && <KnowledgePanel file={f} pack={knowledgeDetails[f.id]} loading={knowledgeLoading.has(f.id)} regenerating={knowledgeBusy.has(f.id)} expandedCardId={expandedKnowledgeCardId} onToggleCard={cardId => setExpandedKnowledgeCardId(current => current === cardId ? null : cardId)} userEditableCardsEnabled={editableCards} onApproveCard={cardId => void approveKnowledgeCard(f.id, cardId)} onRejectCard={cardId => void rejectKnowledgeCard(f.id, cardId)} onRegenerate={() => void regenerateKnowledgePack(f)} onExport={() => void exportKnowledgePack(f.id)} />}
                     </React.Fragment>
                   ))}
                   <button

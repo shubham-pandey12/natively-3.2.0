@@ -53,7 +53,7 @@ import { ProfileIntelligenceSettings } from "./components/ProfileIntelligenceSet
 import { useResolvedTheme } from "./hooks/useResolvedTheme"
 import { useDiagramRenderHost } from "./lib/diagram/diagramRuntime"
 import { WelcomeFlow } from "./components/onboarding/WelcomeFlow"
-import { FirstRunGuideCard } from "./components/onboarding/FirstRunGuideCard"
+import { LauncherGuide } from "./components/onboarding/LauncherGuide"
 import { shouldShowWelcome, hasOnboardingHistory, WELCOME_SEEN_KEY, LEGACY_PERMS_SHOWN_KEY, ONBOARDING_STATE_KEY } from "./lib/onboarding/welcomeGate.mjs"
 
 // How often the launcher may re-read the card inputs when it regains focus
@@ -1362,7 +1362,6 @@ const App: React.FC = () => {
                     interfaceTheme={paintedInterfaceTheme}
                   />
                 </React.Suspense>
-                <FirstRunGuideCard surface="overlay" />
               </div>
               <ToastViewport />
             </ToastProvider>
@@ -1484,7 +1483,7 @@ const App: React.FC = () => {
                     ollamaPullPercent={ollamaPullPercent}
                     ollamaPullMessage={ollamaPullMessage}
                   />
-                  <FirstRunGuideCard surface="launcher" />
+                  {!isolateOnboarding && !isSettingsOpen && !isManagerOpen && <LauncherGuide onOpenSettings={openSettingsExclusive} onOpenMeeting={openLauncherMeeting} onShowHome={() => setLauncherRequest({ kind: 'home', seq: Date.now() })} />}
                 </div>
                 <SettingsOverlay
                   isOpen={isSettingsOpen}

@@ -15,6 +15,7 @@ import {
   HardDriveDownload, Share2,
 } from 'lucide-react';
 import { AutoAnswerIcon } from './AutoAnswerIcon';
+import { LauncherSettingsGuide } from './onboarding/LauncherGuide';
 import { HiCreditCard } from 'react-icons/hi2';
 import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
@@ -4718,7 +4719,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                             )}
 
                             {activeTab === 'help' && (
-                                <HelpSettings onNavigate={setActiveTab} onOpenModes={onOpenModes} onOpenProfile={onOpenProfile} />
+                                <HelpSettings onNavigate={setActiveTab} onOpenModes={onOpenModes} onOpenProfile={onOpenProfile} onShowGuide={() => { void window.electronAPI?.guideDispatch?.({ type: 'restart' }); onClose(); }} />
                             )}
 
                             {activeTab === 'about' && (
@@ -4729,6 +4730,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                         </div>
                     </div>
             </GenieModal>
+            {isOpen && <LauncherSettingsGuide />}
 
 
             {/* ------------------------------------------------------------------ */}
