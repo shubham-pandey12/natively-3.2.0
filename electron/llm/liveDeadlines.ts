@@ -200,6 +200,25 @@ export const USER_ENDPOINT_LATENCY_MARGIN_MS = 5000;
  */
 export const USER_ENDPOINT_MIN_SAMPLES_TO_NARROW = 5;
 
+/**
+ * Lone-provider hedge (3.2.0, F-LAT-03). With no spare rung, the parallel
+ * second call is the turn's only failover, so it fires at a first-useful
+ * point: 4 s while the endpoint is unmeasured, otherwise just above its
+ * slowest observed first token, never below 2.5 s and never past 85% of the
+ * budget.
+ */
+export const LONE_PROVIDER_UNMEASURED_HEDGE_MS = 4_000;
+export const LONE_PROVIDER_MIN_HEDGE_MS = 2_500;
+export const LONE_PROVIDER_HEDGE_MARGIN_MS = 1_500;
+
+export function loneProviderHedgeDelayMs(budgetMs: number, observed?: ObservedLatency | null): number {
+  const ceil = Math.round(budgetMs * 0.85);
+  if (!observed || observed.count <= 0 || !Number.isFinite(observed.maxMs)) {
+    return Math.min(ceil, LONE_PROVIDER_UNMEASURED_HEDGE_MS);
+  }
+  return Math.min(ceil, Math.max(LONE_PROVIDER_MIN_HEDGE_MS, Math.round(observed.maxMs) + LONE_PROVIDER_HEDGE_MARGIN_MS));
+}
+
 /** What the caller has actually measured from one endpoint this session. */
 export interface ObservedLatency {
   /** Slowest first token seen, decayed — see LLMHelper.recordAnswerFirstToken. */

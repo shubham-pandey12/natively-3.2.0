@@ -11,6 +11,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const provPath = path.resolve(__dirname, '../../../dist-electron/electron/rag/providers/GeminiEmbeddingProvider.js');
+// This compiled CommonJS module is cached by Node even when an import URL has a
+// query string. Configure the no-wait branch before its first import.
+process.env.NATIVELY_GEMINI_EMBED_MAX_WAIT_MS = '0';
 const { GeminiEmbeddingProvider } = await import(pathToFileURL(provPath).href);
 
 const DIMS = 768;
@@ -74,17 +77,9 @@ describe('GeminiEmbeddingProvider — key rotation', () => {
   });
 
   test('all keys 429 → throws (within bounded wait) rather than hanging', async () => {
-    // Short cooldown/wait via env so the test is fast.
-    process.env.NATIVELY_GEMINI_EMBED_COOLDOWN_MS = '50';
-    process.env.NATIVELY_GEMINI_EMBED_MAX_WAIT_MS = '0'; // don't wait — fail fast
-    // Re-import with fresh module state so the new env is read at module load.
-    const mod = await import(pathToFileURL(provPath).href + `?t=${Date.now()}`);
-    const P = mod.GeminiEmbeddingProvider;
     global.fetch = stubFetch({ k1: '429', k2: '429' });
-    const p = new P(['k1', 'k2'], 'gemini-embedding-2', DIMS);
+    const p = new GeminiEmbeddingProvider(['k1', 'k2'], 'gemini-embedding-2', DIMS);
     await assert.rejects(() => p.embed('x'), /429|rate-limited/i);
-    delete process.env.NATIVELY_GEMINI_EMBED_COOLDOWN_MS;
-    delete process.env.NATIVELY_GEMINI_EMBED_MAX_WAIT_MS;
   });
 
   test('embedBatch rotates keys on a 429 sub-batch before serial fallback', async () => {

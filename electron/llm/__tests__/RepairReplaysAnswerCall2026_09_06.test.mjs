@@ -445,9 +445,8 @@ describe('a selected single provider now fails over — or retries itself in par
   test('the hedge only arms when there is nothing to fail over to', () => {
     // Decided from the FITTED list, not the raw one: if budget-fitting drops
     // every spare, this is the lone-provider case after all and the hedge must
-    // arm — otherwise the primary keeps a shortened failover-trigger ttft with
-    // nothing behind it and no parallel retry, worse than before fitting.
-    assert.match(llm, /const hedging = fittedSpares\.length === 0;/);
+    // arm only if the turn still has room for the parallel provider call.
+    assert.match(llm, /const hedging = fittedSpares\.length === 0 && budget\.remaining\(turnKey\) >= 2;/);
     assert.match(llm, /if \(fittedSpares\.length === 0\) primaryTtftMs = budgetMs;/,
       'a turn whose spares were all dropped must get the whole budget back');
     assert.match(llm, /hedgeEnabled: hedging/);
@@ -475,8 +474,8 @@ describe('a selected single provider now fails over — or retries itself in par
     // the recurring mistake in this area.
     // Same decaying-max map, read under the ACTIVE Model's key: this runs inside
     // its rung, which a Fast Response Background Model pick never reaches.
-    assert.match(llm, /hedgeDelayForBudget\(budgetMs: number\)[\s\S]{0,400}?this\.observedLatencyFor\(this\.activeAnswerLatencyKey\(\)\)/);
-    assert.match(llm, /hedgeDelayDefaultMs: this\.hedgeDelayForBudget\(budgetMs\)/);
+    assert.match(llm, /loneProviderHedgeDelayMs\(budgetMs, this\.observedLatencyFor\(this\.activeAnswerLatencyKey\(\)\)\)/);
+    assert.match(llm, /hedgeDelayDefaultMs: loneHedgeMs/);
   });
 
   test('IE does not ALSO regenerate a route the engine already retried', () => {

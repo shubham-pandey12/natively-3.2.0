@@ -83,11 +83,15 @@ describe('profile:delete / profile:delete-jd IPC handlers use the transactional 
       const body = handlerBody(routeName);
       const txCallIdx = body.indexOf('deleteProfileTransactional(');
       const afterCall = body.slice(txCallIdx);
-      const nextCatchIdx = afterCall.indexOf('} catch');
       const returnSuccessIdx = afterCall.indexOf('return { success: true }');
+      // The résumé route has a separate, deliberately nonfatal catch for
+      // clearing Cue Card drafts after the transaction has committed.
+      const nextCleanupTry = afterCall.indexOf('try {');
+      const txToNextStep = afterCall.slice(0, nextCleanupTry >= 0 && nextCleanupTry < returnSuccessIdx
+        ? nextCleanupTry : returnSuccessIdx);
       assert.ok(
-        returnSuccessIdx >= 0 && returnSuccessIdx < nextCatchIdx,
-        `${routeName}: no inner catch must sit between the transactional delete and the success return`,
+        returnSuccessIdx >= 0 && !/\}\s*catch\s*\(/.test(txToNextStep),
+        `${routeName}: the transactional delete must reach success without a Tier 2 swallow`,
       );
     }
   });

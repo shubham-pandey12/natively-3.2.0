@@ -29,7 +29,7 @@ import { app, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { loadNativeModule } from '../../../electron/audio/nativeModuleLoader';
-import { classifyProVerify } from './licenseVerifyPolicy';
+import { classifyGumroadVerify, classifyProVerify } from './licenseVerifyPolicy';
 
 // Load via the shared path-based loader (bypasses require('natively-audio') which requires an npm symlink)
 const _nativeMod = loadNativeModule();
@@ -73,6 +73,37 @@ if (!_nativeMod) {
 }
 
 const LICENSE_PATH = path.join(app.getPath('userData'), 'license.enc');
+const OFFLINE_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
+const SEEN_WRITE_EVERY_MS = 60 * 60 * 1000;
+const GUMROAD_PRODUCT_IDS = ['1HETxGKGYYf6DNDp5SnWVw==', 'mzhzpt'];
+export function offlineTooLong(license: { verifiedAt?: string; seenAt?: string }, nowMs: number): boolean {
+    const verified = Date.parse(license.verifiedAt ?? '');
+    if (!Number.isFinite(verified)) return false;
+    return Math.max(nowMs, Date.parse(license.seenAt ?? '') || 0) - verified > OFFLINE_GRACE_MS;
+}
+async function gumroadStanding(key: string): Promise<{ verdict: 'active' | 'revoke' | 'keep'; why: string }> {
+    let notFound = 0;
+    let lastWhy = 'no answer';
+    for (const productId of GUMROAD_PRODUCT_IDS) {
+        let status = 0;
+        let data: unknown = null;
+        try {
+            const res = await fetch('https://api.gumroad.com/v2/licenses/verify', {
+                method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ product_id: productId, license_key: key, increment_uses_count: 'false' }).toString(),
+                signal: AbortSignal.timeout(8000),
+            });
+            status = res.status;
+            data = await res.json().catch(() => null);
+        } catch { return { verdict: 'keep', why: 'network error' }; }
+        const { decision, why } = classifyGumroadVerify(status, data);
+        if (decision === 'active' || decision === 'keep') return { verdict: decision, why };
+        if (status !== 404) return { verdict: 'revoke', why };
+        notFound++;
+        lastWhy = why;
+    }
+    return { verdict: notFound === GUMROAD_PRODUCT_IDS.length ? 'revoke' : 'keep', why: lastWhy };
+}
 const NATIVELY_API_BASE = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
 
 interface StoredLicense {
@@ -87,6 +118,9 @@ interface StoredLicense {
      */
     instanceId?: string;
     plan?: string;
+    verifiedAt?: string;
+    seenAt?: string;
+    revokedAt?: string;
 }
 
 /**
@@ -334,6 +368,8 @@ export class LicenseManager {
                 }
 
                 if (gumroadResult === 'OK') {
+                    const standing = await gumroadStanding(trimmedKey);
+                    if (standing.verdict === 'revoke') return { success: false, error: `Gumroad licence ${standing.why}.` };
                     return await this.storeLicense(trimmedKey, 'gumroad', undefined, undefined, { replacePerpetual: true });
                 }
 
@@ -485,6 +521,7 @@ export class LicenseManager {
      * rather than trusting a verdict taken before a network round trip.
      */
     private perpetualLicenseGuard(): { success: false; skipped: true; error?: string } | null {
+        if (this.readStoredLicense()?.revokedAt) return null;
         const existingProvider = this.peekStoredProvider();
         if (!existingProvider || existingProvider === 'natively_api') return null;
 
@@ -580,6 +617,8 @@ export class LicenseManager {
                 key,
                 hwid,
                 activatedAt: new Date().toISOString(),
+                verifiedAt: new Date().toISOString(),
+                seenAt: new Date().toISOString(),
                 provider,
                 ...(instanceId ? { instanceId } : {}),
                 ...(plan ? { plan } : {}),
@@ -712,8 +751,28 @@ export class LicenseManager {
         if (this.cachedPremium !== null) return this.cachedPremium;
 
         const license = this.readStoredLicense();
-        this.cachedPremium = license !== null;
+        this.cachedPremium = license !== null && !license.revokedAt && !offlineTooLong(license, Date.now());
         return this.cachedPremium;
+    }
+
+    public storedLicenceState(): 'none' | 'held' | 'valid' | 'unreadable' {
+        if (!fs.existsSync(LICENSE_PATH)) return 'none';
+        const license = this.readStoredLicense();
+        if (!license) return 'unreadable';
+        return license.revokedAt || offlineTooLong(license, Date.now()) ? 'held' : 'valid';
+    }
+
+    /**
+     * The stored Pro licence, for the Auto Answer model download only (3.2.0):
+     * a Dodo or Gumroad licence the app currently honours. A Natively API
+     * licence is the API key, which the caller sends instead. Never logged.
+     */
+    public getProLicenceForDownload(): { key: string; provider: 'dodo' | 'gumroad' } | null {
+        if (!this.isPremium()) return null;
+        const license = this.readStoredLicense() as (StoredLicense & { revokedAt?: unknown }) | null;
+        if (!license || license.revokedAt) return null;
+        if (license.provider !== 'dodo' && license.provider !== 'gumroad') return null;
+        return { key: license.key, provider: license.provider };
     }
 
     /**
@@ -722,7 +781,7 @@ export class LicenseManager {
     public getLicenseDetails(): { isPremium: boolean; plan?: string; provider?: string } {
         // Native-module availability is enforced per-provider by readStoredLicense().
         const license = this.readStoredLicense();
-        if (!license) return { isPremium: false };
+        if (!license || license.revokedAt || this.cachedPremium === false || offlineTooLong(license, Date.now())) return { isPremium: false };
 
         let plan = license.plan;
 
@@ -740,106 +799,90 @@ export class LicenseManager {
     }
 
     /**
-     * Async premium check with server-side revocation detection.
-     * Called on app startup (license:check-premium-async IPC handler).
-     *
-     * Algorithm:
-     *   1. Run the sync check (HWID + file) — if no local license, return false immediately
-     *   2. For Dodo licenses: call the Dodo validate endpoint (Rust, libuv thread)
-     *      - "OK"      → return true (valid)
-     *      - "REVOKED" → deactivate locally and return false
-     *      - network error → fail-open (return true; don't punish offline users)
-     *   3. For Gumroad licenses (or if validateDodoKey not in binary): return sync result
-     *
-     * Security note: network errors always fail-open to prevent denial-of-service from
-     * an attacker cutting the network. Only a definitive "REVOKED" response clears the license.
+     * Confirm Dodo, Gumroad, legacy, or Natively API licences with their seller.
+     * A confirmed invalid or refunded licence is held locally so a later valid
+     * answer can restore it. An unanswered check keeps Pro for at most 14 days
+     * after the last confirmation; the stored licence remains available to retry.
      */
     public async isPremiumAsync(): Promise<boolean> {
-        // Step 1: sync check (HWID + decrypt)
-        if (!this.isPremium()) return false;
-
-        // Read the full license payload for provider/key info
         const license = this.readStoredLicense();
-        if (!license) {
+        if (!license) { this.cachedPremium = false; return false; }
+        const held = !!license.revokedAt;
+        const stale = offlineTooLong(license, Date.now());
+        if (!held && !stale && !this.isPremium()) return false;
+        const seenMs = Math.max(Date.now(), Date.parse(license.seenAt ?? '') || 0);
+        const unanswered = () => {
+            if (!held) {
+                const noLimitYet = !Number.isFinite(Date.parse(license.verifiedAt ?? ''));
+                const seenMoved = seenMs - (Date.parse(license.seenAt ?? '') || 0) >= SEEN_WRITE_EVERY_MS;
+                if (noLimitYet || seenMoved) this.rewriteStoredLicense({ ...license, ...(noLimitYet ? { verifiedAt: new Date(seenMs).toISOString() } : {}), seenAt: new Date(seenMs).toISOString() });
+            }
+            this.cachedPremium = !held && !stale;
+            return this.cachedPremium;
+        };
+        const valid = (provider?: StoredLicense['provider']) => {
+            const { revokedAt: _revoked, ...rest } = license;
+            const confirmed = { ...rest, verifiedAt: new Date(seenMs).toISOString(), seenAt: new Date(seenMs).toISOString(), ...(provider ? { provider } : {}) };
+            if (held || stale || provider || seenMs - (Date.parse(license.verifiedAt ?? '') || 0) >= 12 * 60 * 60 * 1000) this.rewriteStoredLicense(confirmed);
+            this.cachedPremium = true;
+            return true;
+        };
+        const hold = (why: string) => {
+            if (!held && !this.rewriteStoredLicense({ ...license, revokedAt: new Date().toISOString() })) this.removeLocalLicenseFile();
+            try { if (fs.existsSync(LICENSE_PATH + '.tmp')) fs.unlinkSync(LICENSE_PATH + '.tmp'); } catch { /* best effort */ }
+            console.warn(`[LicenseManager] licence held: ${why}`);
             this.cachedPremium = false;
             return false;
-        }
-
-        // Step 2: server-side check for Dodo licenses
-        if (license.provider === 'dodo' && validateDodoKeyNative) {
+        };
+        if (license.provider === 'dodo') {
+            if (!validateDodoKeyNative) return unanswered();
             let result: string;
-            try {
-                result = await validateDodoKeyNative(license.key);
-            } catch (e: any) {
-                console.warn('[LicenseManager] validateDodoKey binding error (fail-open):', e?.message ?? e);
-                return true;
-            }
-
-            if (result === 'OK') return true;
-
-            if (result === 'REVOKED') {
-                console.warn('[LicenseManager] Dodo license REVOKED by server — deactivating locally.');
-                this.removeLocalLicenseFile();
-                this.cachedPremium = false;
-                return false;
-            }
-
-            if (result.startsWith('ERR:dodo:network:')) {
-                console.log('[LicenseManager] Dodo validate: network error — fail-open.');
-                return true;
-            }
-
-            console.warn('[LicenseManager] Dodo validate unexpected result — fail-open:', result);
-            return true;
+            try { result = await validateDodoKeyNative(license.key); } catch { return unanswered(); }
+            if (result === 'OK') return valid();
+            if (result === 'REVOKED') return hold('Dodo: not valid');
+            return unanswered();
         }
-
-        // Step 2b: natively_api subscription license — re-validate against server.
-        // The revoke/keep decision is delegated to classifyProVerify (pure, unit-tested).
-        // CRITICAL (paying-user safety): we only delete a paid user's local license on a
-        // CONFIRMED loss of entitlement (plan downgraded / subscription_inactive / key gone).
-        // Transient server states (429 ip_blocked, 403 account_suspended payment-hold, 5xx,
-        // network error, unparseable body) FAIL OPEN — they must never downgrade a paying
-        // customer. Previously, any non-{ok,has_pro} response deleted the license, so a
-        // transient rate-limit or suspension hold would knock a paying user out of Pro.
         if (license.provider === 'natively_api') {
             let status = 0;
             let data: { ok?: boolean; has_pro?: boolean; error?: string } | null = null;
             try {
-                const res = await fetch(`${NATIVELY_API_BASE}/v1/pro/verify`, {
-                    headers: { 'x-natively-key': license.key },
-                    signal: AbortSignal.timeout(8000),
-                });
+                const res = await fetch(`${NATIVELY_API_BASE}/v1/pro/verify`, { headers: { 'x-natively-key': license.key }, signal: AbortSignal.timeout(8000) });
                 status = res.status;
-                try {
-                    data = await res.json() as any;
-                } catch {
-                    data = null; // unparseable → treated as transient by the policy
-                }
-            } catch {
-                // Network error / timeout → status stays 0 → policy returns 'keep' (fail-open).
-                console.log('[LicenseManager] natively_api verify: network error — fail-open.');
-                return true;
-            }
-
+                data = await res.json().catch(() => null) as { ok?: boolean; has_pro?: boolean; error?: string } | null;
+            } catch { return unanswered(); }
             const decision = classifyProVerify(status, data);
-            if (decision === 'active') return true;
-            if (decision === 'revoke') {
-                console.warn(
-                    `[LicenseManager] Natively API Pro entitlement lost (${data?.error ?? 'plan downgraded'}) — revoking locally.`
-                );
-                this.removeLocalLicenseFile();
-                this.cachedPremium = false;
-                return false;
-            }
-            // 'keep' — transient/ambiguous; do NOT revoke a paying user.
-            console.log(
-                `[LicenseManager] natively_api verify non-definitive (status ${status}, error ${data?.error ?? 'none'}) — fail-open (no revoke).`
-            );
-            return true;
+            if (decision === 'active') return valid();
+            if (decision === 'hold') return hold(`Natively API: ${data?.error ?? 'payment hold'}`);
+            if (decision === 'revoke') { this.removeLocalLicenseFile(); this.cachedPremium = false; return false; }
+            return unanswered();
         }
+        if (license.provider === 'gumroad') {
+            const decision = await gumroadStanding(license.key);
+            if (decision.verdict === 'active') return valid();
+            if (decision.verdict === 'revoke') return hold(`Gumroad: ${decision.why}`);
+            return unanswered();
+        }
+        const gum = await gumroadStanding(license.key);
+        if (gum.verdict === 'active') return valid('gumroad');
+        let dodo = 'ERR:dodo:unavailable';
+        if (validateDodoKeyNative) try { dodo = await validateDodoKeyNative(license.key); } catch { dodo = 'ERR:dodo:binding'; }
+        if (dodo === 'OK') return valid('dodo');
+        if (gum.verdict === 'revoke' && dodo === 'REVOKED') return hold('legacy licence: neither seller stands behind it');
+        return unanswered();
+    }
 
-        // Step 3: Gumroad or no validate function available — return sync result
-        return true;
+    private rewriteStoredLicense(license: StoredLicense): boolean {
+        const tmp = LICENSE_PATH + '.tmp';
+        try {
+            if (!safeStorage.isEncryptionAvailable()) return false;
+            fs.writeFileSync(tmp, safeStorage.encryptString(JSON.stringify(license)));
+            fs.renameSync(tmp, LICENSE_PATH);
+            return true;
+        } catch (error: any) {
+            console.error('[LicenseManager] rewriteStoredLicense error:', error?.message ?? error);
+            try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* best effort */ }
+            return false;
+        }
     }
 
     /**

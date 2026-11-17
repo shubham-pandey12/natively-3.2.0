@@ -1109,6 +1109,7 @@ const Launcher: React.FC<LauncherProps> = ({ request, onStartMeeting, onOpenSett
                                             crossfades via AnimatePresence mode="wait" — exit 0.14s, enter 0.22s
                                             with apple-ease — which reads as a soft label change, not a fly. */}
                                         <button
+                                            data-guide="start"
                                             onClick={() => {
                                                 if (isMeetingActive) {
                                                     // inactive=true: overlay appears on top but doesn't activate

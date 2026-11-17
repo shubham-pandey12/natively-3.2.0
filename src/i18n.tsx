@@ -14,6 +14,9 @@ import { STT_STATUS_RU, STT_STATUS_ZH, STT_STATUS_JA, STT_STATUS_ES } from './i1
 import { SCREENSHOT_SCREEN_RU, SCREENSHOT_SCREEN_ZH, SCREENSHOT_SCREEN_JA, SCREENSHOT_SCREEN_ES } from './i18n.screenshotScreen';
 import { SCREENSHOT_QUESTION_RU, SCREENSHOT_QUESTION_ZH, SCREENSHOT_QUESTION_JA, SCREENSHOT_QUESTION_ES } from './i18n.screenshotQuestion';
 import { KEY_RESEND_RU, KEY_RESEND_ZH, KEY_RESEND_JA, KEY_RESEND_ES } from './i18n.keyResend';
+import { GUIDE_TRANSLATIONS } from './i18n.guide';
+
+const guideLanguage = (index: number) => Object.fromEntries(Object.entries(GUIDE_TRANSLATIONS).map(([key, values]) => [key, values[index]]));
 
 // ─── Lightweight in-house i18n ────────────────────────────────────────────────
 // No external dependency. `t(englishText)` returns the translation for the
@@ -53,6 +56,7 @@ function isSupportedLang(v: string | null): v is Lang {
 // Missing keys in any non-English language silently fall back to the English
 // source so the UI stays readable while translations fill in.
 const RU: Record<string, string> = {
+    ...guideLanguage(0),
     ...RU_GENERATED,
     ...RU_GENERATED2,
     ...ONBOARDING_RU,
@@ -305,6 +309,7 @@ const RU: Record<string, string> = {
 
 // Chinese — ZH_GENERATED spread first, then hand-authored overrides on any collision.
 const ZH: Record<string, string> = {
+    ...guideLanguage(1),
     ...ZH_GENERATED,
     ...ONBOARDING_ZH,
     ...DIRECT_ASSIST_ZH,
@@ -331,6 +336,7 @@ const ZH: Record<string, string> = {
 // Japanese — JA_GENERATED (parallel-agent output) spread first, then hand-authored
 // overrides win on any key collision.
 const JA: Record<string, string> = {
+    ...guideLanguage(2),
     ...JA_GENERATED,
     ...ONBOARDING_JA,
     ...DIRECT_ASSIST_JA,
@@ -356,6 +362,7 @@ const JA: Record<string, string> = {
 
 // Spanish — ES_GENERATED spread first, then hand-authored overrides on any collision.
 const ES: Record<string, string> = {
+    ...guideLanguage(3),
     ...ES_GENERATED,
     ...ONBOARDING_ES,
     ...DIRECT_ASSIST_ES,

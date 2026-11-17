@@ -53,6 +53,7 @@ import { ProfileIntelligenceSettings } from "./components/ProfileIntelligenceSet
 import { useResolvedTheme } from "./hooks/useResolvedTheme"
 import { useDiagramRenderHost } from "./lib/diagram/diagramRuntime"
 import { WelcomeFlow } from "./components/onboarding/WelcomeFlow"
+import { FirstRunGuideCard } from "./components/onboarding/FirstRunGuideCard"
 import { shouldShowWelcome, hasOnboardingHistory, WELCOME_SEEN_KEY, LEGACY_PERMS_SHOWN_KEY, ONBOARDING_STATE_KEY } from "./lib/onboarding/welcomeGate.mjs"
 
 // How often the launcher may re-read the card inputs when it regains focus
@@ -356,6 +357,33 @@ const App: React.FC = () => {
     setIsSettingsOpen(false);
     setLauncherRequest({ kind: 'meeting', id, seq: Date.now() });
   }, []);
+  useEffect(() => {
+    if (!isLauncherWindow && !isDefault) return;
+    let opened = '';
+    const showNotes = (state: { status?: string; step?: string; endedMeetingId?: string | null }) => {
+      if (state.status === 'active' && (state.step === 'notes' || state.step === 'notes2') && state.endedMeetingId && state.endedMeetingId !== opened) {
+        opened = state.endedMeetingId;
+        openLauncherMeeting(opened);
+      }
+    };
+    void window.electronAPI?.getGuideState?.().then(showNotes).catch(() => {});
+    return window.electronAPI?.onGuideChanged?.(showNotes);
+  }, [isLauncherWindow, isDefault, openLauncherMeeting]);
+  useEffect(() => {
+    if (!isLauncherWindow && !isDefault) return;
+    const orch = getOrchestrator();
+    let active = false;
+    let release: (() => void) | undefined;
+    const claim = () => { if (active) orch.claimExternalCard('first_run_guide', { force: true }); };
+    const changed = (state: { status?: string }) => {
+      active = state.status === 'active';
+      if (active) { claim(); release ??= orch.subscribe(claim); }
+      else { release?.(); release = undefined; orch.releaseExternalCard('first_run_guide'); }
+    };
+    void window.electronAPI?.getGuideState?.().then(changed).catch(() => {});
+    const off = window.electronAPI?.onGuideChanged?.(changed);
+    return () => { off?.(); release?.(); orch.releaseExternalCard('first_run_guide'); };
+  }, [isLauncherWindow, isDefault]);
   // The notes window's "Open meeting" after Stop (main sends it to the launcher only).
   useEffect(() => {
     const off = window.electronAPI?.onLauncherOpenMeeting?.((id) => { if (id) openLauncherMeeting(id); });
@@ -1334,6 +1362,7 @@ const App: React.FC = () => {
                     interfaceTheme={paintedInterfaceTheme}
                   />
                 </React.Suspense>
+                <FirstRunGuideCard surface="overlay" />
               </div>
               <ToastViewport />
             </ToastProvider>
@@ -1455,6 +1484,7 @@ const App: React.FC = () => {
                     ollamaPullPercent={ollamaPullPercent}
                     ollamaPullMessage={ollamaPullMessage}
                   />
+                  <FirstRunGuideCard surface="launcher" />
                 </div>
                 <SettingsOverlay
                   isOpen={isSettingsOpen}

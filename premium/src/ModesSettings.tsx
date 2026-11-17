@@ -10,6 +10,7 @@
  */
 import { ThinkingOrb } from 'thinking-orbs';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { AipSelect, AIP_CSS } from '../../src/components/settings/AIProvidersSettings';
 import {
   BookOpen,
   Briefcase,
@@ -2003,6 +2004,7 @@ export default function ModesSettings({
     <div className="modes-manager-root" data-theme={theme}
       style={S.root}
       aria-busy={!loaded || uploading}
+      data-genie-view={selectedId ?? undefined}
     >
       <style>{CSS}</style>
 
@@ -2292,13 +2294,14 @@ export default function ModesSettings({
 
               {/* Template type dropdown (non-locked modes only) */}
               {!mode.isBuiltin && (
-                <p key={`subtitle-${mode.id}`} style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--mm-text-tertiary)', lineHeight: 1.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div key={`subtitle-${mode.id}`} style={{ margin: '6px 0 0', fontSize: 11, color: 'var(--mm-text-tertiary)', lineHeight: 1.5, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span>Powered by Natively's built-in</span>
                   {isLockedGeneral(mode) ? <span>General</span> : (
-                    <select
+                    <><style>{AIP_CSS}</style><AipSelect
+                      label="Built-in template"
                       value={mode.templateType}
-                      onChange={async e => {
-                        const type = e.target.value;
+                      options={[{ id: 'general', name: 'General' }, ...TEMPLATES.map(t => ({ id: t.type, name: t.label }))]}
+                      onChange={async type => {
                         try {
                           const result = await api()?.modesUpdate?.(mode.id, { templateType: type });
                           if (result?.success) {
@@ -2317,14 +2320,10 @@ export default function ModesSettings({
                           void loadModes();
                         }
                       }}
-                      style={{ background: 'transparent', border: 'none', borderBottom: '1px solid var(--mm-input-border)', color: 'var(--mm-text-tertiary)', fontSize: 11, cursor: 'pointer', outline: 'none', fontFamily: 'inherit' }}
-                    >
-                      <option value="general" style={{ background: '#1c1c1e' }}>General</option>
-                      {TEMPLATES.map(t => <option key={t.type} value={t.type} style={{ background: '#1c1c1e' }}>{t.label}</option>)}
-                    </select>
+                    /></>
                   )}
                   <span>intelligence.</span>
-                </p>
+                </div>
               )}
             </div>
 

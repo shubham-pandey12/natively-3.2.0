@@ -24,6 +24,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const provPath = path.resolve(__dirname, '../../../dist-electron/electron/rag/providers/GeminiEmbeddingProvider.js');
+// A single rate-limited test key should fail immediately; the production
+// cooldown wait is covered by key-rotation tests and is read at module load.
+process.env.NATIVELY_GEMINI_EMBED_MAX_WAIT_MS = '0';
 const { GeminiEmbeddingProvider } = await import(pathToFileURL(provPath).href);
 
 const DIMS = 768;

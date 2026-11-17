@@ -73,6 +73,11 @@ check('onnxruntime-node resolves via require.resolve', () => {
   }
 });
 
+check('Auto Answer decider runtime resolves via require.resolve', () => {
+  const deciderPath = resolveOrThrow('onnxruntime-node-decider');
+  if (!fs.existsSync(deciderPath)) throw new Error(`decider runtime resolved to ${deciderPath} but file does not exist`);
+});
+
 check('@huggingface/transformers resolves via require.resolve', () => {
   transformersPath = resolveOrThrow('@huggingface/transformers');
   if (!fs.existsSync(transformersPath)) {
@@ -136,11 +141,12 @@ check('onnxruntime-common version matches onnxruntime-node declared peer', () =>
   }
 });
 
-check('asarUnpack includes onnxruntime-{node,common,web}, @huggingface/transformers', () => {
+check('asarUnpack includes ONNX runtimes and @huggingface/transformers', () => {
   const pkg = readPkg(path.join(repoRoot, 'package.json'));
   const unpack = pkg.build?.asarUnpack ?? [];
   const required = [
     'onnxruntime-node',
+    'onnxruntime-node-decider',
     'onnxruntime-common',
     'onnxruntime-web',
     '@huggingface/transformers',

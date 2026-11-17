@@ -38,6 +38,10 @@ const dps = await import(dist('llm/diagramPromptSignals.js'));
 const planner = await import(dist('llm/AnswerPlanner.js'));
 const { SessionTracker } = await import(dist('SessionTracker.js'));
 const { repairCapReached, endsInsideFence, proseOutsideFences, REPAIR_BLOCK_ALLOWANCE_CHARS } = await import(dist('llm/repairCap.js'));
+const { DynamicActionDetector } = await import(dist('services/dynamic-actions/DynamicActionDetector.js'));
+const { renderPhoneAnswer, setPhoneDiagramProvider } = await import(dist('services/phoneMirrorMarkdown.js'));
+const { saveDialogPlacement } = await import(dist('services/diagram/diagramExport.js'));
+const scope = await import(dist('context-intelligence/policies/provider-scope-policy.js'));
 const polish = await import(dist('llm/answerPolish.js'));
 const actions = await import(dist('llm/systemDesignAction.js'));
 const { prepareDirectAssistPrompt } = await import(dist('direct-assist/requestBuilder.js'));
@@ -523,8 +527,7 @@ describe('a repair accepted before its answer is recorded', () => {
 
 // Suggestion cards ignored the switch, fired on small talk, and the
 // system-design card missed "Design a URL shortener."
-describe('suggestion cards that offer a drawing', async () => {
-  const { DynamicActionDetector } = await import(dist('services/dynamic-actions/DynamicActionDetector.js'));
+describe('suggestion cards that offer a drawing', () => {
   const detector = new DynamicActionDetector();
   const offers = (transcript, mode, extra = {}) => detector.detectTriggers({ transcript, modeTemplateType: mode, ...extra }).map((m) => m.trigger.type);
 
@@ -630,8 +633,7 @@ describe('a prompt LLMHelper composes for itself decides from the question, not 
   });
 });
 
-describe('the phone: a finished answer whose block never closed', async () => {
-  const { renderPhoneAnswer, setPhoneDiagramProvider } = await import(dist('services/phoneMirrorMarkdown.js'));
+describe('the phone: a finished answer whose block never closed', () => {
   const provider = { enabled: () => true, lookup: () => undefined, failed: () => false, request: () => undefined };
 
   test('says it was cut off and shows what arrived; while streaming it is still "generating"', () => {
@@ -761,9 +763,7 @@ describe("the overlay's spoken question is a turn of the session", () => {
 // Final review (2026-10-02), seen on macOS: Export in the overlay opened the
 // save dialog BEHIND the frontmost app — the overlay never takes focus, so the
 // app that owns the dialog was not in front — and looked like it did nothing.
-describe('the save dialog is brought in front of the user, per platform', async () => {
-  const { saveDialogPlacement } = await import(dist('services/diagram/diagramExport.js'));
-
+describe('the save dialog is brought in front of the user, per platform', () => {
   test('macOS brings the app forward; Windows makes the dialog owned by the window that asked', () => {
     assert.equal(saveDialogPlacement('darwin'), 'activate-app');
     assert.equal(saveDialogPlacement('win32'), 'own-by-sender');
@@ -904,8 +904,7 @@ describe('a spoken request for a drawing of the conversation is handed the conve
 // The transcript scope says what may go to a PROVIDER. The design on the table
 // and what was said in the meeting were withheld whenever that scope was off —
 // from a model on this device too, which the transport would have sent them.
-describe('a model on this device is sent the design and what was said', async () => {
-  const scope = await import(dist('context-intelligence/policies/provider-scope-policy.js'));
+describe('a model on this device is sent the design and what was said', () => {
   const DENY = 'NATIVELY_DENY_PROVIDER_SCOPES';
   const SAID = '[ME]: the gateway sits in front of two services\n[THEM]: and both write to one orders database';
   const design = { artifactId: 'a.v1', artifact: 'mermaid', view: 'architecture', version: 1, foreground: true, source: ARCH_SOURCE, question: 'Design a notification service' };

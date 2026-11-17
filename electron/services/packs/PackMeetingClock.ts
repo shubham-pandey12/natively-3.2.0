@@ -3,11 +3,8 @@
  * Pro pack ends when its hours are used.
  *
  * WHY (2026-11-06, Evin). A Pro pack (Light $5 = 2 h within 7 days, Heavy $10
- * = 5 h within 14 days) is sold as MEETING hours, and it unlocks Pro as well
- * as the API. Its hours must run out whatever transcribes the meeting:
- * Natively's speech-to-text or the customer's own keys. A meter fed only by
- * our own transcription minutes would never end for someone on their own keys,
- * and $5 would be a cheap Pro licence.
+ * = 5 h within 14 days) counts only while Natively AI, Fast Response and STT
+ * are selected, matching the recovered 3.2.0 client policy.
  *
  * HOW. While a meeting is live and a Natively API key is saved, the clock
  * ticks once a minute and POSTs the seconds since the last tick to
@@ -60,6 +57,8 @@ export interface PackEndedInfo {
 export interface PackMeetingClockDeps {
   /** The saved Natively API key, or null/undefined (none, or a trial sentinel). */
   getApiKey(): string | null | undefined;
+  /** Whether the currently selected AI, Fast Response and STT count pack time. */
+  counts?(): boolean;
   /** POST the tick. Throws on a network error. */
   postTick(key: string, body: TickBody): Promise<TickAnswer>;
   /** Milliseconds. Monotonic preferred; the gap cap covers either kind. */
@@ -100,6 +99,7 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
     since: number | null;
     /** Sub-second remainder carried to the next tick. */
     carryMs: number;
+    counting: boolean;
     /**
      * The pack ended mid-meeting. Nothing accrues (since is null) and the timer
      * only asks whether hours were added; the time in between is never billed.
@@ -117,9 +117,16 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
   let notPackKey: string | null = null;
   let endedReported = false;
 
+  function countsNow(): boolean {
+    try { return deps.counts ? deps.counts() !== false : true; } catch { return true; }
+  }
+
   /** Move time accrued since `since` (capped) into whole seconds on a new tick. */
   function accrue(at: number): void {
     if (!meeting || meeting.since === null) return;
+    const counted = meeting.counting;
+    meeting.counting = countsNow();
+    if (!counted) { meeting.since = at; meeting.carryMs = 0; return; }
     const gap = Math.max(0, at - meeting.since);
     meeting.since = at;
     const ms = meeting.carryMs + Math.min(gap, MAX_GAP_MS);
@@ -224,6 +231,7 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
     meeting.paused = false;
     meeting.since = deps.now();
     meeting.carryMs = 0;
+    meeting.counting = countsNow();
     endedReported = false;
     log.log('[PackClock] the pack is live again — metering the rest of this meeting');
     try { deps.onPackRenewed?.(); } catch { /* a listener never stops the clock */ }
@@ -251,6 +259,7 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
         seq: 0,
         since: deps.now(),
         carryMs: 0,
+        counting: countsNow(),
         paused: false,
         cancelTimer: () => {},
       };
@@ -280,6 +289,13 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
       // A paused meeting (pack ended) does not start accruing on wake.
       if (!meeting || meeting.paused || meeting.since !== null) return;
       meeting.since = deps.now();
+      meeting.counting = countsNow();
+    },
+
+    /** Close the previous provider interval before starting the new one. */
+    countsChanged(): void {
+      if (!meeting || meeting.paused || meeting.since === null) return;
+      accrue(deps.now());
     },
 
     /** Test and diagnostics view. */

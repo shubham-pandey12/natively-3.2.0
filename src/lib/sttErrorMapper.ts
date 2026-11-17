@@ -107,6 +107,12 @@ export function categorizeSttError(rawError: string): SttErrorCategory {
         };
     }
 
+    // 0a. No key saved for the chosen provider (electron/audio/MissingKeySTT.ts,
+    // 3.2.0): its own message already says what to do, so show it as is.
+    if (/^no .+ key is saved, so nothing is being transcribed\./.test(lower)) {
+        return { title: 'Key Missing', body: rawError.trim(), category: 'auth' };
+    }
+
     // 0b. An on-device model that could not run. Before everything else: its
     // messages mention downloads, connections and "unavailable", and none of
     // that is a provider or a key.

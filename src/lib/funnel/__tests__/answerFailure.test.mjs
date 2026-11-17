@@ -119,9 +119,9 @@ test('the analytics helper reports the cause and nothing else', () => {
   assert.doesNotMatch(started, /reportFeatureUsed/);
   assert.match(src, /public trackChatQuestionSent\(\): void \{\s*reportFeatureUsed\('chat'\);/);
   const ui = read('../../../components/NativelyInterface.tsx');
-  assert.match(ui, /lastManualSubmitRef\.current = \{ text: userText, atMs: nowMs \};\s*analytics\.trackChatQuestionSent\(\);/);
+  assert.match(ui, /lastManualSubmitRef\.current = \{ text: userText, atMs: nowMs \};[\s\S]{0,200}analytics\.trackChatQuestionSent\(\);/);
   assert.match(ui, /const failure = chatFailureFromError\(raw, \{ provider: chatProviderLabelRef\.current \}\);\s*reportAnswerFailed\(failure, raw\);/);
-  assert.match(ui, /failure: DirectAssistAnswerFailure,\s*\) => \{\s*reportAnswerFailed\(failure\);/);
+  assert.match(ui, /failure: DirectAssistAnswerFailure,\s*\) => \{[\s\S]{0,180}reportAnswerFailed\(failure\);/);
 });
 
 // ── The note a running meeting leaves on disk ────────────────────────────────

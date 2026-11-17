@@ -42,6 +42,9 @@ import { RoleInsightDatabase } from './roleInsight/RoleInsightDatabase';
 import { RoleInsightService } from './roleInsight/RoleInsightService';
 
 export class KnowledgeOrchestrator {
+    static setProAccessCheck(check: (() => boolean) | null): void {
+        (globalThis as any).__nativelyKnowledgeProAccessV1__ = check;
+    }
     private db: KnowledgeDatabaseManager;
     private knowledgeModeActive: boolean = false;
     private depthScorer: TechnicalDepthScorer;
@@ -519,12 +522,18 @@ export class KnowledgeOrchestrator {
     }
 
     isKnowledgeMode(): boolean {
+        const check = (globalThis as any).__nativelyKnowledgeProAccessV1__;
+        if (typeof check === 'function') {
+            try { if (check() !== true) return false; } catch { return false; }
+        }
         // V2: knowledge mode is valid with a resume OR a JD. Legacy: resume only.
         if (isProfileGroundingV2Enabled()) {
             return this.knowledgeModeActive && (this.activeResume !== null || this.activeJD !== null);
         }
         return this.knowledgeModeActive && this.activeResume !== null;
     }
+
+    isKnowledgeModeSwitchedOn(): boolean { return this.knowledgeModeActive; }
 
     /**
      * Get the company research engine for external use (e.g., IPC handlers).

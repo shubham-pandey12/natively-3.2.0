@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import { ArrowDown, Check, ChevronDown, ChevronUp, Copy, FileText, ImagePlus, LayoutGrid, Minus, MoreHorizontal, Paperclip, Pause, Play, RotateCcw, Scissors, Search, X } from 'lucide-react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import { FirstRunGuideCard } from './onboarding/FirstRunGuideCard';
 import { applyTypedKeyAtEnd, plainAnswerText } from './meeting/notesView';
 import { NotepadAnswer } from './notes/NotepadAnswer';
 import { useLastTimeRecap } from './assist/useLastTimeRecap';
@@ -466,12 +467,17 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     const commit = useCallback((next: string) => {
         setText(next);
         window.electronAPI?.liveNotesSetText?.(next);
+        if (!preview && next.trim()) void window.electronAPI?.dispatchGuideEvent?.({ type: 'note_typed' });
         const now = Date.now();
         if (phase === 'live' && now - lastTypingPing.current > TYPING_PING_MS) {
             lastTypingPing.current = now;
             window.electronAPI?.meetingAutoStopTyping?.();
         }
-    }, [phase]);
+    }, [phase, preview]);
+
+    useEffect(() => {
+        if (!preview && askEngaged) void window.electronAPI?.dispatchGuideEvent?.({ type: 'ask_opened' });
+    }, [askEngaged, preview]);
 
     // The answer streams to this window only (the handler replies to its sender).
     useEffect(() => {
@@ -569,6 +575,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     // (note-recipe:run reads a finished meeting whole, a live one so far with what was typed here).
     const runRecipe = useCallback((recipe: NoteRecipe, extra = '') => {
         if (turnsRef.current.some((t) => t.status === 'streaming')) return;
+        if (!preview) void window.electronAPI?.dispatchGuideEvent?.({ type: 'recipe_run' });
         npTrack('recipe', recipe.id);
         setAllRecipes(false);
         setAsk('');
@@ -582,7 +589,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
         api.runNoteRecipe({ recipeId: recipe.id, extra, meetingId, phase: phase === 'ended' ? 'ended' : 'live', notes: textRef.current })
             .then((res) => settle(res?.text ? { text: res.text, status: 'done' } : { status: 'error' }))
             .catch(() => settle({ status: 'error' }));
-    }, [setAsk, runHelper, meetingId, phase, npTrack]);
+    }, [setAsk, runHelper, meetingId, phase, npTrack, preview]);
 
     const retry = (i: number) => {
         const turn = turns[i];
@@ -1192,6 +1199,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
             data-np-theme={isLight ? 'light' : 'dark'}
             inert={preview ? true : undefined}
         >
+            {!preview && <FirstRunGuideCard surface="notepad" />}
             {/* The top strip is the window's drag handle (frameless on both platforms), 44px as Granola's toolbar. */}
             <div className={`${preview ? '' : 'drag-region '}h-11 shrink-0 flex items-center justify-end gap-1.5 pr-3`}>
                 <div className="relative flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties} ref={menuRef}>

@@ -454,6 +454,7 @@ const SurfaceSwitch: React.FC<{ value: Surface; onChange: (s: Surface) => void; 
                 aria-label={t('What meetings open')}
                 onKeyDown={onKeyDown}
                 className="surface-switch relative grid grid-cols-2 p-1 rounded-full"
+                data-guide="surface-switch"
             >
                 <motion.div
                     aria-hidden="true"

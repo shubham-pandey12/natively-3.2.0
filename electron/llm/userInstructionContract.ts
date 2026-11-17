@@ -801,6 +801,10 @@ export const analyzeUserInstructions = (raw: unknown): UserInstructionAnalysis =
  */
 export const userInstructionsOverrideAppLength = (a: UserInstructionAnalysis): boolean =>
   Boolean(a.length) || a.mentionsLength || a.qualitativeLength === 'long';
+export const registeredInstructionsSetLength = (pinnedModeId?: string | null): boolean => {
+  try { return userInstructionsOverrideAppLength(analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined))); }
+  catch { return false; }
+};
 
 // "only code reviews matter", "no code names", "do not write code in JavaScript"
 // talk ABOUT code; none of them is a request for code-only / no-code output.

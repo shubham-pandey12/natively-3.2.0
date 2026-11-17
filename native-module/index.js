@@ -603,3 +603,4 @@ module.exports.takeNativeCaptureLog = nativeBinding.takeNativeCaptureLog
 module.exports.validateDodoKey = nativeBinding.validateDodoKey
 module.exports.verifyDodoKey = nativeBinding.verifyDodoKey
 module.exports.verifyGumroadKey = nativeBinding.verifyGumroadKey
+module.exports.deliverClicksWithoutActivation = nativeBinding.deliverClicksWithoutActivation

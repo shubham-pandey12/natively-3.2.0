@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 
 export interface AppSettings {
+    firstRunGuide?: unknown;
+    guideSurfaceBefore?: 'overlay' | 'notepad' | null;
     /** The Calendar account name whose full-name mentions in saved notes were carried
      *  to the first name (calendarNameMigration); set once per name. */
     calendarFirstNameMigratedFor?: string;
@@ -51,6 +53,7 @@ export interface AppSettings {
     // produced only by the What-to-Answer hotkey, exactly as before. The
     // trigger itself lives in AppState.scheduleAutoAnswer().
     autoAnswerEnabled?: boolean;
+    answerLength?: 'shorter' | 'smart' | 'longer';
     // Agreement to share the transcripts of meetings where Auto Answer runs, for
     // training the Auto Answer decider (autoAnswerAccess.ts; Evin 2026-11-13).
     // Free users need it to run Auto Answer; for Pro/trial it is an opt-in.

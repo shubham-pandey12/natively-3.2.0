@@ -19,7 +19,7 @@ export function isProOrTrialActive(): boolean {
   // 1. Full premium license (Dodo / Gumroad / Natively API subscription)
   try {
     const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
-    if (LicenseManager.getInstance().isPremium()) return true;
+    if (isLicencePremium()) return true;
   } catch {
     /* premium module not available */
   }
@@ -31,6 +31,32 @@ export function isProOrTrialActive(): boolean {
   } catch {
     return false;
   }
+}
+
+/** A pack retains its licence while Pro stands down on non-Natively providers. */
+export function isLicencePremium(): boolean {
+  try {
+    const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
+    const lm = LicenseManager.getInstance();
+    if (!lm.isPremium()) return false;
+    const details = lm.getLicenseDetails();
+    const { packProBlock } = require('./packs/packProRule') as typeof import('./packs/packProRule');
+    const { CredentialsManager } = require('./CredentialsManager');
+    const cm = CredentialsManager.getInstance();
+    const { currentPackProviders } = require('./packs/packClockWiring') as typeof import('./packs/packClockWiring');
+    const { model, fastFamily } = currentPackProviders();
+    return packProBlock({ licenceProvider: details?.provider, licencePlan: details?.plan,
+      defaultModel: model || cm.getDefaultModel(), fastFamily, sttProvider: cm.getSttProvider() }) === null;
+  } catch { return false; }
+}
+
+export function licenceIsPack(): boolean {
+  try {
+    const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
+    const d = LicenseManager.getInstance().getLicenseDetails();
+    const { isPackLicence } = require('./packs/packProRule') as typeof import('./packs/packProRule');
+    return Boolean(d?.isPremium) && isPackLicence(d?.provider, d?.plan);
+  } catch { return false; }
 }
 
 let trialClock: import('./trialClock').TrialClock | null = null;

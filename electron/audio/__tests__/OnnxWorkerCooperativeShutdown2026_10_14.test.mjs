@@ -107,7 +107,7 @@ for (const rel of [
   'electron/rag/providers/LocalEmbeddingProvider.ts',
   'electron/rag/LocalReranker.ts',
   'electron/llm/routing/RouterModel.ts',
-  'premium/electron/autoAnswer/decider/LocalLayaBackend.ts',
+  'premium/electron/autoAnswer/decider/LocalLayaBackend.js',
 ]) {
   test(`${rel} never calls terminate() on a worker`, () => {
     const code = stripComments(fs.readFileSync(path.join(repo, rel), 'utf8'));
@@ -126,7 +126,7 @@ for (const rel of [
   'electron/rag/providers/localEmbeddingWorker.ts',
   'electron/rag/localRerankerWorker.ts',
   'electron/llm/routing/routerWorker.ts',
-  'premium/electron/autoAnswer/decider/deciderWorker.ts',
+  'premium/electron/autoAnswer/decider/deciderWorker.js',
 ]) {
   test(`${rel} exits on shutdown before it looks at any other message`, () => {
     const src = fs.readFileSync(path.join(repo, rel), 'utf8');
@@ -135,7 +135,7 @@ for (const rel of [
     const at = src.includes("parentPort.on('message'") ? src.indexOf("parentPort.on('message'") : src.indexOf('parentPort.onMessage(');
     assert.ok(at > -1, 'the worker must have a message listener');
     const handler = src.slice(at);
-    const shutdown = handler.indexOf("if (msg?.type === 'shutdown') {");
+    const shutdown = handler.search(/if \(msg\?\.type === ['"]shutdown['"]\) \{/);
     assert.ok(shutdown > -1 && shutdown < 200, 'the shutdown check must be the first thing in the message listener');
     assert.match(handler.slice(shutdown, shutdown + 1400), /process\.exit\(0\);/);
   });

@@ -79,6 +79,7 @@ import { emitNativelyPlanLimit, nativelyLimitErrorMessage } from './llm/natively
 import { interactiveSeedFor } from './llm/interactiveSeed';
 import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
+import { TurnCallBudget, ProviderCircuitBreaker, guardProviderOpen, sdkRetryOptions } from './llm/providerCallBudget';
 import { chatGptCompatibleModel, CodexCliConfig, CodexCliService, codexSignedOutMessage, DEFAULT_CODEX_CLI_CONFIG, getCodexAuthStatus } from './services/CodexCliService';
 import { AntigravityService } from './services/AntigravityService';
 import { GROQ_PRIMARY_MODEL, groqFallbackFor, isGroqModelGone, groqReasoningParams } from './llm/groqModels';
@@ -3140,6 +3141,10 @@ export class LLMHelper {
     if (!observed || observed.count <= 0) return Math.round(budgetMs * 0.6);
     return Math.min(ceil, Math.max(floor, Math.round(observed.maxMs) + 1500));
   }
+  private _turnCallBudget?: TurnCallBudget;
+  private _providerBreaker?: ProviderCircuitBreaker;
+  private callBudget(): TurnCallBudget { return this._turnCallBudget ??= new TurnCallBudget(); }
+  private providerBreakerFor(): ProviderCircuitBreaker { return this._providerBreaker ??= new ProviderCircuitBreaker(); }
 
   /**
    * Run a single-terminal-rung text turn through the shared fallback engine, so
@@ -3176,7 +3181,7 @@ export class LLMHelper {
     }
     // Dynamic, like every other liveDeadlines use in this file — a static
     // import here closes a module cycle.
-    const { totalHardTimeoutMs } = await import('./llm/liveDeadlines');
+    const { totalHardTimeoutMs, loneProviderHedgeDelayMs } = await import('./llm/liveDeadlines');
     // The Active Model's rung, so its own endpoint class and measurement — the
     // public predicates follow a Background Model pick, which did not answer.
     const budgetMs = totalHardTimeoutMs({
@@ -3221,11 +3226,20 @@ export class LLMHelper {
     // of two unrelated constants, not a guarantee, and it would break silently
     // the day either one moves. Decide from what actually survived.
     if (fittedSpares.length === 0) primaryTtftMs = budgetMs;
-    const hedging = fittedSpares.length === 0;
+    const turnKey = opts.abortSignal ?? {};
+    const budget = this.callBudget();
+    const breaker = this.providerBreakerFor();
+    const guard = (family: string, name: string, open: (signal: AbortSignal) => AsyncGenerator<string, void, unknown>) =>
+      guardProviderOpen({ family, name, turnKey, budget, breaker, outerSignal: opts.abortSignal, open });
+    for (let i = 0; i < fittedSpares.length; i++) {
+      const spare = fittedSpares[i], spareOpen = spare.open;
+      fittedSpares[i] = { ...spare, open: (signal, attempt) => guard(spare.id, spare.name, s => spareOpen(s, attempt))(signal) };
+    }
+    const hedging = fittedSpares.length === 0 && budget.remaining(turnKey) >= 2;
     const primary: TextStreamProvider = {
       id: opts.id, name: opts.name, isLocal: false, priority: 0,
       ttftTimeoutMs: primaryTtftMs,
-      open: (sig) => opts.open(sig),
+      open: guard(opts.id, opts.name, opts.open),
     };
     if (hedging) {
       // A distinct id so the primary's own breaker does not suppress its hedge.
@@ -3236,7 +3250,7 @@ export class LLMHelper {
       primary.hedgeWith = {
         id: `${opts.id}#hedge`,
         name: `${opts.name} (parallel retry)`,
-        open: (sig) => opts.open(sig),
+        open: guard(opts.id, `${opts.name} (parallel retry)`, opts.open),
       };
     }
 
@@ -3260,6 +3274,7 @@ export class LLMHelper {
     // as finished answers. With rethrowAfterCommit the engine still never
     // switches providers mid-answer; it only tells us, and the turn ends with
     // the truncation marker that _streamChatTracked turns into the outcome.
+    const loneHedgeMs = loneProviderHedgeDelayMs(budgetMs, this.observedLatencyFor(this.activeAnswerLatencyKey()));
     const commit = { emitted: false };
     try {
       yield* this.trackCommit(runStreamingTextFallback(
@@ -3273,9 +3288,13 @@ export class LLMHelper {
           maxAttempts: 1,
           ttftTimeoutMs: budgetMs,
           hedgeEnabled: hedging,
-          hedgeDelayDefaultMs: this.hedgeDelayForBudget(budgetMs),
-          hedgeDelayMinMs: Math.round(budgetMs * 0.4),
-          hedgeDelayMaxMs: Math.round(budgetMs * 0.9),
+          // The lone provider's only failover fires at a first-useful point
+          // (F-LAT-03): 4 s unmeasured instead of ~9 s, just above the
+          // endpoint's slowest first token once measured. The same number is
+          // the floor, so the engine's EWMA can only push it later.
+          hedgeDelayDefaultMs: loneHedgeMs,
+          hedgeDelayMinMs: loneHedgeMs,
+          hedgeDelayMaxMs: Math.max(loneHedgeMs, Math.round(budgetMs * 0.9)),
           rethrowAfterCommit: true,
         },
         {},
@@ -7584,7 +7603,7 @@ let isMultimodal = !!(imagePaths?.length);
     const client = this.fluxionOpenAIClient;
     if (!client) throw new Error('Sidrune client not initialized');
     const messages = await this.buildOpenRouterMessages(userMessage, systemPrompt, imagePaths);
-    const stream = await client.chat.completions.create({ model, messages, stream: true }, { signal: abortSignal }) as any;
+    const stream = await client.chat.completions.create({ model, messages, stream: true }, { signal: abortSignal, ...sdkRetryOptions(abortSignal) }) as any;
     try {
       for await (const chunk of stream) {
         if (abortSignal?.aborted) return;
@@ -12783,7 +12802,7 @@ let isMultimodal = !!(imagePaths?.length);
     require('./llm/providerPayloadCapture').captureProviderPayload({
       provider: 'openai', classification: 'sdk_request_object_before_serialization', payload: request,
     });
-    const stream = await this.openaiClient.chat.completions.create(request, { signal: abortSignal });
+    const stream = await this.openaiClient.chat.completions.create(request, { signal: abortSignal, ...sdkRetryOptions(abortSignal) });
 
     try {
       for await (const chunk of stream) {
@@ -12830,7 +12849,7 @@ let isMultimodal = !!(imagePaths?.length);
     require('./llm/providerPayloadCapture').captureProviderPayload({
       provider: 'claude', classification: 'sdk_request_object_before_serialization', payload: request,
     });
-    const stream = this.claudeClient.messages.stream(request);
+    const stream = this.claudeClient.messages.stream(request, sdkRetryOptions(abortSignal));
     const onAbort = () => { try { stream.abort(); } catch {} };
     abortSignal?.addEventListener('abort', onAbort, { once: true });
     try {
@@ -12883,7 +12902,7 @@ let isMultimodal = !!(imagePaths?.length);
         seed: interactiveSeedFor('deepseek', [model, systemPrompt, userMessage, (imagePaths ?? []).join('|')]), // DeepSeek is OpenAI-compatible and honors seed
         max_tokens: this.getDeepseekMaxOutput(model),
         ...DEEPSEEK_NO_THINKING, // else the first token waits out the default reasoning
-      }, { signal: abortSignal });
+      }, { signal: abortSignal, ...sdkRetryOptions(abortSignal) });
     } catch (err: any) {
       // Hard-trip on billing/quota/auth failures so we don't burn 3 chain rotations
       // re-attempting a 402 every few seconds. Mirrors Gemini's markRateCooled for
@@ -12940,7 +12959,7 @@ let isMultimodal = !!(imagePaths?.length);
     require('./llm/providerPayloadCapture').captureProviderPayload({
       provider: 'litellm', classification: 'sdk_request_object_before_serialization', payload: request,
     });
-    const stream = await this.litellmClient.chat.completions.create(request, { signal: abortSignal });
+    const stream = await this.litellmClient.chat.completions.create(request, { signal: abortSignal, ...sdkRetryOptions(abortSignal) });
 
     try {
       for await (const chunk of stream) {
@@ -12987,7 +13006,7 @@ let isMultimodal = !!(imagePaths?.length);
     // widening it to `any` loses the `stream: true` overload's iterability.
     const stream = await (async () => {
       try {
-        return await this.ninerouterClient!.chat.completions.create(request, { signal: abortSignal });
+        return await this.ninerouterClient!.chat.completions.create(request, { signal: abortSignal, ...sdkRetryOptions(abortSignal) });
       } catch (e: any) {
         // Rewrite before it leaves the adapter. 9Router relays its upstream's
         // status, so the raw text is a nested JSON blob naming a provider the
@@ -13039,7 +13058,7 @@ let isMultimodal = !!(imagePaths?.length);
       const content: any[] = [{ type: 'text', text: userMessage }, ...await this.buildOpenAiImageParts(imagePaths)];
       messages.push({ role: 'user', content });
     } else messages.push({ role: 'user', content: userMessage });
-    const stream = await this.createNvidiaNimCompletion({ model, messages, stream: true }, { signal: abortSignal });
+    const stream = await this.createNvidiaNimCompletion({ model, messages, stream: true }, { signal: abortSignal, ...sdkRetryOptions(abortSignal) });
     try { for await (const chunk of stream) { if (abortSignal?.aborted) return; const content = chunk.choices[0]?.delta?.content; if (content) yield content; } }
     finally { if (abortSignal?.aborted && typeof (stream as any).abort === 'function') (stream as any).abort(); }
   }
@@ -13053,7 +13072,7 @@ let isMultimodal = !!(imagePaths?.length);
     const model = this.openrouterWireModel(modelId || this.currentModelId);
     const messages = await this.buildOpenRouterMessages(userMessage, systemPrompt, imagePaths);
     if (abortSignal?.aborted) return;
-    const stream = await client.chat.completions.create({ model, messages, stream: true }, { signal: abortSignal }) as any;
+    const stream = await client.chat.completions.create({ model, messages, stream: true }, { signal: abortSignal, ...sdkRetryOptions(abortSignal) }) as any;
     try {
       for await (const chunk of stream) {
         if (abortSignal?.aborted) return;
@@ -13104,7 +13123,7 @@ let isMultimodal = !!(imagePaths?.length);
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
       ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
-    }, { signal: abortSignal });
+    }, { signal: abortSignal, ...sdkRetryOptions(abortSignal) });
 
     try {
       for await (const chunk of stream) {
@@ -14558,6 +14577,21 @@ let isMultimodal = !!(imagePaths?.length);
     return this.useOllama ? this.ollamaModel : this.currentModelId;
   }
 
+  /** Provider family Fast Response would use for a text turn now. */
+  public fastResponseFamilyNow(): string | null {
+    try { return this.resolveFastPick()?.family ?? null; } catch { return null; }
+  }
+
+  public judgeRunsOnNatively(): boolean {
+    if (!this.nativelyKey || this.isLocalOnlyMode) return false;
+    const pick = this.fastModelId;
+    const family = pick ? this.resolveFastModelFamily(pick) : null;
+    if (pick && family && this.fastFamilyReady(family)) return false;
+    if (this.client || (this.groqClient && !this._groqLocalDisabled)) return false;
+    if (this.openaiClient || this.deepseekClient || this.claudeClient) return false;
+    return true;
+  }
+
   /**
    * Snapshot the exact provider/model pair used by Direct Assist. Unlike the
    * legacy getCurrentProvider(), this identifies every supported provider and
@@ -15834,21 +15868,23 @@ let isMultimodal = !!(imagePaths?.length);
   }
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, operationName: string): Promise<T> {
-    let timeoutHandle: NodeJS.Timeout;
+    let timeoutHandle: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<T>((_, reject) => {
       timeoutHandle = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
+      timeoutHandle.unref?.();
     });
 
     // Suppress unhandled-rejection if the original promise settles after the timeout wins the race
     promise.catch(() => { });
 
-    return Promise.race([
-      promise.then(result => {
-        clearTimeout(timeoutHandle!);
-        return result;
-      }),
-      timeoutPromise,
-    ]);
+    try {
+      return await Promise.race([
+        promise,
+        timeoutPromise,
+      ]);
+    } finally {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+    }
   }
 
   /**

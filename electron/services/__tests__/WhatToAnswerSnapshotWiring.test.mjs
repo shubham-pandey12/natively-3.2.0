@@ -326,7 +326,7 @@ describe('answer pipeline lifecycle telemetry', () => {
     }
     assert.match(engineSrc, /const recordWtaCancellation = \(\) => \s*\{[\s\S]*?\.lifecycle\('cancelled'[\s\S]*?commitTrace\(wtaTrace\)/,
       'WTA cancellation must be committed, not silently dropped');
-    assert.match(engineSrc, /if \(streamAborted\) \{\s*recordWtaCancellation\(\)/,
+    assert.match(engineSrc, /const yieldToSupersedingRun = \(discardOpenRow: boolean\): null => \{\s*recordWtaCancellation\(\)[\s\S]*?if \(streamAborted\) return yieldToSupersedingRun\(true\)/,
       'the streaming cancellation path must record the terminal lifecycle event');
   });
 

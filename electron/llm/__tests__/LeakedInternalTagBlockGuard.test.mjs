@@ -30,9 +30,9 @@ const answerPolishPath = path.resolve(__dirname, '../../../dist-electron/electro
 const enginePath = path.resolve(__dirname, '../../../dist-electron/electron/IntelligenceEngine.js');
 const sessionPath = path.resolve(__dirname, '../../../dist-electron/electron/SessionTracker.js');
 const require = createRequire(import.meta.url);
+const { isLeakedInternalTagBlock } = await import(pathToFileURL(answerPolishPath).href);
 
-describe('isLeakedInternalTagBlock (pure detector)', async () => {
-  const { isLeakedInternalTagBlock } = await import(pathToFileURL(answerPolishPath).href);
+describe('isLeakedInternalTagBlock (pure detector)', () => {
 
   // Real, live-captured leaks — 8 of the 12 occurrences across
   // test/harness-longsession/reports/ runs 001/008(x2)/012(x2)/013/014/021,

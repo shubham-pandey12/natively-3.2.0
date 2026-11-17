@@ -786,6 +786,9 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [exportResult, setExportResult] = useState<string | null>(null);
     const [ambientChatEnabled, setAmbientChatEnabled] = useState(false);
     const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
+    const [answerLength, setAnswerLength] = useState<'shorter' | 'smart' | 'longer'>('smart');
+    const [answerLengthError, setAnswerLengthError] = useState<string | null>(null);
+    useEffect(() => { window.electronAPI?.getAnswerLength?.().then(r => setAnswerLength(r.value)).catch(() => {}); }, []);
     // Auto Answer is Pro, or free with transcript sharing (autoAnswerAccess.ts).
     const [autoAnswerAccess, setAutoAnswerAccess] = useState<{ basis: 'pro' | 'sharing' | 'none'; uploads: boolean } | null>(null);
     // False in builds without the premium submodule: the Auto Answer rows are hidden.
@@ -2436,6 +2439,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     </button>
                                     <button
                                         onClick={() => { plansFromSidebarRef.current = true; setActiveTab('plans'); }}
+                                        data-guide="nav-plans"
                                         className={navItemClass(activeTab === 'plans' || activeTab === 'natively-api' || activeTab === 'natively-pro')}
                                     >
                                         {(activeTab === 'plans' || activeTab === 'natively-api' || activeTab === 'natively-pro') && navActivePill}
@@ -2444,6 +2448,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     </button>
                                     <button
                                         onClick={() => setActiveTab('ai-providers')}
+                                        data-guide="nav-ai-providers"
                                         className={navItemClass(activeTab === 'ai-providers')}
                                     >
                                         {activeTab === 'ai-providers' && navActivePill}
@@ -4641,7 +4646,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
 
                             {activeTab === 'overlay' && (
-                                <OverlaySettings
+                                <><OverlaySettings
                                     opacity={previewOverlayOpacity}
                                     opacityControl={opacityCard}
                                     theme={meetingInterfaceTheme}
@@ -4650,6 +4655,33 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         setMeetingInterfaceThemeState(theme);
                                     }}
                                 />
+                                <div className="px-4 py-3">
+                                    <h3 className="settings-title text-text-primary">{t('Answer length')}</h3>
+                                    <p className="text-xs text-text-secondary mt-0.5" role={answerLengthError ? 'alert' : undefined}>
+                                        {answerLengthError ?? t(({ shorter: '1–2 sentences, 15–35 words', smart: 'Fits each question, usually 40–60 words', longer: 'Fuller answers, 90–200 words' })[answerLength])}
+                                    </p>
+                                    <div role="radiogroup" aria-label={t('Answer length')} className="flex gap-2 mt-2">
+                                        {(['shorter', 'smart', 'longer'] as const).map(value => (
+                                            <button key={value} type="button" role="radio" aria-checked={answerLength === value}
+                                                className="px-3 py-1 rounded border border-border-subtle text-text-primary"
+                                                onClick={async () => {
+                                                    if (answerLength === value) return;
+                                                    const previous = answerLength;
+                                                    setAnswerLength(value);
+                                                    setAnswerLengthError(null);
+                                                    try {
+                                                        const result = await window.electronAPI?.setAnswerLength?.(value);
+                                                        if (!result?.success) throw new Error('save refused');
+                                                    } catch {
+                                                        setAnswerLength(previous);
+                                                        setAnswerLengthError(t("Couldn't save the answer length. Please try again."));
+                                                    }
+                                                }}>
+                                                {t(value === 'shorter' ? 'Shorter' : value === 'longer' ? 'Longer' : 'Smart')}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div></>
                             )}
 
                             {activeTab === 'calendar' && <CalendarSettings />}

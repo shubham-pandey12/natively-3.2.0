@@ -40,6 +40,12 @@ electronStub.exports = {
 electronStub.loaded = true;
 cjs.cache[cjs.resolve('electron')] = electronStub;
 const { LLMHelper } = cjs(path.join(root, 'dist-electron/electron/LLMHelper.js'));
+const { isRefinementFollowUp } = cjs(path.join(root, 'dist-electron/electron/llm/FollowUpResolver.js'));
+const { advance, resolveReference } = await import(dist('context-intelligence/question/conversation-state.js'));
+const port = await import(dist('context-intelligence/retrieval/live-transcript-port.js'));
+const { SessionTracker } = await import(dist('SessionTracker.js'));
+const { createMeetingRetrievalPort } = await import(dist('context-intelligence/retrieval/meeting-retrieval-port.js'));
+const { resolveMeetingEvidence, fuseMeetingPorts } = await import(dist('context-intelligence/retrieval/meeting-evidence.js'));
 
 function fakeOpenAiClient(calls, label, content = `${label} summary`) {
   return { chat: { completions: { create: async (req) => { calls.push({ label, model: req.model }); return { choices: [{ message: { content } }] }; } } } };
@@ -125,10 +131,7 @@ describe('1. meeting summary with a DeepSeek key', () => {
   });
 });
 
-describe('2. "this meeting" is not the previous answer', async () => {
-  const { isRefinementFollowUp } = cjs(path.join(root, 'dist-electron/electron/llm/FollowUpResolver.js'));
-  const { advance, resolveReference } = await import(dist('context-intelligence/question/conversation-state.js'));
-
+describe('2. "this meeting" is not the previous answer', () => {
   test('a summary of the meeting is not a refinement', () => {
     for (const q of [
       'Summarize the key decisions from this meeting so far.',
@@ -152,8 +155,7 @@ describe('2. "this meeting" is not the previous answer', async () => {
   });
 });
 
-describe('3. the best transcript window is served with its neighbours', async () => {
-  const port = await import(dist('context-intelligence/retrieval/live-transcript-port.js'));
+describe('3. the best transcript window is served with its neighbours', () => {
   const filler = (n, tag) => Array.from({ length: n }, (_, i) => ({ speaker: i % 2 ? 'user' : 'interviewer', text: `${tag} filler line ${i} about rotations, dashboards and on-call handoffs`, final: true }));
   const segments = [
     ...filler(30, 'early'),
@@ -213,9 +215,7 @@ describe('3. the best transcript window is served with its neighbours', async ()
   });
 });
 
-describe('4. the rolling meeting recap answers "summarise so far"', async () => {
-  const { SessionTracker } = await import(dist('SessionTracker.js'));
-  const port = await import(dist('context-intelligence/retrieval/live-transcript-port.js'));
+describe('4. the rolling meeting recap answers "summarise so far"', () => {
   const settle = () => new Promise((r) => setImmediate(r));
   const say = (s, text, extra = {}) => s.addTranscript({ speaker: 'interviewer', text, timestamp: Date.now(), final: true, ...extra });
 
@@ -275,11 +275,7 @@ describe('4. the rolling meeting recap answers "summarise so far"', async () => 
   });
 });
 
-describe('5. the reset shortcut mid-meeting: semantic search forgets what came before too', async () => {
-  const { SessionTracker } = await import(dist('SessionTracker.js'));
-  const { createMeetingRetrievalPort } = await import(dist('context-intelligence/retrieval/meeting-retrieval-port.js'));
-  const { resolveMeetingEvidence } = await import(dist('context-intelligence/retrieval/meeting-evidence.js'));
-
+describe('5. the reset shortcut mid-meeting: semantic search forgets what came before too', () => {
   test('the session records when a mid-meeting reset began the assistant\'s view; a full reset clears it', () => {
     const s = new SessionTracker();
     assert.equal(s.getAssistantViewStartedAt(), 0);
@@ -318,8 +314,7 @@ describe('5. the reset shortcut mid-meeting: semantic search forgets what came b
   });
 });
 
-describe('6. semantic and keyword meeting results are merged into one ranking', async () => {
-  const { fuseMeetingPorts } = await import(dist('context-intelligence/retrieval/meeting-evidence.js'));
+describe('6. semantic and keyword meeting results are merged into one ranking', () => {
   const item = (id, content, finalScore, sourceId) => ({ evidenceId: id, content, finalScore, sourceId });
   const portOf = (items) => ({ retrieve: async () => ({ evidence: items, attempts: [] }) });
   const ask = (p) => p.retrieve({ decision: {} });

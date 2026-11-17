@@ -31,6 +31,7 @@ function world(over = {}) {
   const answers = [...(over.answers ?? [{ status: 200, body: { ok: true, metered: true, pack: { ended: false } } }])];
   const clock = createPackMeetingClock({
     getApiKey: () => key,
+    ...(over.counts ? { counts: over.counts } : {}),
     postTick: async (k, body) => {
       const a = answers.length > 1 ? answers.shift() : answers[0];
       sent.push({ key: k, ...body, outcome: a === 'throw' ? 'throw' : a.status });
@@ -69,6 +70,21 @@ test('a live meeting bills one tick per minute with increasing seq', async () =>
   assert.deepEqual(w.sent.map((s) => [s.meeting_id, s.seq, s.seconds]),
     [['mtg_test0001', 0, 60], ['mtg_test0001', 1, 60], ['mtg_test0001', 2, 60]]);
   assert.equal(w.clock.snapshot().pending.length, 0);
+});
+
+test('3.2 pack clock counts only eligible provider intervals', async () => {
+  let counts = true;
+  const w = world({ counts: () => counts });
+  w.clock.meetingStarted();
+  w.advance(20_000);
+  counts = false;
+  w.clock.countsChanged();
+  await w.tick(60_000);
+  counts = true;
+  w.clock.countsChanged();
+  w.advance(15_000);
+  await w.clock.meetingEnded();
+  assert.deepEqual(w.sent.map((tick) => tick.seconds), [20, 15]);
 });
 
 test('stopping a meeting bills the last partial minute and stops the timer', async () => {

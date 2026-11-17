@@ -81,7 +81,7 @@ test('a search of past meetings that fails mid-answer is treated the same way', 
 });
 
 test('an answer that broke off keeps its text clean and is marked cut off; one that never began is replaced', () => {
-  const at = overlay.indexOf('const failed = failedLine(error);');
+  const at = overlay.indexOf('const failed = failedLine(data.error);');
   assert.ok(at > 0);
   const block = overlay.slice(at, at + 900);
   assert.ok(block.includes("? { ...lastMsg, isStreaming: false, failure: { ...failed.failure, partial: true } }"));

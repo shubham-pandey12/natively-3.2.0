@@ -21,6 +21,7 @@ const {
   forgetPerformanceEvidence, __setProviderPerformanceStore, performanceHooks,
   recordSecondaryStream, secondaryStreamTallies, readCapabilityFacts,
 } = M;
+const { isTechnicalModeTemplate } = await import('../../../dist-electron/electron/services/screen/technicalMode.js');
 
 const FLAGS = ['NATIVELY_PROVIDER_CALIBRATION', 'NATIVELY_CAPABILITY_PROBE'];
 
@@ -177,8 +178,7 @@ describe('Forget all measurements', () => {
   });
 });
 
-describe('coding-session predicate shared by screen understanding and the image downgrade', async () => {
-  const { isTechnicalModeTemplate } = await import('../../../dist-electron/electron/services/screen/technicalMode.js');
+describe('coding-session predicate shared by screen understanding and the image downgrade', () => {
   test('the technical interview template is a coding session; others are not', () => {
     assert.equal(isTechnicalModeTemplate('technical-interview'), true);
     for (const t of ['general', 'sales', 'lecture', 'looking-for-work', '', null, undefined]) {

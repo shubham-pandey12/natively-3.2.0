@@ -139,6 +139,11 @@ export interface VisionModelState {
 }
 
 export interface ElectronAPI {
+  guideGet?: () => Promise<{ status: string; step: string; stopLockUntil?: number | null }>;
+  guideDispatch?: (event: { type: string; [key: string]: unknown }) => Promise<{ status: string; step: string; stopLockUntil?: number | null }>;
+  getGuideState?: () => Promise<{ status: string; step: string; stopLockUntil?: number | null }>;
+  dispatchGuideEvent?: (event: { type: string; [key: string]: unknown }) => Promise<{ status: string; step: string; stopLockUntil?: number | null }>;
+  onGuideChanged?: (callback: (state: { status: string; step: string; stopLockUntil?: number | null }) => void) => () => void;
   updateContentDimensions: (dimensions: {
     width: number
     height: number
@@ -1361,15 +1366,17 @@ export interface ElectronAPI {
   getMeetingAudioCapture?: () => Promise<{ withoutAudio: boolean }>;
   onMeetingAudioCapture?: (callback: (data: { withoutAudio: boolean }) => void) => () => void;
   getAutoAnswerEnabled: () => Promise<boolean>;
+  getAnswerLength: () => Promise<{ value: 'shorter' | 'smart' | 'longer' }>;
+  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => Promise<{ success: boolean; error?: string }>;
   setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; message?: string }>;
   getAutoAnswerAccess: () => Promise<{ available?: boolean; allowed: boolean; basis: 'pro' | 'sharing' | 'none'; uploads: boolean; consent: { version: number; grantedAt: string } | null; enabled: boolean }>;
   setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
   deleteAutoAnswerSharedData: () => Promise<{ success: boolean; error?: string }>;
   onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => () => void;
   // The on-device Auto Answer model: paid download (API keys + Pro) and its before/after card.
-  getAutoAnswerModelStatus?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings }>;
-  installAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings }>;
-  removeAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings }>;
+  getAutoAnswerModelStatus?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively: boolean }>;
+  installAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively: boolean }>;
+  removeAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively: boolean }>;
   onAutoAnswerModelProgress?: (callback: (install: AutoAnswerModelInstall) => void) => () => void;
   getDirectAssistEnabled: () => Promise<boolean>;
   setDirectAssistEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;

@@ -222,8 +222,37 @@ const SHORT_BAND_TARGETS: Record<ShortLengthBand, ShortBandTarget> = {
   FULLER:   { min: 55, max: 85, seconds: 30, guidance: 'a slightly fuller answer — the point, a reason, and one concrete detail' },
 };
 
+const SHORTER_BAND_TARGETS = {
+  BRIEF: { min: 10, max: 20, seconds: 8, ceiling: 25, guidance: 'one short sentence — the answer and nothing else' },
+  STANDARD: { min: 15, max: 35, seconds: 12, ceiling: 45, guidance: 'one or two sentences — the point, no lead-in' },
+  FULLER: { min: 25, max: 40, seconds: 15, ceiling: 50, guidance: 'two sentences — the point and the one reason that matters' },
+};
+const LONGER_BAND_TARGETS = {
+  BRIEF: { min: 40, max: 60, seconds: 22, ceiling: 75, guidance: 'the answer plus a line of context' },
+  // "detail", never "example": Smart's FULLER says the same, and an asked-for
+  // example on a behavioral turn is an invitation to invent one.
+  // Longer runs about 90 to 200 words (Evin 2026-11-15); a yes/no question
+  // (BRIEF above) stays short rather than padded to 90.
+  STANDARD: { min: 90, max: 140, seconds: 55, ceiling: 175, guidance: 'the point, a reason, and one concrete detail' },
+  FULLER: { min: 140, max: 200, seconds: 80, ceiling: 220, guidance: 'the point, the reasoning, a concrete detail, and the trade-off' },
+};
+
+export function spokenFullPromptMaxWords(length: 'shorter' | 'smart' | 'longer' = 'smart') {
+  if (length === 'shorter') return 70;
+  if (length === 'longer') return 200;
+  return SPOKEN_FULL_PROMPT_MAX_WORDS;
+}
+export function spokenShortLimits(length: 'shorter' | 'smart' | 'longer' = 'smart') {
+  if (length === 'shorter') return { softMaxWords: 40, hardMaxWords: 50, hardMaxSeconds: 22 };
+  if (length === 'longer') return { softMaxWords: 200, hardMaxWords: 230, hardMaxSeconds: 100 };
+  return { softMaxWords: SOFT_MAX_WORDS, hardMaxWords: HARD_MAX_WORDS, hardMaxSeconds: HARD_MAX_SECONDS };
+}
+export const lengthBandTarget = (band: ShortLengthBand, length: 'shorter' | 'longer') => length === 'shorter' ? SHORTER_BAND_TARGETS[band] : LONGER_BAND_TARGETS[band];
+
 /** Target words/seconds for a SPOKEN_SHORT band. All maxes stay within SOFT_MAX_WORDS (85). */
-export function shortBandTargetWords(band: ShortLengthBand): ShortBandTarget {
+export function shortBandTargetWords(band: ShortLengthBand, length: 'shorter' | 'smart' | 'longer' = 'smart'): ShortBandTarget {
+  if (length === 'shorter') return SHORTER_BAND_TARGETS[band];
+  if (length === 'longer') return LONGER_BAND_TARGETS[band];
   return SHORT_BAND_TARGETS[band];
 }
 
@@ -314,6 +343,7 @@ export function decideSpeakability(
   answerStyle: AnswerStyle | undefined,
   question: string,
   isCoding = false,
+  answerLength: 'shorter' | 'smart' | 'longer' = 'smart',
 ): SpeakabilityDecision {
   const wordCount = countSpokenWordsExcludingCode(text);
   const seconds = estimateSpeakSeconds(text);
@@ -340,8 +370,9 @@ export function decideSpeakability(
     exceptionReason = `target:${target}${cause}`;
   }
 
-  const overSoftTarget = wordCount > SOFT_MAX_WORDS;
-  const overBudget = target === 'SPOKEN_SHORT' && (wordCount > HARD_MAX_WORDS || seconds > HARD_MAX_SECONDS);
+  const limits = spokenShortLimits(answerLength);
+  const overSoftTarget = wordCount > limits.softMaxWords;
+  const overBudget = target === 'SPOKEN_SHORT' && (wordCount > limits.hardMaxWords || seconds > limits.hardMaxSeconds);
 
   return { wordCount, seconds, target, overBudget, overSoftTarget, exception, exceptionReason };
 }
@@ -475,6 +506,7 @@ export function applySpeakabilityBudget(
   answerStyle: AnswerStyle | undefined,
   question: string,
   isCoding = false,
+  answerLength: 'shorter' | 'smart' | 'longer' = 'smart',
 ): {
   text: string;
   changed: boolean;
@@ -486,7 +518,7 @@ export function applySpeakabilityBudget(
   /** Coarse marker for telemetry (spec's speakability_class). No raw content. */
   speakability_class: SpeakabilityClass;
 } {
-  const decision = decideSpeakability(text, answerType, answerStyle, question, isCoding);
+  const decision = decideSpeakability(text, answerType, answerStyle, question, isCoding, answerLength);
   return {
     text,                                  // verbatim — never trimmed
     changed: false,

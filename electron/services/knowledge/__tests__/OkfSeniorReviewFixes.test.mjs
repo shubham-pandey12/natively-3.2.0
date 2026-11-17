@@ -329,7 +329,7 @@ test('ModesManager.addReferenceFile: routes large content through generateForFil
   const src = read('electron/services/ModesManager.ts');
   assert.match(src, /const OKF_BACKGROUND_INDEX_THRESHOLD_CHARS = 300_000;/);
   const idx = src.indexOf('public addReferenceFile(params:');
-  const slice = src.slice(idx, idx + 4500);
+  const slice = src.slice(idx, src.indexOf('public deleteReferenceFile(', idx));
   assert.match(slice, /if \(params\.content\.length > OKF_BACKGROUND_INDEX_THRESHOLD_CHARS\) \{/);
   assert.match(slice, /generateForFileInBackground\(fileInput\)/);
   assert.match(slice, /KnowledgeManager\.getInstance\(\)\.generateForFile\(fileInput\);/);

@@ -1316,6 +1316,8 @@ interface ElectronAPI {
   getMeetingAudioCapture: () => Promise<{ withoutAudio: boolean }>;
   onMeetingAudioCapture: (callback: (data: { withoutAudio: boolean }) => void) => () => void;
   getAutoAnswerEnabled: () => Promise<boolean>;
+  getAnswerLength: () => Promise<{ value: 'shorter' | 'smart' | 'longer' }>;
+  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => Promise<{ success: boolean; error?: string }>;
   setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; message?: string }>;
   getAutoAnswerAccess: () => Promise<{ available: boolean; allowed: boolean; basis: 'pro' | 'sharing' | 'none'; uploads: boolean; consent: { version: number; grantedAt: string } | null; enabled: boolean }>;
   setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
@@ -1407,6 +1409,11 @@ interface ElectronAPI {
   /** The permissions card's closes while a permission is missing (src/lib/permissionsCardPolicy.mjs). */
   permissionsCardGet: () => Promise<{ dismissals: number; lastDismissedAt: number | null }>;
   permissionsCardRecord: (event: 'dismissed' | 'granted') => Promise<{ success: boolean; error?: string; record?: { dismissals: number; lastDismissedAt: number | null } }>;
+  guideGet: () => Promise<any>;
+  guideDispatch: (event: { type: string; [key: string]: unknown }) => Promise<any>;
+  getGuideState: () => Promise<any>;
+  dispatchGuideEvent: (event: { type: string; [key: string]: unknown }) => Promise<any>;
+  onGuideChanged: (callback: (state: any) => void) => () => void;
   /** First-launch shortcut tour: taught shortcuts become practice presses. */
   onboardingSetShortcutTour: (active: boolean) => Promise<{ success: boolean }>;
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => () => void;
@@ -3624,6 +3631,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
   getAutoAnswerEnabled: () => ipcRenderer.invoke('get-auto-answer-enabled'),
+  getAnswerLength: () => ipcRenderer.invoke('answer-length:get'),
+  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => ipcRenderer.invoke('answer-length:set', value),
   setAutoAnswerEnabled: (enabled: boolean) => ipcRenderer.invoke('set-auto-answer-enabled', enabled),
   getAutoAnswerAccess: () => ipcRenderer.invoke('auto-answer:get-access'),
   setAutoAnswerTrainingConsent: (granted: boolean) => ipcRenderer.invoke('auto-answer:set-training-consent', granted),
@@ -3723,6 +3732,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ) => ipcRenderer.invoke('onboarding:set-flag', key, value),
   permissionsCardGet: () => ipcRenderer.invoke('permissions-card:get'),
   permissionsCardRecord: (event: 'dismissed' | 'granted') => ipcRenderer.invoke('permissions-card:record', event),
+  guideGet: () => ipcRenderer.invoke('guide:get'),
+  guideDispatch: (event: unknown) => ipcRenderer.invoke('guide:dispatch', event),
+  getGuideState: () => ipcRenderer.invoke('guide:get'),
+  dispatchGuideEvent: (event: { type: string; [key: string]: unknown }) => ipcRenderer.invoke('guide:dispatch', event),
+  onGuideChanged: (callback: (state: any) => void) => {
+    const subscription = (_: unknown, state: any) => callback(state);
+    ipcRenderer.on('guide:changed', subscription);
+    return () => ipcRenderer.removeListener('guide:changed', subscription);
+  },
   onboardingSetShortcutTour: (active: boolean) => ipcRenderer.invoke('onboarding:set-shortcut-tour', active),
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => {
     const subscription = (_: any, actionId: string) => callback(actionId);

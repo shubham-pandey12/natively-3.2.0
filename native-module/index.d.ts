@@ -471,6 +471,9 @@ export declare function verifyDodoKey(licenseKey: string, deviceLabel: string): 
  */
 export declare function verifyGumroadKey(licenseKey: string): Promise<unknown>
 
+/** Windows no-activate windows still receive pointer clicks. */
+export declare function deliverClicksWithoutActivation(handle: Buffer): boolean
+
 export interface WindowInfo {
   pid: number
   /** The owning app's name (macOS kCGWindowOwnerName; Windows the exe's file name). */

@@ -621,6 +621,7 @@ export class IntelligenceEngine extends EventEmitter {
         // A new meeting never inherits a design drawn before it started (in the
         // launcher's chat, or in the meeting that just ended).
         try { this.session.clearActiveDesign(); } catch { /* continuity only */ }
+        try { (require('./llm/answerPathWarmup') as typeof import('./llm/answerPathWarmup')).scheduleAnswerPathWarmup(); } catch { /* warmup is optional */ }
     }
 
     /**
@@ -1091,6 +1092,7 @@ export class IntelligenceEngine extends EventEmitter {
             words.length < this.SPECULATIVE_MIN_WORDS ||
             !IntelligenceEngine.hasQuestionSignal(text)
         ) return;
+        if (IntelligenceEngine.onlySmallTalk(text)) return;
 
         if (this.speculativeTimer !== null) {
             clearTimeout(this.speculativeTimer);
@@ -1488,9 +1490,20 @@ export class IntelligenceEngine extends EventEmitter {
      * trigger cooldown. Callers gate on how likely the candidate is to be an
      * ask, so a whole meeting of exposition does not each start a generation.
      */
+    /** Small talk only (greetings, mic checks): never worth a speculative answer. A load fault answers false. */
+    private static onlySmallTalk(text: string): boolean {
+        try {
+            return (require('./llm/smallTalk') as typeof import('./llm/smallTalk')).isOnlySmallTalk(text);
+        } catch {
+            return false;
+        }
+    }
+
     prefetchAutoAnswer(questionId: string, text: string): void {
         const trimmed = (text ?? '').trim();
         if (trimmed.length < 12) return;
+        // 3.2.0: a greeting or "can you hear me?" never starts a billed prefetch.
+        if (IntelligenceEngine.onlySmallTalk(trimmed)) return;
         this.releaseExpiredSpeculation();
         // The engine's OWN speculation (from an interviewer interim) is not a
         // busy engine: the candidate below is the same speech, finished.
@@ -3615,7 +3628,7 @@ export class IntelligenceEngine extends EventEmitter {
                                 answerShape: evidence.answerShape,
                                 sourceOwner: evidence.sourceOwner,
                                 evidence,
-                                maxAnswerWords: 90,
+                                maxAnswerWords: (require('./llm/answerLength') as typeof import('./llm/answerLength')).profileAnswerWordCap(undefined, (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength(), (require('./llm/userInstructionContract') as typeof import('./llm/userInstructionContract')).registeredInstructionsSetLength(snapshotModeInfo?.id)) ?? undefined,
                                 // Campaign-3 (fix/answer-policy-engine, 2026-07-19,
                                 // founder §2.5): pass the TurnPlanner seeder-leash
                                 // through to the prompt builder so a salary /
@@ -4439,7 +4452,7 @@ export class IntelligenceEngine extends EventEmitter {
                         defaultLengthDirective: (() => {
                             try {
                                 const { renderLengthDirectiveForPlan } = require('./llm/AnswerPlanner') as typeof import('./llm/AnswerPlanner');
-                                return renderLengthDirectiveForPlan(answerPlan) || undefined;
+                                return renderLengthDirectiveForPlan(answerPlan, { pinnedModeId: snapshotModeInfo?.id }) || undefined;
                             } catch { return undefined; /* length directive is best-effort */ }
                         })(),
                         // The diagram turn's note and the design on the table

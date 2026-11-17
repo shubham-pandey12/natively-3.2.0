@@ -90,9 +90,10 @@ describe('Pro IPC gate', () => {
     assert.equal(failureText({ success: false, error: 'disk full' }, 'x'), 'disk full');
     assert.equal(failureText(null, 'fallback'), 'fallback');
     assert.equal(isProRefusal({ error: 'pro_required' }), true);
-    for (const [file, n] of [['src/components/OwnAnswersSection.tsx', 3], ['src/components/ProfileIntelligenceSettings.tsx', 3], ['premium/src/RoleInsightPanel.tsx', 2]]) {
+    for (const [file, n] of [['src/components/OwnAnswersSection.tsx', 3], ['src/components/ProfileIntelligenceSettings.tsx', 3]]) {
       assert.equal((read(file).match(/failureText\(/g) ?? []).length, n, file);
     }
+    assert.match(read('premium/src/RoleInsightPanel.tsx'), /export \{ RoleInsightPanel \} from '.\/recovered\//);
   });
 });
 
@@ -186,7 +187,10 @@ describe('when Pro ends', () => {
     assert.match(stand, /isKnowledgeModeSwitchedOn/);
     assert.match(stand, /modeNeedsPro\(ModesManager\.getInstance\(\)\.getStoredActiveMode\(\)\)/);
     assert.match(ipc, /proWatch\.check\(\);\s*if \(standDownIfNoPro\('licence check'\)\)/);
-    assert.match(ipc, /createProWatch\(isProOrTrialActive, \(allowed\) => \{[\s\S]{0,200}standDownIfNoPro\('Pro gone'\)[\s\S]{0,200}syncConnectorServersWithPro\(\)/);
+    const watchStart = ipc.indexOf('const proWatch = createProWatch(');
+    const watch = ipc.slice(watchStart, ipc.indexOf('  proWatch.check();', watchStart));
+    assert.match(watch, /if \(!allowed\) \{[\s\S]*standDownIfNoPro\('Pro gone'\)/);
+    assert.match(watch, /syncConnectorServersWithPro\(\)/);
   });
 
   test('a held licence is not "licensed" for the expired-trial decisions', () => {

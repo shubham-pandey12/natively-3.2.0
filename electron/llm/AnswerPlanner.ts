@@ -2,7 +2,8 @@ import type { IntentResult } from './PlannerDecision';
 import type { ExtractedQuestion } from './transcriptQuestionExtractor';
 import { CODING_CONTRACT, CODING_CONTRACT_IMPL, CODING_VERIFICATION_INSTRUCTION, CODING_SHAPE_CONTRACTS, type CodingShape } from './codingContract';
 import { detectAnswerStyle, type AnswerStyle } from './answerStyle';
-import { classifyTargetSpeakability, classifyShortBand, shortBandTargetWords, HARD_MAX_WORDS, SPOKEN_FULL_PROMPT_MAX_WORDS } from './speakability';
+import { classifyTargetSpeakability, classifyShortBand, shortBandTargetWords, lengthBandTarget, spokenFullPromptMaxWords, HARD_MAX_WORDS, SPOKEN_FULL_PROMPT_MAX_WORDS } from './speakability';
+import { getRegisteredAnswerLength, type AnswerLength } from './answerLength';
 import { analyzeUserInstructions, getRegisteredUserInstructions, userInstructionsOverrideAppLength } from './userInstructionContract';
 import { applyModeFallback, type ActiveModeInfo } from './modeProfiles';
 import { classifyDocumentQuestionShape } from './documentGroundedPrompt';
@@ -2183,7 +2184,27 @@ const spokenFullDirective = (): string =>
  * contract's own 60-word target (median 155, p90 310) because no per-turn
  * length line was delivered at all on V3-owned turns.
  */
-export const renderLengthDirectiveForPlan = (plan: AnswerPlan): string => {
+export const answerLengthForTurn = (pinnedModeId?: string | null): AnswerLength => {
+  const length = getRegisteredAnswerLength();
+  if (length !== 'longer') return length;
+  try { if (analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined)).qualitativeLength === 'short') return 'smart'; } catch { /* use stored length */ }
+  return length;
+};
+const replacesClause = (length: Exclude<AnswerLength, 'smart'>) => length === 'shorter'
+  ? 'This replaces every longer length target in this prompt, including sentence counts.'
+  : 'This replaces every shorter length target in this prompt, including sentence counts and any "cut it" rule.';
+export const spokenFullDirectiveFor = (length: Exclude<AnswerLength, 'smart'>): string => {
+  const cap = spokenFullPromptMaxWords(length);
+  const seconds = Math.round(cap * (60 / 140) / 5) * 5;
+  const body = length === 'shorter' ? 'Make the one point that matters, then stop.' : 'Give the whole answer with its reasoning and context, then stop — stay speakable, no list of every angle.';
+  return `LENGTH LIMIT (the user chose ${length === 'shorter' ? 'Shorter' : 'Longer'} answers): at most ${cap} words (~${seconds} seconds spoken) — a hard cap, not a target. This is a LIVE spoken answer. ${body} ${replacesClause(length)}`;
+};
+export const shortBandDirectiveFor = (plan: AnswerPlan, length: Exclude<AnswerLength, 'smart'>): string => {
+  const t = lengthBandTarget(classifyShortBand(plan.answerType, plan.answerStyle, plan.question), length);
+  const fit = length === 'shorter' ? 'Use fewer if fewer answers it.' : 'Use the room for substance, never filler or repetition, and keep it speakable.';
+  return `LENGTH (the user chose ${length === 'shorter' ? 'Shorter' : 'Longer'} answers): aim for about ${t.seconds}s spoken — roughly ${t.min} to ${t.max} words (${t.guidance}). ${fit} Hard ceiling: never go past ${t.ceiling} words. ${replacesClause(length)}`;
+};
+export const renderLengthDirectiveForPlan = (plan: AnswerPlan, opts?: { answerLength?: AnswerLength; pinnedModeId?: string | null }): string => {
   // Explicit styles get no line — including the auto-detected `star` style
   // ("tell me about a time…"), deliberately. Measured 2026-09-29 on the exact
   // captured prompts (5 story questions × 5 seeds, no résumé): ANY length line
@@ -2203,13 +2224,15 @@ export const renderLengthDirectiveForPlan = (plan: AnswerPlan): string => {
   // self-contradicting on exactly the "walk me through it step by step"
   // questions that select the tier. No directive here, by design.
   if (tier === 'STRUCTURED_FULL') return '';
+  const length = opts?.answerLength ?? answerLengthForTurn(opts?.pinnedModeId);
   if (tier === 'SPOKEN_FULL') {
     // A fuller spoken answer (STAR story, multi-part, pressured negotiation)
     // has its own budget — SPOKEN_FULL_PROMPT_MAX_WORDS (~45s), below the
     // 180-word telemetry ceiling. Cap-first framing chosen by paired live A/B
     // (155w -> 131w on the equivalent outer-cap test).
-    return spokenFullDirective();
+    return length === 'smart' ? spokenFullDirective() : spokenFullDirectiveFor(length);
   }
+  if (length !== 'smart') return shortBandDirectiveFor(plan, length);
   const band = classifyShortBand(plan.answerType, plan.answerStyle, plan.question);
   const t = shortBandTargetWords(band);
   // The "aim for" phrasing alone was overshot ~50-100% live (sessions D/E:

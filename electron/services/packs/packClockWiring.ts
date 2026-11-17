@@ -14,11 +14,25 @@ import { performance } from 'node:perf_hooks';
 import { TRIAL_SENTINEL_KEY } from '../../config/constants';
 import { nativelyApiBase } from '../nativelyApiBase';
 import { createPackMeetingClock, type TickAnswer, type TickBody } from './PackMeetingClock';
+import { packHoursCount } from './packProRule';
 
 const API_BASE = nativelyApiBase();
 
 type Clock = ReturnType<typeof createPackMeetingClock>;
 let instance: Clock | null = null;
+let liveModel: (() => string | null | undefined) | null = null;
+let liveFastFamily: (() => string | null | undefined) | null = null;
+
+export function setPackProviderReaders(model: () => string | null | undefined, fastFamily: () => string | null | undefined): void {
+  liveModel = model;
+  liveFastFamily = fastFamily;
+}
+export function currentPackProviders(): { model: string | null; fastFamily: string | null } {
+  try { return { model: liveModel?.() ?? null, fastFamily: liveFastFamily?.() ?? null }; }
+  catch { return { model: null, fastFamily: null }; }
+}
+
+export function packSelectionChanged(): void { instance?.countsChanged(); }
 
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -116,6 +130,13 @@ export function getPackMeetingClock(onProLost: () => void = () => {}): Clock {
       }
     },
     postTick,
+    counts: () => {
+      try {
+        const { CredentialsManager } = require('../CredentialsManager');
+        const cm = CredentialsManager.getInstance();
+        return packHoursCount(liveModel?.() || cm.getDefaultModel(), cm.getSttProvider(), liveFastFamily?.() ?? null);
+      } catch { return true; }
+    },
     now: () => performance.now(),
     every: (fn, ms) => {
       const t = setInterval(fn, ms);

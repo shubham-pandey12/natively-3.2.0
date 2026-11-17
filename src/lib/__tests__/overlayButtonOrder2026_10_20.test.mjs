@@ -98,7 +98,7 @@ test('the overlay draws only the row, each button wired to its own handler', () 
 
 test('Settings has an Overlay tab with the style picker and opacity; Advanced no longer has the style', () => {
   const settings = read('src/components/SettingsOverlay.tsx');
-  assert.match(settings, /activeTab === 'overlay' && \(\s*<OverlaySettings/);
+  assert.match(settings, /activeTab === 'overlay' && \(\s*(?:<>\s*)?<OverlaySettings/);
   assert.match(settings, /opacityControl=\{opacityCard\}/);
   assert.equal((settings.match(/Meeting Interface Style/g) || []).length, 0);
   assert.match(read('src/components/settings/OverlaySettings.tsx'), /'Meeting Interface Style'/);

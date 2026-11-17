@@ -109,7 +109,7 @@ describe('App owns the trial flag and hands it to both managers', () => {
 
   test('ModesSettings honours the prop it is given', { skip: modesCode === null && 'premium submodule not checked out' }, () => {
     assert.ok(
-      /const\s+hasProAccess\s*=\s*isPremium\s*\|\|\s*isTrialActive/.test(modesCode),
+      /const\s+isAllowed\s*=\s*isPremium\s*\|\|\s*isTrialActive/.test(modesCode),
       'the premium submodule must keep gating on licence-or-trial',
     );
   });

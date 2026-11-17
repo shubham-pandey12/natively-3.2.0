@@ -29,6 +29,7 @@ const code = rel => read(rel)
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^[^\n]*?\/\/[^\n]*$/gm, '')
   .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, '');
+const premiumCompiled = read('../premium/src/recovered/App-h7VwvpAg.js');
 
 const { presenceInitial, presenceReducer, presenceEventFor } = await import('../geniePresence.mjs');
 const genieMod = await import('../genieMotion.mjs');
@@ -312,8 +313,9 @@ for (const name of PREMIUM) {
   const rel = `../premium/src/${name}.tsx`;
   test(`${name} (premium) opens and closes with the genie`, { skip: !existsSync(resolve(SRC, rel)) && 'premium not checked out' }, () => {
     const src = code(rel);
-    assert.ok(src.includes('<GenieModal'));
-    assert.ok(!src.includes('<AnimatePresence>'), 'no second, framer-driven entrance for the card');
+    assert.ok(src.includes(`export { ${name} } from './recovered/App-h7VwvpAg.js'`));
+    const at = premiumCompiled.indexOf(`label: "${name}"`);
+    assert.ok(at > 0 && premiumCompiled.slice(at - 180, at).includes('onClosed:'), `${name} renders the compiled genie with a close callback`);
   });
 }
 
@@ -412,7 +414,7 @@ test('pictures: a close pours away a fresh one; a picture open hands over withou
 
 test('pictures: the Modes manager says when it is loading and which mode it shows', { skip: !existsSync(resolve(SRC, '../premium/src/ModesSettings.tsx')) && 'premium not checked out' }, () => {
   const modes = code('../premium/src/ModesSettings.tsx');
-  assert.ok(modes.includes('aria-busy={!modesLoaded || uploading}'));
+  assert.ok(modes.includes('aria-busy={!loaded || uploading}'));
   assert.ok(modes.includes('data-genie-view={selectedId ?? undefined}'));
 });
 
@@ -547,11 +549,10 @@ test('pictures: a card that opens reset keeps only its untouched picture', () =>
 test('pictures (premium): the Natively API card has one picture per variant', { skip: !existsSync(resolve(SRC, '../premium/src/NativelyApiPromoToaster.tsx')) && 'premium not checked out' }, () => {
   // 'new' (no provider keys) and 'existing' share one layout and one size, so
   // without the variant in the key, adding a first key poured out the other copy.
-  const nap = code('../premium/src/NativelyApiPromoToaster.tsx');
-  assert.ok(nap.includes('openingView={variant ?? undefined}'));
-  assert.ok(nap.includes("'data-genie-view': variant ?? undefined,"));
-  // (`&& !closing`: the card closes itself before it reports, final review #5.)
-  assert.ok(/const visible = isOpen && variant !== null(?: && !closing)?;/.test(nap), 'the variant is known before the card opens');
+  const nap = premiumCompiled.slice(premiumCompiled.indexOf('QP = ({ isOpen:'), premiumCompiled.indexOf('p7 = ({ isOpen:'));
+  assert.ok(nap.includes('openingView: r ?? void 0,'));
+  assert.ok(nap.includes('"data-genie-view": r ?? void 0,'));
+  assert.ok(nap.includes('E = t && r !== null && !k;'), 'the variant is known before the card opens');
 });
 
 // ─── Pictures in memory (executed) ──────────────────────────────

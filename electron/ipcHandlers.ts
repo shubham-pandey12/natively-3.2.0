@@ -3,6 +3,9 @@ import type { WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 
 import * as crypto from 'crypto';
 import { prewarmPreparedJpeg } from './services/screen/preparedJpeg';
+import { CredentialsManager } from './services/CredentialsManager';
+import { DEMO_VIDEO_URL, demoFilmOpenOptions } from '../src/lib/demoVideoUrl';
+import { configureGuideStore, dispatchGuideFromWindow, getGuideState, guideScreenshotTaken, guideStopLockedMs, guideSurfaceSet } from './services/firstRunGuideStore';
 import { repairCapReached, endsInsideFence } from './llm/repairCap';
 import { AntigravityService, initializeAntigravityLifecycle } from './services/AntigravityService';
 import { buildEmbeddingConfig } from './rag/embeddingConfigIdentity';
@@ -358,6 +361,44 @@ export function initializeIpcHandlers(appState: AppState): void {
     ipcMain.removeAllListeners(channel);
     ipcMain.on(channel, listener);
   };
+
+  safeHandle('guide:get', () => getGuideState());
+  safeHandle('guide:dispatch', (_event, guideEvent: unknown) => dispatchGuideFromWindow(guideEvent));
+  configureGuideStore({
+    meetingActive: () => appState.getIsMeetingActive(),
+    meetingSurface: () => normalizeMeetingSurface(SettingsManager.getInstance().get('meetingSurface')),
+    // 3.2.0: the launch count reaches the guide only through the renderer's
+    // plans_closed event; main reports 0, and a seeded demo meeting is not one
+    // of the user's own (hasOwnMeeting), so the guide can start for new users.
+    factsProvider: () => {
+      const cm = CredentialsManager.getInstance();
+      const key = cm.getNativelyApiKey();
+      return {
+        hasOwnAiKey: hasOwnAiKey(cm.getAllCredentials() as unknown as Record<string, unknown>, { codexReady: codexRouteReady() }),
+        hasNativelyKey: typeof key === 'string' && key.length > 0 && key !== TRIAL_SENTINEL_KEY,
+        isPremium: !!isLicensed(),
+        hasMeetings: DatabaseManager.getInstance().hasOwnMeeting(),
+        launchCount: 0,
+      };
+    },
+    onGuideStart: () => {
+      const sm = SettingsManager.getInstance();
+      if (sm.get('guideSurfaceBefore') == null) sm.set('guideSurfaceBefore', normalizeMeetingSurface(sm.get('meetingSurface')));
+      sm.set('meetingSurface', 'overlay');
+    },
+    onGuideEnd: () => {
+      const sm = SettingsManager.getInstance();
+      sm.set('meetingSurface', normalizeMeetingSurface(sm.get('guideSurfaceBefore') ?? 'overlay'));
+      sm.set('guideSurfaceBefore', null);
+    },
+    onEnterStep: (step) => { if (step === 'surface' && normalizeMeetingSurface(SettingsManager.getInstance().get('meetingSurface')) === 'notepad') guideSurfaceSet('notepad'); },
+    // Step 2: the demo film plays in the user's browser so the first meeting
+    // has a voice to hear. shell.openExternal is the same on macOS and
+    // Windows; on macOS the browser stays behind (demoFilmOpenOptions).
+    onFirstMeetingStarted: () => {
+      shell.openExternal(DEMO_VIDEO_URL, demoFilmOpenOptions(process.platform)).catch((e: any) => console.warn('[Guide] demo film did not open:', e?.message));
+    },
+  });
 
   // System-design diagram artifacts: repair, export, the feature switch and
   // the Phone Mirror render path. One module, registered once here.
@@ -1407,14 +1448,45 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Profile Intelligence and a Pro mode switched off, the MCP server and local
   // API stopped, or started again when Pro is back.
   const { createProWatch, PRO_WATCH_EVERY_MS } = require('./services/licenceRecheck') as typeof import('./services/licenceRecheck');
+  let packSavedModeId: string | null = null;
   const proWatch = createProWatch(isProOrTrialActive, (allowed) => {
     console.log(`[IPC] Pro ${allowed ? 'available' : 'gone'}: connector servers and Pro switches follow`);
-    if (!allowed) standDownIfNoPro('Pro gone');
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) win.webContents.send('license-status-changed', { isPremium: allowed });
+    });
+    if (!allowed) {
+      try {
+        const { licenceIsPack } = require('./services/proAccess') as typeof import('./services/proAccess');
+        if (licenceIsPack()) packSavedModeId = require('./services/ModesManager').ModesManager.getInstance().getStoredActiveMode()?.id ?? null;
+      } catch { /* no pack mode to save */ }
+      standDownIfNoPro('Pro gone');
+    } else {
+      const { restoreAfterPackStandDown } = require('./services/packs/packProRule') as typeof import('./services/packs/packProRule');
+      void restoreAfterPackStandDown({
+        proActive: isProOrTrialActive,
+        knowledgeSetting: () => require('./services/SettingsManager').SettingsManager.getInstance().get('knowledgeMode') === true,
+        knowledgeSwitchedOn: () => Boolean(appState.getKnowledgeOrchestrator()?.isKnowledgeModeSwitchedOn?.()),
+        setKnowledge: (on) => { appState.getKnowledgeOrchestrator()?.setKnowledgeMode(on); },
+        savedModeId: () => packSavedModeId,
+        clearSavedModeId: () => { packSavedModeId = null; },
+        packLicence: () => require('./services/proAccess').licenceIsPack(),
+        activeModeId: () => require('./services/ModesManager').ModesManager.getInstance().getStoredActiveMode()?.id ?? null,
+        modeExists: (id) => require('./services/ModesManager').ModesManager.getInstance().getModes().some((mode: any) => mode.id === id),
+        applyMode: async (id) => { require('./services/ModesManager').ModesManager.getInstance().setActiveMode(id); return { success: true }; },
+      });
+    }
     try {
       void require('./services/outputs/outputsIpc').syncConnectorServersWithPro();
     } catch { /* connectors module absent */ }
   });
   proWatch.check();
+  try {
+    const { setPackProviderReaders } = require('./services/packs/packClockWiring') as typeof import('./services/packs/packClockWiring');
+    setPackProviderReaders(
+      () => (appState as any).processingHelper?.getLLMHelper?.()?.getCurrentModelId?.() ?? null,
+      () => (appState as any).processingHelper?.getLLMHelper?.()?.fastResponseFamilyNow?.() ?? null,
+    );
+  } catch { /* pack clock falls back to saved model */ }
   {
     proWatchTimer && clearInterval(proWatchTimer);
     proWatchTimer = setInterval(() => proWatch.check(), PRO_WATCH_EVERY_MS);
@@ -1744,6 +1816,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       (pillWin && !pillWin.isDestroyed() && pillWin.webContents.id === event.sender.id) ||
       (toggleWin && !toggleWin.isDestroyed() && toggleWin.webContents.id === event.sender.id);
     if (!fromAux || !action?.type) return;
+    if (action.type === 'end-meeting' && guideStopLockedMs() > 0) return;
     await routeOverlayUiAction(action, {
       endMeeting: () => appState.endMeeting(),
       forwardToOverlay: (a) => helper.forwardOverlayUiAction(a),
@@ -1852,6 +1925,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const preview = await appState.getImagePreview(screenshotPath);
       // Make the upload JPEG now, while the user types, not when they send.
       prewarmPreparedJpeg(screenshotPath);
+      guideScreenshotTaken();
       return { path: screenshotPath, preview };
     } catch (error) {
       // console.error("Error taking screenshot:", error)
@@ -1889,6 +1963,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const screenshotPath = await appState.takeSelectiveScreenshot();
       const preview = await appState.getImagePreview(screenshotPath);
       prewarmPreparedJpeg(screenshotPath);
+      guideScreenshotTaken();
       return { path: screenshotPath, preview };
     } catch (error) {
       // EC-04 fix: cast unknown error to Error before accessing .message
@@ -2771,7 +2846,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               defaultLengthDirective: answerSurface === 'live' ? (() => {
                 try {
                   const { renderLengthDirectiveForPlan } = require('./llm/AnswerPlanner') as typeof import('./llm/AnswerPlanner');
-                  return v3Plan ? renderLengthDirectiveForPlan(v3Plan) || undefined : undefined;
+                  return v3Plan ? renderLengthDirectiveForPlan(v3Plan, { pinnedModeId: modeInfo?.id }) || undefined : undefined;
                 } catch { return undefined; }
               })() : undefined,
               modeTemplateType: rawMode,
@@ -4519,7 +4594,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 contract: manualSourceContract,
                 evidence: evidenceRoute,
                 styleInstructions: formatAnswerPlanForPrompt(answerPlan, false),
-                maxAnswerWords: answerPlan.answerStyle === 'detailed' ? 180 : 90,
+                maxAnswerWords: (require('./llm/answerLength') as typeof import('./llm/answerLength')).profileAnswerWordCap(answerPlan.answerStyle, (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength(), (require('./llm/userInstructionContract') as typeof import('./llm/userInstructionContract')).registeredInstructionsSetLength(manualActiveMode?.id), answerSurface === 'live') ?? undefined,
               });
               const profileJitBlock = `${profileJitPrompt.systemPrompt}\n\n${profileJitPrompt.userPrompt}`;
               context = context ? `${profileJitBlock}\n\n${context}` : profileJitBlock;
@@ -6306,7 +6381,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               // deterministic trimmer was REMOVED because it cropped the conclusion off long
               // answers — so we NEVER trim here, we only measure the answer for telemetry (the
               // coarse length class + word count). The answer text is left exactly as produced.
-              const budget = applySpeakabilityBudget(fullResponse, answerPlan.answerType, answerPlan.answerStyle as any, message, isCodingChat);
+              const budget = applySpeakabilityBudget(fullResponse, answerPlan.answerType, answerPlan.answerStyle as any, message, isCodingChat, (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength());
               piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'speakability_measured', speakabilityClass: budget.speakability_class, markerCount: budget.spoken_word_count });
               // Visible scaffold in a DEFAULT-style answer (user didn't ask for
               // structure): compress to the speakable form. detectAnswerStyle
@@ -7864,7 +7939,9 @@ export function initializeIpcHandlers(appState: AppState): void {
     // The user chose: a pending fresh-install default (e.g. a DMG launch on
     // macOS) must not override it later. See utils/openAtLoginDefault.ts.
     if (SettingsManager.getInstance().get('openAtLoginDefault') !== 'done') {
-      SettingsManager.getInstance().set('openAtLoginDefault', 'done');
+      if (!SettingsManager.getInstance().set('openAtLoginDefault', 'done')) {
+        return { success: false, error: 'settings_store_degraded' };
+      }
     }
     return { success: true };
   });
@@ -8036,16 +8113,28 @@ export function initializeIpcHandlers(appState: AppState): void {
   // server's copies (DELETE /v1/training/meeting-transcripts). Also withdraws.
   safeHandle('auto-answer:delete-shared-data', async () => {
     appState.setAutoAnswerTrainingConsent(false);
-    return appState.trainingUploader().requestDeletion();
+    try {
+      const uploader = appState.trainingUploader();
+      const deleteShared = uploader.requestDeletion;
+      return typeof deleteShared === 'function'
+        ? await deleteShared.call(uploader)
+        : { success: false, error: 'Deletion is unavailable in this build.' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   });
 
   // The Auto Answer model: a paid, private download for API keys and Pro
   // (premium/electron/autoAnswer/decider/deciderModelInstaller.ts), and its
   // before/after judge-call card (deciderSavings.ts, numbers only).
-  const autoAnswerModelState = () => ({
-    install: appState.deciderInstaller().status(),
-    savings: appState.deciderSavings().summary(),
-  });
+  const autoAnswerModelState = () => {
+    const llm = appState.processingHelper?.getLLMHelper?.();
+    return {
+      install: appState.deciderInstaller().status(),
+      savings: appState.deciderSavings().summary(),
+      judgeViaNatively: llm?.getCurrentModelId?.() === 'natively' || llm?.judgeRunsOnNatively?.() === true,
+    };
+  };
   safeHandle('auto-answer-model:get-status', async () => autoAnswerModelState());
   safeHandle('auto-answer-model:install', async () => {
     const send = (install: unknown) => {
@@ -9065,6 +9154,17 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   // Settings › Overlay › Screenshot screen (electron/screenshotDisplay.ts).
+  safeHandle('answer-length:get', async () => {
+    const { effectiveAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
+    return { value: effectiveAnswerLength(SettingsManager.getInstance().get('answerLength'), isProOrTrialActive()) };
+  });
+  safeHandle('answer-length:set', async (_event, value: unknown) => {
+    const { isAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
+    if (!isAnswerLength(value)) return { success: false, error: 'invalid_value' };
+    if (value !== 'smart' && !isProOrTrialActive()) return proRefusal();
+    if (!SettingsManager.getInstance().set('answerLength', value)) return { success: false, error: 'settings_store_degraded' };
+    return { success: true };
+  });
   safeHandle('get-screenshot-display', async () => {
     const { listScreenshotDisplays, parseScreenshotDisplayPreference } = require('./screenshotDisplay');
     let primaryId: number | null = null;
@@ -14292,6 +14392,8 @@ export function initializeIpcHandlers(appState: AppState): void {
           CredentialsManager.getInstance().emitStorageStatusDiagnostic('stt_save_failed');
           return { success: false, error: sttPersistError };
         }
+        require('./services/packs/packClockWiring').packSelectionChanged();
+        proWatch.check();
 
         // Reconfigure the audio pipeline to use the new STT provider
         await appState.reconfigureSttProvider();
@@ -15939,6 +16041,8 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (!CredentialsManager.getInstance().setFastModel(modelId)) {
       return { success: false, error: 'settings_store_degraded' };
     }
+    require('./services/packs/packClockWiring').packSelectionChanged();
+    proWatch.check();
     return { success: true };
   });
 
@@ -15998,6 +16102,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const legacyProviders = cm.getCustomProviders() || [];
       const allProviders = [...curlProviders, ...legacyProviders];
       llmHelper.setModel(modelId, allProviders);
+      require('./services/packs/packClockWiring').packSelectionChanged();
+      proWatch.check();
 
       // Warm + pin a newly-selected local Ollama model off the hot path (see
       // set-model / switch-to-ollama). Fire-and-forget; no-ops for non-Ollama.
@@ -16117,6 +16223,8 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('end-meeting', async () => {
     try {
+      const lockedMs = guideStopLockedMs();
+      if (lockedMs > 0) return { success: false, error: 'guide_stop_locked', lockedMs };
       await appState.endMeeting();
       return { success: true };
     } catch (error: any) {
@@ -17918,6 +18026,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (surface !== 'overlay' && surface !== 'notepad') return { success: false };
     const before = normalizeMeetingSurface(SettingsManager.getInstance().get('meetingSurface'));
     if (!SettingsManager.getInstance().set('meetingSurface', surface)) return { success: false, error: 'settings_store_degraded' };
+    guideSurfaceSet(surface);
     try { funnelTelemetry.meetingSurfaceSet(before, surface); } catch { /* analytics only */ }
     return { success: true };
   });

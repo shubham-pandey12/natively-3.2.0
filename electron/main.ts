@@ -1340,6 +1340,8 @@ import { AudioDevices } from "./audio/AudioDevices"
 import { isInternalCaptureDevice, resolveRequestedInputDevice } from "./audio/audioDeviceSelection.mjs"
 import { loadNativeModule } from "./audio/nativeModuleLoader"
 import { GoogleSTT } from "./audio/GoogleSTT"
+import { MissingKeySTT } from "./audio/MissingKeySTT"
+import { MicEchoGuard } from "./audio/micEchoGuard"
 import { RestSTT } from "./audio/RestSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
 import { isIntelligenceFlagEnabled } from "./intelligence/intelligenceFlags"
@@ -1369,7 +1371,7 @@ import { isSpokenSavedLine } from "./intelligence/savedTranscriptOrigin"
 import { buildSummaryTextForSearch } from "./rag/summaryTextForSearch"
 
 /** Unified type for all STT providers with optional extended capabilities */
-type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | QwenRealtimeSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT | NvidiaNimStreamingSTT | AppleSpeechSTT) & {
+type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | QwenRealtimeSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT | NvidiaNimStreamingSTT | AppleSpeechSTT | MissingKeySTT) & {
   /** Local models return whether a trailing final is now in flight; cloud providers return void. */
   finalize?: () => void | boolean;
   setAudioChannelCount?: (count: number) => void;
@@ -1499,6 +1501,7 @@ import { NativeOomTrace } from './utils/NativeOomTrace'
 import { setStealthHookAvailabilityProvider, setNoActivateClickDelivery } from './utils/windowsFocusPolicy'
 import { hasLiveRenderer } from './utils/rendererLiveness'
 import { DEFAULT_MEETING_SURFACE, planMeetingStart, planMeetingResume, planNotesClosed, type MeetingSurface } from './utils/meetingSurface'
+import { applyGuideEvent, guideScreenshotTaken } from './services/firstRunGuideStore';
 import { resumeMetadata, resumedChatFrom, type ResumeBase } from './services/meeting/meetingResume'
 import { isDefaultMeetingTitle } from './MeetingPersistence'
 import {
@@ -1807,6 +1810,11 @@ export class AppState {
   constructor() {
     // 1. Load boot-critical settings first (used by WindowHelpers)
     const settingsManager = SettingsManager.getInstance();
+    const { registerAnswerLengthProvider, effectiveAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
+    registerAnswerLengthProvider(() => {
+      const { isProOrTrialActive } = require('./services/proAccess') as typeof import('./services/proAccess');
+      return effectiveAnswerLength(settingsManager.get('answerLength'), isProOrTrialActive());
+    });
     this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
     this.disguiseMode = normalizeDisguiseMode(settingsManager.get('disguiseMode'));
     // Default OFF: ON means full content capture (transcripts, questions,
@@ -2802,6 +2810,7 @@ export class AppState {
    * renderer re-render twice for one change.
    */
   public sendModelChanged(modelId: string): void {
+    try { require('./services/packs/packClockWiring').packSelectionChanged(); } catch { /* no pack clock */ }
     const targets = [
       this.getWindowHelper().getOverlayWindow(),
       this.modelSelectorWindowHelper.getWindow(),
@@ -3798,6 +3807,7 @@ export class AppState {
     mic: { effective: '', streaming: false },
     system: { effective: '', streaming: false },
   };
+  private readonly micEchoGuard = new MicEchoGuard();
   /**
    * Mid-meeting failover (audio/sttFailover.ts), per source: while the live
    * cloud provider is down past the reconnect policy, another transcriber the
@@ -3922,10 +3932,8 @@ export class AppState {
       } catch { /* speculative */ }
     },
     ...((process.env.NATIVELY_AUTO_ANSWER_JUDGE || '').toLowerCase() === 'off' ? {} : {
-      // The decision cascade (premium/electron/autoAnswer/decider) wraps the LLM judge. Packaged
-      // builds default to NATIVELY_AUTO_ANSWER_DECIDER=off, which calls the judge exactly as
-      // before; shadow (the dev default) keeps the judge authoritative and only records the
-      // decider beside it.
+      // The decision cascade defaults to on in the recovered 3.2.0 premium module;
+      // without an installed local model it escalates to the LLM judge.
       judgeCandidate: async (req, signal) => await this.autoAnswerDecider().judgeCandidate(req, signal),
     }),
     modeName: () => {
@@ -4289,9 +4297,9 @@ export class AppState {
     if (sttProvider === 'natively') {
       const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
       if (!nativelyKey) {
-        // Natively is Coming Soon — no key means degrade gracefully like every other provider
-        console.warn(`[Main] No Natively API Key configured for ${speaker}, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
+        // No key means transcription must report the missing credential.
+        console.warn(`[Main] No Natively API Key configured for ${speaker}, reporting missing key`);
+        stt = new MissingKeySTT('natively');
       } else {
         // 'system' for interviewer (system audio), 'mic' for user (microphone).
         // The server uses ${key}:${channel} as the session key so both streams
@@ -4321,8 +4329,8 @@ export class AppState {
         // provider that can label voices (sttDiarization.ts).
         stt = new DeepgramStreamingSTT(apiKey, CredentialsManager.getInstance().getSttModel('deepgram'));
       } else {
-        console.warn(`[Main] No API key for Deepgram STT, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
+        console.warn(`[Main] No API key for Deepgram STT, reporting missing key`);
+        stt = new MissingKeySTT('deepgram');
       }
     } else if (sttProvider === 'soniox') {
       const apiKey = CredentialsManager.getInstance().getSonioxApiKey();
@@ -4330,8 +4338,8 @@ export class AppState {
         console.log(`[Main] Using SonioxStreamingSTT for ${speaker}`);
         stt = new SonioxStreamingSTT(apiKey);
       } else {
-        console.warn(`[Main] No API key for Soniox STT, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
+        console.warn(`[Main] No API key for Soniox STT, reporting missing key`);
+        stt = new MissingKeySTT('soniox');
       }
     } else if (sttProvider === 'qwen') {
       const apiKey = CredentialsManager.getInstance().getQwenAsrApiKey();
@@ -4339,8 +4347,8 @@ export class AppState {
         console.log(`[Main] Using QwenRealtimeSTT for ${speaker}`);
         stt = new QwenRealtimeSTT(apiKey);
       } else {
-        console.warn('[Main] No Qwen ASR API key, falling back to GoogleSTT');
-        stt = new GoogleSTT(speaker);
+        console.warn('[Main] No Qwen ASR API key, reporting missing key');
+        stt = new MissingKeySTT('qwen');
       }
     } else if (sttProvider === 'elevenlabs') {
       const apiKey = CredentialsManager.getInstance().getElevenLabsApiKey();
@@ -4348,8 +4356,8 @@ export class AppState {
         console.log(`[Main] Using ElevenLabsStreamingSTT for ${speaker}`);
         stt = new ElevenLabsStreamingSTT(apiKey);
       } else {
-        console.warn(`[Main] No API key for ElevenLabs STT, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
+        console.warn(`[Main] No API key for ElevenLabs STT, reporting missing key`);
+        stt = new MissingKeySTT('elevenlabs');
       }
     } else if (sttProvider === 'openai') {
       // OpenAI: WebSocket Realtime (gpt-live-transcribe → gpt-4o-transcribe → gpt-4o-mini-transcribe) with whisper-1 REST fallback.
@@ -4361,8 +4369,8 @@ export class AppState {
         console.log(`[Main] Using OpenAIStreamingSTT for ${speaker}${baseUrl ? ` (custom endpoint: ${baseUrl})` : ' (WebSocket+REST fallback)'}`);
         stt = new OpenAIStreamingSTT(apiKey, baseUrl, CredentialsManager.getInstance().getSttModel('openai'));
       } else {
-        console.warn(`[Main] No API key for OpenAI STT, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
+        console.warn(`[Main] No API key for OpenAI STT, reporting missing key`);
+        stt = new MissingKeySTT('openai');
       }
     } else if (sttProvider === 'nvidia_nim') {
       const key = CredentialsManager.getInstance().getNvidiaNimApiKey();
@@ -4371,8 +4379,8 @@ export class AppState {
         console.log(`[Main] Using NvidiaNimStreamingSTT for ${speaker} (${model})`);
         stt = new NvidiaNimStreamingSTT(key, model);
       } else {
-        console.warn(`[Main] No NVIDIA NIM API key for ${speaker}, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
+        console.warn(`[Main] No NVIDIA NIM API key for ${speaker}, reporting missing key`);
+        stt = new MissingKeySTT('nvidia_nim');
       }
     } else if (sttProvider === 'groq' || sttProvider === 'azure' || sttProvider === 'ibmwatson') {
       let apiKey: string | undefined;
@@ -4399,8 +4407,8 @@ export class AppState {
         if (speaker === 'user') rest.setHoldSpeechEnds(true);
         stt = rest;
       } else {
-        console.warn(`[Main] No API key for ${sttProvider} STT, falling back to GoogleSTT`);
-        stt = new GoogleSTT(speaker);
+        console.warn(`[Main] No API key for ${sttProvider} STT, reporting missing key`);
+        stt = new MissingKeySTT(sttProvider);
       }
     } else if (sttProvider === 'apple-speech') {
       // A carried-over on-device selection must never send audio to a cloud provider.
@@ -4425,16 +4433,19 @@ export class AppState {
       // Channel label disambiguates the two concurrent instances in latency logs.
       lws.setChannel(speaker === 'interviewer' ? 'system' : 'mic');
       stt = lws as any;
-    } else {
+    } else if (sttProvider === 'google') {
       stt = new GoogleSTT(speaker);
+    } else {
+      console.warn(`[Main] Unknown STT provider '${sttProvider}' for ${speaker}; transcription is off`);
+      stt = new MissingKeySTT(sttProvider);
     }
 
     stt.setRecognitionLanguage(sttLanguage);
 
     // WTA audit F9 (2026-08-18): effective provider id for punctuation
     // provenance — derived from the CONSTRUCTED instance, not the settings
-    // value, because several ladder branches above silently fall back to
-    // GoogleSTT (missing key, unknown provider). RestSTT keeps the settings
+    // value, because missing-key and unknown selections use MissingKeySTT.
+    // RestSTT keeps the settings
     // id (groq/azure/ibmwatson — all map to 'unavailable' anyway); the
     // local-whisper branch falls through to its settings id.
     const effectiveSttId: string =
@@ -4445,6 +4456,7 @@ export class AppState {
       : stt instanceof ElevenLabsStreamingSTT ? 'elevenlabs'
       : stt instanceof NativelyProSTT ? 'natively'
       : stt instanceof GoogleSTT ? 'google'
+      : stt instanceof MissingKeySTT ? 'none'
       : sttProvider;
 
     // Gap recovery (sttGapRecovery.ts): which provider replays a missed span,
@@ -4488,6 +4500,7 @@ export class AppState {
       if (!this.isMeetingActive && !this._isDraining) {
         return;
       }
+      const nowMs = Date.now();
 
       // Mic voice ids carry the provider connection they came from: voice
       // numbers restart on a reconnect (sttDiarization.withVoiceEpoch). The
@@ -4499,12 +4512,14 @@ export class AppState {
       if (this.isMeetingActive) this.meetingAutoStop.noteTranscript(speaker, segment.text, segment.isFinal);
       // Any text proves the connection works: closes an open outage (sttGapRecovery.ts).
       this.sttGap.onTranscript(gapSource, segment.text, segment.isFinal);
+      if (speaker === 'interviewer') this.micEchoGuard.noteInterviewer(segment.text, segment.isFinal, nowMs);
+      const micEcho = speaker === 'user' && segment.isFinal && this.micEchoGuard.isEcho(segment.text, nowMs);
 
-      this.intelligenceManager.handleTranscript({
+      if (!micEcho) this.intelligenceManager.handleTranscript({
         speaker: speaker,
         ...(speakerId ? { speakerId } : {}),
         text: segment.text,
-        timestamp: Date.now(),
+        timestamp: nowMs,
         final: segment.isFinal,
         confidence: segment.confidence,
         // Defect B (2026-08-01): this is the ONLY real spoken-audio seam —
@@ -4542,7 +4557,7 @@ export class AppState {
       }
 
       // Feed final transcript to JIT RAG indexer
-      if (segment.isFinal && this.ragManager) {
+      if (segment.isFinal && this.ragManager && !micEcho) {
         this.ragManager.feedLiveTranscript([{
           speaker: speaker,
           text: segment.text,
@@ -8017,7 +8032,9 @@ export class AppState {
     this.windowHelper.setWindowMode('overlay', undefined, { hidden: startPlan.overlayHidden });
 
     const meetingGeneration = ++this._meetingGeneration;
+    this.micEchoGuard.reset();
     this.isMeetingActive = true;
+    try { applyGuideEvent({ type: 'meeting_started' }); } catch { /* guide must not stop a meeting */ }
     this.autoAnswerUsage.meetingStarted();
     try { this.trainingUploader().meetingStarted(); } catch { /* sharing is never a blocker */ }
     // Auto Answer switched on from before it became Pro-or-sharing (2026-11-13),
@@ -8567,6 +8584,7 @@ export class AppState {
     // "Meeting ongoing" pill reverts to "Start Natively" immediately;
     // trailing transcript finals are still accepted via `_isDraining`.
     this.isMeetingActive = false;
+    try { applyGuideEvent({ type: 'meeting_stopped' }); } catch { /* guide must not stop a meeting */ }
     this._meetingGeneration++;
     this._isDraining = true;
     this.sttGap.endMeeting();
@@ -9579,6 +9597,7 @@ export class AppState {
   private async captureScreenAndProcess(): Promise<void> {
     const screenshotPath = await this.takeScreenshot(false);
     const preview = await this.getImagePreview(screenshotPath);
+    guideScreenshotTaken();
     // Ensure the window is visible so the user can see the response without stealing focus
     this.showMainWindow(true);
     // win.focus() can cause macOS to re-activate the app. Re-hide the dock
@@ -9606,6 +9625,7 @@ export class AppState {
     const overlay = () => this.windowHelper?.getOverlayWindow?.() ?? this.getMainWindow();
     try {
       const screenshotPath = await this.takeScreenshot(false);
+      guideScreenshotTaken();
       const preview = shot.claimed ? '' : await this.getImagePreview(screenshotPath);
       // Decided after the last await: a claim can arrive during either one.
       const inOverlay = shot.deliverToOverlay();
@@ -9950,6 +9970,7 @@ export class AppState {
           try {
             const screenshotPath = await this.takeScreenshot()
             const preview = await this.getImagePreview(screenshotPath)
+            guideScreenshotTaken()
             const mainWindow = this.getMainWindow()
             this.sendToWindow(mainWindow, 'screenshot-taken', {
               path: screenshotPath,

@@ -13,6 +13,7 @@
 
 import type { MeetingModeSectionInput } from './types';
 import { MEETING_TITLE_RULE, isEmptyListPlaceholder, isEmptyPlaceholder } from './MeetingSummaryV3';
+import { sectionGuidance } from './sectionInstructions';
 import { headingBudgetForTranscript, renderNotesPromptContext, userNoteHeadings, type NotesPromptContext } from './meetingNotesContext';
 
 const BASE_RULES = `RULES:
@@ -54,8 +55,12 @@ export function buildV2FallbackPrompts(params: V2FallbackPromptParams): { summar
   const contextPart = context ? `\n${context}\n` : '';
 
   if (params.modeNoteSections.length > 0) {
+    // 3.2.0 (recovered MeetingPersistence.js buildV2FallbackPrompts): each
+    // section line carries the same guidance the chunk prompt uses: the
+    // built-in instruction for a stock section, else the compiled prompt,
+    // else the description.
     const sectionList = params.modeNoteSections
-      .map(s => s.description?.trim() ? `- "${s.title}": ${s.description}` : `- "${s.title}"`)
+      .map(s => `- "${s.title}": ${sectionGuidance(s)}`)
       .join('\n');
     const sectionKeys = params.modeNoteSections.map(s => `    "${s.title}": []`).join(',\n');
     const summaryPrompt = `You are a silent meeting note-taker. Extract structured notes from the conversation transcript below.

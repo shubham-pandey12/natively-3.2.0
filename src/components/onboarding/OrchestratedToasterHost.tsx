@@ -131,6 +131,17 @@ export const OrchestratedToasterHost: React.FC<HostProps> = ({ onOpenSettings, o
     else recorder.outcome(reason ?? 'later');
     orch.markDismissed(id);
   };
+  // 3.2.0: closing the first-run Plans card is what starts the first-run
+  // guide. Main decides eligibility from these facts (own key, plan, launch).
+  const closePlans = (reason?: CloseReason) => {
+    closeWith('plans')(reason);
+    if (forced) return;
+    const user = orch.getUserState();
+    void window.electronAPI?.dispatchGuideEvent?.({
+      type: 'plans_closed',
+      facts: { hasOwnAiKey: user.hasOwnAiKey, hasNativelyKey: user.hasNativelyKey, isPremium: user.isPremium, launchCount: user.cardLedger?.launchCount ?? 1 },
+    })?.catch?.(() => {});
+  };
   const openSettings = (tab: string) => {
     if (onOpenSettings) onOpenSettings(tab);
     else window.electronAPI?.openSettingsTab?.(tab);
@@ -181,7 +192,7 @@ export const OrchestratedToasterHost: React.FC<HostProps> = ({ onOpenSettings, o
       );
 
     case 'plans':
-      return <PlansToaster isOpen={true} onDismiss={closeWith('plans')} onOpenPlans={() => openSettings('plans')} />;
+      return <PlansToaster isOpen={true} onDismiss={closePlans} onOpenPlans={() => openSettings('plans')} />;
 
     case 'demo_video':
       return <DemoVideoToaster isOpen={true} onDismiss={closeWith('demo_video')} />;

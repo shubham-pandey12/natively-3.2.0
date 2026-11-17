@@ -55,9 +55,11 @@ test('wiring: no premium module means "nothing to do", never an error and never 
   assert.match(WIRING, /if \(!lm\) return \{ success: false, skipped: true \}/);
 });
 
-test('development premium override is always on: licensing bypassed, Ultra by default', () => {
-  assert.match(DEV_PREMIUM, /export function isDevPremiumOverrideEnabled\(\): boolean \{\s*return true;\s*\}/);
-  assert.match(DEV_PREMIUM, /export function getDevPlanOverride\(\): string \| null \{\s*return 'ultra';\s*\}/);
+test('development Ultra remains available, packaged builds use real licensing', () => {
+  assert.match(DEV_PREMIUM, /!app\.isPackaged/);
+  assert.match(DEV_PREMIUM, /process\.env\.NODE_ENV === 'development'/);
+  assert.match(DEV_PREMIUM, /process\.env\.NATIVELY_DEV_PREMIUM === '1'/);
+  assert.match(DEV_PREMIUM, /process\.env\.NATIVELY_DEV_PLAN \?\? 'ultra'/);
 });
 
 test('wiring: only 401/403 on /v1/usage count as a refused key — 429 and 5xx are transient', () => {

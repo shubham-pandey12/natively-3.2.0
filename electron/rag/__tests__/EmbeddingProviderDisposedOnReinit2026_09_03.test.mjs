@@ -107,7 +107,7 @@ test('dispose() rejects pending work only when there is no worker left to answer
 
     let rejected;
     const orphaned = new Promise((resolve, reject) => {
-        provider.pendingRequests.set(1, { resolve, reject, timer: setTimeout(() => {}, 60_000) });
+        provider.pendingRequests.set(1, { resolve, reject, timer: setTimeout(() => {}, 60_000).unref?.() });
     }).catch((e) => { rejected = e; });
 
     await provider.dispose('replaced by a new embedding configuration');
@@ -177,7 +177,7 @@ test('dispose() lets an IN-FLIGHT embed finish instead of failing it', async () 
 
     let settled = 'pending';
     const inFlight = new Promise((resolve, reject) => {
-        provider.pendingRequests.set(1, { resolve, reject, timer: setTimeout(() => {}, 60_000) });
+        provider.pendingRequests.set(1, { resolve, reject, timer: setTimeout(() => {}, 60_000).unref?.() });
     }).then(() => { settled = 'resolved'; }, () => { settled = 'rejected'; });
 
     const disposing = provider.dispose('replaced by a new embedding configuration');
@@ -189,7 +189,9 @@ test('dispose() lets an IN-FLIGHT embed finish instead of failing it', async () 
     assert.equal(worker.shutdownRequests, 0, 'the worker must stay alive while it still owes a reply');
 
     // The reply arrives late, the way a real worker's would.
-    provider.pendingRequests.get(1).resolve({ vectors: [[0.1, 0.2]] });
+    const req = provider.pendingRequests.get(1);
+    clearTimeout(req?.timer);
+    req.resolve({ vectors: [[0.1, 0.2]] });
     provider.pendingRequests.delete(1);
     await inFlight;
     assert.equal(settled, 'resolved', 'the in-flight embed must complete normally');

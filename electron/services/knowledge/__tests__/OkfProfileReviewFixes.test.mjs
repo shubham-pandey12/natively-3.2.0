@@ -38,7 +38,7 @@ test('HIGH: manual-path guard fails CLOSED when active-mode state is unknown (nu
   // The fail-closed variable exists and treats null mode as doc-grounded.
   assert.match(src, /const docGroundedOrUnknown = manualActiveMode == null/,
     'docGroundedOrUnknown treats null mode as doc-grounded');
-  assert.match(src, /!isCodingChat && answerPlan\.profileContextPolicy !== 'forbidden' && !docGroundedOrUnknown/,
+  assert.match(src, /if \(!isCodingChat &&[^\n]*answerPlan\.profileContextPolicy !== 'forbidden' && !docGroundedOrUnknown/,
     'the retrieval guard consumes the fail-closed variable');
   // The retriever call passes the REAL doc-grounded state (gate 4 is live, not dead).
   assert.match(src, /documentGroundedActive: manualActiveMode\?\.documentGroundedCustomModeActive === true/,

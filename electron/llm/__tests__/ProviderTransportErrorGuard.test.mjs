@@ -28,8 +28,9 @@ const require = createRequire(import.meta.url);
 const PROVIDER_TRANSPORT_ERROR_TEXT =
   "I couldn't reach the AI provider — this looks like an API key or rate-limit issue. Check your API keys / plan in Settings and try again.";
 
-describe('isProviderTransportError (pure detector)', async () => {
-  const { isProviderTransportError } = await import(pathToFileURL(answerPolishPath).href);
+const { isProviderTransportError } = await import(pathToFileURL(answerPolishPath).href);
+
+describe('isProviderTransportError (pure detector)', () => {
 
   test('matches the exact provider-transport-error string', () => {
     assert.equal(isProviderTransportError(PROVIDER_TRANSPORT_ERROR_TEXT), true);

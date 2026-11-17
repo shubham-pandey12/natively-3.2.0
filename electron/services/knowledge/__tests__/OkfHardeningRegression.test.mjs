@@ -66,7 +66,7 @@ test('DatabaseManager: deleteKnowledgeSource wraps the cascade in a single trans
 test('ModesManager: deleteMode calls KnowledgeManager.deleteForMode before deleting the mode row (previously only per-file deletion was cleaned up)', () => {
   const idx = modesManagerSrc.indexOf('public deleteMode(id: string): void {');
   assert.ok(idx >= 0);
-  const slice = modesManagerSrc.slice(idx, idx + 1200);
+  const slice = modesManagerSrc.slice(idx, modesManagerSrc.indexOf('DatabaseManager.getInstance().deleteMode(id)', idx));
   assert.match(slice, /KnowledgeManager\.getInstance\(\)\.deleteForMode\(id\)/);
 });
 

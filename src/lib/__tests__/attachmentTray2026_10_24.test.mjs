@@ -51,8 +51,8 @@ describe('addAttachment', () => {
   test('the overlay adds every attached image through it, and a page capture clears old formula images', () => {
     const src = fs.readFileSync(path.resolve(__dirname, '../../components/NativelyInterface.tsx'), 'utf8');
     assert.match(src, /import \{ addAttachment, revealsOverlay, withoutFormulaImages \} from '\.\.\/lib\/attachmentTray\.mjs';/);
-    // 3 tray adds + the 2 send paths taking a screenshot still capturing (2026-11-06).
-    assert.equal(src.match(/addAttachment\(/g).length, 5);
+    // Tray state and both answer paths add late screenshots through the same bounded helper.
+    assert.equal(src.match(/addAttachment\(/g).length, 7);
     assert.doesNotMatch(src, /\]\.slice\(-5\)|updated\.slice\(-5\)/);
     const handler = src.slice(src.indexOf('window.electronAPI?.onDomContextReceived?.('));
     assert.match(handler.slice(0, 1500), /setAttachedContext\(\(prev\) => withoutFormulaImages\(prev\)\);/);
