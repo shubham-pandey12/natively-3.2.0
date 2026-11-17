@@ -468,13 +468,15 @@ export function planTurn(input: TurnPlanInput): TurnPlan {
 
 /** Whether the planner would seed candidate background for this turn, with
  * profile, JD and live transcript assumed available (3.2.0 parity). */
-export function seedsCandidateBackground(input: Omit<TurnPlanInput, 'availability'> & Partial<Pick<TurnPlanInput, 'availability'>>): boolean {
+export function seedsCandidateBackground(input: Pick<TurnPlanInput, 'question' | 'answerType' | 'intent'> | null | undefined): boolean {
   try {
-    const plan = planTurn({
-      ...(input as TurnPlanInput),
+    if (!input) return false;
+    return planTurn({
+      question: input.question || '',
+      answerType: input.answerType ?? null,
+      intent: input.intent ?? null,
       availability: { hasReferenceFiles: false, hasProfileFacts: true, hasJobDescription: true, hasLiveTranscript: true } as TurnPlanInput['availability'],
-    });
-    return (plan.answerDirectives as { seedCandidateBackground?: boolean }).seedCandidateBackground === true;
+    }).answerDirectives.seedCandidateBackground === true;
   } catch {
     return false;
   }
