@@ -24,13 +24,21 @@ import { getRegisteredUserInstructions, resolveCodingFormatFromInstructions } fr
 
 // Words that make a deictic ask "screen-only" — the user is pointing at the
 // screen and asking to look at / work with it rather than introducing a new topic.
+// The union of the local action verbs and the 3.2.0 conversational words, so
+// both "fix this code" and "what should I say about this" stay screen-only.
 const SCREEN_ONLY_WORDS = new Set([
+  // local (action verbs and pointers)
   'it', 'this', 'that', 'here', 'there', 'above', 'below', 'now', 'next',
   'please', 'ok', 'okay', 'go', 'do', 'run', 'try', 'show', 'give', 'help',
-  'solve', 'fix', 'code', 'write', 'implement', 'answer', 'solve', 'work',
+  'solve', 'fix', 'code', 'write', 'implement', 'answer', 'work',
   'looks', 'look', 'see', 'check', 'read', 'debug', 'explain', 'analyze',
   'analyse', 'review', 'what', 'how', 'why', 'screen', 'question', 'problem',
-  'the', 'a', 'an', 'my', 'this', 'that', 'these', 'those',
+  'the', 'a', 'an', 'my', 'these', 'those',
+  // 3.2.0 (conversational)
+  'whats', 'hows', 'does', 'i', 'im', 'you', 'we', 'me', 'us',
+  'should', 'would', 'could', 'can', 'will', 'say', 'respond', 'reply', 'tell',
+  'about', 'its', 'one', 'goes', 'to', 'with', 'on', 'for', 'of', 'in',
+  'is', 'are', 'be', 'so', 'um', 'uh', 'and', 'then', 'just', 'task', 'part',
 ]);
 
 /** Matches a question that names a code artifact or programming concept. */

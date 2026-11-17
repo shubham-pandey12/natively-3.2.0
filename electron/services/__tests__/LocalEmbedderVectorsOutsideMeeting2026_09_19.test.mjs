@@ -40,15 +40,17 @@ describe('local provider', () => {
     const r = await ask(hr, true, 'manual');
     assert.equal(r.usedHybrid, true); assert.ok(embeds.query > 0);
   });
-  test('meeting running, heard turn → lexical-only, no query embed (unchanged)', async () => {
+  // 3.2.0 parity (2026-11-17): heard turns and unknown state query the vectors
+  // too; only NATIVELY_KEYLESS_LEXICAL_MANUAL_RETRIEVAL forces keyword-only.
+  test('meeting running, heard turn → the vectors are queried (3.2.0)', async () => {
     const { hr, embeds } = retriever('local');
-    const r = await ask(hr, true, 'live');
-    assert.equal(r.usedHybrid, false); assert.equal(embeds.query, 0);
+    await ask(hr, true, 'live');
+    assert.ok(embeds.query > 0);
   });
-  test('UNKNOWN meeting state and surface → still lexical-only (conservative default)', async () => {
+  test('UNKNOWN meeting state and surface → the vectors are queried (3.2.0)', async () => {
     const { hr, embeds } = retriever('local');
-    const r = await ask(hr, undefined);
-    assert.equal(r.usedHybrid, false); assert.equal(embeds.query, 0);
+    await ask(hr, undefined);
+    assert.ok(embeds.query > 0);
   });
   test('the July hotfix can be forced back for typed questions too', async () => {
     process.env.NATIVELY_KEYLESS_LEXICAL_MANUAL_RETRIEVAL = '1';

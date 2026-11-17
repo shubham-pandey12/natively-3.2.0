@@ -259,3 +259,15 @@ Every module whose compiled output differs from 3.2.0 was diffed (48 with 3+ hun
 - Tests: MeetingNotesV3 and ModesManagerColdStartCompile were updated, and RateLimiterBackgroundLane2026_11_17 was added.
 - Results: 16215 tests, 16159 pass, 1 fail. The failure is the pre-existing FastModelPreferFast check.
 - Platform: no platform branches. `node:async_hooks` is available on both. Reviewed but not executed on Windows.
+
+## Follow-up 2 — remaining deferred items ported (2026-11-17)
+- featureGate: added `markPremiumAbsent()` (a globalThis flag). main calls it when the knowledge modules fail to load at startup. The local module probe is kept as a second signal, so source-only builds still report premium as absent. `resetFeatureGate()` clears both.
+- First-run guide:
+  - `guideFactsFromSources()` in firstRunGuidePolicy, used by the guide's facts provider. The trial sentinel never counts as a purchased key.
+  - `meetingSurface` now reads `AppState.getMeetingSurface()`, the running meeting's surface, instead of the setting.
+  - `end-meeting` checks the guide lock before the try block, logs it, and returns `code: 'guide_stop_locked'`. `error` is kept for compatibility.
+- codingPromptSignals: `SCREEN_ONLY_WORDS` is now the union of the local action verbs and the 3.2.0 conversational words.
+- ModeHybridRetriever: heard turns query the vectors too, as in 3.2.0. Only `NATIVELY_KEYLESS_LEXICAL_MANUAL_RETRIEVAL` forces keyword-only search. LocalEmbedderVectorsOutsideMeeting was updated. Risk: local-embedder memory in long meetings. Needs physical checks on macOS and Windows.
+- main: knowledge `generateContent` and live-coaching calls carry `dataScopes: ['profile_history']`, so the provider privacy scopes apply to them.
+- Diagnostics: guide step-change log, SessionTracker "coding question cleared" log, and ModesManager lexical-fallback log. The `LARGE_PACK_*` constants were already exported.
+- Tests: added ParityDeferredItems2026_11_17.

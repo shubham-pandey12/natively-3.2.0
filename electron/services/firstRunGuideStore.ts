@@ -58,6 +58,7 @@ export function applyGuideEvent(event: GuideEvent): any {
   const reduced = reduceGuide(current, enriched, now);
   const next = ['restart', 'plans_closed'].includes(event.type)
     ? reconcileGuide(reduced, { meetingActive: deps.meetingActive(), atLaunch: false, surface: deps.meetingSurface?.() }, now) : reduced;
+  if (next !== current) console.log(`[Guide] ${event.type}: ${current.step}/${current.status} -> ${next.step}/${next.status}`);
   const saved = save(current, next);
   if (saved !== next) return saved;
   try {

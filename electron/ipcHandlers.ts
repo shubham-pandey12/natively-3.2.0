@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { prewarmPreparedJpeg } from './services/screen/preparedJpeg';
 import { CredentialsManager } from './services/CredentialsManager';
 import { DEMO_VIDEO_URL, demoFilmOpenOptions } from '../src/lib/demoVideoUrl';
+import { guideFactsFromSources } from './services/firstRunGuidePolicy';
 import { configureGuideStore, dispatchGuideFromWindow, getGuideState, guideScreenshotTaken, guideStopLockedMs, guideSurfaceSet } from './services/firstRunGuideStore';
 import { repairCapReached, endsInsideFence } from './llm/repairCap';
 import { AntigravityService, initializeAntigravityLifecycle } from './services/AntigravityService';
@@ -366,20 +367,22 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('guide:dispatch', (_event, guideEvent: unknown) => dispatchGuideFromWindow(guideEvent));
   configureGuideStore({
     meetingActive: () => appState.getIsMeetingActive(),
-    meetingSurface: () => normalizeMeetingSurface(SettingsManager.getInstance().get('meetingSurface')),
+    // The running meeting's own surface, not the setting, which can change mid-meeting (3.2.0).
+    meetingSurface: () => appState.getMeetingSurface(),
     // 3.2.0: the launch count reaches the guide only through the renderer's
     // plans_closed event; main reports 0, and a seeded demo meeting is not one
     // of the user's own (hasOwnMeeting), so the guide can start for new users.
     factsProvider: () => {
       const cm = CredentialsManager.getInstance();
-      const key = cm.getNativelyApiKey();
-      return {
+      return guideFactsFromSources({
+        nativelyKey: cm.getNativelyApiKey(),
+        trialSentinel: TRIAL_SENTINEL_KEY,
+        licensed: isLicensed(),
         hasOwnAiKey: hasOwnAiKey(cm.getAllCredentials() as unknown as Record<string, unknown>, { codexReady: codexRouteReady() }),
-        hasNativelyKey: typeof key === 'string' && key.length > 0 && key !== TRIAL_SENTINEL_KEY,
-        isPremium: !!isLicensed(),
+        // First users only: someone with a meeting of their own is not one.
         hasMeetings: DatabaseManager.getInstance().hasOwnMeeting(),
         launchCount: 0,
-      };
+      });
     },
     onGuideStart: () => {
       const sm = SettingsManager.getInstance();
@@ -16223,9 +16226,13 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('end-meeting', async () => {
+    const lockedMs = guideStopLockedMs();
+    if (lockedMs > 0) {
+      console.log(`[Guide] Stop held: ${Math.ceil(lockedMs / 1000)} s of the first meeting left`);
+      // `code` is the 3.2.0 field; `error` stays for renderers that read it.
+      return { success: false, code: 'guide_stop_locked', error: 'guide_stop_locked', lockedMs };
+    }
     try {
-      const lockedMs = guideStopLockedMs();
-      if (lockedMs > 0) return { success: false, error: 'guide_stop_locked', lockedMs };
       await appState.endMeeting();
       return { success: true };
     } catch (error: any) {

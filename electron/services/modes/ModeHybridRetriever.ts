@@ -1419,7 +1419,11 @@ export class ModeHybridRetriever {
         // 2026-10-03 to keep as it is. Lifting the rule for every turn (the
         // first version of this change) gave heard turns vector scores, the
         // gate stopped firing, and the rerank stopped running on them.
-        return surface !== 'manual';
+        // 3.2.0: heard turns query the vectors too; only the
+        // NATIVELY_KEYLESS_LEXICAL_MANUAL_RETRIEVAL setting (above) forces
+        // keyword-only search now. Watch local-embedder memory in long meetings.
+        void surface;
+        return false;
     }
 
     /**

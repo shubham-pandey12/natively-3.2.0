@@ -160,3 +160,22 @@ export function reconcileGuide(state: any, { meetingActive, atLaunch, surface }:
   return state;
 }
 const ALMOST_GONE_MS = 15 * 60 * 1e3;
+
+/**
+ * The guide's account facts from their raw sources (3.2.0). The trial sentinel
+ * is a placeholder key, not a purchased one, so it never counts as a Natively key.
+ */
+export function guideFactsFromSources({
+  nativelyKey, trialSentinel, licensed, hasOwnAiKey, hasMeetings, launchCount = 0,
+}: {
+  nativelyKey?: unknown; trialSentinel?: string; licensed?: unknown; hasOwnAiKey?: unknown;
+  hasMeetings?: unknown; launchCount?: unknown;
+} = {}) {
+  return {
+    hasOwnAiKey: !!hasOwnAiKey,
+    hasMeetings: !!hasMeetings,
+    hasNativelyKey: typeof nativelyKey === 'string' && nativelyKey.length > 0 && nativelyKey !== trialSentinel,
+    isPremium: !!licensed,
+    launchCount: Number(launchCount) || 0,
+  };
+}

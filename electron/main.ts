@@ -1453,6 +1453,8 @@ try {
     textHasCompEvidence = require('../premium/electron/knowledge/NegotiationConversationTracker').textHasCompEvidence;
 } catch {
     console.log('[Main] Knowledge modules not available — profile intelligence disabled.');
+    // Tell the feature gate once, at startup, so every later check agrees (3.2.0).
+    try { require('./premium/featureGate').markPremiumAbsent(); } catch { /* gate unavailable */ }
 }
 
 import { CredentialsManager } from "./services/CredentialsManager"
@@ -3134,7 +3136,7 @@ export class AppState {
             .filter(Boolean)
             .join('\n\n');
         this.knowledgeOrchestrator.setGenerateContentFn(async (contents: any[]) => {
-          return await llmHelper.generateContentStructured(joinContents(contents));
+          return await llmHelper.generateContentStructured(joinContents(contents), { dataScopes: ['profile_history'] });
         });
 
         // Low-latency generation for LIVE negotiation coaching (spoken in real
@@ -3146,7 +3148,7 @@ export class AppState {
             // and says aloud, so it is not an "invisible call". The fast rung also caps
             // output at 256 tokens, and a truncated coaching JSON degrades to a canned
             // fallback mid-negotiation with nothing pointing at the setting that caused it.
-            return await llmHelper.generateContentStructured(joinContents(contents));
+            return await llmHelper.generateContentStructured(joinContents(contents), { dataScopes: ['profile_history'] });
           });
         }
 
@@ -4131,6 +4133,10 @@ export class AppState {
 
   /** The surface the running meeting started on (startMeeting). */
   private meetingSurface: MeetingSurface = DEFAULT_MEETING_SURFACE;
+  /** The surface the running (or last) meeting started on. */
+  public getMeetingSurface(): MeetingSurface {
+    return this.meetingSurface;
+  }
 
   /**
    * The launcher's "Meeting ongoing" (set-window-mode 'overlay' mid-meeting):

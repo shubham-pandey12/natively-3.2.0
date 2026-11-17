@@ -711,6 +711,9 @@ export class SessionTracker {
         const text = segment.text.trim();
         if (!text) return;
         if (MOVE_ON_TO_NEW_PROBLEM_RE.test(text)) {
+            if (this.detectedCodingQuestion !== null) {
+                console.log('[SessionTracker] Coding question cleared: the interviewer moved on', { source: this.codingQuestionSource });
+            }
             this.detectedCodingQuestion = null;
             this.codingQuestionSource = null;
             this.codingQuestionSetAt = null;

@@ -1956,6 +1956,7 @@ export class ModesManager {
                     return hybridResult.formattedContext;
                 }
                 // Hybrid unavailable — fall back to lexical + identity block.
+                console.info(`[ModesManager] document-grounded retrieval is lexical-only this turn (${hybridResult?.degradedReason ?? 'no semantic arm'}); using the legacy lexical block`);
                 return this.buildRetrievedActiveModeContextBlock(
                     query, transcript, tokenBudget, answerType, excludeCustomContext, pinnedModeId, retrievalOptions,
                 );
