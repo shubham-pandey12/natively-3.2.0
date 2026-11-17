@@ -314,6 +314,18 @@ export async function buildV3Prompt(input: BridgeInput): Promise<BridgeResult | 
       userAnswerPolicy = getStoredAnswerPolicy(input.modeUniqueId ?? modeId);
     } catch { /* store unavailable — mode default applies */ }
     const policy = resolveModePolicy(modeId);
+    let modeSourceContract: { sourceAuthority: string; origin: string } | null = null;
+    if (input.modeUniqueId) {
+      try {
+        const { ModesManager } = require('../../services/ModesManager');
+        const mode = ModesManager.getInstance().getModes().find((m: { id: string; sourceContract?: { sourceAuthority?: unknown; origin?: unknown } }) => m.id === input.modeUniqueId);
+        const c = mode?.sourceContract;
+        if (c && typeof c.sourceAuthority === 'string' && typeof c.origin === 'string') {
+          modeSourceContract = { sourceAuthority: c.sourceAuthority, origin: c.origin };
+        }
+      } catch {
+      }
+    }
 
     const req: AnswerRequest = {
       requestId: input.requestId ?? `v3-${input.surface}-${Date.now()}`,
@@ -346,6 +358,7 @@ export async function buildV3Prompt(input: BridgeInput): Promise<BridgeResult | 
       attachedFileNames: input.attachedFileNames,
       screenText: input.screenText,
       extraAllowedSourceTypes: input.extraAllowedSourceTypes,
+      modeSourceContract,
       keepConversationState: input.keepConversationState,
     };
 
