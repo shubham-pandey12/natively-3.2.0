@@ -59,6 +59,14 @@ const _autoAnswerModelCard = import.meta.glob<any>(
   '../../premium/src/AutoAnswerModelCard.tsx',
   { eager: true }
 );
+const _autoAnswerAccessDialog = import.meta.glob<any>(
+  '../../premium/src/AutoAnswerAccessDialog.tsx',
+  { eager: true }
+);
+const _autoAnswerStopSharingDialog = import.meta.glob<any>(
+  '../../premium/src/AutoAnswerStopSharingDialog.tsx',
+  { eager: true }
+);
 const _roleInsight = import.meta.glob<any>(
   '../../premium/src/RoleInsightPanel.tsx',
   { eager: true }
@@ -100,3 +108,9 @@ export const RoleInsightPanel: React.FC<any> =
 
 export const AutoAnswerModelCard: React.FC<any> =
   get(_autoAnswerModelCard, 'AutoAnswerModelCard', NullComponent);
+
+export const AutoAnswerAccessDialog: React.FC<any> =
+  get(_autoAnswerAccessDialog, 'AutoAnswerAccessDialog', NullComponent);
+
+export const AutoAnswerStopSharingDialog: React.FC<any> =
+  get(_autoAnswerStopSharingDialog, 'AutoAnswerStopSharingDialog', NullComponent);

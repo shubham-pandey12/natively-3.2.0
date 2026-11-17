@@ -3,11 +3,12 @@ import { createPortal } from 'react-dom';
 import { useT } from '../i18n';
 import {
     Github, Twitter, Linkedin, Instagram, Send, Star, Bug, Mail, Heart,
-    NotebookPen, Pin, Plug, Link,
+    Camera, AlignLeft, Smartphone, AudioLines,
     LayoutGrid, Search, FileText, PlayCircle,
     HardDrive, Sliders, Lock, ArrowRight, Check, HandCoins,
 } from 'lucide-react';
 import { ProfileIntelligenceIcon } from './ProfileIntelligenceIcon';
+import { AutoAnswerIcon } from './AutoAnswerIcon';
 import evinProfile from '../assets/evin.png';
 // Each platform's own app icon: the Liquid Glass render macOS shows in the Dock
 // (assets/icons/mac/dock-icon.png) and the Windows icon (assets/icons/png), at
@@ -71,11 +72,11 @@ interface AboutItem { title: string; body: string; badge?: string; Icon: AboutIc
 // Undetectable is deliberately not claimed here: the owner won't promise it.
 // Nothing here needs the Companion extension.
 const WHATS_NEW: AboutItem[] = [
-    { title: 'Notepad', body: 'Notes with recipes, a live transcript and Ask for the whole meeting.', Icon: NotebookPen },
-    { title: 'Your own overlay buttons', body: 'Describe a button in plain sentences and Natively builds it. In Overlay.', Icon: Pin },
-    { title: 'Connectors', body: 'Gmail, Slack, Notion, Zapier, CRMs and webhooks. In Connectors.', Icon: Plug },
-    { title: 'Share notes as a link', body: 'Send anyone a link to a meeting’s notes. In the Share menu.', Icon: Link },
-    { title: 'Follow-ups in your style', body: 'One click writes the follow-up email in your tone, per mode.', Icon: Mail },
+    { title: 'Smarter Auto Answer', body: 'An on-device model decides which questions to answer. In Intelligence.', Icon: AutoAnswerIcon },
+    { title: 'Faster screenshot answers', body: 'Answers start about twice as fast, and you choose the question. In Overlay.', Icon: Camera },
+    { title: 'Answer length', body: 'Shorter, Smart or Longer answers, for every mode. In Overlay.', Icon: AlignLeft },
+    { title: 'Answers on your phone', body: 'Every overlay answer streams live to your paired phone.', Icon: Smartphone },
+    { title: 'Newer speech models', body: 'Soniox v6, ElevenLabs Scribe v3 and Nepali. In Audio.', Icon: AudioLines },
 ];
 
 // Compressed 2026-09-25 at the owner's request. Not numbered: they are not a

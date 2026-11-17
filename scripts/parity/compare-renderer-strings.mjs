@@ -25,10 +25,14 @@ const literals = (txt) => new Set((txt.match(/"(?:[^"\\\n]|\\.){3,400}"/g) || []
   .map((s) => s.slice(1, -1))
   .filter((s) => !/[{}();=]|=>|\$\{/.test(s) && filter.test(s)));
 
-const rec = literals(read(path.join(recoveredApp, 'dist', 'assets')));
-const loc = literals(read(path.resolve('dist', 'assets')));
-const onlyRec = [...rec].filter((s) => !loc.has(s)).sort();
-const onlyLoc = [...loc].filter((s) => !rec.has(s)).sort();
+const recText = read(path.join(recoveredApp, 'dist', 'assets'));
+const locText = read(path.resolve('dist', 'assets'));
+const rec = literals(recText);
+const loc = literals(locText);
+// Minified quote pairing can split a literal differently in each build: a
+// string only counts as missing when its quoted form is absent from the raw text.
+const onlyRec = [...rec].filter((s) => !loc.has(s) && !locText.includes(`"${s}"`)).sort();
+const onlyLoc = [...loc].filter((s) => !rec.has(s) && !recText.includes(`"${s}"`)).sort();
 console.log(`only in 3.2.0 (${onlyRec.length}):`); for (const s of onlyRec) console.log(`  - ${s}`);
 console.log(`only in this build (${onlyLoc.length}):`); for (const s of onlyLoc) console.log(`  + ${s}`);
 process.exit(onlyRec.length || onlyLoc.length ? 1 : 0);

@@ -440,8 +440,25 @@ const StatusBadge: React.FC<{ status: ConnStatus; testing: boolean }> = ({ statu
   );
 };
 
-export const IntelligenceSettings: React.FC = () => {
+export interface IntelligenceSettingsProps {
+  /** 3.2.0: the Auto Answer block (model card + transcript sharing), rendered by Settings. */
+  autoAnswer?: React.ReactNode;
+  /** Bumped to scroll the Auto Answer section into view. */
+  autoAnswerFocus?: number;
+  onAutoAnswerFocused?: () => void;
+}
+
+export const IntelligenceSettings: React.FC<IntelligenceSettingsProps> = ({ autoAnswer, autoAnswerFocus = 0, onAutoAnswerFocused }) => {
   const t = useT();
+  const autoAnswerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!autoAnswerFocus || !autoAnswerRef.current) return;
+    const timer = setTimeout(() => {
+      autoAnswerRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      onAutoAnswerFocused?.();
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [autoAnswerFocus, autoAnswer != null]);
   const tones = useSettingsTones();
   const [flags, setFlags] = useState<FlagRow[]>([]);
   const [cfg, setCfg] = useState<HindsightCfg | null>(null);
@@ -800,6 +817,16 @@ export const IntelligenceSettings: React.FC = () => {
         />
         {flagRows('notes')}
       </section>
+
+      {autoAnswer ? (
+        <section ref={autoAnswerRef} className="scroll-mt-4">
+          <SettingsSectionHeading
+            title={t('Auto Answer')}
+            subtitle={t('The on-device model and transcript sharing. Turn Auto Answer on or off in General.')}
+          />
+          {autoAnswer}
+        </section>
+      ) : null}
 
       {/* ── Memory: Hindsight long-term memory, then the memory switches ── */}
       <section>

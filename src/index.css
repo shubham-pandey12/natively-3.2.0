@@ -317,6 +317,7 @@
 /* Phase-1 Settings-only accent override (dark mode), scoped via
    data-settings-theme so the rest of the app keeps the blue brand accent. */
 [data-settings-theme="periwinkle"] {
+  --bg-settings-tile: #2F2F34; /* 3.2.0 settings icon tile */
   --accent-primary: var(--periwinkle-300);
   --accent-hover: #DED4FD; /* not a canonical scale step — a dedicated lighter dark-mode hover tint */
   --accent-pressed: var(--periwinkle-400);
@@ -476,6 +477,7 @@
 /* Phase-1 Settings-only accent override (light mode), scoped via
    data-settings-theme so the rest of the app keeps the blue brand accent. */
 [data-theme='light'] [data-settings-theme="periwinkle"] {
+  --bg-settings-tile: var(--bg-item-surface);
   --accent-primary: var(--periwinkle-600);
   --accent-hover: var(--periwinkle-700);
   --accent-pressed: var(--periwinkle-800);
