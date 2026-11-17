@@ -160,6 +160,9 @@ const TYPED_SUBJECT: Record<string, string> = {
 export function materialHasNoDocuments(material: string): boolean {
   return !/<evidence\b/.test(String(material ?? ''));
 }
+export function claimVerifierRunsWithoutDocuments(): boolean {
+  return process.env.NATIVELY_CLAIM_VERIFIER_NO_DOCS === '1';
+}
 /**
  * LIST, THEN REWRITE (2026-10-01). Asked only to "output the revised reply",
  * the edit model left the claims the external judge capped most often:

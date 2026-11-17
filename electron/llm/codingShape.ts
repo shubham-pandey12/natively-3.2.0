@@ -81,3 +81,13 @@ export function detectCodingShape(question: string | null | undefined): CodingSh
 export const NARROW_CODING_SHAPES: ReadonlySet<CodingShape> = new Set<CodingShape>([
   'approach', 'brute_force', 'complexity', 'dry_run', 'explain', 'walkthrough',
 ]);
+
+/** True when the question names a coding shape by keyword. Used by isImageCodingAsk. */
+export function namesCodingShape(question: string | null | undefined): boolean {
+  const q = stripCode(String(question ?? '')).trim();
+  if (!q) return false;
+  return [
+    FULL_RE, DEBUG_RE, WRITE_RE, SOLVE_RE, DRY_RUN_RE, COMPLEXITY_RE,
+    BRUTE_RE, OPTIMIZE_RE, EXPLAIN_IDEA_RE, WALKTHROUGH_RE, EXPLAIN_RE, APPROACH_RE,
+  ].some(re => re.test(q));
+}

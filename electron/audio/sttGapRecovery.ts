@@ -286,6 +286,23 @@ export function isCoveredByLive(text: string, liveTexts: readonly string[], thre
     return hit / (w.length - 1) >= threshold;
 }
 
+export function repeatsLiveText(text: string, liveTexts: readonly string[]): boolean {
+    const w = words(text);
+    if (w.length === 0) return true;
+    const said = new Set<string>();
+    for (const t of liveTexts) for (const lw of words(t)) said.add(lw);
+    if (!w.every((x) => said.has(x))) return false;
+    return isCoveredByLive(text, liveTexts);
+}
+
+export const RECOVERED_ANSWER_MAX_AGE_MS = 60_000;
+
+export function recoveredLineMayBeAnswered(seg: RecoveredSegment, nowMs: number): boolean {
+    if (seg.source !== 'system') return false;
+    if (!(seg.text ?? '').trim()) return false;
+    return nowMs - seg.endTimestamp <= RECOVERED_ANSWER_MAX_AGE_MS;
+}
+
 /** Inserts by timestamp, after any entry with the same time, so the list stays in time order. */
 export function insertSortedByTimestamp<T extends { timestamp: number }>(list: T[], item: T): number {
     let lo = 0;

@@ -173,10 +173,16 @@ const DESIRE_RE = /^(?:i|we)\s+(?:want|need|prefer|expect|would\s+like|'d\s+like
 const LEAD_IN_RE = /^(?:(?:first\s+of\s+all|first(?:ly)?|second(?:ly)?|third(?:ly)?|then|next|after\s+that|finally|lastly|also|and|so|hence|therefore|please|pls|just)\b[\s,]*|[A-Za-z][\w /-]{0,40}:\s*)+/i;
 const IMPERATIVE_OPEN_RE = /^(?:answer|ans|respond|reply|use|write|code|solve|keep|prefer|avoid|give|explain|speak|output|format|show|provide|start|begin|end|list|state|restate|name|walk|skip|omit|add|put|limit|structure|organi[sz]e|break|summari[sz]e|be|talk|sound|act|behave|translate|tag|stick|focus|make|ensure|return|print|do|don'?t|dont|never|always|no|follow|think|include|mention|highlight|call\s+out|note|cover|describe|conclude|finish|open|close|generate|produce|present|elaborate|expand|pick|choose|select|trace|test|check|handle|consider|optimi[sz]e|compare|discuss|analy[sz]e|identify|clarify|ask|assume|declare|define|implement|run|treat|imagine|pretend|teach|guide|help|go|dig|dive|lead|max|min|you\s+(?:must|should|are|will))\b/i;
 
+// "Go" at the start of an instruction is usually the programming language ("Go only",
+// "Go for backend"), not the imperative verb "go". Suppress imperative promotion when
+// "Go" is followed by a navigation/action word that makes it clearly NOT the language.
+const GO_LANGUAGE_OPEN_RE = /^Go\b(?!\s+(?:through|over|deeper|deep|into|in|ahead|back|beyond|easy|light|slow|slowly|step|on|with|for|straight|further|to|and|by|from|the|a|an|it|this|that|me|us|one|each|line|top|down|up)\b)/;
+const opensImperative = (t: string): boolean => IMPERATIVE_OPEN_RE.test(t) && !GO_LANGUAGE_OPEN_RE.test(t);
+
 /** An imperative opener or a wish — the strong shapes, as opposed to a sentence that merely contains "only"/"every". */
 export const isImperativeOrWish = (text: string): boolean => {
   const t = asText(text).trim();
-  return Boolean(t) && (DESIRE_RE.test(t) || IMPERATIVE_OPEN_RE.test(t) || IMPERATIVE_OPEN_RE.test(t.replace(LEAD_IN_RE, '')));
+  return Boolean(t) && (DESIRE_RE.test(t) || opensImperative(t) || opensImperative(t.replace(LEAD_IN_RE, '')));
 };
 
 // Hinglish puts the verb LAST: "Java mein code likho", "100 shabd mein jawab do".
@@ -188,7 +194,7 @@ export const isDirectiveShaped = (text: string): boolean => {
   if (!t) return false;
   // Both forms: "Follow this format:" IS its own label, so peeling the lead-in
   // first leaves nothing to test.
-  return DEONTIC_RE.test(t) || DESIRE_RE.test(t) || IMPERATIVE_OPEN_RE.test(t) || IMPERATIVE_OPEN_RE.test(t.replace(LEAD_IN_RE, '')) || HINGLISH_VERB_END_RE.test(t);
+  return DEONTIC_RE.test(t) || DESIRE_RE.test(t) || opensImperative(t) || opensImperative(t.replace(LEAD_IN_RE, '')) || HINGLISH_VERB_END_RE.test(t);
 };
 
 // A bare phrase with no verb — "100 words max", "java 8 only" — is how people
@@ -471,6 +477,27 @@ const GO_BINDING_RE = new RegExp(String.raw`\b(?:in|use|using)\s+Go(?![A-Za-z0-9
 const GO_LOWER_BINDING_RE = /\b(?:in|use|using)\s+go(?=\s*(?:$|[.,;!]|only\b|lang\b|language\b|for\s+(?:code|coding|dsa|everything|all)\b))/;
 const C_BINDING_RE = new RegExp(String.raw`\b(?:in|use|using)\s+C(?![A-Za-z0-9_+#-])(?!\s*(?:plus|sharp))${NOT_A_TARGET}|\bcode\s+in\s+c(?![A-Za-z0-9_+#])(?!\s*(?:plus|sharp))`);
 
+// A clause that is just a programming language name (possibly with a version) with
+// no binding verb/preposition is a "bare name clause". It should only bind when
+// another clause in the same instruction already imperatively names a language —
+// i.e., the user wrote a list like "use Python, Go" that the clause splitter cut.
+const LANGUAGE_MENTION_RE = new RegExp(
+  LANGUAGES.map(([, src]) => String.raw`(?:^|\b)(?:${src})(?:\s*\d+(?:\.\d+)?)?(?:\b|$)`).join('|')
+  + String.raw`|(?:^|\b)Go(?![A-Za-z0-9_+#-])${NOT_A_TARGET}`
+  + String.raw`|(?:^|\b)C(?![A-Za-z0-9_+#-])(?!\s*(?:plus|sharp))`,
+  'i',
+);
+const BARE_NAME_CLAUSE_RE = new RegExp(
+  String.raw`^\s*(?:` + [
+    ...LANGUAGES.map(([, src]) => src),
+    String.raw`Go(?![A-Za-z0-9_+#-])`,
+    String.raw`C(?![A-Za-z0-9_+#-])(?!\s*(?:plus|sharp))`,
+  ].join('|') + String.raw`)(?:\s*\d+(?:\.\d+)?)?\s*[.,;!]?\s*$`,
+  'i',
+);
+export const namesLanguage = (clause: string): boolean => LANGUAGE_MENTION_RE.test(clause);
+export const isBareLanguageName = (clause: string): boolean => BARE_NAME_CLAUSE_RE.test(clause.replace(/["'`*_]+/g, ''));
+
 // Everything after an EMPHATIC concessive names what to IGNORE ("in Java even if
 // the screenshot has Python" binds Java, hard). Everything after an EXCLUSION or a
 // NEGATOR names what is forbidden ("Any language but Java", "Never use Python"
@@ -495,11 +522,21 @@ const detectProgrammingLanguages = (sentences: string[]): { found: string[]; con
     // The exclusion is cut at SENTENCE level: the clause splitter breaks on " but ",
     // which turned "Any language but Java" into a bare clause "Java." that bound.
     const head = s.split(EXCLUSION_SPLIT_RE)[0] || '';
-    for (const c of splitInstructionClauses(head)) {
+    const clauses = splitInstructionClauses(head);
+    // If any clause imperatively binds a language, bare-name clauses in the
+    // same instruction are list continuations ("use Python, Go") and may also
+    // bind. Without a directive clause, a bare name is just a mention.
+    const hasDirectiveClause = clauses.some(c =>
+      !isFirstPersonFact(c) && isDirectiveShaped(c) && namesLanguage(c) && !isBareLanguageName(c)
+    );
+    for (const c of clauses) {
       // "if the question is about databases use SQL ..." is an instruction whose
       // imperative is not at the front.
       const instructs = acceptsInstructionClause(c) || (!hasFactSignature(c) && /\b(?:use|using|write|answer|respond|reply|code)\b/i.test(c));
       if (isFirstPersonFact(c) || !instructs || (besideFact && !isDirectiveShaped(c))) continue;
+      // A clause that is literally just a language name binds only when the same
+      // instruction has a proper directive clause naming a language (list context).
+      if (isBareLanguageName(c) && !hasDirectiveClause) continue;
       // "Java mein mat likho" negates AFTER the language, so the before-the-negator
       // rule below cannot see it: a Hinglish negator voids the whole clause.
       if (HINGLISH_NEGATOR_RE.test(c) && /\b(?:mein|me|likh\w*|karo|batao|chahiye|sirf)\b/i.test(c)) continue;
@@ -572,14 +609,14 @@ const detectAnswerStructure = (text: string, lines: InstructionLine[]): boolean 
     if (lines[i].isListItem || !/:\s*$/.test(lines[i].body)) continue;
     const items: InstructionLine[] = [];
     for (let j = i + 1; j < lines.length && lines[j].isListItem; j++) items.push(lines[j]);
-    if (items.length >= 2 && items.filter(it => !isFirstPersonFact(it.body) && IMPERATIVE_OPEN_RE.test(it.body)).length >= 2) return true;
+    if (items.length >= 2 && items.filter(it => !isFirstPersonFact(it.body) && opensImperative(it.body)).length >= 2) return true;
   }
   // Two or more sequenced INSTRUCTIONS lay out an order. "First, I am a designer.
   // Then I became a PM." is a biography.
   const sequenced = lines.flatMap(l => l.sentences).filter((s) => {
     if (!SEQUENCER_RE.test(s)) return false;
     const rest = s.replace(LEAD_IN_RE, '');
-    return !isFirstPersonFact(rest) && IMPERATIVE_OPEN_RE.test(rest);
+    return !isFirstPersonFact(rest) && opensImperative(rest);
   });
   if (sequenced.length >= 2) return true;
   // A numbered list is a layout only when something calls it a format, or its
@@ -587,7 +624,7 @@ const detectAnswerStructure = (text: string, lines: InstructionLine[]): boolean 
   const numbered = lines.filter(l => /^\s*\d{1,2}[.)]\s/.test(l.marker));
   if (numbered.length < 2) return false;
   const cued = lines.some(l => !l.isListItem && FORMAT_CUE_RE.test(l.body) && isDirectiveShaped(l.body));
-  return cued || numbered.filter(l => IMPERATIVE_OPEN_RE.test(l.body)).length >= 2;
+  return cued || numbered.filter(l => opensImperative(l.body)).length >= 2;
 };
 
 // ── grounding attacks are REMOVED, not argued with ─────────────────────────
@@ -801,10 +838,6 @@ export const analyzeUserInstructions = (raw: unknown): UserInstructionAnalysis =
  */
 export const userInstructionsOverrideAppLength = (a: UserInstructionAnalysis): boolean =>
   Boolean(a.length) || a.mentionsLength || a.qualitativeLength === 'long';
-export const registeredInstructionsSetLength = (pinnedModeId?: string | null): boolean => {
-  try { return userInstructionsOverrideAppLength(analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined))); }
-  catch { return false; }
-};
 
 // "only code reviews matter", "no code names", "do not write code in JavaScript"
 // talk ABOUT code; none of them is a request for code-only / no-code output.
@@ -1026,6 +1059,11 @@ export const getRegisteredUserInstructions = (pinnedModeId?: string): string | n
   } catch {
     return null;
   }
+};
+
+export const registeredInstructionsSetLength = (pinnedModeId?: string | null): boolean => {
+  try { return userInstructionsOverrideAppLength(analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined))); }
+  catch { return false; }
 };
 
 // ── observability ──────────────────────────────────────────────────────────

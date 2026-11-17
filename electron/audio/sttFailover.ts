@@ -34,7 +34,7 @@
  * clock and timers are injected for the tests.
  */
 
-import { isCoveredByLive, type SttSource } from './sttGapRecovery';
+import { repeatsLiveText, type SttSource } from './sttGapRecovery';
 import { providerHasPendingWork, sttTailTimingFor, type SttTailTiming } from './sttTailTiming';
 
 /** The provider surface used here (main's STTProvider shares it). */
@@ -100,6 +100,7 @@ export interface SttFailoverOptions {
     recentFinalsMs?: number;
     /** After every stand-in failed (or none is set up), wait this long before trying again. */
     retryAfterMs?: number;
+    handbackDedupeMs?: number;
 }
 
 /** User-facing provider names for the notice. */
@@ -190,6 +191,9 @@ export class SttFailover {
     private readonly recentFinalsMs: number;
     private readonly retryAfterMs: number;
     private exhaustedAt: number | null = null;
+    private readonly handbackDedupeMs: number;
+    /** Until when the primary's finals are checked against the stand-in's (after a recovery). */
+    private handbackUntil = 0;
 
     constructor(private readonly deps: SttFailoverDeps, options: SttFailoverOptions = {}) {
         this.now = deps.now ?? Date.now;
@@ -197,6 +201,7 @@ export class SttFailover {
         this.fallbackMaxErrors = options.fallbackMaxErrors ?? 3;
         this.recentFinalsMs = options.recentFinalsMs ?? 60_000;
         this.retryAfterMs = options.retryAfterMs ?? 120_000;
+        this.handbackDedupeMs = options.handbackDedupeMs ?? 10_000;
     }
 
     get active(): boolean {
@@ -231,12 +236,22 @@ export class SttFailover {
      * first final with text means it is back.
      */
     acceptPrimary(seg: LiveSegment): boolean {
-        if (this.phase !== 'fallback') return true;
         const text = (seg.text ?? '').trim();
+        if (this.phase !== 'fallback') {
+            if (!seg.isFinal || !text || this.handbackUntil === 0) return true;
+            if (this.now() > this.handbackUntil) {
+                this.handbackUntil = 0;
+                this.recentFinals = [];
+                return true;
+            }
+            return !repeatsLiveText(text, this.recentTexts());
+        }
         if (!seg.isFinal || !text) return false;
         const recent = this.recentTexts();
         this.disengage('recovered');
-        return !isCoveredByLive(text, recent);
+        this.recentFinals = recent.map((t) => ({ text: t, at: this.now() }));
+        this.handbackUntil = this.now() + this.handbackDedupeMs;
+        return !repeatsLiveText(text, recent);
     }
 
     write(chunk: Buffer): void {
@@ -316,6 +331,7 @@ export class SttFailover {
     }
 
     private startNextFallback(): boolean {
+        this.handbackUntil = 0;
         let ids: string[] = [];
         try { ids = this.deps.candidates(); } catch { ids = []; }
         for (const id of ids) {
@@ -388,6 +404,7 @@ export class SttFailover {
         this.stopProbe();
         this.phase = 'primary';
         this.recentFinals = [];
+        this.handbackUntil = 0;
         this.exhaustedAt = reason === 'exhausted' ? this.now() : null;
         this.deps.log?.(`${this.deps.source}: back to ${this.deps.primary} (${reason})`);
         // A teardown reports nothing: the channel is going away.

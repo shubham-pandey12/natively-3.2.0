@@ -1351,7 +1351,7 @@ import { canDiarize, shouldDiarize, withVoiceEpoch } from "./audio/sttDiarizatio
 import { loadAutoAnswerPremium, type AutoAnswerAccess, type AutoAnswerDecider, type AutoAnswerModelInstaller, type AutoAnswerSavingsLedger, type TrainingUploader } from "./premium/autoAnswer"
 import { currentWhisperGlossaryPrompt, nameTerms, setSttContextTerms, setSttDictionaryTerms } from "./audio/sttContextTerms"
 import { getUserDictionary } from "./audio/userDictionary"
-import { LOCAL_STT_PROVIDERS, SttGapRecoveryCoordinator, type RecoveredSegment, type SttSource } from "./audio/sttGapRecovery"
+import { LOCAL_STT_PROVIDERS, SttGapRecoveryCoordinator, recoveredLineMayBeAnswered, type RecoveredSegment, type SttSource } from "./audio/sttGapRecovery"
 import { SttFailover, failoverNotice, type FailoverCause, type FailoverStatus } from "./audio/sttFailover"
 import { resolveAutoAnswerThresholds } from "./context-intelligence/policies/mode-policy-registry"
 import type { SpeechEdge } from "./audio/speechEdge"
@@ -3831,7 +3831,7 @@ export class AppState {
     watchdogEnabled: (source) => this._sttGapProvider[source].streaming,
   });
 
-  /** A recovered line goes into the session at the time it was said; it triggers no answer. */
+  /** A recovered line goes into the session at the time it was said. */
   private insertRecoveredTranscript(seg: RecoveredSegment): void {
     if (!this.isMeetingActive && !this._isDraining) return;
     const speaker = seg.source === 'system' ? 'interviewer' : 'user';
@@ -3845,8 +3845,16 @@ export class AppState {
       sttProvider: seg.transcriberId,
       punctuationSource: punctuationSourceFor(seg.transcriberId, true),
     });
-    if (inserted && this.ragManager) {
+    if (!inserted) return;
+    if (this.ragManager) {
       this.ragManager.feedLiveTranscript([{ speaker, text: seg.text, timestamp: seg.timestamp }]);
+    }
+    if (this.isAutoAnswerActive() && recoveredLineMayBeAnswered(seg, Date.now())) {
+      this.simpleAutoAnswer.ingest({
+        speaker: 'interviewer', text: seg.text, timestamp: seg.timestamp,
+        final: true, confidence: 1, origin: 'stt', sttProvider: seg.transcriberId,
+        punctuationSource: punctuationSourceFor(seg.transcriberId, true),
+      });
     }
   }
   // ── AUTO ANSWER (Settings > General, default OFF) ────────────────────────

@@ -9,6 +9,10 @@ import type { AttemptId, TurnIdentity } from './llm/turnIdentity';
 import { stripGistTrailer } from '../src/lib/displayMarkup';
 import { createActiveDesignState, type ActiveDesign } from '../src/lib/diagram/activeDesign.mjs';
 import { replaceMermaidSource } from '../src/lib/diagram/fencedBlocks.mjs';
+import { isCodingContinuation } from './llm/codingFollowup';
+
+const MOVE_ON_TO_NEW_PROBLEM_RE = /\b(?:mov(?:e|ing)|go(?:ing)?|jump(?:ing)?|switch(?:ing)?|turn(?:ing)?)\s+on\s*to\s+(?:the\s+|a\s+|our\s+|your\s+)?(?:next|main|new|another|different|second|third|final|last|actual)\s+(?:problem|question|exercise|challenge|task|one)\b|\bhere(?:'s|\s+is)\s+(?:the|your|a|our)\s+(?:next|new|second|third|final|main)\s+(?:problem|question|exercise|challenge)\b|^\W*(?:(?:ok(?:ay)?|alright|all right|great|cool|good|so|now)[\s,.!]+)*(?:the\s+)?next\s+(?:problem|question|exercise|challenge)\b/i;
+const CANDIDATE_QUESTION_RE = /\bhow(?:'s|\s+is|\s+was|\s+has)\s+your\s+(?:day|week|weekend|morning|afternoon|evening)\b|\b(?:have|did|do)\s+you\s+(?:ever\s+)?(?:use[ds]?|work(?:ed)?|buil[dt]|writ(?:e|ten)|wrote|done|tried|had|seen|enjoy|like)\b|\bhow\s+long\s+have\s+you\b|\btell\s+me\s+(?:about|a\s+bit\s+about)\s+(?:yourself|you|your|a\s+time)\b|\b(?:your|you\s+had)\s+(?:experience|background|weekend|last\s+(?:job|role|project|company)|previous\s+(?:job|role|project|company)|current\s+(?:job|role|project|company))\b|\bat\s+work\b|\bwalk\s+me\s+through\s+your\b/i;
 
 // Canned-fallback phrases that mean the model gave up entirely, not phrases
 // that might legitimately appear inside a real answer. Matched only when the
@@ -271,6 +275,13 @@ export class SessionTracker {
 
     // Rolling buffer for multi-segment interviewer question detection
     private recentInterviewerBuffer: { text: string; timestamp: number }[] = [];
+    private statementHoldsProblem = false;
+    private statementsAfterProblem: { seq: number; text: string; at: number }[] = [];
+    private statementSeq = 0;
+    private static readonly SAID_AFTER_MAX_STATEMENTS = 4;
+    private static readonly SAID_AFTER_MAX_CHARS = 700;
+    private static readonly STATEMENT_GAP_MS = 90_000;
+    private static readonly CANDIDATE_ACK_MAX_WORDS = 3;
     private static readonly INTERVIEWER_BUFFER_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
     // Screenshot-detected question stays sticky for 3 min before transcript can override
     private static readonly SCREENSHOT_STALE_MS = 3 * 60 * 1000;
@@ -320,6 +331,7 @@ export class SessionTracker {
             this.detectedCodingQuestion = trimmed;
             this.codingQuestionSource = source;
             this.codingQuestionSetAt = now;
+            this.statementsAfterProblem = [];
             console.log(`[SessionTracker] Coding question stored`, { source, length: trimmed.length });
             return;
         }
@@ -329,6 +341,7 @@ export class SessionTracker {
             this.detectedCodingQuestion = trimmed;
             this.codingQuestionSource = source;
             this.codingQuestionSetAt = now;
+            this.statementsAfterProblem = [];
             console.log(`[SessionTracker] Coding question updated via screenshot`, { length: trimmed.length });
             return;
         }
@@ -342,6 +355,7 @@ export class SessionTracker {
             this.detectedCodingQuestion = trimmed;
             this.codingQuestionSource = source;
             this.codingQuestionSetAt = now;
+            this.statementsAfterProblem = [];
             console.log(`[SessionTracker] Coding question updated via transcript`, { source: this.codingQuestionSource, stale: isStale, length: trimmed.length });
         } else {
             console.log(`[SessionTracker] Transcript question ignored — screenshot question is recent (< ${SessionTracker.SCREENSHOT_STALE_MS / 1000}s)`);
@@ -352,11 +366,29 @@ export class SessionTracker {
         return { question: this.detectedCodingQuestion, source: this.codingQuestionSource, setAt: this.codingQuestionSetAt };
     }
 
+    getActiveCodingProblem(maxAgeMs: number, now = Date.now()): { question: string; source: 'screenshot' | 'transcript'; setAt: number; saidAfter: string[] } | null {
+        const question = this.detectedCodingQuestion;
+        const source = this.codingQuestionSource;
+        const setAt = this.codingQuestionSetAt;
+        if (!question || !source || setAt === null || now - setAt > maxAgeMs) return null;
+        const saidAfter: string[] = [];
+        let chars = 0;
+        for (let i = this.statementsAfterProblem.length - 1; i >= 0; i--) {
+            const text = this.statementsAfterProblem[i].text;
+            if (saidAfter.length > 0 && chars + text.length > SessionTracker.SAID_AFTER_MAX_CHARS) break;
+            saidAfter.unshift(text.length > SessionTracker.SAID_AFTER_MAX_CHARS ? `…${text.slice(-SessionTracker.SAID_AFTER_MAX_CHARS)}` : text);
+            chars += text.length;
+        }
+        return { question, source, setAt, saidAfter };
+    }
+
     clearCodingQuestion(): void {
         this.detectedCodingQuestion = null;
         this.codingQuestionSource = null;
         this.codingQuestionSetAt = null;
         this.recentInterviewerBuffer = [];
+        this.statementHoldsProblem = false;
+        this.statementsAfterProblem = [];
     }
 
     /**
@@ -374,6 +406,8 @@ export class SessionTracker {
         this.codingQuestionSource = null;
         this.codingQuestionSetAt = null;
         this.recentInterviewerBuffer = [];
+        this.statementHoldsProblem = false;
+        this.statementsAfterProblem = [];
         this.lastAssistantMessage = null;
         this.assistantResponseHistory = [];
         this.lastInterimInterviewer = null;
@@ -387,17 +421,21 @@ export class SessionTracker {
      * on casual conversation ("can you implement X?" → yes, "sounds good!" → no).
      */
     private looksLikeCodingQuestion(text: string): boolean {
-        if (text.length < 50) return false;
+        return text.length >= 30 && SessionTracker.codingSignalCount(text) >= 2;
+    }
+
+    private static codingSignalCount(text: string): number {
         const patterns = [
-            /\b(implement|write|code|solve|design|build|create)\b/i,
+            /\b(implement(?:s|ed|ing)?|writ(?:e|es|ing)|cod(?:e|es|ing)|solv(?:e|es|ing)|design(?:s|ing)?|build(?:s|ing)?|creat(?:e|es|ing))\b/i,
             /\b(given\s+(an?|the)\s+(array|string|list|tree|graph|matrix|number|integer|node|linked list|stack|queue|heap))\b/i,
             /\b(return|find\s+(all|the|a|any)|count|check\s+if|determine|calculate|maximize|minimize|sort)\b/i,
             /\b(function|method|algorithm|data structure|class)\b/i,
             /\b(O\(n\)|time complexity|space complexity|optimal|efficient|brute force)\b/i,
-            /\b(two sum|three sum|binary search|dynamic programming|BFS|DFS|palindrome|anagram|substring|subarray|rotation)\b/i,
+            /\b(two sum|three sum|binary search|dynamic programming|BFS|DFS|palindrome|anagram|substring|subarray|rotat(?:e|es|ion))\b/i,
+            /\b(microservices?|services?|apis?|endpoints?|lru|cache|linked list|hash ?(?:map|table|set)|trie|iterator|rate limiter|parser|encrypt\w*|decrypt\w*)\b/i,
+            /\b(at (?:least|most) (?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|k|n)|every (?:second|minute|hour|day|\d+)|get and put)\b/i,
         ];
-        const matchCount = patterns.filter(p => p.test(text)).length;
-        return matchCount >= 2;
+        return patterns.filter(p => p.test(text)).length;
     }
 
     // ============================================
@@ -654,26 +692,60 @@ export class SessionTracker {
                 this.lastInterimInterviewer = segment;
             } else {
                 this.lastInterimInterviewer = null;
-
-                // Add segment to rolling buffer and evict old entries
-                this.recentInterviewerBuffer.push({ text: segment.text, timestamp: segment.timestamp });
-                const bufferCutoff = Date.now() - SessionTracker.INTERVIEWER_BUFFER_WINDOW_MS;
-                this.recentInterviewerBuffer = this.recentInterviewerBuffer.filter(e => e.timestamp >= bufferCutoff);
-
-                // Test single segment first; if no match, test accumulated recent turns
-                // (interviewer may state a problem across multiple speech segments)
-                if (this.looksLikeCodingQuestion(segment.text)) {
-                    this.setCodingQuestion(segment.text, 'transcript');
-                } else if (this.recentInterviewerBuffer.length > 1) {
-                    const combinedText = this.recentInterviewerBuffer.map(e => e.text).join(' ');
-                    if (this.looksLikeCodingQuestion(combinedText)) {
-                        this.setCodingQuestion(combinedText, 'transcript');
-                    }
-                }
+                this.trackInterviewerStatement(segment);
             }
+        } else if (segment.final && segment.speaker === 'user' && segment.text.trim().split(/\s+/).length > SessionTracker.CANDIDATE_ACK_MAX_WORDS) {
+            this.endInterviewerStatement();
         }
 
         return this.addTranscript(segment);
+    }
+
+    private endInterviewerStatement(): void {
+        this.recentInterviewerBuffer = [];
+        this.statementHoldsProblem = false;
+        this.statementSeq++;
+    }
+
+    private trackInterviewerStatement(segment: TranscriptSegment): void {
+        const text = segment.text.trim();
+        if (!text) return;
+        if (MOVE_ON_TO_NEW_PROBLEM_RE.test(text)) {
+            this.detectedCodingQuestion = null;
+            this.codingQuestionSource = null;
+            this.codingQuestionSetAt = null;
+            this.statementsAfterProblem = [];
+            this.endInterviewerStatement();
+        }
+        const last = this.recentInterviewerBuffer.at(-1);
+        if (last && segment.timestamp - last.timestamp > SessionTracker.STATEMENT_GAP_MS) this.endInterviewerStatement();
+        const cutoff = Date.now() - SessionTracker.INTERVIEWER_BUFFER_WINDOW_MS;
+        this.recentInterviewerBuffer = this.recentInterviewerBuffer.filter(entry => entry.timestamp >= cutoff);
+        if (CANDIDATE_QUESTION_RE.test(text)) {
+            this.endInterviewerStatement();
+            return;
+        }
+        if (isCodingContinuation(text)) {
+            if (this.looksLikeCodingQuestion(text)) {
+                this.setCodingQuestion(text, 'transcript');
+            } else if (!this.statementHoldsProblem && this.recentInterviewerBuffer.length > 0) {
+                const combined = [...this.recentInterviewerBuffer.map(entry => entry.text), text].join(' ');
+                if (this.looksLikeCodingQuestion(combined)) this.setCodingQuestion(combined, 'transcript');
+            }
+            this.endInterviewerStatement();
+            return;
+        }
+        this.recentInterviewerBuffer.push({ text, timestamp: segment.timestamp });
+        const combined = this.recentInterviewerBuffer.map(entry => entry.text).join(' ');
+        if (this.looksLikeCodingQuestion(text) || (this.recentInterviewerBuffer.length > 1 && this.looksLikeCodingQuestion(combined))) {
+            this.setCodingQuestion(combined, 'transcript');
+            this.statementHoldsProblem = this.codingQuestionSource === 'transcript' && this.detectedCodingQuestion === combined;
+        } else if (!this.statementHoldsProblem && combined.split(/\s+/).length >= 4) {
+            const lastStatement = this.statementsAfterProblem.at(-1);
+            if (lastStatement && lastStatement.seq === this.statementSeq) lastStatement.text = combined;
+            else this.statementsAfterProblem.push({ seq: this.statementSeq, text: combined, at: Date.now() });
+            if (this.statementsAfterProblem.length > SessionTracker.SAID_AFTER_MAX_STATEMENTS) this.statementsAfterProblem.shift();
+        }
     }
 
     // ============================================
@@ -1232,6 +1304,8 @@ export class SessionTracker {
         this.codingQuestionSource = null;
         this.codingQuestionSetAt = null;
         this.recentInterviewerBuffer = [];
+        this.statementHoldsProblem = false;
+        this.statementsAfterProblem = [];
         this.activeDesign.clear();
         this.pendingDiagramRepairs = [];
         this.lastRepairedAnswer = null;

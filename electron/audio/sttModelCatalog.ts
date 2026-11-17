@@ -57,7 +57,7 @@ export const STT_MODEL_CATALOG: Record<SttModelProvider, { defaultId: string; mo
             { id: 'nova-3-medical', label: 'Nova-3 Medical', description: 'Medical vocabulary, English only', englishOnly: true },
             {
                 id: 'nova-2', label: 'Nova-2', description: 'Previous generation',
-                unsupportedLanguages: ['mr', 'ta', 'te', 'bn', 'gu', 'kn', 'ml', 'pa', 'ur'],
+                unsupportedLanguages: ['mr', 'ta', 'te', 'bn', 'gu', 'kn', 'ml', 'pa', 'ur', 'ne'],
             },
             { id: 'nova-2-meeting', label: 'Nova-2 Meeting', description: 'Tuned for meetings, English only', englishOnly: true },
         ],

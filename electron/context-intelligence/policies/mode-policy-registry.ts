@@ -527,3 +527,29 @@ export function profileIntelligenceEligibility(templateType: unknown): ProfileIn
 export function isProfileIntelligenceAllowed(templateType: unknown): boolean {
   return profileIntelligenceEligibility(templateType).allowed;
 }
+
+const REFERENCE_FIRST_AUTHORITIES = new Set([
+  'reference_files_only', 'reference_files_primary', 'reference_files_plus_transcript',
+]);
+
+export function applyModeSourceContract(
+  policy: ModePolicy,
+  contract?: { origin: string; sourceAuthority: string } | null,
+): ModePolicy {
+  if (!contract || contract.origin === 'default_new_mode') return policy;
+  if (!REFERENCE_FIRST_AUTHORITIES.has(contract.sourceAuthority)) return policy;
+  if (!policy.retrievalPolicy.enabled) return policy;
+  const allowed = policy.allowedSourceTypes.includes('REFERENCE_FILE')
+    ? policy.allowedSourceTypes : [...policy.allowedSourceTypes, 'REFERENCE_FILE' as const];
+  const priorities = Object.values(policy.sourcePriorities).filter((n): n is number => typeof n === 'number');
+  const top = priorities.length ? Math.min(...priorities) : 1;
+  const ref = policy.sourcePriorities.REFERENCE_FILE;
+  const othersAtTop = Object.entries(policy.sourcePriorities).some(([k, n]) => k !== 'REFERENCE_FILE' && n === top);
+  if (ref === top && !othersAtTop && allowed === policy.allowedSourceTypes) return policy;
+  return {
+    ...policy,
+    allowedSourceTypes: allowed,
+    sourcePriorities: { ...policy.sourcePriorities, REFERENCE_FILE: top - 1 },
+    attachedMaterialIsPrimary: true,
+  };
+}

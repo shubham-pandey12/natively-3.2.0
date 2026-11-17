@@ -7,7 +7,8 @@ export const MIC_ECHO_PAIR_SHARE = 0.7;
 export class MicEchoGuard {
   private finals: Array<{ text: string; at: number }> = [];
   private interim: { text: string; at: number } | null = null;
-  noteInterviewer(text: string, isFinal: boolean, nowMs: number): void {
+    /** Every interviewer segment (finals and interims), as it arrives. */
+    noteInterviewer(text: string, isFinal: boolean, nowMs: number): void {
     const t = (text ?? '').trim();
     if (!t) return;
     if (isFinal) {

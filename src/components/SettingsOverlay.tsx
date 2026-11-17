@@ -1477,7 +1477,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
     const allowedLanguageKeySet = localLanguageCapability?.allowedKeys ?? nvidiaLanguageCapability ?? deepgramLanguageCapability ?? appleLanguageCapability ?? null;
     const isLanguageEntryAllowed = (key: string) =>
-        isRecognitionLanguageOffered(key, localLanguageCapability?.allowedKeys ?? null, allowedLanguageKeySet);
+        isRecognitionLanguageOffered(key, localLanguageCapability?.allowedKeys ?? null, allowedLanguageKeySet, sttProvider);
 
     // Helper to get unique groups (restricted to what the active model accepts)
     const languageGroups = Array.from(new Set(

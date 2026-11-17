@@ -3650,7 +3650,7 @@ export class DatabaseManager {
     public saveMeeting(meeting: Meeting, startTimeMs: number, durationMs: number) {
         if (!this.db) {
             console.error('[DatabaseManager] DB not initialized');
-            throw new Error('Database not initialized or closed');
+            return;
         }
 
         // An UPSERT, not INSERT OR REPLACE (2026-10-04). REPLACE resolves the

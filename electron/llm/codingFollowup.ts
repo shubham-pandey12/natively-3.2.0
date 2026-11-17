@@ -241,6 +241,26 @@ function isLanguageRequest(question: string): boolean {
 const DIRECT_ACTION_RE =
   /^(?:(?:ok(?:ay)?|so|now|and|please)[,.!]?\s+)*(?:(?:can|could)\s+you\s+)?(?:implement|write|code|solve)\s+(?:this|it|that|the\s+(?:solution|same|above))(?:\s+(?:now|please|again))?\s*[?.!]*$/i;
 
+/** Regex that matches the annotation appended by withActiveCodingProblem. */
+export const ACTIVE_CODING_PROBLEM_NOTE_RE = / \(follow-up to the coding problem[\s\S]*\)$/;
+
+/**
+ * Annotates a follow-up ask with the active coding problem context so the
+ * model answers the PROBLEM rather than treating the ask as a fresh question.
+ * When the interviewer has spoken since the problem was set, their latest
+ * statement(s) are injected so the model can resolve it over the problem.
+ */
+export function withActiveCodingProblem(ask: string, problem: string, saidAfter: string[] = []): string {
+  if (saidAfter.length === 0)
+    return `${ask} (follow-up to the coding problem: "${problem}")`;
+  return `${ask} (follow-up to the coding problem the interviewer is on now. Their latest statement before this ask: "${saidAfter.join(' ')}". Earlier problem: "${problem}". If the latest statement describes a task or problem, solve that task instead of the earlier problem. Only if it just talks about the earlier problem, solve the earlier problem.)`;
+}
+
+/** True when the question already carries the active-coding-problem annotation. */
+export function isActiveCodingProblemFollowUp(question: string | null | undefined): boolean {
+  return ACTIVE_CODING_PROBLEM_NOTE_RE.test(question || '');
+}
+
 export function isCodingContinuation(question: string): boolean {
   const q = lc(question);
   if (!q) return false;

@@ -92,6 +92,12 @@ describe('D1 — V3 evidence markup is classified', () => {
     assert.deepEqual(call('inferEmbeddedMessageScopes', h, ''), []);
     assert.deepEqual(call('inferEmbeddedMessageScopes', h, 'just a question'), []);
   });
+
+  test('premium profile blocks carry profile_history in context and message', () => {
+    const block = '<salary_intelligence>Private compensation</salary_intelligence>';
+    assert.ok(call('inferContextScopes', h, block).includes('profile_history'));
+    assert.ok(call('inferEmbeddedMessageScopes', h, block).includes('profile_history'));
+  });
 });
 
 // ── D2: the strip actually strips ───────────────────────────────────────────
@@ -111,6 +117,14 @@ describe('D2 — denied blocks are removed from the message', () => {
     const msg = v3Prompt([evidenceBlock('RESUME', SECRET_RESUME)]);
     const out = strip(msg, ['profile_history']);
     assert.ok(!out.includes(SECRET_RESUME), 'LEAK: résumé evidence survived the strip');
+  });
+
+  test('profile_history denial removes premium profile blocks', () => {
+    const msg = '<target_job>Confidential role</target_job>\n<salary_intelligence>Private compensation</salary_intelligence>\nKeep this question';
+    const out = strip(msg, ['profile_history']);
+    assert.ok(!out.includes('Confidential role'));
+    assert.ok(!out.includes('Private compensation'));
+    assert.ok(out.includes('Keep this question'));
   });
 
   test('transcript denial removes meeting evidence, legacy transcript blocks and the conversation section', () => {

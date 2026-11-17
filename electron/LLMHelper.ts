@@ -45,7 +45,7 @@ import {
   DEFAULT_TEXT_FALLBACK_CONFIG,
   type TextStreamProvider,
 } from "./llm/textStreamFallback"
-import { isPermanentKeyError } from "./llm/providerErrorClassifier"
+import { isPermanentKeyError, PROVIDERS_EXHAUSTED_CODE } from "./llm/providerErrorClassifier"
 import { telemetryService } from "./services/telemetry/TelemetryService"
 import {
   ollamaVisionFromShow,
@@ -92,6 +92,8 @@ import type {
   DirectAssistRung,
   DirectAssistSelection,
 } from './direct-assist/types';
+const PREMIUM_PROFILE_BLOCK_RE = /<(?:target_job|target_job_context|salary_intelligence|company_research|gap_pivot_scripts|mock_question_hint|culture_alignment|live_negotiation_state|profile_jit_evidence_request)\b/i;
+const PREMIUM_PROFILE_BLOCK_STRIP_RE = /<(target_job|target_job_context|salary_intelligence|company_research|gap_pivot_scripts|mock_question_hint|culture_alignment|live_negotiation_state|profile_jit_evidence_request)\b[\s\S]*?<\/\1>\s*/gi;
 const NATIVELY_API_URL = nativelyApiBase();
 
 function nowMs(): number {
@@ -1211,6 +1213,7 @@ export class LLMHelper {
     if (!context?.trim()) return scopes;
     if (/<reference_file|<active_mode_retrieved_context|mode_retrieval/i.test(context)) scopes.push('reference_files');
     if (/<meeting_history|USER-PROVIDED PERSONA CONTEXT|<user_context|<candidate_|<active_mode_custom_instructions/i.test(context)) scopes.push('profile_history');
+    if (PREMIUM_PROFILE_BLOCK_RE.test(context)) scopes.push('profile_history');
     if (/<post_call_summary|meeting summary|silent meeting summarizer|silent meeting note-taker/i.test(context)) scopes.push('post_call_summary');
     // Context Intelligence V3 evidence markup. The patterns above are the
     // LEGACY tag vocabulary; V3 has been the default answer path since
@@ -1226,6 +1229,7 @@ export class LLMHelper {
     if (!message?.trim()) return scopes;
     if (/<reference_file|<active_mode_retrieved_context|mode_retrieval/i.test(message)) scopes.push('reference_files');
     if (/<meeting_history|USER-PROVIDED PERSONA CONTEXT|<user_context|<candidate_|<active_mode_custom_instructions/i.test(message)) scopes.push('profile_history');
+    if (PREMIUM_PROFILE_BLOCK_RE.test(message)) scopes.push('profile_history');
     if (/<post_call_summary/i.test(message)) scopes.push('post_call_summary');
     // V3 evidence markup — see inferContextScopes. A V3 prompt carries its
     // evidence in the MESSAGE (context is undefined), so this is the branch
@@ -1261,7 +1265,8 @@ export class LLMHelper {
         .replace(/<user_context\b[\s\S]*?<\/user_context>\s*/gi, '')
         .replace(/<active_mode_custom_instructions\b[\s\S]*?<\/active_mode_custom_instructions>\s*/gi, '')
         .replace(/<candidate_[a-z0-9_:-]+\b[\s\S]*?<\/candidate_[a-z0-9_:-]+>\s*/gi, '')
-        .replace(/<meeting_history\b[\s\S]*?<\/meeting_history>\s*/gi, '');
+        .replace(/<meeting_history\b[\s\S]*?<\/meeting_history>\s*/gi, '')
+        .replace(PREMIUM_PROFILE_BLOCK_STRIP_RE, '');
     }
     if (deniedScopes.includes('post_call_summary')) {
       scrubbed = scrubbed.replace(/<post_call_summary\b[\s\S]*?<\/post_call_summary>\s*/gi, '');
@@ -4015,9 +4020,16 @@ export class LLMHelper {
 
   /** The error for an answer nothing could give: the Natively limit while it
    *  holds, else "no provider". */
-  private exhaustedChainError(): Error {
+  private exhaustedChainError(lastProviderError?: unknown): Error {
     if (this.nativelyLimit && this.nativelyQuotaBlockedUntil > Date.now()) {
       return new Error(nativelyLimitErrorMessage(this.nativelyLimit));
+    }
+    if (lastProviderError != null) {
+      const err = new Error('All configured AI providers failed to answer.') as Error & { code?: string; cause?: unknown; firstProviderError?: unknown };
+      err.code = PROVIDERS_EXHAUSTED_CODE;
+      err.cause = lastProviderError;
+      err.firstProviderError = lastProviderError;
+      return err;
     }
     return new Error(this.noProviderAvailableMessage());
   }
@@ -5027,7 +5039,7 @@ try {
             // shared resolver (.audit/coding-template-audit-2026-08-18.md).
             ...(() => {
               try {
-                const { resolveCodingPromptSignals, isDeicticAsk, screenPromotedCodingSignals } = require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals');
+                const { resolveCodingPromptSignals, isImageCodingAsk, screenPromotedCodingSignals } = require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals');
                 const resolved = resolveCodingPromptSignals({ answerType: routeOptions?.answerType, question: message });
                 // Attached-screenshot promotion (2026-08-19 channel audit): a
                 // message with an image whose text only points at it ("solve
@@ -5037,7 +5049,7 @@ try {
                 // boundary skips non-coding screenshots.
                 if (!resolved.codingTask
                     && (imagePaths?.length ?? 0) > 0
-                    && (!message?.trim() || isDeicticAsk(message))) {
+                    && isImageCodingAsk(message)) {
                   // The screenshot grounds the problem; the words decide the shape.
                   return screenPromotedCodingSignals(message);
                 }
@@ -6510,12 +6522,22 @@ let isMultimodal = !!(imagePaths?.length);
     // its controller's). Only the Natively rung and the preferFast pick take it
     // mid-call; the others finish their in-flight request, then the ladder stops
     // instead of trying the next rung or rotation. An aborted call never resolves.
-    opts?: { preferFast?: boolean; signal?: AbortSignal },
+    opts?: { preferFast?: boolean; signal?: AbortSignal; dataScopes?: ProviderDataScope[] },
   ): Promise<string> {
     const signal = opts?.signal;
     const aborted = () => signal?.aborted === true;
     const abortError = () => Object.assign(new Error('structured generation aborted: superseded or cancelled'), { name: 'AbortError' });
     if (aborted()) throw abortError();
+
+    if (opts?.dataScopes?.length) {
+      const deniedStructured = getDeniedDataScopes(opts.dataScopes, this.getProviderScopePolicy());
+      if (deniedStructured.length > 0) {
+        const ollamaAvailable = this.useOllama && await this.ensureOllamaModelSelected();
+        for (const scope of deniedStructured) this.logScopeFallback(scope, ollamaAvailable ? 'routing' : 'omitting');
+        if (ollamaAvailable) return this.processResponse(await this.callOllama(message));
+        throw Object.assign(new Error(`Not sent: a privacy setting keeps this data off cloud providers (Settings > AI Providers > Privacy — cloud data scopes: ${scopeLabels(deniedStructured)}).`), { name: 'ProviderScopeDenied' });
+      }
+    }
 
     type ProviderAttempt = { name: string; execute: () => Promise<string> };
     const providers: ProviderAttempt[] = [];
@@ -10119,7 +10141,7 @@ let isMultimodal = !!(imagePaths?.length);
             // shared resolver (.audit/coding-template-audit-2026-08-18.md).
             ...(() => {
               try {
-                const { resolveCodingPromptSignals, isDeicticAsk, screenPromotedCodingSignals } = require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals');
+                const { resolveCodingPromptSignals, isImageCodingAsk, screenPromotedCodingSignals } = require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals');
                 const resolved = resolveCodingPromptSignals({ answerType: routeOptions?.answerType, question: message });
                 // Attached-screenshot promotion (2026-08-19 channel audit): a
                 // message with an image whose text only points at it ("solve
@@ -10129,7 +10151,7 @@ let isMultimodal = !!(imagePaths?.length);
                 // boundary skips non-coding screenshots.
                 if (!resolved.codingTask
                     && (imagePaths?.length ?? 0) > 0
-                    && (!message?.trim() || isDeicticAsk(message))) {
+                    && isImageCodingAsk(message)) {
                   // The screenshot grounds the problem; the words decide the shape.
                   return screenPromotedCodingSignals(message);
                 }
@@ -11891,6 +11913,7 @@ let isMultimodal = !!(imagePaths?.length);
     // winner does not change answer STYLE — only who serves it. Multimodal with
     // images keeps the dedicated Groq-multimodal path (vision is handled by the
     // separate vision fallback when a vision model is selected).
+    let lastProviderError: unknown = null;
     if (this.currentModelId === 'natively') {
       // Bug found during Phase 2 harness investigation (2026-07-27): this gate
       // used to check CredentialsManager.getNativelyApiKey() directly, which
@@ -12057,6 +12080,7 @@ let isMultimodal = !!(imagePaths?.length);
               yield LLMHelper.TRUNCATION_SENTINEL;
               return;
             }
+            lastProviderError = raceErr;
             console.warn('[LLMHelper] Text TTFT race exhausted, falling through to Gemini:', raceErr?.message);
             telemetryService.track({ name: 'provider_error', durationMs: Date.now() - raceStart, properties: { path: 'text', stage: 'race_exhausted' } });
             // Fall through to the Gemini block below as the final safety net.
@@ -12119,6 +12143,7 @@ let isMultimodal = !!(imagePaths?.length);
           yield LLMHelper.TRUNCATION_SENTINEL;
           return;
         }
+        lastProviderError = e;
         console.warn('[LLMHelper] Gemini cascade failed pre-commit — falling through to next provider:', e?.message || e);
         // fall through to the Natively last-resort below
       }
@@ -12138,6 +12163,7 @@ let isMultimodal = !!(imagePaths?.length);
           yield LLMHelper.TRUNCATION_SENTINEL;
           return;
         }
+        lastProviderError = e;
         console.warn('[LLMHelper] Natively last-resort fallback failed:', e.message);
       }
     }
@@ -12182,6 +12208,7 @@ let isMultimodal = !!(imagePaths?.length);
           yield LLMHelper.TRUNCATION_SENTINEL;
           return;
         }
+        lastProviderError = e;
         console.warn(`[LLMHelper] Configured custom last-resort failed: ${e?.message || e}`);
       } finally {
         // Restore — never leave a non-active customProvider on the instance,
@@ -12191,7 +12218,7 @@ let isMultimodal = !!(imagePaths?.length);
       }
     }
 
-    throw this.exhaustedChainError();
+    throw this.exhaustedChainError(lastProviderError);
   }
 
   /**

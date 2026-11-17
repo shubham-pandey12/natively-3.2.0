@@ -147,10 +147,23 @@ export function classifyProviderError(err: any, text?: string): ProviderErrorCla
  * catch. Timeouts and empty streams keep the graceful retry: those already
  * have their own deadline fallbacks and the retry wording is honest there.
  */
+export const PROVIDERS_EXHAUSTED_CODE = 'PROVIDERS_EXHAUSTED';
+const PROVIDERS_UNREACHABLE_LINE = "The AI provider is unreachable or overloaded right now, so I couldn't generate an answer. Try again in a moment.";
+
+/** Every provider in the chain failed; `cause` holds the last provider's own error. */
+export function isProvidersExhaustedError(err: unknown): boolean {
+  return !!err && typeof err === 'object' && (err as { code?: unknown }).code === PROVIDERS_EXHAUSTED_CODE;
+}
+
 export function providerFailureUserMessage(err: unknown): string | null {
   if (!err) return null;
   const own = accountOrSetupUserMessage(err);
   if (own) return own;
+  if (isProvidersExhaustedError(err)) {
+    const cause = (err as { cause?: unknown }).cause;
+    const specific = cause && !isProvidersExhaustedError(cause) ? providerFailureUserMessage(cause) : null;
+    return specific ?? PROVIDERS_UNREACHABLE_LINE;
+  }
   const rejection = providerRejectionUserMessage(err);
   if (rejection) return rejection;
   const c = classifyProviderError(err);

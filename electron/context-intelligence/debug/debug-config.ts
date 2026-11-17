@@ -119,3 +119,16 @@ export function describeContextDebugConfig(): {
     contentInclusion: getContentInclusionEnabled(level),
   };
 }
+
+export function logSafeText(text: unknown): string {
+  const s = text == null ? '' : String(text);
+  let open = false;
+  try { open = getContentInclusionEnabled(); } catch { open = false; }
+  return open ? s : `<${s.length} chars>`;
+}
+
+export function logSafeFileName(filePath: unknown): string {
+  const s = filePath == null ? '' : String(filePath);
+  const parts = s.split(/[\\/]/);
+  return parts[parts.length - 1] || s;
+}

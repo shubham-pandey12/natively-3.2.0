@@ -19,8 +19,22 @@
 import { isCodingAnswerType, type AnswerType } from './AnswerPlanner';
 import { detectExplicitCodingContract, type ExplicitCodingContract } from './codingFollowup';
 import type { CodingShape } from './codingContract';
-import { detectCodingShape } from './codingShape';
+import { detectCodingShape, namesCodingShape } from './codingShape';
 import { getRegisteredUserInstructions, resolveCodingFormatFromInstructions } from './userInstructionContract';
+
+// Words that make a deictic ask "screen-only" — the user is pointing at the
+// screen and asking to look at / work with it rather than introducing a new topic.
+const SCREEN_ONLY_WORDS = new Set([
+  'it', 'this', 'that', 'here', 'there', 'above', 'below', 'now', 'next',
+  'please', 'ok', 'okay', 'go', 'do', 'run', 'try', 'show', 'give', 'help',
+  'solve', 'fix', 'code', 'write', 'implement', 'answer', 'solve', 'work',
+  'looks', 'look', 'see', 'check', 'read', 'debug', 'explain', 'analyze',
+  'analyse', 'review', 'what', 'how', 'why', 'screen', 'question', 'problem',
+  'the', 'a', 'an', 'my', 'this', 'that', 'these', 'those',
+]);
+
+/** Matches a question that names a code artifact or programming concept. */
+const CODE_NOUN_RE = /\b(?:code|function|snippet|program|method|class|algorithm|solution|implementation|bug|compile[sd]?|tests?|leetcode|hackerrank|query|sql|regex|stack\s*trace|output)\b/i;
 
 /**
  * Which coding contract the turn wants.
@@ -194,6 +208,39 @@ export function isDeicticAsk(question: string | undefined | null): boolean {
   return DEICTIC_ASK_RE.test(q);
 }
 
+/**
+ * True when the question contains no context-introducing words — the user is
+ * pointing at the screen and not introducing any topic. Used to gate image
+ * coding promotion (screen-only asks that name a code artifact or shape are
+ * promoted; topical asks are not).
+ */
+export function isScreenOnlyAsk(question: string | undefined | null): boolean {
+  const q = (question || '').trim();
+  if (!q) return true;
+  if (BARE_TRIGGER_ASK_RE.test(q)) return true;
+  if (!isDeicticAsk(q)) return false;
+  const words = q.toLowerCase().replace(/['']/g, '').split(/[^a-z]+/).filter(Boolean);
+  return words.length > 0 && words.every(w => SCREEN_ONLY_WORDS.has(w));
+}
+
+/**
+ * True when this image-attached turn is a prompt to work on the code in the
+ * image. An empty question always promotes (the image IS the question); a
+ * deictic ask promotes when it is screen-only, names a code noun, or names a
+ * coding shape.
+ */
+export function isImageCodingAsk(question: string | undefined | null): boolean {
+  const q = (question || '').trim();
+  if (!q) return true;
+  if (!isDeicticAsk(q)) return false;
+  return isScreenOnlyAsk(q) || CODE_NOUN_RE.test(q) || namesCodingShape(q);
+}
+
+/** True when this is a "solve it again" repeat press on an image coding turn. */
+export function isRepeatPressAsk(question: string | undefined | null, shape: string): boolean {
+  return shape === 'solve' && isScreenOnlyAsk(question);
+}
+
 // ── screen-coding promotion (single source of truth) ────────────────────────
 //
 // Code-review 2026-08-22, two confirmed findings with one root: the
@@ -224,7 +271,7 @@ export function isPromotedScreenCodingTurn(input: {
   if (input.alreadyCoding) return false;
   const q = (input.question || '').trim();
   if (q && !isDeicticAsk(q)) return false;
-  if (input.hasImages) return true;
+  if (input.hasImages && isImageCodingAsk(q)) return true;
   return detectStructuralCodeTemplate(input.screenText);
 }
 

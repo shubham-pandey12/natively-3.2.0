@@ -410,6 +410,10 @@ export class IntelligenceEngine extends EventEmitter {
         const cv = require('./llm/claimVerifier') as typeof import('./llm/claimVerifier');
         const kind = cv.claimVerifierKind({ modeId: opts.modeId, question: opts.question, draft: opts.answer, surface: 'spoken' });
         if (!kind || !opts.modeId) return opts.answer;
+        if (cv.materialHasNoDocuments(opts.material) && !cv.claimVerifierRunsWithoutDocuments()) {
+            opts.trace.mark('claim_verifier_skipped', { reason: 'no_documents' });
+            return opts.answer;
+        }
         const system = cv.claimVerifierSystemPrompt(opts.modeId, 'spoken', { noDocuments: cv.materialHasNoDocuments(opts.material) });
         // The replayed answer call carries the material itself (its own user
         // message comes first); without one, the V3 user message stands in.
@@ -496,6 +500,7 @@ export class IntelligenceEngine extends EventEmitter {
      * of each other. 800 ms does that without the user feeling it.
      */
     private readonly automaticTriggerCooldown: number = 800;
+    private lastSpeculativeDeclineAt = 0;
     /**
      * Generation id of the answer run started by an AUTOMATIC trigger
      * (SuggestionTrigger.automatic), or null. Lets the dual-channel gate
@@ -1106,6 +1111,7 @@ export class IntelligenceEngine extends EventEmitter {
             this.releaseExpiredSpeculation();
             if (this.speculativeText !== null) return;
             if (Date.now() - this.lastTriggerTime < this.triggerCooldown) return;
+            if (Date.now() - this.lastSpeculativeDeclineAt < this.triggerCooldown) return;
             console.log(`[IntelligenceEngine] Speculative inference fired on interim`, { length: text.length, confidence });
             this.speculativeQuestionId = this.currentAutoCandidateId;
             this.runWhatShouldISay(text, confidence || 0.8, undefined, { speculative: true })
@@ -1441,7 +1447,8 @@ export class IntelligenceEngine extends EventEmitter {
             try { this.llmHelper.setGroqFastTextMode(true); } catch { /* routing hint only */ }
         }
         try {
-            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined);
+            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
+                trigger.automatic === true ? { skipCooldown: true } : undefined);
         } finally {
             this.nextRunIsAutomatic = false;
             if (fastAuto && !previousFastMode) {
@@ -1517,6 +1524,7 @@ export class IntelligenceEngine extends EventEmitter {
             && this.speculativeAdoptedGenerationId !== this.currentGenerationId;
         if (this.activeMode !== 'idle' && this.activeMode !== 'assist' && !ownSpeculationStreaming) return;
         if (Date.now() - this.lastTriggerTime < this.triggerCooldown) return;
+        if (Date.now() - this.lastSpeculativeDeclineAt < this.triggerCooldown) return;
         // A debounced interim speculation that has not fired yet would start on
         // FEWER words than this candidate: the candidate replaces it.
         if (this.speculativeTimer !== null) {
@@ -2245,8 +2253,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // which would be a behaviour change rather than a cost saving.
                 this.speculativeText = null;
                 this.speculativeTextExpiry = Infinity;
-                this.lastTriggerTime = Date.now();
-                this.lastTriggerQuestion = question ?? null;
+                this.lastSpeculativeDeclineAt = Date.now();
                 this.setMode('idle');
                 return null;
             }
@@ -6813,8 +6820,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (openedStreamRow) this.emit('suggested_answer_discard', 'no_answer', generationId);
                 this.speculativeText = null;
                 this.speculativeTextExpiry = Infinity;
-                this.lastTriggerTime = Date.now();
-                this.lastTriggerQuestion = question ?? null;
+                this.lastSpeculativeDeclineAt = Date.now();
                 this.setMode('idle');
                 return null;
             }

@@ -471,6 +471,18 @@ describe('openHedged (tail-latency vision hedge)', () => {
     return p;
   }
 
+  test('pre-aborted turn does not launch the hedge partner', async () => {
+    const partner = okProvider('gemini_flash_lite', ['lite']);
+    const primary = prov('openai', (id) => okProvider(id, ['late'], { firstDelayMs: 200 }), partner);
+    const turn = new AbortController();
+    turn.abort();
+    await assert.rejects(
+      () => collect(openHedged(primary, hedgeCfg(), new Map(), realHooks(), turn.signal, 1)),
+      { name: 'AbortError' },
+    );
+    assert.equal(partner._calls, 0);
+  });
+
   test('primary fast → wins solo, partner never launched (no hedge fired)', async () => {
     const partner = okProvider('gemini_flash_lite', ['lite']);
     const primary = prov('gemini_flash', (id) => okProvider(id, ['flash-fast']), partner);

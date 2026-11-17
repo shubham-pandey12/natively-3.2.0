@@ -18,7 +18,7 @@ import type {
   RetrievalPlan, ClaimRequirement, SourceType, Answerability, ClaimType,
 } from '../contracts/types';
 import { freezeTurnDecision } from '../contracts/types';
-import { resolveModePolicy, generalKnowledgeAllowed, type ModePolicy } from '../policies/mode-policy-registry';
+import { resolveModePolicy, generalKnowledgeAllowed, applyModeSourceContract, type ModePolicy } from '../policies/mode-policy-registry';
 import { resolveAnswerPolicy, type AnswerPolicy } from '../policies/answer-policy';
 import { CLAIM_AUTHORITY, claimAuthority } from '../policies/source-authority-policy';
 import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
@@ -33,6 +33,7 @@ export interface AnswerRequest {
   requestSequence: number;
   surface: AnswerSurface;
   modeId: string;
+  modeSourceContract?: { origin: string; sourceAuthority: string } | null;
   scope: EvidenceScope;
   sessionId: string;
 
@@ -254,6 +255,7 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   let policy: ModePolicy = resolvedGrounding.source === 'user_choice'
     ? { ...basePolicy, groundingPolicy: resolvedGrounding.groundingPolicy }
     : basePolicy;
+  policy = applyModeSourceContract(policy, req.modeSourceContract);
 
   // Attachment-derived source types (deep-test D10). Additive and LOW priority:
   // extras never displace the mode's primary source, they only make the claim →

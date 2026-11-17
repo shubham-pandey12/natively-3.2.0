@@ -1981,7 +1981,7 @@ function detectBasis(q) {
  *   forceDesign?: boolean,
  *   hasVisualContext?: boolean,
  *   mode?: string | null,
- *   material?: string | null,
+ *   material?: string | null | (() => string | null),
  * }} input  `material` is what was said in the conversation so far, when the
  *   caller can supply it (see visualInputStatus). `mode` is the resolved built-in template ('sales', 'call-center', …),
  *   'custom', or absent/unknown. Unknown keeps the pre-catalog behaviour: only
@@ -2126,7 +2126,8 @@ function describeVisual(request, input) {
     out.chartIntent = chartIntent;
     // (Which inputs a sentence states is read in English only: for a request
     // in another language nothing is called missing, and the model decides.)
-    const inputs = request.language ? null : visualInputStatus(q, chartIntent, input.material);
+    const material = typeof input.material === 'function' ? input.material() : input.material;
+    const inputs = request.language ? null : visualInputStatus(q, chartIntent, material);
     if (inputs && request.operation === 'create' && !request.parentArtifactId) {
       out.inputs = inputs;
       // Stated nowhere the app can see: the model is told so, and gets no

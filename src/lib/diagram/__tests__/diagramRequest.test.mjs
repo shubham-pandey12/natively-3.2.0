@@ -16,6 +16,16 @@ const NOTIFICATION_DESIGN = {
 
 const resolve = (question, extra = {}) => resolveDiagramRequest({ question, ...extra });
 
+test('chart input analysis accepts lazy conversation material', () => {
+  const request = resolveDiagramRequest({
+    question: 'Forecast revenue growth at 5% for 12 months.',
+    featureEnabled: true,
+    mode: 'sales',
+    material: () => 'Revenue is $1000 per month.',
+  });
+  assert.deepEqual(request.inputs?.missing, []);
+});
+
 describe('first questions — design asks', () => {
   for (const q of [
     'Design a URL shortener.',

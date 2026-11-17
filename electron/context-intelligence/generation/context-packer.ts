@@ -103,6 +103,24 @@ function renderEvidence(e: EvidenceItem): string {
   return `<evidence ${attrs}>\n${esc(e.content.trim())}\n</evidence>`;
 }
 
+export const TRIMMED_EVIDENCE_MARKER = '[… the rest of this passage was cut to fit; it continues in the source]';
+const MIN_TRIMMED_CONTENT_CHARS = 200;
+
+function trimToFit(e: EvidenceItem, tokens: number): string | null {
+  const shell = estimateTokens(renderEvidence({ ...e, content: `\n${TRIMMED_EVIDENCE_MARKER}` }));
+  let chars = (tokens - shell) * 4;
+  const text = e.content.trim();
+  for (let i = 0; i < 8 && chars >= MIN_TRIMMED_CONTENT_CHARS; i++) {
+    let cut = text.slice(0, chars);
+    const ws = cut.lastIndexOf(' ');
+    if (ws > chars * 0.8) cut = cut.slice(0, ws);
+    const rendered = renderEvidence({ ...e, content: `${cut.trimEnd()}\n${TRIMMED_EVIDENCE_MARKER}` });
+    if (estimateTokens(rendered) <= tokens) return rendered;
+    chars = Math.floor(chars * 0.9);
+  }
+  return null;
+}
+
 export function packContext(
   decision: Readonly<TurnDecision>,
   evidence: EvidenceItem[],
@@ -127,9 +145,14 @@ export function packContext(
     const key = `${e.sourceId}:${e.content.trim().toLowerCase().replace(/\s+/g, ' ')}`;
     if (seen.has(key)) { dropped.push(e.evidenceId); continue; }
 
-    const rendered = renderEvidence(e);
-    const cost = estimateTokens(rendered);
-    if (used + cost > budget.evidenceTokens) { dropped.push(e.evidenceId); continue; }
+    let rendered = renderEvidence(e);
+    let cost = estimateTokens(rendered);
+    if (used + cost > budget.evidenceTokens) {
+      const trimmed = included.length === 0 ? trimToFit(e, budget.evidenceTokens - used) : null;
+      if (!trimmed) { dropped.push(e.evidenceId); continue; }
+      rendered = trimmed;
+      cost = estimateTokens(rendered);
+    }
 
     seen.add(key);
     parts.push(rendered);
