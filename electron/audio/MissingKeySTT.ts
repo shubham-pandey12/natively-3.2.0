@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter } from 'events';
 import { sttProviderName } from './sttFailover';
 
 export const MISSING_STT_KEY_CODE = 'stt_key_missing';
@@ -20,7 +20,10 @@ export class MissingKeySTT extends EventEmitter {
     setImmediate(() => {
       this.reportScheduled = false;
       if (!this.active || this.listenerCount('error') === 0) return;
-      this.emit('error', Object.assign(new Error(missingSttKeyMessage(this.provider)), { code: MISSING_STT_KEY_CODE, terminal: true }));
+      this.emit('error', Object.assign(new Error(missingSttKeyMessage(this.provider)), {
+        code: MISSING_STT_KEY_CODE,
+        terminal: true,
+      }));
     });
   }
   stop(): void { this.active = false; }
@@ -28,7 +31,7 @@ export class MissingKeySTT extends EventEmitter {
   setSampleRate(_rate: number): void {}
   setAudioChannelCount(_count: number): void {}
   setRecognitionLanguage(_language: string): void {}
-  setCredentials(_path: string): void {}
+  setCredentials(_keyFilePath: string): void {}
   notifySpeechEnded(): void {}
   finalize(): void {}
 }

@@ -1959,7 +1959,6 @@ export class MeetingPersistence {
             // inferred — see the guard at the top of the catch.
             meetingSaved = true;
             if (generationSucceeded) this.notifyNotesSaved(meetingId);
-            try { require('./services/firstRunGuideStore').applyGuideEvent({ type: 'meeting_saved', meetingId }); } catch { /* guide must not affect saved notes */ }
 
             // The other side's voice still unnamed ("Speaker 1"): one short call
             // proposes a name from what was said, after the save so the notes

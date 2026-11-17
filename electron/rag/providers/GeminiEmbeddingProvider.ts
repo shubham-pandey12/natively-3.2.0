@@ -35,9 +35,7 @@ const KEY_COOLDOWN_MS = Number(process.env.NATIVELY_GEMINI_EMBED_COOLDOWN_MS) ||
 // full-pool rate-limit). The per-minute Gemini window is ~60s, so the default
 // budget must exceed that or an all-keys-hot pool never drains — set to 75s.
 // Bounded so a persistent multi-minute outage still eventually degrades gracefully.
-const configuredCooldownWait = Number(process.env.NATIVELY_GEMINI_EMBED_MAX_WAIT_MS);
-const MAX_COOLDOWN_WAIT_MS = Number.isFinite(configuredCooldownWait) && configuredCooldownWait >= 0
-  ? configuredCooldownWait : 75_000;
+const MAX_COOLDOWN_WAIT_MS = Number(process.env.NATIVELY_GEMINI_EMBED_MAX_WAIT_MS) || 75_000;
 
 export class GeminiEmbeddingProvider implements IEmbeddingProvider {
   readonly name = 'gemini';

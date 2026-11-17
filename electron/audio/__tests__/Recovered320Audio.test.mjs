@@ -35,7 +35,7 @@ test('all missing-key and unknown providers stay off; echo still reaches display
   assert.match(create, /sttProvider === 'google'\) \{\s*stt = new GoogleSTT\(speaker\);\s*\} else \{[\s\S]*?stt = new MissingKeySTT\(sttProvider\)/);
   assert.match(create, /stt instanceof MissingKeySTT \? 'none'/);
   const segment = main.slice(main.indexOf('const onSegment = (segment:'), main.indexOf('    this._sttFailover[gapSource]?.stop()', main.indexOf('const onSegment = (segment:')));
-  assert.match(segment, /if \(!micEcho\) this\.intelligenceManager\.handleTranscript/);
+  assert.match(segment, /if \(!micEcho\) \{? ?this\.intelligenceManager\.handleTranscript/);
   assert.match(segment, /segment\.isFinal && this\.ragManager && !micEcho/);
   assert.match(segment, /this\.simpleAutoAnswer\.ingest/);
   assert.match(segment, /this\.sendThrottledTranscript\(payload\)/);

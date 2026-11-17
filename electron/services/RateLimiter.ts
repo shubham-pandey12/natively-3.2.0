@@ -51,11 +51,11 @@ export class RateLimiter {
      */
     constructor(maxTokens: number, refillRatePerSecond: number, opts: { liveQuietMs?: number } = {}) {
         this.maxTokens = maxTokens;
-        this.liveReserve = Math.max(1, Math.ceil(maxTokens * LIVE_RESERVE_FRACTION));
-        this.liveQuietMs = Math.max(0, opts.liveQuietMs ?? DEFAULT_LIVE_QUIET_MS);
         this.tokens = maxTokens;
         this.refillRatePerSecond = refillRatePerSecond;
         this.lastRefillTime = Date.now();
+        this.liveReserve = Math.max(1, Math.ceil(maxTokens * LIVE_RESERVE_FRACTION));
+        this.liveQuietMs = Math.max(0, opts.liveQuietMs ?? DEFAULT_LIVE_QUIET_MS);
 
         // Refill tokens periodically. unref() so the timer does not keep the
         // event loop alive — important for unit tests that create a limiter
@@ -108,7 +108,9 @@ export class RateLimiter {
             return;
         }
         if (this.backgroundQueue.length >= this.MAX_QUEUE_DEPTH) {
-            throw new Error(`Rate limiter background queue full (${this.MAX_QUEUE_DEPTH} waiters) — request rejected`);
+            throw new Error(
+                `Rate limiter background queue full (${this.MAX_QUEUE_DEPTH} waiters) — request rejected`
+            );
         }
         return new Promise<void>((resolve, reject) => {
             this.backgroundQueue.push({ resolve, reject });

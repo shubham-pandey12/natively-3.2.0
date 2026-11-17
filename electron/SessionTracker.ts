@@ -9,10 +9,6 @@ import type { AttemptId, TurnIdentity } from './llm/turnIdentity';
 import { stripGistTrailer } from '../src/lib/displayMarkup';
 import { createActiveDesignState, type ActiveDesign } from '../src/lib/diagram/activeDesign.mjs';
 import { replaceMermaidSource } from '../src/lib/diagram/fencedBlocks.mjs';
-import { isCodingContinuation } from './llm/codingFollowup';
-
-const MOVE_ON_TO_NEW_PROBLEM_RE = /\b(?:mov(?:e|ing)|go(?:ing)?|jump(?:ing)?|switch(?:ing)?|turn(?:ing)?)\s+on\s*to\s+(?:the\s+|a\s+|our\s+|your\s+)?(?:next|main|new|another|different|second|third|final|last|actual)\s+(?:problem|question|exercise|challenge|task|one)\b|\bhere(?:'s|\s+is)\s+(?:the|your|a|our)\s+(?:next|new|second|third|final|main)\s+(?:problem|question|exercise|challenge)\b|^\W*(?:(?:ok(?:ay)?|alright|all right|great|cool|good|so|now)[\s,.!]+)*(?:the\s+)?next\s+(?:problem|question|exercise|challenge)\b/i;
-const CANDIDATE_QUESTION_RE = /\bhow(?:'s|\s+is|\s+was|\s+has)\s+your\s+(?:day|week|weekend|morning|afternoon|evening)\b|\b(?:have|did|do)\s+you\s+(?:ever\s+)?(?:use[ds]?|work(?:ed)?|buil[dt]|writ(?:e|ten)|wrote|done|tried|had|seen|enjoy|like)\b|\bhow\s+long\s+have\s+you\b|\btell\s+me\s+(?:about|a\s+bit\s+about)\s+(?:yourself|you|your|a\s+time)\b|\b(?:your|you\s+had)\s+(?:experience|background|weekend|last\s+(?:job|role|project|company)|previous\s+(?:job|role|project|company)|current\s+(?:job|role|project|company))\b|\bat\s+work\b|\bwalk\s+me\s+through\s+your\b/i;
 
 // Canned-fallback phrases that mean the model gave up entirely, not phrases
 // that might legitimately appear inside a real answer. Matched only when the
@@ -48,6 +44,10 @@ export type TranscriptOrigin = 'stt' | 'manual_chat' | 'assistant' | 'system_ins
 // context. Defined in its own module so the other formatter can share it.
 import { TYPED_TURN_LABEL } from './llm/typedTurnLabel';
 import { insertSortedByTimestamp } from './audio/sttGapRecovery';
+import { isCodingContinuation } from './llm/codingFollowup';
+
+const MOVE_ON_TO_NEW_PROBLEM_RE = /\b(?:mov(?:e|ing)|go(?:ing)?|jump(?:ing)?|switch(?:ing)?|turn(?:ing)?)\s+on\s*to\s+(?:the\s+|a\s+|our\s+|your\s+)?(?:next|main|new|another|different|second|third|final|last|actual)\s+(?:problem|question|exercise|challenge|task|one)\b|\bhere(?:'s|\s+is)\s+(?:the|your|a|our)\s+(?:next|new|second|third|final|main)\s+(?:problem|question|exercise|challenge)\b|^\W*(?:(?:ok(?:ay)?|alright|all right|great|cool|good|so|now)[\s,.!]+)*(?:the\s+)?next\s+(?:problem|question|exercise|challenge)\b/i;
+const CANDIDATE_QUESTION_RE = /\bhow(?:'s|\s+is|\s+was|\s+has)\s+your\s+(?:day|week|weekend|morning|afternoon|evening)\b|\b(?:have|did|do)\s+you\s+(?:ever\s+)?(?:use[ds]?|work(?:ed)?|buil[dt]|writ(?:e|ten)|wrote|done|tried|had|seen|enjoy|like)\b|\bhow\s+long\s+have\s+you\b|\btell\s+me\s+(?:about|a\s+bit\s+about)\s+(?:yourself|you|your|a\s+time)\b|\b(?:your|you\s+had)\s+(?:experience|background|weekend|last\s+(?:job|role|project|company)|previous\s+(?:job|role|project|company)|current\s+(?:job|role|project|company))\b|\bat\s+work\b|\bwalk\s+me\s+through\s+your\b/i;
 export { TYPED_TURN_LABEL };
 
 export interface TranscriptSegment {
@@ -280,9 +280,9 @@ export class SessionTracker {
     private statementSeq = 0;
     private static readonly SAID_AFTER_MAX_STATEMENTS = 4;
     private static readonly SAID_AFTER_MAX_CHARS = 700;
-    private static readonly STATEMENT_GAP_MS = 90_000;
-    private static readonly CANDIDATE_ACK_MAX_WORDS = 3;
     private static readonly INTERVIEWER_BUFFER_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+    private static readonly STATEMENT_GAP_MS = 90 * 1000;
+    private static readonly CANDIDATE_ACK_MAX_WORDS = 3;
     // Screenshot-detected question stays sticky for 3 min before transcript can override
     private static readonly SCREENSHOT_STALE_MS = 3 * 60 * 1000;
 
@@ -720,10 +720,10 @@ export class SessionTracker {
             this.statementsAfterProblem = [];
             this.endInterviewerStatement();
         }
-        const last = this.recentInterviewerBuffer.at(-1);
+        const last = this.recentInterviewerBuffer[this.recentInterviewerBuffer.length - 1];
         if (last && segment.timestamp - last.timestamp > SessionTracker.STATEMENT_GAP_MS) this.endInterviewerStatement();
-        const cutoff = Date.now() - SessionTracker.INTERVIEWER_BUFFER_WINDOW_MS;
-        this.recentInterviewerBuffer = this.recentInterviewerBuffer.filter(entry => entry.timestamp >= cutoff);
+        const bufferCutoff = Date.now() - SessionTracker.INTERVIEWER_BUFFER_WINDOW_MS;
+        this.recentInterviewerBuffer = this.recentInterviewerBuffer.filter(e => e.timestamp >= bufferCutoff);
         if (CANDIDATE_QUESTION_RE.test(text)) {
             this.endInterviewerStatement();
             return;
@@ -732,20 +732,20 @@ export class SessionTracker {
             if (this.looksLikeCodingQuestion(text)) {
                 this.setCodingQuestion(text, 'transcript');
             } else if (!this.statementHoldsProblem && this.recentInterviewerBuffer.length > 0) {
-                const combined = [...this.recentInterviewerBuffer.map(entry => entry.text), text].join(' ');
+                const combined = [...this.recentInterviewerBuffer.map(e => e.text), text].join(' ');
                 if (this.looksLikeCodingQuestion(combined)) this.setCodingQuestion(combined, 'transcript');
             }
             this.endInterviewerStatement();
             return;
         }
         this.recentInterviewerBuffer.push({ text, timestamp: segment.timestamp });
-        const combined = this.recentInterviewerBuffer.map(entry => entry.text).join(' ');
+        const combined = this.recentInterviewerBuffer.map(e => e.text).join(' ');
         if (this.looksLikeCodingQuestion(text) || (this.recentInterviewerBuffer.length > 1 && this.looksLikeCodingQuestion(combined))) {
             this.setCodingQuestion(combined, 'transcript');
             this.statementHoldsProblem = this.codingQuestionSource === 'transcript' && this.detectedCodingQuestion === combined;
         } else if (!this.statementHoldsProblem && combined.split(/\s+/).length >= 4) {
-            const lastStatement = this.statementsAfterProblem.at(-1);
-            if (lastStatement && lastStatement.seq === this.statementSeq) lastStatement.text = combined;
+            const last = this.statementsAfterProblem[this.statementsAfterProblem.length - 1];
+            if (last && last.seq === this.statementSeq) last.text = combined;
             else this.statementsAfterProblem.push({ seq: this.statementSeq, text: combined, at: Date.now() });
             if (this.statementsAfterProblem.length > SessionTracker.SAID_AFTER_MAX_STATEMENTS) this.statementsAfterProblem.shift();
         }

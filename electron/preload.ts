@@ -3734,10 +3734,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   guideDispatch: (event: unknown) => ipcRenderer.invoke('guide:dispatch', event),
   getGuideState: () => ipcRenderer.invoke('guide:get'),
   dispatchGuideEvent: (event: { type: string; [key: string]: unknown }) => ipcRenderer.invoke('guide:dispatch', event),
-  onGuideChanged: (callback: (state: any) => void) => {
-    const subscription = (_: unknown, state: any) => callback(state);
-    ipcRenderer.on('guide:changed', subscription);
-    return () => ipcRenderer.removeListener('guide:changed', subscription);
+  onGuideChanged: (cb: (state: any) => void) => {
+    const sub = (_: unknown, state: any) => cb(state);
+    ipcRenderer.on('guide:changed', sub);
+    return () => ipcRenderer.removeListener('guide:changed', sub);
   },
   onboardingSetShortcutTour: (active: boolean) => ipcRenderer.invoke('onboarding:set-shortcut-tour', active),
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => {
