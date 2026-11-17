@@ -1,12 +1,7 @@
-import type { WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 // ipcHandlers.ts
 
 import * as crypto from 'crypto';
 import { prewarmPreparedJpeg } from './services/screen/preparedJpeg';
-import { CredentialsManager } from './services/CredentialsManager';
-import { DEMO_VIDEO_URL, demoFilmOpenOptions } from '../src/lib/demoVideoUrl';
-import { guideFactsFromSources } from './services/firstRunGuidePolicy';
-import { configureGuideStore, dispatchGuideFromWindow, getGuideState, guideScreenshotTaken, guideStopLockedMs, guideSurfaceSet } from './services/firstRunGuideStore';
 import { repairCapReached, endsInsideFence } from './llm/repairCap';
 import { AntigravityService, initializeAntigravityLifecycle } from './services/AntigravityService';
 import { buildEmbeddingConfig } from './rag/embeddingConfigIdentity';
@@ -18,6 +13,9 @@ import { openInNotepadBlockReason, resumeBlockReason } from './services/meeting/
 import { micSettingsUri } from '../src/lib/micPermissionPolicy.mjs';
 import { resolveMacScreenStatus } from '../src/lib/permissionAttentionPolicy.mjs';
 import { applyPermissionsCardEvent, normalizePermissionsCardRecord } from '../src/lib/permissionsCardPolicy.mjs';
+import { guideFactsFromSources } from '../src/lib/onboarding/firstRunGuide.mjs';
+import { configureGuideStore, dispatchGuideFromWindow, getGuideState, guideScreenshotTaken, guideStopLockedMs, guideSurfaceSet } from './services/firstRunGuideStore';
+import { DEMO_VIDEO_URL, demoFilmOpenOptions } from '../src/lib/demoVideoUrl';
 import { hasOwnAiKey, resolveExpiredTrial } from '../src/lib/trialPolicy.mjs';
 import { CARDS, OUTCOMES } from '../src/lib/cards/cardPolicy.mjs';
 import { TRIAL_CAMPAIGN, TRIAL_PROMO_ID, runTrialCampaignReset } from '../src/lib/trialCampaign.mjs';
@@ -362,46 +360,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     ipcMain.removeAllListeners(channel);
     ipcMain.on(channel, listener);
   };
-
-  safeHandle('guide:get', () => getGuideState());
-  safeHandle('guide:dispatch', (_event, guideEvent: unknown) => dispatchGuideFromWindow(guideEvent));
-  configureGuideStore({
-    meetingActive: () => appState.getIsMeetingActive(),
-    // The running meeting's own surface, not the setting, which can change mid-meeting (3.2.0).
-    meetingSurface: () => appState.getMeetingSurface(),
-    // 3.2.0: the launch count reaches the guide only through the renderer's
-    // plans_closed event; main reports 0, and a seeded demo meeting is not one
-    // of the user's own (hasOwnMeeting), so the guide can start for new users.
-    factsProvider: () => {
-      const cm = CredentialsManager.getInstance();
-      return guideFactsFromSources({
-        nativelyKey: cm.getNativelyApiKey(),
-        trialSentinel: TRIAL_SENTINEL_KEY,
-        licensed: isLicensed(),
-        hasOwnAiKey: hasOwnAiKey(cm.getAllCredentials() as unknown as Record<string, unknown>, { codexReady: codexRouteReady() }),
-        // First users only: someone with a meeting of their own is not one.
-        hasMeetings: DatabaseManager.getInstance().hasOwnMeeting(),
-        launchCount: 0,
-      });
-    },
-    onGuideStart: () => {
-      const sm = SettingsManager.getInstance();
-      if (sm.get('guideSurfaceBefore') == null) sm.set('guideSurfaceBefore', normalizeMeetingSurface(sm.get('meetingSurface')));
-      sm.set('meetingSurface', 'overlay');
-    },
-    onGuideEnd: () => {
-      const sm = SettingsManager.getInstance();
-      sm.set('meetingSurface', normalizeMeetingSurface(sm.get('guideSurfaceBefore') ?? 'overlay'));
-      sm.set('guideSurfaceBefore', null);
-    },
-    onEnterStep: (step) => { if (step === 'surface' && normalizeMeetingSurface(SettingsManager.getInstance().get('meetingSurface')) === 'notepad') guideSurfaceSet('notepad'); },
-    // Step 2: the demo film plays in the user's browser so the first meeting
-    // has a voice to hear. shell.openExternal is the same on macOS and
-    // Windows; on macOS the browser stays behind (demoFilmOpenOptions).
-    onFirstMeetingStarted: () => {
-      shell.openExternal(DEMO_VIDEO_URL, demoFilmOpenOptions(process.platform)).catch((e: any) => console.warn('[Guide] demo film did not open:', e?.message));
-    },
-  });
 
   // System-design diagram artifacts: repair, export, the feature switch and
   // the Phone Mirror render path. One module, registered once here.
@@ -1819,7 +1777,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       (pillWin && !pillWin.isDestroyed() && pillWin.webContents.id === event.sender.id) ||
       (toggleWin && !toggleWin.isDestroyed() && toggleWin.webContents.id === event.sender.id);
     if (!fromAux || !action?.type) return;
-    if (action.type === 'end-meeting' && guideStopLockedMs() > 0) return;
+    if (action.type === 'end-meeting' && guideStopLockedMs() > 0) {
+      console.log('[Guide] Stop from the pill held: the first meeting is still in its 30 s');
+      return;
+    }
     await routeOverlayUiAction(action, {
       endMeeting: () => appState.endMeeting(),
       forwardToOverlay: (a) => helper.forwardOverlayUiAction(a),
@@ -1875,40 +1836,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
     appState.getWindowHelper().setWindowMode(mode, inactive);
     return { success: true };
-  });
-
-  // Leases belong to the requesting renderer; another window cannot release them.
-  const screenshotRetryLeases = new Map<number, Set<string>>();
-  safeHandle('retain-screenshot-retry', async (event, imagePaths: unknown) => {
-    if (event.sender.id !== appState.getWindowHelper().getOverlayWindow()?.webContents.id) {
-      throw new Error('Screenshot retry is only available from the overlay');
-    }
-    if (!Array.isArray(imagePaths) || imagePaths.length === 0 || imagePaths.length > 5
-        || imagePaths.some((item) => typeof item !== 'string')) throw new Error('Invalid screenshot attachments');
-    const { validateImagePath } = require('./utils/curlUtils');
-    for (const imagePath of imagePaths) {
-      if (!validateImagePath(imagePath, app.getPath('userData')).isValid) throw new Error('Screenshot attachment is unavailable');
-    }
-    let leases = screenshotRetryLeases.get(event.sender.id);
-    if (!leases) {
-      leases = new Set<string>();
-      screenshotRetryLeases.set(event.sender.id, leases);
-      const senderId = event.sender.id;
-      event.sender.once('destroyed', () => {
-        for (const lease of screenshotRetryLeases.get(senderId) ?? []) {
-          void appState.getScreenshotHelper().releaseScreenshots(lease).catch(() => {});
-        }
-        screenshotRetryLeases.delete(senderId);
-      });
-    }
-    const lease = appState.getScreenshotHelper().retainScreenshots(imagePaths);
-    leases.add(lease);
-    return lease;
-  });
-  safeHandle('release-screenshot-retry', async (event, lease: unknown) => {
-    const leases = screenshotRetryLeases.get(event.sender.id);
-    if (typeof lease !== 'string' || !leases?.delete(lease)) return;
-    await appState.getScreenshotHelper().releaseScreenshots(lease);
   });
 
   safeHandle('delete-screenshot', async (event, filePath: string) => {
@@ -2180,7 +2107,6 @@ export function initializeIpcHandlers(appState: AppState): void {
   let _chatStreamId = 0;
   // Keep IDs globally unique for phone/desktop message correlation; supersession is per sender.
   const _chatStreamsBySender = new Map<number, { streamId: number; controller: AbortController }>();
-  let _phoneChatStreamController: { streamId: number; cancel: (reason: string) => void } | null = null;
   // Phone-mirror chat supersession is tracked SEPARATELY from the global id counter.
   // `_chatStreamId` is shared with the desktop chat path purely to keep correlation ids
   // globally unique, so checking it for phone supersession let a desktop message (which
@@ -2849,7 +2775,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               defaultLengthDirective: answerSurface === 'live' ? (() => {
                 try {
                   const { renderLengthDirectiveForPlan } = require('./llm/AnswerPlanner') as typeof import('./llm/AnswerPlanner');
-                  return v3Plan ? renderLengthDirectiveForPlan(v3Plan, { pinnedModeId: modeInfo?.id }) || undefined : undefined;
+                  return v3Plan ? renderLengthDirectiveForPlan(v3Plan, { pinnedModeId: modeInfo?.id ?? null }) || undefined : undefined;
                 } catch { return undefined; }
               })() : undefined,
               modeTemplateType: rawMode,
@@ -3223,7 +3149,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 return null;
               }
             }
-            const v3Truncated = v3Stream.outcome.truncated === true || !finalText.trim();
+            const v3Truncated = v3Stream.outcome.truncated === true;
             if (v3Truncated) {
               console.warn('[IPC] manual chat answer is INCOMPLETE — not storing it as conversation history', {
                 streamId: myStreamId,
@@ -3234,7 +3160,6 @@ export function initializeIpcHandlers(appState: AppState): void {
             event.sender.send('gemini-stream-done', {
               finalText,
               streamId: myStreamId,
-              outcome: { status: v3Truncated ? 'failed' : 'success', retryable: v3Truncated, reason: v3Truncated ? 'incomplete_answer' : undefined },
               incomplete: v3Truncated,
               incompleteReason: v3Truncated ? v3Stream.outcome.reason : undefined,
             });
@@ -4597,7 +4522,16 @@ export function initializeIpcHandlers(appState: AppState): void {
                 contract: manualSourceContract,
                 evidence: evidenceRoute,
                 styleInstructions: formatAnswerPlanForPrompt(answerPlan, false),
-                maxAnswerWords: (require('./llm/answerLength') as typeof import('./llm/answerLength')).profileAnswerWordCap(answerPlan.answerStyle, (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength(), (require('./llm/userInstructionContract') as typeof import('./llm/userInstructionContract')).registeredInstructionsSetLength(manualActiveMode?.id), answerSurface === 'live') ?? undefined,
+                maxAnswerWords: (() => {
+                  try {
+                    const { registeredInstructionsSetLength } = require('./llm/userInstructionContract') as typeof import('./llm/userInstructionContract');
+                    if (registeredInstructionsSetLength(manualActiveMode?.id ?? null)) return null;
+                    const { profileAnswerWordCap, getRegisteredAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
+                    return profileAnswerWordCap(answerPlan.answerStyle, answerSurface === 'live' ? getRegisteredAnswerLength() : 'smart');
+                  } catch {
+                    return answerPlan.answerStyle === 'detailed' ? 180 : 90;
+                  }
+                })(),
               });
               const profileJitBlock = `${profileJitPrompt.systemPrompt}\n\n${profileJitPrompt.userPrompt}`;
               context = context ? `${profileJitBlock}\n\n${context}` : profileJitBlock;
@@ -5481,7 +5415,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             },
           ];
           llmHelper.rememberAnswerCall?.(myController.signal, _manualAnswerArgs);
-          const { stream, outcome: manualStreamOutcome } = llmHelper.streamChatWithOutcome(..._manualAnswerArgs);
+          const stream = llmHelper.streamChat(..._manualAnswerArgs);
 
           // Coding chat STREAMS LIVE through a gate that holds tokens only until
           // the first "## " heading is confirmed (never code-first), then passes
@@ -5640,7 +5574,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               console.log('[Perf] manual chat turn ended early', record);
             },
           });
-          const manualStreamResult = await raceStreamWithDeadline({
+          await raceStreamWithDeadline({
             stream: stream as AsyncGenerator<string>,
             observe: manualPerf.observe,
             interTokenStallMs: manualPerf.interTokenStallMs,
@@ -5708,7 +5642,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               }
             },
           });
-          if (manualSuperseded || _chatStreamsBySender.get(senderId)?.streamId !== myStreamId) {
+          if (manualSuperseded) {
             iTrace.setCorrelation({ aborted: true, errorCategory: 'superseded' })
               .lifecycle('cancelled', { reason: 'superseded', finalAction: 'discard' });
             commitTrace(iTrace);
@@ -5724,10 +5658,6 @@ export function initializeIpcHandlers(appState: AppState): void {
               event.sender.send('gemini-stream-token', tail, { streamId: myStreamId });
               try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), tail); } catch (_) { /* noop */ }
             }
-          }
-
-          if (manualStreamOutcome.truncated || (manualStreamResult !== 'done' && fullResponse.trim())) {
-            throw new Error('The answer was interrupted. Please try again.');
           }
 
           // DEADLINE FALLBACK (manual chat): the provider stalled past the
@@ -6384,7 +6314,14 @@ export function initializeIpcHandlers(appState: AppState): void {
               // deterministic trimmer was REMOVED because it cropped the conclusion off long
               // answers — so we NEVER trim here, we only measure the answer for telemetry (the
               // coarse length class + word count). The answer text is left exactly as produced.
-              const measuredLength = (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength();
+              const measuredLength = (() => {
+                try {
+                  const { getRegisteredAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
+                  return getRegisteredAnswerLength();
+                } catch {
+                  return 'smart' as const;
+                }
+              })();
               const budget = applySpeakabilityBudget(fullResponse, answerPlan.answerType, answerPlan.answerStyle as any, message, isCodingChat, measuredLength);
               piTelemetry.emit('pi_context_policy_applied', { answerType: answerPlan.answerType, via: 'speakability_measured', speakabilityClass: budget.speakability_class, markerCount: budget.spoken_word_count, answerLength: measuredLength });
               // Visible scaffold in a DEFAULT-style answer (user didn't ask for
@@ -7383,7 +7320,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // the streamed answer was already valid, finalText is undefined and the
             // already-streamed tokens stand. streamId (audit finding #3) lets the
             // renderer ignore a stale done from a superseded stream.
-            event.sender.send('gemini-stream-done', { ...(finalText ? { finalText } : {}), streamId: myStreamId, outcome: { status: sessionWriteDecision.blockedFromSessionTracker || blockedFromSessionTracker || !(finalText || fullResponse).trim() ? 'failed' : 'success', retryable: sessionWriteDecision.blockedFromSessionTracker || blockedFromSessionTracker || !(finalText || fullResponse).trim(), reason: sessionWriteDecision.reason } });
+            event.sender.send('gemini-stream-done', { ...(finalText ? { finalText } : {}), streamId: myStreamId });
             // Compile-only syntax check of fenced JavaScript (observe-only).
             try { require('./llm/codeVerification/syntaxCheckReport').observeAnswerJsSyntax(finalText ?? fullResponse, 'manual_chat_legacy'); } catch { /* observe only */ }
             chatTrace.mark('response_completed', { chars: fullResponse.length, repaired: Boolean(finalText) });
@@ -7662,7 +7599,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 criticalViolations: ['provider_error_no_answer'],
               });
               event.sender.send('gemini-stream-token', safe, { streamId: myStreamId });
-              event.sender.send('gemini-stream-done', { finalText: safe, streamId: myStreamId, outcome: { status: 'failed', retryable: true, reason: 'provider_error_no_answer' } });
+              event.sender.send('gemini-stream-done', { finalText: safe, streamId: myStreamId });
               try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), safe); PhoneMirrorService.getInstance().publishDone(String(myStreamId), safe); } catch (_) { /* noop */ }
               intelligenceManager.addAssistantMessage(safe, forThisTurn(sessionWriteDecision), 'manual_chat');
               _emitAttr({ answer_type: answerPlan.answerType, profile_tree_used: false, profile_tree_fast_path_used: false, structured_resume_used: false });
@@ -7942,10 +7879,8 @@ export function initializeIpcHandlers(appState: AppState): void {
     setOpenAtLogin(app, process.platform, openAtLogin, app.getPath('exe'));
     // The user chose: a pending fresh-install default (e.g. a DMG launch on
     // macOS) must not override it later. See utils/openAtLoginDefault.ts.
-    if (SettingsManager.getInstance().get('openAtLoginDefault') !== 'done') {
-      if (!SettingsManager.getInstance().set('openAtLoginDefault', 'done')) {
-        return { success: false, error: 'settings_store_degraded' };
-      }
+    if (SettingsManager.getInstance().get('openAtLoginDefault') !== 'done' && !SettingsManager.getInstance().set('openAtLoginDefault', 'done')) {
+      return { success: false, error: 'settings_store_degraded' };
     }
     return { success: true };
   });
@@ -9547,6 +9482,43 @@ export function initializeIpcHandlers(appState: AppState): void {
   // First-launch shortcut tour: route the shortcuts it teaches to the calling
   // renderer as practice presses (AppState.setShortcutTour). Bound to the
   // sender, and dropped automatically when that renderer reloads or dies.
+  configureGuideStore({
+    meetingActive: () => appState.getIsMeetingActive(),
+    factsProvider: () => {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const cm = CredentialsManager.getInstance();
+      return guideFactsFromSources({
+        nativelyKey: cm.getNativelyApiKey(),
+        trialSentinel: TRIAL_SENTINEL_KEY,
+        licensed: isLicensed(),
+        hasOwnAiKey: hasOwnAiKey(cm.getAllCredentials() as unknown as Record<string, unknown>, { codexReady: codexRouteReady() }),
+        // First users only: someone with a meeting of their own is not one.
+        hasMeetings: DatabaseManager.getInstance().hasOwnMeeting(),
+      });
+    },
+    meetingSurface: () => appState.getMeetingSurface(),
+    onGuideStart: () => {
+      const sm = SettingsManager.getInstance();
+      if (sm.get('guideSurfaceBefore') == null) sm.set('guideSurfaceBefore', normalizeMeetingSurface(sm.get('meetingSurface')));
+      sm.set('meetingSurface', 'overlay');
+    },
+    onGuideEnd: () => {
+      const sm = SettingsManager.getInstance();
+      sm.set('meetingSurface', normalizeMeetingSurface(sm.get('guideSurfaceBefore') ?? 'overlay'));
+      sm.set('guideSurfaceBefore', null);
+    },
+    // Step 7 with the notepad already chosen: nothing to switch, go on.
+    onEnterStep: (step) => {
+      if (step === 'surface' && normalizeMeetingSurface(SettingsManager.getInstance().get('meetingSurface')) === 'notepad') guideSurfaceSet('notepad');
+    },
+    // Step 2: the demo film plays in the user's browser. shell.openExternal is
+    // the same on macOS and Windows; on macOS the browser stays behind.
+    onFirstMeetingStarted: () => {
+      shell.openExternal(DEMO_VIDEO_URL, demoFilmOpenOptions(process.platform)).catch((e: any) => console.warn('[Guide] demo film did not open:', e?.message));
+    },
+  });
+  safeHandle('guide:get', async () => getGuideState());
+  safeHandle('guide:dispatch', async (_, event: unknown) => dispatchGuideFromWindow(event));
   safeHandle('onboarding:set-shortcut-tour', async (event, active: boolean) => {
     appState.setShortcutTour(active === true, event.sender);
     return { success: true };
@@ -16215,7 +16187,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (lockedMs > 0) {
       console.log(`[Guide] Stop held: ${Math.ceil(lockedMs / 1000)} s of the first meeting left`);
       // `code` is the 3.2.0 field; `error` stays for renderers that read it.
-      return { success: false, code: 'guide_stop_locked', error: 'guide_stop_locked', lockedMs };
+      return { success: false, code: 'guide_stop_locked', lockedMs };
     }
     try {
       await appState.endMeeting();
@@ -16908,14 +16880,6 @@ export function initializeIpcHandlers(appState: AppState): void {
                 error: `Invalid image path: ${validation.reason}`,
               };
             }
-            if (!(await fs.promises.stat(imagePath).catch(() => null))?.isFile()) {
-              return {
-                answer: null,
-                outcome: { status: 'failed', retryable: false, reason: 'attachment_unavailable' },
-                error: 'The screenshot is unavailable. Capture it again to retry.',
-                screenContextStatus,
-              };
-            }
             validatedImagePaths!.push(imagePath);
           }
 
@@ -17045,12 +17009,8 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const phonePress = startPhonePress();
-        const outcomeOut: WhatToSayOutcomeOut = {};
-        const effectiveQuestion = (typeof question === 'string' && question.trim().length > 0)
-          ? question
-          : (validatedImagePaths?.length ? 'What should I say about this?' : question);
         let answer = await phonePress.run(() => intelligenceManager.runWhatShouldISay(
-          effectiveQuestion,
+          question,
           0.8,
           validatedImagePaths,
           {
@@ -17066,7 +17026,6 @@ export function initializeIpcHandlers(appState: AppState): void {
             // gate can otherwise bleed a previous question's answer into the
             // current manual press). See runWhatShouldISay.forceFresh branch.
             forceFresh: true,
-            outcomeOut,
             screenContext,
             pressedAt,
             ...(screenFromImage ? { screenFromImage: true } : {}),
@@ -17089,7 +17048,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         let refusalRetry: { cropped: boolean; improved: boolean } | undefined;
         if (
           answer
-          && outcomeOut.value?.status === 'success'
           && validatedImagePaths?.length
           && process.env.NATIVELY_ASSESSMENT_RETRY !== 'off'
         ) {
@@ -17109,7 +17067,6 @@ export function initializeIpcHandlers(appState: AppState): void {
               );
               if (crop) {
                 const retryPaths = validatedImagePaths.slice(0, -1).concat(croppedImagePath);
-                const retryOutcomeOut: WhatToSayOutcomeOut = {};
                 const retryAnswer = await phonePress.run(() => intelligenceManager.runWhatShouldISay(
                   question,
                   0.8,
@@ -17117,7 +17074,6 @@ export function initializeIpcHandlers(appState: AppState): void {
                   {
                     skipCooldown: true,
                     forceFresh: true,
-                    outcomeOut: retryOutcomeOut,
                     promptInstruction:
                       typeof options?.promptInstruction === 'string'
                         ? options.promptInstruction
@@ -17130,7 +17086,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                     // would re-tell the model what we cropped away.
                   },
                 ));
-                if (retryAnswer && retryOutcomeOut.value?.status === 'success') {
+                if (retryAnswer) {
                   // Both runs recorded a turn, each with the screenshot: the
                   // refusal is dropped from the conversation, so it neither
                   // takes a screen's room nor steers the next follow-up toward
@@ -17155,7 +17111,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             }
           }
         }
-        if (answer && outcomeOut.value?.status === 'success') {
+        if (answer) {
           // The conversation-ring write lives in IntelligenceEngine.runWhatShouldISay
           // now, not here. Placed at this IPC handler it only ever recorded a
           // MANUAL press: Auto Answer calls runWhatShouldISay directly and never
@@ -17173,8 +17129,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
         return {
           answer,
-          outcome: outcomeOut.value ?? { status: 'failed', retryable: true, reason: 'missing_generation_outcome' },
-          ...(outcomeOut.value?.status === 'failed' ? { error: outcomeOut.value.reason || 'generation_failed' } : {}),
           question: question || 'inferred from context',
           screenContextStatus,
           visionProviderUsed,
@@ -19135,26 +19089,10 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('profile:get-status', async () => {
-    const defaultStatus = {
-      hasProfile: false,
-      profileMode: false,
-      name: undefined,
-      role: undefined,
-      totalExperienceYears: undefined as number | undefined,
-      resume_structured_extraction_complete: false,
-      resume_profile_facts_ready: false,
-      profileFactsReady: false,
-      jd_structured_extraction_complete: false,
-      jdFactsReady: false,
-      aot_pipeline_running: false,
-      resume_indexing_in_flight: false,
-      jd_indexing_in_flight: false,
-      extractionMode: 'none' as const,
-    };
     try {
       const orchestrator = appState.getKnowledgeOrchestrator();
       if (!orchestrator) {
-        return defaultStatus;
+        return { hasProfile: false, profileMode: false };
       }
       // Map new KnowledgeStatus back to legacy UI shape temporarily, plus explicit
       // readiness flags used by eval/UI polling. profileFactsReady is true as soon
@@ -19172,10 +19110,10 @@ export function initializeIpcHandlers(appState: AppState): void {
       // deliberately excluded from the resume readiness signal.
       const { DocType: StatusDocType } = require('../premium/electron/knowledge/types');
       return {
-        hasProfile: Boolean(status.hasResume),
-        profileMode: Boolean(status.activeMode),
-        name: status.resumeSummary?.name ?? (activeResume as any)?.identity?.name,
-        role: status.resumeSummary?.role ?? (activeResume as any)?.experience?.[0]?.role,
+        hasProfile: status.hasResume,
+        profileMode: status.activeMode,
+        name: status.resumeSummary?.name,
+        role: status.resumeSummary?.role,
         totalExperienceYears: status.resumeSummary?.totalExperienceYears,
         resume_structured_extraction_complete: Boolean(activeResume),
         resume_profile_facts_ready: profileFactsReady(activeResume),
@@ -19192,7 +19130,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           : 'none',
       };
     } catch (error: any) {
-      return defaultStatus;
+      return { hasProfile: false, profileMode: false };
     }
   });
 
@@ -19485,9 +19423,9 @@ export function initializeIpcHandlers(appState: AppState): void {
   // renderer had no way to learn that dossier had landed, so it showed the
   // "Research Now" CTA, and the CTA bought the identical dossier a second time.
   // Only the explicit "Refresh" pill passes true now.
-  safeHandle('profile:research-company', async (_, requestedCompanyName?: string, forceRefresh: boolean = false) => {
+  safeHandle('profile:research-company', async (_, companyName: string, forceRefresh: boolean = false) => {
     try {
-      console.log(`[CompanyIntel-research] invoked for companyName="${requestedCompanyName}" forceRefresh=${forceRefresh}`);
+      console.log(`[CompanyIntel-research] invoked for companyName="${companyName}" forceRefresh=${forceRefresh}`);
       // Premium gate
       if (!isProOrTrialActive()) {
         return proRefusal('Profile Intelligence is part of Natively Pro. Activate a licence or start the free trial to use it.');
@@ -19495,12 +19433,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       const orchestrator = appState.getKnowledgeOrchestrator();
       if (!orchestrator) {
         return { success: false, error: 'Knowledge engine not initialized' };
-      }
-      const profileData = orchestrator.getProfileData();
-      const activeJD = profileData?.activeJD;
-      const companyName = requestedCompanyName?.trim() || activeJD?.company?.trim();
-      if (!companyName) {
-        return { success: false, error: 'Upload a job description with a company name first.' };
       }
       const engine = orchestrator.getCompanyResearchEngine();
 
@@ -19512,6 +19444,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         resolveCompanySearchProvider,
       } = require('./services/resolveCompanySearchProvider');
       engine.setSearchProvider(resolveCompanySearchProvider());
+      const profileData = orchestrator.getProfileData();
+      const activeJD = profileData?.activeJD;
 
       // Build full JD context so the dossier is tailored to the exact role
       const jdCtx = activeJD
@@ -19879,7 +19813,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       const os = require('os');
       const fsp = require('fs/promises');
-      tempPath = path.join(os.tmpdir(), `natively-jd-${crypto.randomUUID()}.txt`);
+      tempPath = path.join(os.tmpdir(), `natively-jd-${Date.now()}.txt`);
       await fsp.writeFile(tempPath, text, 'utf8');
       registerSelectedProfilePath(tempPath);
 
@@ -19944,7 +19878,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       const os = require('os');
       const fsp = require('fs/promises');
-      tempPath = path.join(os.tmpdir(), `natively-jd-${crypto.randomUUID()}.txt`);
+      tempPath = path.join(os.tmpdir(), `natively-jd-${Date.now()}.txt`);
       await fsp.writeFile(tempPath, resolvedJd.text, 'utf8');
       registerSelectedProfilePath(tempPath);
       const staged = consumeSelectedProfilePath(tempPath);
@@ -20175,9 +20109,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         const { generateMode } = require('./services/ModeGenerator');
         const llmHelper = appState.processingHelper?.getLLMHelper?.();
         if (!llmHelper) return { success: false, error: 'llm_unavailable' };
-        if (typeof llmHelper.hasAnyConfiguredProvider === 'function' && !llmHelper.hasAnyConfiguredProvider()) {
-          return { success: false, error: 'llm_not_configured' };
-        }
 
         // Injected LLM entry: raw system-prompt override, no active-mode injection,
         // no knowledge-mode intercept — a clean generation call that routes through
@@ -20227,23 +20158,14 @@ export function initializeIpcHandlers(appState: AppState): void {
       try {
         const { ModesManager } = require('./services/ModesManager');
         const mgr = ModesManager.getInstance();
-        if (id === '__profile_okf__') {
-          return { success: false, error: 'reserved_mode' };
-        }
-        if (updates.name !== undefined && !updates.name.trim()) {
-          return { success: false, error: 'empty_name' };
-        }
-        const existing = mgr.getModes().find((m: any) => m.id === id);
-        if (!existing) {
-          return { success: false, error: 'mode_not_found' };
-        }
         // Gate: changing templateType to a non-general template requires pro.
         // Also gate if the existing mode is already non-general (editing a pro mode requires pro).
         if (!isProOrTrialActive()) {
           if (updates.templateType && updates.templateType !== 'general') {
             return proRefusal();
           }
-          if (existing.templateType !== 'general') {
+          const existing = mgr.getModes().find((m: any) => m.id === id);
+          if (existing && existing.templateType !== 'general') {
             return proRefusal();
           }
         }
@@ -20289,9 +20211,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     hasLiveTranscriptCapable?: boolean;
   }) => {
     try {
-      if (!input || !input.templateType) {
-        return null;
-      }
       // Source Contract Builder is a Phase-7 pro feature: the panel renders
       // for any non-general mode and gates on pro via the surrounding UI,
       // but the IPC must enforce the same gate so a hand-crafted payload
@@ -20427,25 +20346,8 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('modes:delete', async (_, id: string) => {
     try {
       if (!isProOrTrialActive()) return proRefusal();
-      if (id === '__profile_okf__') return { success: false, error: 'reserved_mode' };
       const { ModesManager } = require('./services/ModesManager');
-      const mgr = ModesManager.getInstance();
-      const targetMode = mgr.getModes().find((m: any) => m.id === id);
-      if (!targetMode) return { success: false, error: 'mode_not_found' };
-      if (targetMode.isBuiltin) {
-        return { success: false, error: 'cannot_delete_builtin' };
-      }
-      const activeMode = mgr.getActiveMode();
-      const wasActive = activeMode?.id === id;
-      mgr.deleteMode(id);
-      if (wasActive) {
-        BrowserWindow.getAllWindows().forEach((win) => {
-          if (!win.isDestroyed()) {
-            win.webContents.send('mode-changed', { id: null, name: null, fileCount: 0, indexedCount: 0 });
-            win.webContents.send('modes-active-cleared');
-          }
-        });
-      }
+      ModesManager.getInstance().deleteMode(id);
       return { success: true };
     } catch (e: any) {
       console.error('[IPC] modes:delete error:', e);
@@ -20457,17 +20359,11 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       // Allow clearing (null) or setting general mode without pro; all other modes require pro
       if (id !== null) {
-        if (id === '__profile_okf__') {
-          return { success: false, error: 'reserved_mode' };
-        }
         const { ModesManager } = require('./services/ModesManager');
         const targetMode = ModesManager.getInstance()
           .getModes()
           .find((m: any) => m.id === id);
-        if (!targetMode) {
-          return { success: false, error: 'mode_not_found' };
-        }
-        if (targetMode.templateType !== 'general' && !isProOrTrialActive()) {
+        if (targetMode && targetMode.templateType !== 'general' && !isProOrTrialActive()) {
           return proRefusal();
         }
       }
@@ -20493,7 +20389,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       {
         const { abortAndInvalidateChatStreams } = require('./services/chatStreamRegistry') as typeof import('./services/chatStreamRegistry');
         abortAndInvalidateChatStreams(_chatStreamsBySender);
-        _phoneChatStreamController?.cancel('The meeting or mode changed before this answer finished.');
       }
       // BUG-MODE-BLEEDING fix: clear mode-specific session context BEFORE switching modes
       // so Interview mode resume/JD context doesn't bleed into the new mode's responses.
@@ -20550,11 +20445,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('mode-changed', { id, name: activeName, fileCount, indexedCount });
       });
-      if (!id) {
-        BrowserWindow.getAllWindows().forEach((win) => {
-          if (!win.isDestroyed()) win.webContents.send('modes-active-cleared');
-        });
-      }
       // Phase 3 — re-bind dynamic action engine so the new mode's trigger pack
       // takes effect immediately. New (sessionId, modeId) pair flushes the per-
       // session store inside DynamicActionEngine, killing any old-mode candidates.
@@ -20613,7 +20503,6 @@ export function initializeIpcHandlers(appState: AppState): void {
   // PI v3 (W3): per-file index status for the Modes Manager UI badges.
   safeHandle('modes:get-reference-file-status', async (_, modeId: string) => {
     try {
-      if (!modeId || modeId === '__profile_okf__') return { success: true, statuses: [] };
       const { ModesManager } = require('./services/ModesManager');
       return { success: true, statuses: ModesManager.getInstance().getReferenceFileIndexStatuses(modeId) };
     } catch (e: any) {
@@ -20624,7 +20513,6 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('modes:get-reference-files', async (_, modeId: string) => {
     try {
-      if (!modeId || modeId === '__profile_okf__') return [];
       const { ModesManager } = require('./services/ModesManager');
       return ModesManager.getInstance().getReferenceFiles(modeId);
     } catch (e: any) {
@@ -20633,7 +20521,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle('modes:upload-reference-file', async (event, modeId: string) => {
+  safeHandle('modes:upload-reference-file', async (_, modeId: string) => {
     // Bug fix 2026-07-28 (code review): the .doc friendly-message check
     // below used to read the thrown error's own path field, but the Error
     // thrown by SafeDocumentTextExtractor's extension whitelist never sets
@@ -20643,16 +20531,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     let selectedPath: string | undefined;
     try {
       if (!isProOrTrialActive()) return proRefusal();
-      if (!modeId || modeId === '__profile_okf__') return { success: false, error: 'invalid_mode' };
-      const { ModesManager } = require('./services/ModesManager');
-      const targetMode = ModesManager.getInstance().getModes().find((m: any) => m.id === modeId);
-      if (!targetMode) return { success: false, error: 'mode_not_found' };
-
-      const { dialog, BrowserWindow } = require('electron');
-      const parent = (event?.sender ? BrowserWindow.fromWebContents(event.sender) : null)
-        ?? BrowserWindow.getFocusedWindow()
-        ?? BrowserWindow.getAllWindows()[0];
-      const dialogOptions = {
+      const result = await dialog.showOpenDialog({
         properties: ['openFile'],
         filters: [
           // One source of truth with the extractor: a hand-copied list here
@@ -20660,10 +20539,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           { name: 'Text, Documents & Code', extensions: [...SAFE_DOCUMENT_EXTENSIONS].map(extension => extension.slice(1)) },
           { name: 'All Files', extensions: ['*'] },
         ],
-      };
-      const result: any = parent
-        ? await dialog.showOpenDialog(parent, dialogOptions)
-        : await dialog.showOpenDialog(dialogOptions);
+      });
       if (result.canceled || !result.filePaths?.[0]) return { success: false, cancelled: true };
       selectedPath = result.filePaths[0];
       const { ingestModeReferenceFile } = require('./services/ModeReferenceFileIngestion') as typeof import('./services/ModeReferenceFileIngestion');
@@ -20671,7 +20547,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         modeId,
         filePath: selectedPath!,  // guarded + assigned on the straight line above
         onIndexStatus: (status, fileId) => {
-          BrowserWindow.getAllWindows().forEach((win: any) => {
+          BrowserWindow.getAllWindows().forEach((win) => {
             if (!win.isDestroyed()) win.webContents.send('mode-file-index-status', { modeId, fileId, phase: status });
           });
         },
@@ -21056,10 +20932,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     async (_, modeId: string, title: string, description: string) => {
       try {
         if (!isProOrTrialActive()) return proRefusal();
-        if (!modeId || modeId === '__profile_okf__') return { success: false, error: 'invalid_mode' };
         const { ModesManager } = require('./services/ModesManager');
-        const targetMode = ModesManager.getInstance().getModes().find((m: any) => m.id === modeId);
-        if (!targetMode) return { success: false, error: 'mode_not_found' };
         const section = ModesManager.getInstance().addNoteSection({ modeId, title, description });
         return { success: true, section };
       } catch (e: any) {
@@ -21679,6 +21552,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // the existing action system (global-shortcut events, chat stream) handles
   // them without duplicating logic.
   PhoneMirrorService.getInstance().onPhoneCommand(async (cmd) => {
+    const win = appState.getMainWindow();
     if (cmd.type === 'action') {
       // Re-use the same global-shortcut dispatch path the keyboard uses.
       // This keeps phone actions identical to key-triggered stealth actions.
@@ -21694,9 +21568,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
       }
     } else if (cmd.type === 'chat') {
-      // Only the overlay creates a row for an incoming phone turn. Launcher
-      // listeners receive the same chat channels for their own requests.
-      const win = appState.getWindowHelper().getOverlayWindow();
       // Stream a phone-initiated chat through the LLM exactly like gemini-chat-stream
       // but without requiring a renderer event sender. Tokens are pushed directly to
       // the phone over WebSocket; desktop renderer also receives them so both views
@@ -21714,9 +21585,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       const intelligenceManager = appState.getIntelligenceManager();
       // Stop flips the meeting state before the session reset, while audio drains.
       const myPhoneContextEpoch = intelligenceManager.getContextEpoch();
-      const myPhoneMeetingActive = appState.getIsMeetingActive();
-      const phoneContextChanged = () => intelligenceManager.getContextEpoch() !== myPhoneContextEpoch
-        || appState.getIsMeetingActive() !== myPhoneMeetingActive;
       // The conversation this question was asked in, for recording it below.
       const myPhoneConversationKey = (() => {
         try { return intelligenceManager.conversationSessionId(); } catch { return undefined; }
@@ -21785,37 +21653,19 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
       }
 
-      const sendToRenderer = (channel: string, ...args: unknown[]) => {
-        try {
-          if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
-            win.webContents.send(channel, ...args);
-          }
-        } catch { /* The desktop can close while the phone is still connected. */ }
-      };
-      const discardPhoneAnswer = (reason: string) => {
-        try { phoneMirror.publishDiscard(String(myStreamId)); } catch {}
-        sendToRenderer('gemini-stream-error', reason, { streamId: myStreamId, source: 'phone-mirror' });
-      };
-      const phoneController = new AbortController();
-      const previous = _phoneChatStreamController;
-      _phoneChatStreamController = {
-        streamId: myStreamId,
-        cancel: (reason) => {
-          if (_phoneChatStreamController?.streamId === myStreamId) _phoneChatStreamController = null;
-          phoneController.abort();
-          discardPhoneAnswer(reason);
-        },
-      };
+      intelligenceManager.addTranscript(
+        { text: message, speaker: 'user', timestamp: Date.now(), final: true, origin: 'manual_chat' },
+        true,
+      );
+      try { phoneMirror.publishUserMessage(String(myStreamId), message); } catch (_) {}
+      win?.webContents.send('phone-mirror:incoming-chat', {
+        message,
+        streamId: String(myStreamId),
+      });
 
       try {
-        previous?.cancel('A newer phone question replaced this answer.');
-        intelligenceManager.addTranscript(
-          { text: message, speaker: 'user', timestamp: Date.now(), final: true, origin: 'manual_chat' },
-          true,
-        );
-        try { phoneMirror.publishUserMessage(String(myStreamId), message); } catch {}
-        sendToRenderer('phone-mirror:incoming-chat', { message, streamId: String(myStreamId) });
         const llmHelper = appState.processingHelper.getLLMHelper();
+        const phoneController = new AbortController();
         // Compute the same routing decision the desktop gemini-chat-stream uses
         // (ipcHandlers.ts ~959) so the phone-chat path applies the active custom
         // mode's voice + retrieved product material just like the desktop surface.
@@ -21916,13 +21766,13 @@ export function initializeIpcHandlers(appState: AppState): void {
             hasProfileFacts: _pHasProfile,
             turnSourceDecision: _pTurnSourceDecision,
           });
-          if (_pOwn.shouldClarifyInsteadOfProfile && _phoneChatLatestId === myPhoneId && !phoneContextChanged()
+          if (_pOwn.shouldClarifyInsteadOfProfile && _phoneChatLatestId === myPhoneId
               && require('./intelligence/context-os').clarificationShortCircuitEnabled()) {
             const clarify = buildSourceSwitchClarification(_pOwn.owner, _pExplicitSwitch, { hasReferenceFiles: Boolean((_pMode as any)?.hasReferenceFiles) });
             try { phoneMirror.publishToken(String(myStreamId), clarify); } catch (_) {}
             try { phoneMirror.publishDone(String(myStreamId), clarify); } catch (_) {}
-            sendToRenderer('gemini-stream-token', clarify, { streamId: myStreamId, source: 'phone' });
-            sendToRenderer('gemini-stream-done', { streamId: myStreamId, source: 'phone' });
+            win?.webContents.send('gemini-stream-token', clarify, { streamId: myStreamId, source: 'phone' });
+            win?.webContents.send('gemini-stream-done', { streamId: myStreamId, source: 'phone' });
             intelligenceManager.addAssistantMessage(clarify, undefined, 'phone_mirror');
             intelligenceManager.logUsage('chat', message, clarify);
             if (isIntelligenceFlagEnabled('trace')) {
@@ -21981,7 +21831,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         // The design on the table joins this turn's context (a follow-up typed
         // on the phone refines the design drawn on the desktop).
         if (phoneDiagramTurn) context = withDiagramTurnBlock(context, phoneDiagramTurn) || context;
-        const { stream, outcome } = llmHelper.streamChatWithOutcome(message, phoneImagePaths.length ? phoneImagePaths : undefined, context, phoneBasePrompt(resolveCodingPromptSignals({ answerType: phoneRouteOptions?.answerType as any, question: message }), 'live'), false, false, [], phoneController.signal, undefined, phoneRouteOptions);
+        const stream = llmHelper.streamChat(message, phoneImagePaths.length ? phoneImagePaths : undefined, context, phoneBasePrompt(resolveCodingPromptSignals({ answerType: phoneRouteOptions?.answerType as any, question: message }), 'live'), false, false, [], phoneController.signal, undefined, phoneRouteOptions);
         let full = '';
         let phoneSuperseded = false;
         // Deadline-guarded (Issue 1) — this is a live streaming surface too: a hung
@@ -22037,7 +21887,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             console.log('[Perf] phone-mirror turn ended early', record);
           },
         });
-        const streamResult = await raceStreamWithDeadline({
+        await raceStreamWithDeadline({
           stream: stream as AsyncGenerator<string>,
           observe: phonePerf.observe,
           interTokenStallMs: phonePerf.interTokenStallMs,
@@ -22053,84 +21903,61 @@ export function initializeIpcHandlers(appState: AppState): void {
               console.log(`[PhoneMirror] phone-chat ${myStreamId} superseded by a newer phone message, stopping.`);
               phoneSuperseded = true; return true;
             }
-            if (_phoneChatStreamController?.streamId !== myStreamId) {
-              phoneSuperseded = true; return true;
-            }
             // Cancel early if all phones disconnected and there's no desktop renderer.
-            return phoneContextChanged() || (!phoneMirror.hasClients() && (!win || win.isDestroyed()));
+            if (!phoneMirror.hasClients() && win?.isDestroyed()) return true;
+            return false;
           },
           onToken: (token: string) => {
-            if (phoneController.signal.aborted || phoneContextChanged()) return;
             notePhoneFirstToken();
             try { phoneMirror.publishToken(String(myStreamId), token); } catch (_) {}
             // streamId lets the desktop renderer drop tokens from a superseded
             // chat stream (audit finding #3); backward-compatible optional arg.
-            sendToRenderer('gemini-stream-token', token, { streamId: myStreamId, source: 'phone' });
+            win?.webContents.send('gemini-stream-token', token, { streamId: myStreamId, source: 'phone' });
             full += token;
           },
-          onCleanup: (reason) => { if (reason !== 'done') phoneController.abort(); },
+          onCleanup: () => {
+            try { phoneController.abort(); } catch { /* noop */ }
+          },
         });
-        if (phoneSuperseded || _phoneChatLatestId !== myPhoneId || _phoneChatStreamController?.streamId !== myStreamId) return;
-        if (phoneContextChanged()) {
-          discardPhoneAnswer('The meeting or mode changed before this answer finished.');
-          return;
-        }
-        if (streamResult !== 'done') {
-          if (streamResult === 'aborted') {
-            discardPhoneAnswer('The answer was cancelled.');
-            return;
-          }
-          throw new Error('The answer timed out. Please try asking again.');
-        }
-        if (outcome.truncated) throw new Error('The answer was interrupted. Please try asking again.');
-        if (!full.trim()) throw new Error('No answer was received. Please try asking again.');
-        try {
-          phoneMirror.publishDone(String(myStreamId), full);
-        } catch (_) {}
-        sendToRenderer('gemini-stream-done', { streamId: myStreamId, source: 'phone' });
-        // Document-grounded: block a greeting/empty answer from SessionTracker
-        // so it can't contaminate the next turn (same backstop as the desktop
-        // path, minus the regenerate — the phone surface keeps it simple).
-        const phoneTrim = full.trim();
-        const phoneInvalid = phoneDocGrounded && (
-          phoneTrim.length < 8
-          || /what would you like help with/i.test(phoneTrim)
-          || /^\s*(?:hey|hi|hello)[!,.]?\s*(?:there)?[!,.]?\s*(?:what would you like help with|how can i help|what can i (?:help|do))/i.test(phoneTrim)
-        );
-        if (phoneInvalid) {
-          console.warn('[PhoneMirror] document-grounded invalid answer blocked from SessionTracker', { chars: phoneTrim.length });
-        }
-        if (phoneTrim.length > 0 && !phoneInvalid) {
-          intelligenceManager.addAssistantMessage(full, undefined, 'phone_mirror');
-          intelligenceManager.logUsage('chat', message, full);
-          // Into the conversation with its screenshots and photos (2026-11-06),
-          // like a question typed on the desktop: the next question, on the
-          // phone (conversationHistoryBlock, above) or the desktop (typed,
-          // What to answer, a button), can then refer to it and its screen.
+        if (phoneSuperseded) return;
+        if (_phoneChatLatestId === myPhoneId) {
           try {
-            intelligenceManager.recordPhoneTurn(full, String(message || ''), phoneImagePaths, myPhoneConversationKey);
-          } catch (recordErr: any) {
-            console.warn('[PhoneMirror] phone turn not recorded in the conversation:', recordErr?.message ?? recordErr);
+            phoneMirror.publishDone(String(myStreamId), full);
+          } catch (_) {}
+          win?.webContents.send('gemini-stream-done', { streamId: myStreamId, source: 'phone' });
+          // Document-grounded: block a greeting/empty answer from SessionTracker
+          // so it can't contaminate the next turn (same backstop as the desktop
+          // path, minus the regenerate — the phone surface keeps it simple).
+          const phoneTrim = full.trim();
+          const phoneInvalid = phoneDocGrounded && (
+            phoneTrim.length < 8
+            || /what would you like help with/i.test(phoneTrim)
+            || /^\s*(?:hey|hi|hello)[!,.]?\s*(?:there)?[!,.]?\s*(?:what would you like help with|how can i help|what can i (?:help|do))/i.test(phoneTrim)
+          );
+          if (phoneInvalid) {
+            console.warn('[PhoneMirror] document-grounded invalid answer blocked from SessionTracker', { chars: phoneTrim.length });
+          }
+          const phoneContextChanged = intelligenceManager.getContextEpoch() !== myPhoneContextEpoch;
+          if (phoneContextChanged) {
+            console.log('[PhoneMirror] session reset or mode switched during this answer \u2014 not saving it', { chars: phoneTrim.length });
+          }
+          if (phoneTrim.length > 0 && !phoneInvalid && !phoneContextChanged) {
+            intelligenceManager.addAssistantMessage(full, undefined, 'phone_mirror');
+            intelligenceManager.logUsage('chat', message, full);
+            try {
+              intelligenceManager.recordPhoneTurn(full, String(message || ''), phoneImagePaths, myPhoneConversationKey);
+            } catch (recordErr: any) {
+              console.warn('[PhoneMirror] phone turn not recorded in the conversation:', recordErr?.message ?? recordErr);
+            }
           }
         }
       } catch (err: any) {
-        if (_phoneChatLatestId === myPhoneId && _phoneChatStreamController?.streamId === myStreamId) {
-          if (phoneContextChanged()) {
-            discardPhoneAnswer('The meeting or mode changed before this answer finished.');
-            return;
-          }
-          console.error('[PhoneMirror] phone-chat stream error:', err);
+        console.error('[PhoneMirror] phone-chat stream error:', err);
+        if (_phoneChatLatestId === myPhoneId) {
           try {
             phoneMirror.publishError(String(myStreamId), err?.message || 'stream error');
           } catch (_) {}
-          // Tagged so the desktop renderer can tell this is a PHONE stream's
-          // failure: untagged, it defaced whatever desktop bubble happened to
-          // be streaming ("[Error: …]" appended to an unrelated answer).
-          sendToRenderer('gemini-stream-error', err?.message || 'stream error', { streamId: myStreamId, source: 'phone-mirror' });
-        }
-      } finally {
-        if (_phoneChatStreamController?.streamId === myStreamId) {
-          _phoneChatStreamController = null;
+          win?.webContents.send('gemini-stream-error', err?.message || 'stream error', { streamId: null, source: 'phone-mirror' });
         }
       }
     } else if (cmd.type === 'screenshot') {

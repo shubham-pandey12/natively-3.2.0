@@ -467,7 +467,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     const commit = useCallback((next: string) => {
         setText(next);
         window.electronAPI?.liveNotesSetText?.(next);
-        if (!preview && next.trim()) void window.electronAPI?.dispatchGuideEvent?.({ type: 'note_typed' });
+        if (!preview && next.trim()) void window.electronAPI?.guideDispatch?.({ type: 'note_typed' });
         const now = Date.now();
         if (phase === 'live' && now - lastTypingPing.current > TYPING_PING_MS) {
             lastTypingPing.current = now;
@@ -476,7 +476,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     }, [phase, preview]);
 
     useEffect(() => {
-        if (!preview && askEngaged) void window.electronAPI?.dispatchGuideEvent?.({ type: 'ask_opened' });
+        if (!preview && askEngaged) void window.electronAPI?.guideDispatch?.({ type: 'ask_opened' });
     }, [askEngaged, preview]);
 
     // The answer streams to this window only (the handler replies to its sender).
@@ -575,7 +575,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     // (note-recipe:run reads a finished meeting whole, a live one so far with what was typed here).
     const runRecipe = useCallback((recipe: NoteRecipe, extra = '') => {
         if (turnsRef.current.some((t) => t.status === 'streaming')) return;
-        if (!preview) void window.electronAPI?.dispatchGuideEvent?.({ type: 'recipe_run' });
+        if (!preview) void window.electronAPI?.guideDispatch?.({ type: 'recipe_run' });
         npTrack('recipe', recipe.id);
         setAllRecipes(false);
         setAsk('');

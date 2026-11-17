@@ -161,11 +161,7 @@ export class MeetingOffers {
         private readonly options: { countdownMs?: number; expireMs?: number; notNowMs?: number; recheckMs?: number; sameCallGapMs?: number } = {},
     ) {
         this.now = deps.now ?? Date.now;
-        this.setT = deps.setTimeout ?? ((fn, ms) => {
-            const t = setTimeout(fn, ms);
-            t.unref?.();
-            return t;
-        });
+        this.setT = deps.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
         this.clearT = deps.clearTimeout ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     }
 

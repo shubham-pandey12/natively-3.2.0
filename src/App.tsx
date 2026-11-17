@@ -366,7 +366,7 @@ const App: React.FC = () => {
         openLauncherMeeting(opened);
       }
     };
-    void window.electronAPI?.getGuideState?.().then(showNotes).catch(() => {});
+    void window.electronAPI?.guideGet?.().then(showNotes).catch(() => {});
     return window.electronAPI?.onGuideChanged?.(showNotes);
   }, [isLauncherWindow, isDefault, openLauncherMeeting]);
   useEffect(() => {
@@ -380,7 +380,7 @@ const App: React.FC = () => {
       if (active) { claim(); release ??= orch.subscribe(claim); }
       else { release?.(); release = undefined; orch.releaseExternalCard('first_run_guide'); }
     };
-    void window.electronAPI?.getGuideState?.().then(changed).catch(() => {});
+    void window.electronAPI?.guideGet?.().then(changed).catch(() => {});
     const off = window.electronAPI?.onGuideChanged?.(changed);
     return () => { off?.(); release?.(); orch.releaseExternalCard('first_run_guide'); };
   }, [isLauncherWindow, isDefault]);

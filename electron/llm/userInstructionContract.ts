@@ -495,7 +495,7 @@ const LANGUAGE_CONDITION_RE = /\b(?:unless|except|otherwise|else|only\s+if|if|wh
 // second binding; alone, it is treated like any other clause (3.2.0).
 const BARE_NAME_CLAUSE_RE = /^[\s"'`*_(]*[A-Za-z][A-Za-z+#]*(?:\s?\d+(?:\.\d+)?)?[\s"'`*_)]*[.!]?\s*$/;
 const LANGUAGE_MENTION_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(?:${LANGUAGES.map(([, src]) => src).join('|')})(?![A-Za-z_+#])`, 'i');
-export const namesLanguage = (text: string): boolean => LANGUAGE_MENTION_RE.test(text) || /(?<![A-Za-z0-9_])(?:Go|C)(?![A-Za-z0-9_+#-])/.test(text);
+const namesLanguage = (text: string): boolean => LANGUAGE_MENTION_RE.test(text) || /(?<![A-Za-z0-9_])(?:Go|C)(?![A-Za-z0-9_+#-])/.test(text);
 export const isBareLanguageName = (text: string): boolean => BARE_NAME_CLAUSE_RE.test(asText(text)) && namesLanguage(asText(text));
 
 const detectProgrammingLanguages = (sentences: string[]): { found: string[]; conditional: boolean } => {

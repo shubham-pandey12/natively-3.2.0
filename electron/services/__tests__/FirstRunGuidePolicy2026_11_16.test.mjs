@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
-const { emptyGuideState, reduceGuide, normalizeGuideState } = require('../../../dist-electron/electron/services/firstRunGuidePolicy.js');
+const { emptyGuideState, reduceGuide, normalizeGuideState } = require('../../../src/lib/onboarding/firstRunGuide.mjs');
 
 test('guide starts only for an eligible new user, advances, and can be skipped', () => {
   const now = 1_000;

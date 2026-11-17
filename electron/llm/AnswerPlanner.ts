@@ -1,6 +1,7 @@
 import type { IntentResult } from './PlannerDecision';
 import type { ExtractedQuestion } from './transcriptQuestionExtractor';
 import { CODING_CONTRACT, CODING_CONTRACT_IMPL, CODING_VERIFICATION_INSTRUCTION, CODING_SHAPE_CONTRACTS, type CodingShape } from './codingContract';
+import { isActiveCodingProblemFollowUp } from './codingFollowup';
 import { detectAnswerStyle, type AnswerStyle } from './answerStyle';
 import { classifyTargetSpeakability, classifyShortBand, shortBandTargetWords, lengthBandTarget, spokenFullPromptMaxWords, HARD_MAX_WORDS, SPOKEN_FULL_PROMPT_MAX_WORDS } from './speakability';
 import { getRegisteredAnswerLength, type AnswerLength } from './answerLength';
@@ -8,7 +9,6 @@ import { analyzeUserInstructions, getRegisteredUserInstructions, userInstruction
 import { applyModeFallback, type ActiveModeInfo } from './modeProfiles';
 import { classifyDocumentQuestionShape } from './documentGroundedPrompt';
 import { includesPlannerTerm } from '../services/modes/retrievalTextMatch';
-import { isActiveCodingProblemFollowUp } from './codingFollowup';
 // Classification regex tables (PR #427 §1.3) — moved verbatim to a sibling
 // module to cut this file down; imported under identical names so no
 // reference below changes.
@@ -2188,25 +2188,31 @@ const spokenFullDirective = (): string =>
  * contract's own 60-word target (median 155, p90 310) because no per-turn
  * length line was delivered at all on V3-owned turns.
  */
-export const answerLengthForTurn = (pinnedModeId?: string | null): AnswerLength => {
-  const length = getRegisteredAnswerLength();
-  if (length !== 'longer') return length;
-  try { if (analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined)).qualitativeLength === 'short') return 'smart'; } catch { /* use stored length */ }
-  return length;
-};
+const SPOKEN_SECONDS_PER_WORD = 60 / 140;
+const lengthLabel = (length: Exclude<AnswerLength, 'smart'>) => length === 'shorter' ? 'Shorter' : 'Longer';
 const replacesClause = (length: Exclude<AnswerLength, 'smart'>) => length === 'shorter'
   ? 'This replaces every longer length target in this prompt, including sentence counts.'
   : 'This replaces every shorter length target in this prompt, including sentence counts and any "cut it" rule.';
-export const spokenFullDirectiveFor = (length: Exclude<AnswerLength, 'smart'>): string => {
+const spokenFullDirectiveFor = (length: Exclude<AnswerLength, 'smart'>): string => {
   const cap = spokenFullPromptMaxWords(length);
-  const seconds = Math.round(cap * (60 / 140) / 5) * 5;
+  const seconds = Math.round(cap * SPOKEN_SECONDS_PER_WORD / 5) * 5;
   const body = length === 'shorter' ? 'Make the one point that matters, then stop.' : 'Give the whole answer with its reasoning and context, then stop — stay speakable, no list of every angle.';
-  return `LENGTH LIMIT (the user chose ${length === 'shorter' ? 'Shorter' : 'Longer'} answers): at most ${cap} words (~${seconds} seconds spoken) — a hard cap, not a target. This is a LIVE spoken answer. ${body} ${replacesClause(length)}`;
+  return `LENGTH LIMIT (the user chose ${lengthLabel(length)} answers): at most ${cap} words (~${seconds} seconds spoken) — a hard cap, not a target. This is a LIVE spoken answer. ${body} ${replacesClause(length)}`;
 };
-export const shortBandDirectiveFor = (plan: AnswerPlan, length: Exclude<AnswerLength, 'smart'>): string => {
-  const t = lengthBandTarget(classifyShortBand(plan.answerType, plan.answerStyle, plan.question), length);
+const shortBandDirectiveFor = (plan: AnswerPlan, length: Exclude<AnswerLength, 'smart'>): string => {
+  const band = classifyShortBand(plan.answerType, plan.answerStyle, plan.question);
+  const t = lengthBandTarget(band, length);
   const fit = length === 'shorter' ? 'Use fewer if fewer answers it.' : 'Use the room for substance, never filler or repetition, and keep it speakable.';
-  return `LENGTH (the user chose ${length === 'shorter' ? 'Shorter' : 'Longer'} answers): aim for about ${t.seconds}s spoken — roughly ${t.min} to ${t.max} words (${t.guidance}). ${fit} Hard ceiling: never go past ${t.ceiling} words. ${replacesClause(length)}`;
+  return `LENGTH (the user chose ${lengthLabel(length)} answers): aim for about ${t.seconds}s spoken — roughly ${t.min} to ${t.max} words (${t.guidance}). ${fit} Hard ceiling: never go past ${t.ceiling} words. ${replacesClause(length)}`;
+};
+const answerLengthForTurn = (pinnedModeId?: string | null): AnswerLength => {
+  const length = getRegisteredAnswerLength();
+  if (length !== 'longer') return length;
+  try {
+    const written = analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined));
+    if (written.qualitativeLength === 'short') return 'smart';
+  } catch { /* use stored length */ }
+  return length;
 };
 export const renderLengthDirectiveForPlan = (plan: AnswerPlan, opts?: { answerLength?: AnswerLength; pinnedModeId?: string | null }): string => {
   // Explicit styles get no line — including the auto-detected `star` style

@@ -1,5 +1,5 @@
 const DEFAULT_SCREENSHOT_REQUEST =
-  'Analyze the current attached screenshot and answer the question or task shown in it.';
+  'Analyze the attached screenshot and answer the interviewer question provided with it.';
 
 /**
  * Build the text/provenance portion of a Direct Assist What-to-Say request.
@@ -7,8 +7,9 @@ const DEFAULT_SCREENSHOT_REQUEST =
  * The triggering interviewer speech is the authoritative request whenever it
  * exists and no screenshot is attached. A dynamic action describes how to
  * shape the answer; it must never replace that speech or relabel it as typed.
- * Screenshot turns answer the attached image. The rolling speech window can
- * belong to a previous turn and must not become authoritative current-turn speech.
+ * Screenshot turns retain the existing privacy split: speech stays in the
+ * transcript field while a generic or dynamic typed instruction is the current
+ * request.
  */
 export function buildDirectWhatToSayPayload({
   interviewerRequest,
@@ -29,7 +30,7 @@ export function buildDirectWhatToSayPayload({
     return {
       source: 'screenshot',
       currentRequest: instruction || custom || DEFAULT_SCREENSHOT_REQUEST,
-      transcript: undefined,
+      transcript: speech || undefined,
     };
   }
 

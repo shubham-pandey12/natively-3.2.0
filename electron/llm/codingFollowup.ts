@@ -242,7 +242,7 @@ const DIRECT_ACTION_RE =
   /^(?:(?:ok(?:ay)?|so|now|and|please)[,.!]?\s+)*(?:(?:can|could)\s+you\s+)?(?:implement|write|code|solve)\s+(?:this|it|that|the\s+(?:solution|same|above))(?:\s+(?:now|please|again))?\s*[?.!]*$/i;
 
 /** Regex that matches the annotation appended by withActiveCodingProblem. */
-export const ACTIVE_CODING_PROBLEM_NOTE_RE = / \(follow-up to the coding problem[\s\S]*\)$/;
+const ACTIVE_CODING_PROBLEM_NOTE_RE = / \(follow-up to the coding problem[\s\S]*\)$/;
 
 /**
  * Annotates a follow-up ask with the active coding problem context so the
@@ -251,8 +251,7 @@ export const ACTIVE_CODING_PROBLEM_NOTE_RE = / \(follow-up to the coding problem
  * statement(s) are injected so the model can resolve it over the problem.
  */
 export function withActiveCodingProblem(ask: string, problem: string, saidAfter: string[] = []): string {
-  if (saidAfter.length === 0)
-    return `${ask} (follow-up to the coding problem: "${problem}")`;
+  if (saidAfter.length === 0) return `${ask} (follow-up to the coding problem: "${problem}")`;
   return `${ask} (follow-up to the coding problem the interviewer is on now. Their latest statement before this ask: "${saidAfter.join(' ')}". Earlier problem: "${problem}". If the latest statement describes a task or problem, solve that task instead of the earlier problem. Only if it just talks about the earlier problem, solve the earlier problem.)`;
 }
 

@@ -41,7 +41,7 @@ export type ModeTemplateType =
     | 'seminar'
     | 'call-center';
 
-export const VALID_TEMPLATE_TYPES: ReadonlySet<string> = new Set([
+const VALID_TEMPLATE_TYPES: ReadonlySet<string> = new Set([
     'general',
     'looking-for-work',
     'sales',
@@ -49,8 +49,6 @@ export const VALID_TEMPLATE_TYPES: ReadonlySet<string> = new Set([
     'team-meet',
     'lecture',
     'technical-interview',
-    'seminar',
-    'call-center',
 ]);
 
 // Injection-time cap in ModesManager is 1200; target below it and hard-trim.

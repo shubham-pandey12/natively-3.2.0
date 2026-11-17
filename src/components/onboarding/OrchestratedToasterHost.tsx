@@ -137,7 +137,7 @@ export const OrchestratedToasterHost: React.FC<HostProps> = ({ onOpenSettings, o
     closeWith('plans')(reason);
     if (forced) return;
     const user = orch.getUserState();
-    void window.electronAPI?.dispatchGuideEvent?.({
+    void window.electronAPI?.guideDispatch?.({
       type: 'plans_closed',
       facts: { hasOwnAiKey: user.hasOwnAiKey, hasNativelyKey: user.hasNativelyKey, isPremium: user.isPremium, launchCount: user.cardLedger?.launchCount ?? 1 },
     })?.catch?.(() => {});

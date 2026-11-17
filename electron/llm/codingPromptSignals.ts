@@ -22,27 +22,6 @@ import type { CodingShape } from './codingContract';
 import { detectCodingShape, namesCodingShape } from './codingShape';
 import { getRegisteredUserInstructions, resolveCodingFormatFromInstructions } from './userInstructionContract';
 
-// Words that make a deictic ask "screen-only" — the user is pointing at the
-// screen and asking to look at / work with it rather than introducing a new topic.
-// The union of the local action verbs and the 3.2.0 conversational words, so
-// both "fix this code" and "what should I say about this" stay screen-only.
-const SCREEN_ONLY_WORDS = new Set([
-  // local (action verbs and pointers)
-  'it', 'this', 'that', 'here', 'there', 'above', 'below', 'now', 'next',
-  'please', 'ok', 'okay', 'go', 'do', 'run', 'try', 'show', 'give', 'help',
-  'solve', 'fix', 'code', 'write', 'implement', 'answer', 'work',
-  'looks', 'look', 'see', 'check', 'read', 'debug', 'explain', 'analyze',
-  'analyse', 'review', 'what', 'how', 'why', 'screen', 'question', 'problem',
-  'the', 'a', 'an', 'my', 'these', 'those',
-  // 3.2.0 (conversational)
-  'whats', 'hows', 'does', 'i', 'im', 'you', 'we', 'me', 'us',
-  'should', 'would', 'could', 'can', 'will', 'say', 'respond', 'reply', 'tell',
-  'about', 'its', 'one', 'goes', 'to', 'with', 'on', 'for', 'of', 'in',
-  'is', 'are', 'be', 'so', 'um', 'uh', 'and', 'then', 'just', 'task', 'part',
-]);
-
-/** Matches a question that names a code artifact or programming concept. */
-const CODE_NOUN_RE = /\b(?:code|function|snippet|program|method|class|algorithm|solution|implementation|bug|compile[sd]?|tests?|leetcode|hackerrank|query|sql|regex|stack\s*trace|output)\b/i;
 
 /**
  * Which coding contract the turn wants.
@@ -206,6 +185,19 @@ const BARE_TRIGGER_ASK_RE =
 // left open behind a sales call cannot promote small talk into a coding turn.
 const RETROSPECTIVE_FRAME_RE = /\b(did|was|were|went|has|have)\b/i;
 
+const SCREEN_ONLY_WORDS = new Set([
+  'what', 'whats', 'how', 'hows', 'do', 'does', 'i', 'im', 'you', 'we',
+  'me', 'my', 'us', 'should', 'would', 'could', 'can', 'will', 'say', 'answer',
+  'respond', 'reply', 'about', 'this', 'that', 'these', 'those', 'it', 'its', 'here',
+  'the', 'above', 'screen', 'one', 'a', 'an', 'go', 'goes', 'to', 'with',
+  'on', 'for', 'of', 'in', 'is', 'are', 'be', 'please', 'so', 'ok',
+  'okay', 'now', 'next', 'um', 'uh', 'and', 'then', 'just', 'help', 'solve',
+  'give', 'tell', 'question', 'problem', 'task', 'part',
+]);
+
+/** Matches a question that names a code artifact or programming concept. */
+const CODE_NOUN_RE = /\b(?:code|function|snippet|program|method|class|algorithm|solution|implementation|bug|compile[sd]?|tests?|leetcode|hackerrank|query|sql|regex|stack\s*trace|output)\b/i;
+
 export function isDeicticAsk(question: string | undefined | null): boolean {
   const q = (question || '').trim();
   if (!q) return false;
@@ -227,7 +219,7 @@ export function isScreenOnlyAsk(question: string | undefined | null): boolean {
   if (!q) return true;
   if (BARE_TRIGGER_ASK_RE.test(q)) return true;
   if (!isDeicticAsk(q)) return false;
-  const words = q.toLowerCase().replace(/['\u2019]/g, '').split(/[^a-z]+/).filter(Boolean);
+  const words = q.toLowerCase().replace(/['’]/g, '').split(/[^a-z]+/).filter(Boolean);
   return words.length > 0 && words.every(w => SCREEN_ONLY_WORDS.has(w));
 }
 

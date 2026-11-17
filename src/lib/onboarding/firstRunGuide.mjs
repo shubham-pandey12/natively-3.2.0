@@ -38,7 +38,7 @@ const GUIDE_STEP_NUMBER = Object.freeze({
   keys: 14
 });
 const GUIDE_STOP_LOCK_MS = 3e4;
-export function guideStopLockLeft(state: any, now: number) {
+function guideStopLockLeft(state, now) {
   if (!state || state.status !== "active" || typeof state.stopLockUntil !== "number") return 0;
   return Math.max(0, Math.min(GUIDE_STOP_LOCK_MS, state.stopLockUntil - now));
 }
@@ -46,7 +46,7 @@ const BEFORE_PLANS = STEPS.slice(0, STEPS.indexOf("plans"));
 const MEETING_1 = ["overlay", "answer", "screenshot", "stop"];
 const MEETING_2 = ["notepad", "ask", "recipe", "stop2"];
 const IN_MEETING = [...MEETING_1, ...MEETING_2];
-const ADVANCE: Record<string, [string, string][]> = {
+const ADVANCE = {
   overlay_next: [["overlay", "answer"]],
   answer_shown: [["answer", "screenshot"]],
   screenshot_taken: [["screenshot", "stop"]],
@@ -57,7 +57,7 @@ const ADVANCE: Record<string, [string, string][]> = {
   recipe_run: [["recipe", "stop2"]],
   own_keys: [["plans", "keys"]]
 };
-export const GUIDE_EVENT_TYPES = Object.freeze([
+const GUIDE_EVENT_TYPES = Object.freeze([
   "plans_closed",
   "meeting_started",
   "answer_shown",
@@ -76,11 +76,11 @@ export const GUIDE_EVENT_TYPES = Object.freeze([
   "skip",
   "restart"
 ]);
-export function emptyGuideState() {
+function emptyGuideState() {
   return { status: "idle", step: "start", variant: "normal", outcome: null, startedAt: null, updatedAt: null, endedMeetingId: null, stopLockUntil: null };
 }
-const isTime = (v: any) => v === null || typeof v === "number" && Number.isFinite(v);
-export function normalizeGuideState(raw: any, now: number) {
+const isTime = (v) => v === null || typeof v === "number" && Number.isFinite(v);
+function normalizeGuideState(raw, now) {
   if (!raw || typeof raw !== "object") return emptyGuideState();
   const { status, step, variant, outcome, startedAt, updatedAt } = raw;
   const endedMeetingId = raw.endedMeetingId === void 0 ? null : raw.endedMeetingId;
@@ -94,12 +94,12 @@ export function normalizeGuideState(raw: any, now: number) {
   }
   return state;
 }
-function isGuideEligible(facts: any) {
+function isGuideEligible(facts) {
   return !!facts && !facts.hasOwnAiKey && !facts.hasMeetings && Number(facts.launchCount) <= GUIDE_MAX_LAUNCH;
 }
-const move = (state: any, patch: any, now: number) => ({ ...state, ...patch, updatedAt: now });
-const fresh = (now: number) => ({ ...emptyGuideState(), status: "active", startedAt: now, updatedAt: now });
-export function reduceGuide(state: any, event: any, now: number) {
+const move = (state, patch, now) => ({ ...state, ...patch, updatedAt: now });
+const fresh = (now) => ({ ...emptyGuideState(), status: "active", startedAt: now, updatedAt: now });
+function reduceGuide(state, event, now) {
   if (!event || typeof event !== "object") return state;
   if (event.type === "restart") return fresh(now);
   if (event.type === "plans_closed") {
@@ -153,29 +153,28 @@ export function reduceGuide(state: any, event: any, now: number) {
     }
   }
 }
-export function reconcileGuide(state: any, { meetingActive, atLaunch, surface }: any, now: number) {
+function reconcileGuide(state, { meetingActive, atLaunch, surface }, now) {
   if (!state || state.status !== "active") return state;
   if (meetingActive && (state.step === "start" || state.step === "start2")) return reduceGuide(state, { type: "meeting_started", surface }, now);
   if (atLaunch && !meetingActive && IN_MEETING.includes(state.step)) return reduceGuide(state, { type: "meeting_stopped" }, now);
   return state;
 }
 const ALMOST_GONE_MS = 15 * 60 * 1e3;
-
-/**
- * The guide's account facts from their raw sources (3.2.0). The trial sentinel
- * is a placeholder key, not a purchased one, so it never counts as a Natively key.
- */
-export function guideFactsFromSources({
-  nativelyKey, trialSentinel, licensed, hasOwnAiKey, hasMeetings, launchCount = 0,
-}: {
-  nativelyKey?: unknown; trialSentinel?: string; licensed?: unknown; hasOwnAiKey?: unknown;
-  hasMeetings?: unknown; launchCount?: unknown;
-} = {}) {
+function guideFactsFromSources({ nativelyKey, trialSentinel, licensed, hasOwnAiKey, hasMeetings, launchCount = 0 } = {}) {
   return {
     hasOwnAiKey: !!hasOwnAiKey,
     hasMeetings: !!hasMeetings,
-    hasNativelyKey: typeof nativelyKey === 'string' && nativelyKey.length > 0 && nativelyKey !== trialSentinel,
+    hasNativelyKey: typeof nativelyKey === "string" && nativelyKey.length > 0 && nativelyKey !== trialSentinel,
     isPremium: !!licensed,
-    launchCount: Number(launchCount) || 0,
+    launchCount: Number(launchCount) || 0
   };
 }
+export {
+  GUIDE_EVENT_TYPES,
+  emptyGuideState,
+  guideFactsFromSources,
+  guideStopLockLeft,
+  normalizeGuideState,
+  reconcileGuide,
+  reduceGuide
+};

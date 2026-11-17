@@ -12,8 +12,8 @@ test('answer length defaults and Pro gate match 3.2', () => {
   assert.equal(length.effectiveAnswerLength('invalid', true), 'smart');
   assert.equal(length.profileAnswerWordCap(undefined, 'shorter'), 50);
   assert.equal(length.profileAnswerWordCap('detailed', 'longer'), 200);
-  assert.equal(length.profileAnswerWordCap(undefined, 'longer', true), null);
-  assert.equal(length.profileAnswerWordCap(undefined, 'longer', false, false), 90);
+  assert.equal(length.profileAnswerWordCap('detailed', 'smart'), 180);
+  assert.equal(length.profileAnswerWordCap(undefined, 'smart'), 90);
 });
 
 test('3.2 spoken limits and prompt bands follow selected answer length', () => {

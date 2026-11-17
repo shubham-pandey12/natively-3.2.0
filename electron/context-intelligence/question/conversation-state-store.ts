@@ -335,12 +335,11 @@ export function resolveAgainstSession(
   sessionId: string,
   question: string,
   scope?: EvidenceScope,
-  opts?: { hasScreenContext?: boolean },
 ): ResolvedReference {
   // `scope` (T7): when the caller knows this turn's scope, a referent from a
   // DIFFERENT scope is not resolved against. Optional so existing callers are
   // byte-for-byte unchanged.
-  return resolveReference(question, getConversationState(sessionId), scope, opts);
+  return resolveReference(question, getConversationState(sessionId), scope);
 }
 
 /** Mode switches and session resets must not carry referents across. */

@@ -223,7 +223,7 @@ describe('a template as a mode\'s notes template', () => {
         assert.ok(h.indexOf('isProOrTrialActive()') < h.indexOf('noteTemplateById('));
         assert.ok(h.indexOf("'unknown_template'") < h.indexOf('replaceNoteSectionsWith('));
         assert.ok(h.indexOf("'unknown_mode'") < h.indexOf('replaceNoteSectionsWith('));
-        assert.match(src('electron/services/ModesManager.ts'), /replaceNoteSections\(modeId, rows\)\) return null;\n\s+this\.compileAllSectionsAsync\(modeId\);/);
+        assert.match(src('electron/services/ModesManager.ts'), /replaceNoteSections\(modeId, rows\)\) return null;\n\s+return this\.getNoteSections\(modeId\);/);
         assert.match(src('electron/preload.ts'), /modesApplyNoteTemplate: \(modeId: string, templateId: string\) =>\n\s+ipcRenderer\.invoke\('modes:apply-note-template', modeId, templateId\)/);
         assert.match(src('src/types/electron.d.ts'), /modesApplyNoteTemplate\?: \(modeId: string, templateId: string\)/);
     });

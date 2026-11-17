@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto';
 import type { EvidenceScope, PriorTurnDecision, SourceType } from '../contracts/types';
 import { scopeKey } from '../contracts/types';
 import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
-import { isBareFollowUp, isResponseRequest, isContinuationFragment, isCurrentScreenRequest } from './turn-classifier';
+import { isBareFollowUp, isResponseRequest, isContinuationFragment } from './turn-classifier';
 import { isRefinementFollowUp } from '../../llm/FollowUpResolver';
 
 export interface ConversationTurn {
@@ -836,9 +836,6 @@ export interface ResolvedReference {
     // 2026-09-11: "repeat the number" resolved to the most recent answer in the
     // ring that actually carries one, not to the immediately previous answer.
     | 'VALUE_RECALL_FROM_HISTORY'
-    // With screen context present, "What should I say?" / "What should I say about this?"
-    // is a question about what is on screen, not a request to rephrase previous speech.
-    | 'SCREEN_CONTEXT_IS_PRIMARY_SUBJECT'
     // The previous question named nothing, so the referent is the subject the
     // previous ANSWER named.
     | 'RESOLVED_FROM_PREVIOUS_ANSWER';
@@ -938,14 +935,9 @@ export function resolveReference(
   question: string,
   state: ConversationState | null,
   scope?: EvidenceScope,
-  opts?: { hasScreenContext?: boolean },
 ): ResolvedReference {
   const q = question.trim();
   if (!state) return { resolved: q, usedState: false, reason: 'NO_CONVERSATION_STATE' };
-
-  if (isCurrentScreenRequest(q, Boolean(opts?.hasScreenContext))) {
-    return { resolved: q, usedState: false, reason: 'SCREEN_CONTEXT_IS_PRIMARY_SUBJECT' };
-  }
 
   // T7 (2026-08-28) — SCOPE CHECK. `continuitySourceIds` below has always
   // compared `state.scopeId` before reusing source ids; this function never did,

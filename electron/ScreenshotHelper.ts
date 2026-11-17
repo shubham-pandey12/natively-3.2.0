@@ -65,47 +65,6 @@ function assertScreenRecordingPermission(): void {
   }
 }
 
-function sameCaptureDisplay(a: Electron.Display, b: Electron.Display): boolean {
-  return a.id === b.id && a.scaleFactor === b.scaleFactor && a.rotation === b.rotation
-    && a.bounds.x === b.bounds.x && a.bounds.y === b.bounds.y
-    && a.bounds.width === b.bounds.width && a.bounds.height === b.bounds.height;
-}
-
-function assertCaptureDisplaysUnchanged(displays: readonly Electron.Display[]): void {
-  const current = screen.getAllDisplays();
-  if (current.length !== displays.length || displays.some(display => !current.some(d => sameCaptureDisplay(d, display)))) {
-    throw new Error('The display layout changed during capture. Try taking the screenshot again.');
-  }
-}
-
-// Both capture paths use display IDs because source order can differ from display order.
-function requireDisplaySource(
-  display: Electron.Display,
-  displays: readonly Electron.Display[],
-  sources: readonly Electron.DesktopCapturerSource[],
-): Electron.DesktopCapturerSource {
-  const matchesId = (source: Electron.DesktopCapturerSource, d: Electron.Display) =>
-    source.display_id === String(d.id);
-  const direct = sources.filter(source => matchesId(source, display));
-  const unmappedDisplays = displays.filter(d => !sources.some(source => matchesId(source, d)));
-  const unidentified = sources.filter(source => !source.display_id);
-  let source = direct.length === 1 ? direct[0] : undefined;
-  if (direct.length === 0 && unmappedDisplays.length === 1 &&
-      unmappedDisplays[0].id === display.id && unidentified.length === 1 &&
-      sources.length === displays.length) {
-    source = unidentified[0];
-  }
-
-  if (!source || sources.filter(candidate => candidate.id === source.id).length !== 1) {
-    throw new Error('Could not identify the selected screen. Reconnect the display or restart Natively and try again.');
-  }
-  const { width, height } = source.thumbnail.getSize();
-  if (width <= 0 || height <= 0) {
-    throw new Error('The selected screen returned an empty image. Check screen capture permissions and try again.');
-  }
-  return source;
-}
-
 /**
  * Finds the display that best contains the given rectangle.
  * Used to determine which monitor to capture for a selection area.
@@ -265,11 +224,20 @@ async function getDisplaysIntersectingSelection(
     throw error;
   }
   
-  assertCaptureDisplaysUnchanged(displays);
   console.log(`[ScreenshotHelper] Found ${sources.length} screen sources for ${displays.length} displays`);
   
+  // Build a map of source by display_id for reliable matching
+  // On Windows, source.display_id is a string representation of the display id
+  const sourceByDisplayId = new Map<string, Electron.DesktopCapturerSource>();
+  for (const src of sources) {
+    if ('display_id' in src && src.display_id) {
+      sourceByDisplayId.set(src.display_id, src);
+      console.log(`[ScreenshotHelper] Registered source: ${src.name} with display_id: ${src.display_id}`);
+    }
+  }
+  
   const captures: DisplayCapture[] = [];
-
+  
   // For each display, check if selection intersects with it
   for (const display of displays) {
     const { x: dx, y: dy, width: dWidth, height: dHeight } = display.bounds;
@@ -294,7 +262,31 @@ async function getDisplaysIntersectingSelection(
     
     console.log(`[ScreenshotHelper] Selection intersects with display ${display.id}:`, intersection);
     
-    const source = requireDisplaySource(display, displays, sources);
+    const scaleFactor = display.scaleFactor;
+    
+    // Find the corresponding source using the pre-built map
+    const displayIdStr = display.id.toString();
+    let source = sourceByDisplayId.get(displayIdStr);
+    
+    // Fallback: index-based matching (less reliable)
+    if (!source) {
+      console.warn(`[ScreenshotHelper] display_id ${displayIdStr} not found in sources, using index-based fallback`);
+      const displayIndex = displays.findIndex(d => d.id === display.id);
+      if (displayIndex === -1) {
+        console.error(`[ScreenshotHelper] CRITICAL: Display ${display.id} not found in displays array. Available displays:`, displays.map(d => d.id));
+      } else if (displayIndex >= sources.length) {
+        console.warn(`[ScreenshotHelper] Index ${displayIndex} out of bounds for sources (${sources.length} sources). Using first source.`);
+      } else {
+        console.log(`[ScreenshotHelper] Fallback: matched display[${displayIndex}] to sources[${displayIndex}] = ${sources[displayIndex]?.name || 'unknown'}`);
+      }
+      source = sources[displayIndex] || sources[0];
+    }
+    
+    if (!source) {
+      source = sources[0];
+    }
+    
+    console.log(`[ScreenshotHelper] Final source for display ${display.id}: ${source.name}`);
     
     // Get source thumbnail info
     const sourceSize = source.thumbnail.getSize();
@@ -488,10 +480,6 @@ export async function captureWindowThumbnail(titles: string[], maxEdge: number =
 export class ScreenshotHelper {
   private screenshotQueue: string[] = []
   private extraScreenshotQueue: string[] = []
-  private screenshotRetentions = new Map<string, readonly string[]>()
-  private retainedScreenshotPaths = new Map<string, number>()
-  private deferredScreenshotDeletes = new Set<string>()
-  private deletingScreenshotPaths = new Set<string>()
   private readonly MAX_SCREENSHOTS = 5
   // The extension's formula images (#645), one list per capture, kept apart
   // from the queues so they never push out the user's own screenshots.
@@ -555,11 +543,6 @@ export class ScreenshotHelper {
       targetDisplay = screen.getPrimaryDisplay();
     }
     
-    const displays = screen.getAllDisplays();
-    if (!displays.some(display => sameCaptureDisplay(display, targetDisplay))) {
-      throw new Error('The selected display changed before capture. Try taking the screenshot again.');
-    }
-
     const { scaleFactor } = targetDisplay;
     const displayBounds = targetDisplay.bounds;
     
@@ -620,8 +603,34 @@ export class ScreenshotHelper {
       );
     }
 
-    assertCaptureDisplaysUnchanged(displays);
-    const selectedSource = requireDisplaySource(targetDisplay, displays, sources);
+    // Find the source matching our target display using reliable display_id mapping
+    const targetDisplayId = targetDisplay.id.toString();
+    let selectedSource: Electron.DesktopCapturerSource | null = null;
+    
+    // Build a map of sources by display_id (same logic as in getDisplaysIntersectingSelection)
+    for (const source of sources) {
+      if ('display_id' in source && source.display_id) {
+        console.log(`[ScreenshotHelper] Source: ${source.name}, display_id: ${source.display_id}`);
+        if (source.display_id === targetDisplayId) {
+          selectedSource = source;
+          console.log(`[ScreenshotHelper] Matched source by display_id: ${source.display_id}`);
+        }
+      }
+    }
+    
+    // Last resort: use first source. This means we may be capturing the WRONG
+    // display — surface it at error level with the counts so a mismatch is obvious
+    // in field logs (control flow unchanged: sources[0] is the only fallback we have).
+    if (!selectedSource) {
+      console.error(
+        `[ScreenshotHelper] display_id ${targetDisplayId} not matched in ${sources.length} source(s) ` +
+        `for ${screen.getAllDisplays().length} display(s) — falling back to sources[0] (may be the wrong display)`
+      );
+      selectedSource = sources[0];
+    }
+    
+    console.log(`[ScreenshotHelper] Final source: ${selectedSource.name} (id: ${selectedSource.id})`);
+    
     let image = selectedSource.thumbnail;
 
     if (area) {
@@ -805,65 +814,6 @@ export class ScreenshotHelper {
     }
   }
 
-  /** Retain validated screenshots while an answer or its explicit retry owns them. */
-  public retainScreenshots(paths: readonly string[]): string {
-    const retained = [...new Set(paths.map((imagePath) => path.resolve(imagePath)))]
-    for (const imagePath of retained) {
-      if (this.deletingScreenshotPaths.has(imagePath) || !fs.statSync(imagePath).isFile()) {
-        throw new Error('A screenshot is no longer available. Capture it again.')
-      }
-    }
-    const token = uuidv4()
-    this.screenshotRetentions.set(token, retained)
-    for (const imagePath of retained) {
-      this.retainedScreenshotPaths.set(imagePath, (this.retainedScreenshotPaths.get(imagePath) ?? 0) + 1)
-    }
-    return token
-  }
-
-  public async releaseScreenshots(token: string): Promise<void> {
-    const retained = this.screenshotRetentions.get(token)
-    if (!retained) return
-    this.screenshotRetentions.delete(token)
-    for (const imagePath of retained) {
-      const remaining = (this.retainedScreenshotPaths.get(imagePath) ?? 1) - 1
-      if (remaining > 0) {
-        this.retainedScreenshotPaths.set(imagePath, remaining)
-        continue
-      }
-      this.retainedScreenshotPaths.delete(imagePath)
-      if (!this.deferredScreenshotDeletes.has(imagePath)) continue
-      const queued = this.screenshotQueue.includes(imagePath) || this.extraScreenshotQueue.includes(imagePath)
-        || this.formulaImageCaptures.some((capture) => capture.includes(imagePath))
-      if (queued) {
-        this.deferredScreenshotDeletes.delete(imagePath)
-        continue
-      }
-      try {
-        await this.deleteUnretainedScreenshot(imagePath)
-        this.deferredScreenshotDeletes.delete(imagePath)
-      } catch (error) {
-        // A locked file (Windows) remains tracked so a later reset can retry cleanup.
-        console.warn('[ScreenshotHelper] Retained screenshot cleanup failed:', error)
-      }
-    }
-  }
-
-  private async deleteUnretainedScreenshot(imagePath: string): Promise<void> {
-    if (this.retainedScreenshotPaths.has(imagePath)) {
-      this.deferredScreenshotDeletes.add(imagePath)
-      return
-    }
-    this.deletingScreenshotPaths.add(imagePath)
-    try {
-      await fs.promises.unlink(imagePath)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    } finally {
-      this.deletingScreenshotPaths.delete(imagePath)
-    }
-  }
-
   /**
    * Add a saved image to its queue, dropping (and deleting) the oldest past
    * MAX_SCREENSHOTS. The one place the cap lives, for captures and for images
@@ -876,7 +826,7 @@ export class ScreenshotHelper {
     const removedPath = queue.shift()
     if (!removedPath) return
     try {
-      await this.deleteUnretainedScreenshot(removedPath)
+      await fs.promises.unlink(removedPath)
       console.log(`[ScreenshotHelper] Removed old ${which === 'queue' ? '' : 'extra '}screenshot: ${removedPath}`)
     } catch (error) {
       console.warn(`[ScreenshotHelper] Failed to remove old ${which === 'queue' ? '' : 'extra '}screenshot: ${removedPath}`, error)
@@ -932,7 +882,7 @@ export class ScreenshotHelper {
     this.formulaImageCaptures.push(paths)
     const removed = this.formulaImageCaptures.splice(0, Math.max(0, this.formulaImageCaptures.length - this.MAX_FORMULA_IMAGE_CAPTURES)).flat()
     removed.forEach((p) => this.formulaImageRanges.delete(p))
-    await Promise.all(removed.map((p) => this.deleteUnretainedScreenshot(p).catch(() => {})))
+    await Promise.all(removed.map((p) => fs.promises.unlink(p).catch(() => {})))
     return paths
   }
 
@@ -958,21 +908,34 @@ export class ScreenshotHelper {
   }
 
   public clearQueues(): void {
-    // Reset invalidates retry ownership and removes even screenshots already evicted from a queue.
-    const paths = new Set([
-      ...this.screenshotQueue, ...this.extraScreenshotQueue, ...this.formulaImageCaptures.flat(),
-      ...this.deferredScreenshotDeletes,
-    ])
+    // Clear screenshotQueue
+    this.screenshotQueue.forEach((screenshotPath) => {
+      fs.unlink(screenshotPath, (err) => {
+        if (err) {
+          // console.error(`Error deleting screenshot at ${screenshotPath}:`, err)
+        }
+      })
+    })
     this.screenshotQueue = []
+
+    // Clear extraScreenshotQueue
+    this.extraScreenshotQueue.forEach((screenshotPath) => {
+      fs.unlink(screenshotPath, (err) => {
+        if (err) {
+          // console.error(
+          //   `Error deleting extra screenshot at ${screenshotPath}:`,
+          //   err
+          // )
+        }
+      })
+    })
     this.extraScreenshotQueue = []
+
+    this.formulaImageCaptures.flat().forEach((imagePath) => {
+      fs.unlink(imagePath, () => {})
+    })
     this.formulaImageCaptures = []
     this.formulaImageRanges.clear()
-    this.screenshotRetentions.clear()
-    this.retainedScreenshotPaths.clear()
-    this.deferredScreenshotDeletes.clear()
-    for (const imagePath of paths) {
-      void this.deleteUnretainedScreenshot(imagePath).catch(() => {})
-    }
   }
 
   /**

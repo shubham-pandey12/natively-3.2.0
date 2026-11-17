@@ -4,7 +4,7 @@ import { MeetingSummarySchemaValidator, dropAssistantSourcedAtoms } from './Meet
 import { generateStructured } from './generateStructured';
 import { anchorAtomTimes, chunkElapsedRange } from './evidenceTimes';
 import { chunkDensityTarget, headingBudgetForTranscript, renderNotesPromptContext, userNoteHeadings, type NotesPromptContext } from './meetingNotesContext';
-import { builtinSectionInstruction } from './sectionInstructions';
+import { sectionGuidance as sectionGuidanceFor } from './sectionInstructions';
 
 export class ChunkSummaryGenerator {
   private readonly validator = new MeetingSummarySchemaValidator();
@@ -99,8 +99,7 @@ export function buildChunkPrompt(params: {
   const sectionList = params.modeNoteSections || [];
   const sectionGuidance = sectionList.length > 0
     ? sectionList.map((section, i) => {
-        const guidance = builtinSectionInstruction(section.title, section.description)
-          ?? (section.compiledPrompt?.trim() || section.description?.trim() || `Capture content for "${section.title}", grounded only in this transcript.`);
+        const guidance = sectionGuidanceFor(section);
         return `${i + 1}. SECTION "${section.title}"\n   ${guidance}`;
       }).join('\n')
     : '';

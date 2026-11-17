@@ -47,7 +47,7 @@ test('the phone pin is captured before the provider stream starts', () => {
   const capture = src.indexOf('phonePinnedModeId: string | null = null');
   // The phone question's stream call (its image argument carries the phone's
   // photos and the overlay's attached screenshots since 2026-09-27).
-  const stream = src.indexOf('llmHelper.streamChatWithOutcome(message, phoneImagePaths.length ? phoneImagePaths : undefined, context');
+  const stream = src.indexOf('llmHelper.streamChat(message, phoneImagePaths.length ? phoneImagePaths : undefined, context');
   assert.notEqual(capture, -1);
   assert.notEqual(stream, -1);
   assert.ok(capture < stream, 'the pin must be taken before the awaits it protects');

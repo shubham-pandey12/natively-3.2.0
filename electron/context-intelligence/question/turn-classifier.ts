@@ -833,22 +833,6 @@ export const isBareFollowUp = (raw: string): boolean => {
  *  the old duplicate gates disagreed on every reported failure. */
 export const isResponseRequest = (raw: string): boolean => RESPONSE_REQUEST_RE.test(String(raw).toLowerCase());
 
-/** A bare caption names no personal fact; its subject is supplied by the image. */
-function isScreenPointerQuestion(question: string): boolean {
-  const q = question.trim().replace(/\s+/g, ' ');
-  return /^(?:what (?:should|can|do) i (?:say|answer|reply)|how (?:should|can|do) i (?:answer|respond|reply))(?: (?:about|to))?(?: (?:this|that)(?: (?:screenshot|image|screen|page))?)?[?.!]*$/i.test(q)
-    || /^(?:please )?(?:analy[sz]e|solve|answer|read|describe|explain) (?:this|that|the attached)(?: (?:screenshot|image|screen|page))?[?.!]*$/i.test(q);
-}
-
-/** Current-screen subjects must not inherit the topic of an earlier exchange. */
-export function isCurrentScreenRequest(question: string, hasScreenContext: boolean): boolean {
-  if (!hasScreenContext) return false;
-  if (isScreenPointerQuestion(question)) return true;
-  // Explicit comparisons and edits may need both the new image and prior conversation.
-  if (/\b(?:previous|earlier|last|prior) (?:answer|reply|question|turn|image|screenshot)\b/i.test(question)) return false;
-  return /\b(?:this|the|current|attached|new) (?:screenshot|image|screen|page)\b/i.test(question);
-}
-
 /**
  * Classify per CLAUSE, then union.
  *
@@ -1588,19 +1572,7 @@ function detectTypes(q: string, input: ClassificationInput): { types: QuestionTy
     types.add('DOCUMENT_FACT'); noteWholeQ('DOCUMENT_FACT');
   }
 
-  if (input.hasScreenContext && isScreenPointerQuestion(q)) {
-    // 'I say' points at the image; it makes no claim about the user's employment.
-    types.delete('PERSONAL_EXPERIENCE');
-    for (const claim of claims) {
-      if (claim.startsWith('USER_')) {
-        claims.delete(claim);
-        inferredClaims.delete(claim);
-        delete clauses[claim];
-      }
-    }
-  }
-  if (!isCurrentScreenRequest(q, Boolean(input.hasScreenContext))
-      && (input.isFollowUp || isBareFollowUp(q))) types.add('FOLLOW_UP');
+  if (input.isFollowUp || isBareFollowUp(q)) types.add('FOLLOW_UP');
 
   // LIVE MEETING, PERSONAL OR FOLLOW-UP TURN (2026-09-24, measured live).
   //

@@ -16,24 +16,17 @@ const SKILL_CATEGORY_LABEL: Record<string, string> = {
 export function calculateDurationMonths(startDate: string | null, endDate: string | null): number {
     if (!startDate) return 0;
     try {
-        const startParts = startDate.split('-').map(Number);
-        const startYear = startParts[0];
-        const startMonth = Number.isFinite(startParts[1]) ? startParts[1] : 1;
-        if (!Number.isInteger(startYear) || !Number.isInteger(startMonth) || startMonth < 1 || startMonth > 12) return 0;
-
+        const [startYear, startMonth] = startDate.split('-').map(Number);
         let endYear: number, endMonth: number;
         if (endDate) {
-            const endParts = endDate.split('-').map(Number);
-            endYear = endParts[0];
-            endMonth = Number.isFinite(endParts[1]) ? endParts[1] : 12;
-            if (!Number.isInteger(endYear) || !Number.isInteger(endMonth) || endMonth < 1 || endMonth > 12) return 0;
+            [endYear, endMonth] = endDate.split('-').map(Number);
         } else {
             const now = new Date();
             endYear = now.getFullYear();
             endMonth = now.getMonth() + 1;
         }
         const months = (endYear - startYear) * 12 + (endMonth - startMonth);
-        return Number.isFinite(months) ? Math.max(0, months) : 0;
+        return Math.max(0, months);
     } catch {
         return 0;
     }

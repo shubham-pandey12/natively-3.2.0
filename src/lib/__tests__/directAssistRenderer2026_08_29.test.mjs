@@ -98,16 +98,16 @@ test('What-to-Say forwards recent interviewer STT and never auto-captures a page
   const body = section('const handleWhatToSay = async', 'const handleFollowUp = async');
   const directBranch = body.indexOf('if (directAssistEnabled) {');
   const autoCapture = body.indexOf('phoneMirrorRequestAutoContext');
-  assert.ok(directBranch >= 0 && autoCapture === -1, 'WTA must not automatically recapture a previous page');
+  assert.ok(directBranch >= 0 && autoCapture > directBranch, 'Direct WTA must precede legacy auto capture');
   assert.match(body, /const directTranscriptSnapshot = pendingRollingPartialRef\.current/);
   assert.match(body, /const interviewerRequest = directTranscriptSnapshot/);
   assert.match(body, /buildDirectWhatToSayPayload\(\{\s*interviewerRequest,\s*dynamicPromptInstruction,\s*hasScreenshots,/);
   assert.match(body, /source: directWhatToSayPayload\.source/);
-  assert.match(body, /currentRequest: retrySnapshot\?\.question \|\| directWhatToSayPayload\.currentRequest/);
+  assert.match(body, /currentRequest: directWhatToSayPayload\.currentRequest/);
   assert.match(body, /transcript: directWhatToSayPayload\.transcript/);
 
-  // Rolling audio may describe an earlier question; it must not become
-  // current-turn speech when the user submits a new screenshot.
+  // Screenshot+STT keeps audio out of currentRequest so the IPC transcript
+  // scope can remove it without leaking the same text through another field.
   const interviewer = 'Implement binary search in C++';
   const screenshotPayload = buildDirectWhatToSayPayload({
     interviewerRequest: interviewer,
@@ -115,7 +115,7 @@ test('What-to-Say forwards recent interviewer STT and never auto-captures a page
   });
   assert.equal(screenshotPayload.source, 'screenshot');
   assert.doesNotMatch(screenshotPayload.currentRequest, /binary search/i);
-  assert.equal(screenshotPayload.transcript, undefined, 'retained audio must not override a new screenshot');
+  assert.equal(screenshotPayload.transcript, interviewer);
 });
 
 test('no-screenshot dynamic What-to-Say keeps STT authoritative and appends the output instruction', () => {
@@ -206,7 +206,7 @@ test('Direct start tombstones tagged and id-less legacy Intelligence finals beyo
   const finalMarker = 'window.electronAPI.onIntelligenceSuggestedAnswer((data) => {';
   const finalStart = interfaceSource.indexOf(finalMarker);
   assert.ok(finalStart >= 0);
-  const finalHandler = interfaceSource.slice(finalStart, interfaceSource.indexOf("window.electronAPI.onIntelligenceSuggestedAnswerDiscard", finalStart));
+  const finalHandler = interfaceSource.slice(finalStart, finalStart + 2400);
   const tombstoneGuard = finalHandler.indexOf('if (legacyIntelligenceTombstonedRef.current) return;');
   const appendPath = finalHandler.indexOf("finalizeStreamingByIntent('what_to_answer', answerText)");
   assert.ok(tombstoneGuard >= 0 && appendPath > tombstoneGuard);
@@ -360,7 +360,7 @@ test("the provider's own words stay beside the answer: never in its text, never 
     'const buildConversationContextFromMessages = (items: Message[]): string =>',
     '// PERF: HighlightedCode',
   );
-  assert.match(contextBuilder, /conversationContextFromMessages\(items\)/);
+  assert.match(contextBuilder, /m\.text/);
   assert.doesNotMatch(contextBuilder, /\.failure\b|fallbackNotice|\.detail\b/);
 
   const settleFn = section(

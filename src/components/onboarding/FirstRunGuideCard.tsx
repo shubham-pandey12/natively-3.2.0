@@ -10,8 +10,6 @@ type GuideState = { status: string; step: string; stopLockUntil?: number | null 
 type GuideApi = {
   guideGet?: () => Promise<GuideState>;
   guideDispatch?: (event: { type: string; [key: string]: unknown }) => Promise<GuideState>;
-  getGuideState?: () => Promise<GuideState>;
-  dispatchGuideEvent?: (event: { type: string; [key: string]: unknown }) => Promise<GuideState>;
   onGuideChanged?: (cb: (state: GuideState) => void) => () => void;
 };
 
@@ -44,8 +42,8 @@ export function FirstRunGuideCard({ surface }: { surface: 'launcher' | 'overlay'
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const [anchorMissingSince, setAnchorMissingSince] = useState<number | null>(null);
   const [keys, setKeys] = useState({ ai: false, stt: false, retrieval: false });
-  const getGuide = api?.guideGet ?? api?.getGuideState;
-  const dispatchGuide = api?.guideDispatch ?? api?.dispatchGuideEvent;
+  const getGuide = api?.guideGet;
+  const dispatchGuide = api?.guideDispatch;
   useEffect(() => {
     if (!getGuide) return;
     void getGuide.call(api).then(setGuide).catch(() => {});

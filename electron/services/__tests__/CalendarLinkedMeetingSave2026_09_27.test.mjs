@@ -23,7 +23,6 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.
 let tmpDir;
 let MeetingPersistence;
 let Database;
-let windows = [];
 const originalLoad = Module._load;
 
 const SNAPSHOT = {
@@ -71,7 +70,7 @@ describe('a calendar-linked 1:1, saved', () => {
         process.env.NATIVELY_MEETING_MODE_AUTODETECT = 'false';
         const electronStub = {
             app: { getPath: () => tmpDir, isPackaged: false, getVersion: () => '0.0.0', on: () => {}, whenReady: () => Promise.resolve() },
-            BrowserWindow: { getAllWindows: () => windows },
+            BrowserWindow: { getAllWindows: () => [] },
             safeStorage: { isEncryptionAvailable: () => false },
             shell: {}, ipcMain: { handle: () => {}, on: () => {} },
             Notification: class { static isSupported() { return false; } on() {} show() {} },
@@ -91,64 +90,6 @@ describe('a calendar-linked 1:1, saved', () => {
     });
 
     const data = () => ({ transcript: TRANSCRIPT.map((s) => ({ ...s })), usage: [], startTime: Date.parse(SNAPSHOT.startTime), durationMs: 30 * 60_000, context: '', memoryEligibleCount: TRANSCRIPT.length });
-
-    test('a chat-only save failure preserves its transcript in a sanitized backup', async () => {
-        const mp = makePersistence([]);
-        const chat = { ...data(), memoryEligibleCount: 0 };
-        await mp.processAndSaveMeeting(chat, 'seed', { title: 'Seed chat' }, null);
-        const db = new Database(path.join(tmpDir, 'natively.db'));
-        try {
-            db.exec(`CREATE TRIGGER reject_chat_save BEFORE INSERT ON meetings
-                WHEN NEW.id = 'folder/chat'
-                BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`);
-            const meetingId = 'folder/chat';
-            await mp.processAndSaveMeeting(chat, meetingId, { title: 'Interview chat' }, null);
-            const dir = path.join(tmpDir, 'emergency-transcripts');
-            assert.deepEqual(fs.readdirSync(dir), ['folder_chat.json']);
-            const backup = JSON.parse(fs.readFileSync(path.join(dir, 'folder_chat.json'), 'utf8'));
-            assert.equal(backup.meetingId, meetingId);
-            assert.equal(backup.data.title, 'Interview chat');
-            assert.deepEqual(backup.data.transcript, TRANSCRIPT);
-        } finally {
-            db.exec('DROP TRIGGER IF EXISTS reject_chat_save');
-            db.close();
-        }
-    });
-
-    test('an audio save failure preserves both speakers and a retry saves them in SQLite', async () => {
-        const mp = makePersistence([]);
-        const meetingId = 'failed-audio-save';
-        const db = new Database(path.join(tmpDir, 'natively.db'));
-        try {
-            db.exec(`CREATE TRIGGER reject_audio_save BEFORE INSERT ON meetings
-                WHEN NEW.id = 'failed-audio-save'
-                BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`);
-            await mp.processAndSaveMeeting(data(), meetingId, { title: 'Interview audio' }, null);
-            assert.equal(readMeeting(meetingId).row, undefined);
-            const backup = JSON.parse(fs.readFileSync(path.join(tmpDir, 'emergency-transcripts', `${meetingId}.json`), 'utf8'));
-            assert.equal(backup.meetingId, meetingId);
-            assert.deepEqual(backup.data.transcript, TRANSCRIPT);
-
-            db.exec('DROP TRIGGER reject_audio_save');
-            await mp.processAndSaveMeeting(data(), meetingId, { title: 'Interview audio' }, null);
-            assert.deepEqual(readMeeting(meetingId).speakers, TRANSCRIPT.map((segment) => segment.speaker));
-        } finally {
-            db.exec('DROP TRIGGER IF EXISTS reject_audio_save');
-            db.close();
-        }
-    });
-
-    test('a destroyed renderer after a chat save does not create a transcript backup', async () => {
-        const meetingId = 'saved-chat-closed-window';
-        windows = [{ webContents: { send() { throw new Error('Object has been destroyed'); } } }];
-        try {
-            await makePersistence([]).processAndSaveMeeting({ ...data(), memoryEligibleCount: 0 }, meetingId, null, null);
-            assert.deepEqual(readMeeting(meetingId).speakers, TRANSCRIPT.map((segment) => segment.speaker));
-            assert.equal(fs.existsSync(path.join(tmpDir, 'emergency-transcripts', `${meetingId}.json`)), false);
-        } finally {
-            windows = [];
-        }
-    });
 
     test('the notes see names; the stored transcript keeps raw speakers; the meeting keeps event and labels', async () => {
         const calls = [];

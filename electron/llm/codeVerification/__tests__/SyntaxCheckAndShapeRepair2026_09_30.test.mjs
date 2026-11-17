@@ -166,7 +166,7 @@ describe('coding repairs follow the turn shape', () => {
 
   test('legacy repeat-press directive only rides a solve turn, and no longer demands the full section shape', () => {
     const wta = SRC('electron/llm/WhatToAnswerLLM.ts');
-    assert.match(wta, /if \(promotedScreenCodingTurn && isRepeatPressAsk\(answerPlan\?\.question, codingSignals\.codingShape \?\? ''\)\) \{/);
+    assert.match(wta, /if \(promotedScreenCodingTurn && isRepeatPressAsk\(answerPlan\?\.question, codingSignals\.codingShape!\)\) \{/);
     assert.doesNotMatch(wta, /full section shape/);
   });
 });

@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isPremiumAvailable, markPremiumAbsent, resetFeatureGate } from '../../../dist-electron/electron/premium/featureGate.js';
-import { guideFactsFromSources } from '../../../dist-electron/electron/services/firstRunGuidePolicy.js';
+import { guideFactsFromSources } from '../../../src/lib/onboarding/firstRunGuide.mjs';
 import { isImageCodingAsk } from '../../../dist-electron/electron/llm/codingPromptSignals.js';
 
 test('markPremiumAbsent makes the gate report premium unavailable until reset', () => {

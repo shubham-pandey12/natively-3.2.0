@@ -16,5 +16,5 @@ test('launcher guide anchors and reacts to plan and credential changes', () => {
 });
 
 test('Help can restart the guide', () => {
-  assert.match(src('components/settings/HelpSettings.tsx'), /dispatchGuideEvent\?\.\(\{ type: 'restart' \}\)/);
+  assert.match(src('components/settings/HelpSettings.tsx'), /guideDispatch\?\.\(\{ type: 'restart' \}\)/);
 });

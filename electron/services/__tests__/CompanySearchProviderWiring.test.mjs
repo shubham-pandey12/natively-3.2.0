@@ -28,13 +28,6 @@ const read = (p) => fs.readFileSync(path.join(root, p), 'utf8');
 const { CompanyResearchEngine } = require(
     path.join(root, 'dist-electron/premium/electron/knowledge/CompanyResearchEngine.js')
 );
-const { AOTPipeline } = require(
-    path.join(root, 'dist-electron/premium/electron/knowledge/AOTPipeline.js')
-);
-const { KnowledgeDatabaseManager } = require(
-    path.join(root, 'dist-electron/premium/electron/knowledge/KnowledgeDatabaseManager.js')
-);
-const Database = require('better-sqlite3');
 
 const VALID_DOSSIER_JSON = JSON.stringify({
     company: 'Acme',
@@ -67,14 +60,6 @@ test('no search provider → LLM-only dossier is marked degraded and cached as s
     assert.equal(dossier.degraded, true, 'LLM-only dossier must carry degraded:true');
     assert.equal(db.saved.length, 1, 'degraded dossier is still cached');
     assert.equal(db.saved[0].dossier.degraded, true, 'cached copy carries the flag');
-});
-
-test('LLM-only failure is surfaced to the caller with its provider diagnosis', async () => {
-    const engine = new CompanyResearchEngine(makeFakeDb());
-    await assert.rejects(
-        engine.researchCompany('Acme', {}),
-        /No AI provider is configured for Company Intel/
-    );
 });
 
 test('fresh cached DEGRADED dossier + provider now available → cache bypassed, search attempted', async () => {
@@ -123,88 +108,6 @@ test('setSearchProvider accepts null (clears a stale provider)', () => {
     engine.setSearchProvider({ search: async () => [] });
     engine.setSearchProvider(null);
     assert.equal(engine.searchProvider, null);
-});
-
-test('getCachedDossier does not expose an expired persisted dossier', () => {
-    const db = makeFakeDb({ cachedDossier: { company: 'Acme' }, stale: true });
-    const engine = new CompanyResearchEngine(db);
-    assert.equal(engine.getCachedDossier('Acme'), null);
-});
-
-test('company dossier persists in SQLite and expires at the configured 24-hour TTL', () => {
-    const sqlite = new Database(':memory:');
-    try {
-        const db = new KnowledgeDatabaseManager(sqlite);
-        db.initializeSchema();
-        const dossier = { company: 'Acme', sources: ['https://example.com'] };
-        db.saveDossier('Acme', dossier, dossier.sources);
-
-        assert.deepEqual(db.getDossier('Acme').dossier, dossier);
-        assert.equal(db.isDossierStale('Acme'), false);
-        sqlite.prepare("UPDATE company_dossiers SET last_checked = datetime('now', '-2 days') WHERE company_name = ?").run('acme');
-        assert.equal(db.isDossierStale('Acme'), true);
-    } finally {
-        sqlite.close();
-    }
-});
-
-test('legacy company_dossiers schema migrates timestamps and sources without dropping rows', () => {
-    const sqlite = new Database(':memory:');
-    try {
-        sqlite.exec(`
-            CREATE TABLE company_dossiers (
-                company_name TEXT PRIMARY KEY,
-                dossier_json TEXT NOT NULL,
-                sources_json TEXT,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-        const dossier = { company: 'Barq', hiring_strategy: 'Legacy cached dossier' };
-        const sources = ['https://example.com/barq'];
-        sqlite.prepare('INSERT INTO company_dossiers (company_name, dossier_json, sources_json, updated_at) VALUES (?, ?, ?, ?)')
-            .run('barq', JSON.stringify(dossier), JSON.stringify(sources), new Date().toISOString());
-
-        const db = new KnowledgeDatabaseManager(sqlite);
-        db.initializeSchema();
-        db.initializeSchema();
-
-        assert.deepEqual(db.getDossier('Barq').dossier, dossier);
-        assert.deepEqual(db.getDossier('Barq').sources, sources);
-        assert.equal(db.isDossierStale('Barq'), false);
-        db.saveDossier('Barq', { ...dossier, hiring_strategy: 'Updated' }, sources);
-        assert.equal(db.getDossier('Barq').dossier.hiring_strategy, 'Updated');
-    } finally {
-        sqlite.close();
-    }
-});
-
-test('invalid search summary falls back to a degraded LLM-only dossier', async () => {
-    const db = makeFakeDb();
-    const engine = new CompanyResearchEngine(db);
-    engine.minSearchIntervalMs = 0;
-    engine.buildSearchQueries = () => ['Acme hiring'];
-    engine.setSearchProvider({ search: async () => [{ title: 'Acme', link: 'https://example.com', snippet: 'Hiring details' }] });
-    let llmCalls = 0;
-    engine.setGenerateContentFn(async () => ++llmCalls === 1 ? 'not-json' : VALID_DOSSIER_JSON);
-
-    const dossier = await engine.researchCompany('Acme', {});
-    assert.equal(llmCalls, 2);
-    assert.equal(dossier.degraded, true);
-    assert.deepEqual(dossier.sources, []);
-    assert.equal(db.saved.length, 1);
-});
-
-test('AOT marks null research failed and clears the previous company dossier', async () => {
-    const engine = new CompanyResearchEngine(makeFakeDb());
-    engine.researchCompany = async () => null;
-    const pipeline = new AOTPipeline({}, engine);
-    pipeline.setGenerateContentFn(async () => 'unused');
-    pipeline.cachedDossier = { company: 'Previous Co' };
-
-    await pipeline.runForJD({ structured_data: { company: 'Acme', title: 'Engineer' } }, null);
-
-    assert.equal(pipeline.getStatus().companyResearch, 'failed');
-    assert.equal(pipeline.getCachedDossier(), null);
 });
 
 // ---------- source-inspection wiring guards ----------

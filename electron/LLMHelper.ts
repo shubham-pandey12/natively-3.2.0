@@ -10833,7 +10833,7 @@ let isMultimodal = !!(imagePaths?.length);
       // to "Answer in 100 words".
       try {
         const alreadyCarried = /<user_instructions\b|<custom_instructions>/.test(`${systemPromptOverride || ''}\n${message || ''}`);
-        const answerTurn = Boolean(routeOptions?.answerType) && routeOptions?.answerType !== 'project_link_answer';
+        const answerTurn = Boolean(routeOptions?.answerType);
         if (!alreadyCarried && answerTurn) {
           const modesMgr = modesMgrForInjection || require('./services/ModesManager').ModesManager.getInstance();
           const pinnedInstructions: string = modesMgr.getActiveModePinnedInstructions?.(modeAnswerType(routeOptions), routeOptions?.pinnedModeId ?? undefined) || '';
@@ -15443,21 +15443,9 @@ let isMultimodal = !!(imagePaths?.length);
       }
     }
     if (carriedImagePaths.length) imagePaths.push(...carriedImagePaths);
-    let directUserPrompt = deniedScopes.length
+    const directUserPrompt = deniedScopes.length
       ? this.stripDeniedScopedBlocksFromMessage(request.userPrompt, deniedScopes)
       : request.userPrompt;
-    // History files can disappear after prompt preparation. Bind the surviving
-    // bytes to their original turn IDs rather than silently shifting the labels.
-    if (request.historyImagePaths?.length) {
-      const identities = request.imagePaths.map((_, i) => `Image attachment ${i + 1}: current request image ${i + 1}.`);
-      request.historyImagePaths.forEach((path, i) => {
-        const position = carriedImagePaths.indexOf(path);
-        identities.push(position < 0
-          ? `Earlier screenshot ${i + 1}: not included in this request.`
-          : `Image attachment ${request.imagePaths.length + position + 1}: earlier screenshot ${i + 1}.`);
-      });
-      directUserPrompt += `\n\n[DISPATCHED IMAGE IDENTITIES]\nThis map supersedes earlier attachment counts and numbering notices.\n${identities.join('\n')}\n[/DISPATCHED IMAGE IDENTITIES]`;
-    }
     const capabilityModel = provider === 'antigravity'
       ? this.getAntigravityModelId(model)
       : provider === 'litellm'

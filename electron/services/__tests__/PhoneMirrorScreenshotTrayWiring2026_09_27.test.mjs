@@ -125,7 +125,6 @@ const fakeElectron = {
 const originalLoad = Module._load;
 const originalListen = http.Server.prototype.listen;
 let phone;
-let holdPhoneAnswer = null;
 
 const intelligenceManager = new Proxy({
   getContextEpoch: () => 1,
@@ -133,26 +132,17 @@ const intelligenceManager = new Proxy({
 }, { get: (t, k) => (k in t ? t[k] : k === 'then' ? undefined : noop) });
 const appState = {
   getWindowHelper: () => ({ getOverlayWindow: () => overlay, getLauncherWindow: () => launcher }),
-  getMainWindow: () => launcher,
+  getMainWindow: () => overlay,
   getIntelligenceManager: () => intelligenceManager,
-  getIsMeetingActive: () => false,
   takePhoneChatImages: () => [PHONE_PHOTO],
   dropPhoneImage: (p) => dropped.push(p),
   processingHelper: {
     // Whatever else the phone path asks the helper answers "no".
     getLLMHelper: () => new Proxy({
       getKnowledgeOrchestrator: () => null,
-      textTurn: undefined,
-      streamChatWithOutcome: (message, imagePaths) => {
+      streamChat: (message, imagePaths) => {
         streamChatCalls.push({ message, imagePaths });
-        const hold = holdPhoneAnswer;
-        return {
-          stream: (async function* () {
-            if (hold) await hold;
-            yield hold ? 'Old meeting answer.' : 'ok';
-          })(),
-          outcome: { truncated: false },
-        };
+        return (async function* () { yield 'ok'; })();
       },
     }, { get: (t, k) => (k in t ? t[k] : k === 'then' ? undefined : () => false) }),
   },
@@ -245,9 +235,6 @@ describe('overlay → phone, executed', () => {
     await settle(20);
     assert.deepEqual((await askFromPhone('what is on my screen?')).imagePaths, [CAPTURE, PHONE_PHOTO]);
     assert.ok(overlay.webContents.sent.some((s) => s.channel === 'phone-mirror:incoming-chat'), 'the overlay is told (it clears its tray)');
-    assert.ok(overlay.webContents.sent.some((s) => s.channel === 'gemini-stream-done'));
-    assert.ok(!launcher.webContents.sent.some((s) =>
-      s.channel === 'phone-mirror:incoming-chat' || s.channel.startsWith('gemini-stream-')));
   });
 
   test('a phone photo the overlay has sent or removed does not ride along again', async () => {
@@ -340,37 +327,6 @@ describe('overlay → phone, executed', () => {
 
   test('with no overlay to hold them, the phone\'s own photos still go with its question', async () => {
     assert.deepEqual((await askFromPhone('what about this photo?')).imagePaths, [PHONE_PHOTO]);
-  });
-
-  test('a mode switch discards a pending answer immediately and keeps it out of reconnect history', { timeout: 5000 }, async () => {
-    let release;
-    holdPhoneAnswer = new Promise((resolve) => { release = resolve; });
-    try {
-      await askFromPhone('Question from the old meeting.');
-      const id = phone.of('user').at(-1).id.replace(/^u:/, '');
-      assert.deepEqual(await invokeHandlers.get('modes:set-active')({}, null), { success: true });
-      for (let i = 0; i < 100 && !phone.of('discard').some((frame) => frame.streamId === id); i++) await settle(20);
-      assert.ok(phone.of('discard').some((frame) => frame.streamId === id), 'Thinking was cleared before the provider returned');
-      release();
-      assert.ok(!phone.of('done').some((frame) => frame.streamId === id));
-
-      const reconnect = new WS(phone.ws.url);
-      try {
-        const history = await new Promise((resolve, reject) => {
-          reconnect.on('message', (data) => {
-            const frame = JSON.parse(String(data));
-            if (frame.type === 'history') resolve(frame.messages);
-          });
-          reconnect.once('error', reject);
-        });
-        assert.ok(!history.some((row) => row.id === 'a:' + id));
-      } finally {
-        reconnect.close();
-      }
-    } finally {
-      release();
-      holdPhoneAnswer = null;
-    }
   });
 });
 

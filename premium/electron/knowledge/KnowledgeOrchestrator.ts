@@ -5,10 +5,10 @@ import { buildGroundingBlock } from './ProfileContextBuilder';
 import { isProfileGroundingV2Enabled, isProfileGroundingV2JdFitCoverageEnabled } from '../../../electron/llm/profileGroundingV2';
 import { planAnswer, isJdFactualLookupNotNegotiationAdvice } from '../../../electron/llm/AnswerPlanner';
 import { isIntelligenceFlagEnabled } from '../../../electron/intelligence/intelligenceFlags';
-import { seedsCandidateBackground } from '../../../electron/llm/TurnPlanner';
-import { logSafeFileName } from '../../../electron/context-intelligence/debug/debug-config';
 import { isLayerAllowed } from '../../../electron/llm/contextRoute';
+import { seedsCandidateBackground } from '../../../electron/llm/TurnPlanner';
 import { extractDocumentText } from './DocumentReader';
+import { logSafeFileName } from '../../../electron/context-intelligence/debug/debug-config';
 import { extractStructuredData } from './StructuredExtractor';
 import { heuristicResumeExtract, heuristicJDExtract } from './HeuristicExtractor';
 import { chunkAndEmbedDocument } from './DocumentChunker';
@@ -523,6 +523,11 @@ export class KnowledgeOrchestrator {
         console.log(`[KnowledgeOrchestrator] Knowledge mode ${enabled ? 'ENABLED' : 'DISABLED'}`);
     }
 
+    /** The switch as set, with no Pro check. Only for standing it down. */
+    isKnowledgeModeSwitchedOn(): boolean {
+        return this.knowledgeModeActive;
+    }
+
     isKnowledgeMode(): boolean {
         const check = (globalThis as any).__nativelyKnowledgeProAccessV1__;
         if (typeof check === 'function') {
@@ -534,8 +539,6 @@ export class KnowledgeOrchestrator {
         }
         return this.knowledgeModeActive && this.activeResume !== null;
     }
-
-    isKnowledgeModeSwitchedOn(): boolean { return this.knowledgeModeActive; }
 
     /**
      * Get the company research engine for external use (e.g., IPC handlers).
@@ -874,13 +877,15 @@ export class KnowledgeOrchestrator {
         let resumeSummary;
         if (hasResume) {
             try {
-                const structured = this.activeResume!.structured_data as StructuredResume;
                 const processed = this.getProcessedResume();
-                resumeSummary = {
-                    name: structured?.identity?.name || 'Professional',
-                    role: structured?.experience?.[0]?.role || 'Professional',
-                    totalExperienceYears: processed?.totalExperienceYears ?? 0
-                };
+                if (processed) {
+                    const structured = this.activeResume!.structured_data as StructuredResume;
+                    resumeSummary = {
+                        name: structured.identity.name,
+                        role: structured.experience?.[0]?.role || 'Professional',
+                        totalExperienceYears: processed.totalExperienceYears
+                    };
+                }
             } catch { /* ignore */ }
         }
 
@@ -2020,7 +2025,7 @@ export class KnowledgeOrchestrator {
                     result.contextBlock = result.contextBlock
                         ? `${result.contextBlock}\n\n${mockBlock}`
                         : mockBlock;
-                    console.log(`[KnowledgeOrchestrator] Injecting mock question hint (${(bestMatch.similarity * 100).toFixed(0)}% match): "${bestMatch.mock.question.substring(0, 60)}..."`);
+                    console.log(`[KnowledgeOrchestrator] Injecting mock question hint (${(bestMatch.similarity * 100).toFixed(0)}% match): "${bestMatch.mock.question}"`);
                 }
             }
         }

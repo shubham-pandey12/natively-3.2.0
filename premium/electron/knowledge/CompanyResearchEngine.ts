@@ -222,32 +222,32 @@ export class CompanyResearchEngine {
 
             if (allResults.length === 0) {
                 console.warn('[CompanyResearch] No search results found. Falling back to LLM-only.');
-            } else {
-                // Fetch page content for top results (limit to 8 to cover new culture/review queries)
-                const snippets: { url: string; text: string }[] = [];
-                for (const result of allResults.slice(0, 8)) {
-                    const text = result.snippet || await fetchPageText(result.link);
-                    if (text) {
-                        snippets.push({ url: result.link, text: text.slice(0, 1500) });
-                    }
-                }
-
-                // Summarize with LLM
-                const dossier = await this.summarizeWithLLM(companyName, jdCtx, snippets);
-
-                if (dossier) {
-                    // Cache the dossier
-                    this.db.saveDossier(normalizedName, dossier, allUrls);
-                    return dossier;
-                }
-
-                console.warn('[CompanyResearch] Search-backed summary was invalid. Falling back to LLM-only.');
+                return this.generateLLMOnlyDossier(companyName, jdCtx);
             }
+
+            // Fetch page content for top results (limit to 8 to cover new culture/review queries)
+            const snippets: { url: string; text: string }[] = [];
+            for (const result of allResults.slice(0, 8)) {
+                const text = result.snippet || await fetchPageText(result.link);
+                if (text) {
+                    snippets.push({ url: result.link, text: text.slice(0, 1500) });
+                }
+            }
+
+            // Summarize with LLM
+            const dossier = await this.summarizeWithLLM(companyName, jdCtx, snippets);
+
+            if (dossier) {
+                // Cache the dossier
+                this.db.saveDossier(normalizedName, dossier, allUrls);
+                return dossier;
+            }
+
+            return null;
         } catch (error: any) {
             console.error(`[CompanyResearch] Research failed for ${companyName}:`, error.message);
+            return this.generateLLMOnlyDossier(companyName, jdCtx);
         }
-
-        return this.generateLLMOnlyDossier(companyName, jdCtx);
     }
 
     /**
@@ -388,9 +388,7 @@ ${snippetText}`;
         companyName: string,
         jdCtx: JDContext = {}
     ): Promise<CompanyDossier | null> {
-        if (!this.generateContentFn) {
-            throw new Error('No AI provider is configured for Company Intel. Add one in Settings > AI Providers.');
-        }
+        if (!this.generateContentFn) return null;
 
         const jdBlock = this.formatJDContextBlock(jdCtx);
 
@@ -442,7 +440,7 @@ Rules:
             return dossier;
         } catch (error: any) {
             console.error(`[CompanyResearch] LLM-only dossier generation failed:`, error.message);
-            throw error;
+            return null;
         }
     }
 
@@ -451,8 +449,7 @@ Rules:
      */
     getCachedDossier(companyName: string): CompanyDossier | null {
         const cached = this.db.getDossier(companyName);
-        if (!cached || this.db.isDossierStale(companyName)) return null;
-        return cached.dossier as CompanyDossier;
+        return cached ? cached.dossier as CompanyDossier : null;
     }
 }
 

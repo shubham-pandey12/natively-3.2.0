@@ -351,7 +351,7 @@ ${promptInstruction.trim()}
             // "Explain this" / "what's the complexity" over a screenshot is
             // promoted too, and this directive used to override their shape
             // with the full solution.
-            if (promotedScreenCodingTurn && isRepeatPressAsk(answerPlan?.question, codingSignals.codingShape ?? '')) {
+            if (promotedScreenCodingTurn && isRepeatPressAsk(answerPlan?.question, codingSignals.codingShape!)) {
                 intentContextParts.push(`<repeat_press_directive>
 The user triggered this action with a coding problem on screen and NO new question. That is a request for the COMPLETE solution to the on-screen problem, in the shape the coding contract asks for, even if a previous answer in this conversation already covered it, and even if this looks like a follow-up. Never respond with commentary on, agreement with, or a summary of an earlier answer. Produce the answer as if asked for the first time.
 </repeat_press_directive>`);
@@ -1163,14 +1163,7 @@ The user triggered this action with a coding problem on screen and NO new questi
             // The V3 composer already rendered the design on the table as its
             // own section; the v2 envelope and the legacy packet get it appended
             // (never twice — see withDiagramTurnBlock).
-            let _wtaUserBase = _v3p?.user ?? _v2TurnUser ?? packet.userMessage;
-            if (_v3p) {
-                if (hasAttachedImages && !_wtaUserBase.includes(SCREEN_DIRECT_VISION_INSTRUCTION)) {
-                    _wtaUserBase = `${SCREEN_DIRECT_VISION_INSTRUCTION}\n\n${_wtaUserBase}`;
-                } else if (hasScreenText && !_wtaUserBase.includes(SCREEN_DOM_INSTRUCTION)) {
-                    _wtaUserBase = `${SCREEN_DOM_INSTRUCTION}\n\n${_wtaUserBase}`;
-                }
-            }
+            const _wtaUserBase = _v3p?.user ?? _v2TurnUser ?? packet.userMessage;
             // What the user told the app about themselves (2026-11-09): the V3
             // composer carries About you, the mode's Real-time prompt facts and
             // "Use in every answer" skills; the v2 envelope and the legacy packet

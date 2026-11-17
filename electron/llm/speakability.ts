@@ -247,7 +247,9 @@ export function spokenShortLimits(length: 'shorter' | 'smart' | 'longer' = 'smar
   if (length === 'longer') return { softMaxWords: 200, hardMaxWords: 230, hardMaxSeconds: 100 };
   return { softMaxWords: SOFT_MAX_WORDS, hardMaxWords: HARD_MAX_WORDS, hardMaxSeconds: HARD_MAX_SECONDS };
 }
-export const lengthBandTarget = (band: ShortLengthBand, length: 'shorter' | 'longer') => length === 'shorter' ? SHORTER_BAND_TARGETS[band] : LONGER_BAND_TARGETS[band];
+export function lengthBandTarget(band: ShortLengthBand, length: 'shorter' | 'longer') {
+  return length === 'shorter' ? SHORTER_BAND_TARGETS[band] : LONGER_BAND_TARGETS[band];
+}
 
 /** Target words/seconds for a SPOKEN_SHORT band. All maxes stay within SOFT_MAX_WORDS (85). */
 export function shortBandTargetWords(band: ShortLengthBand, length: 'shorter' | 'smart' | 'longer' = 'smart'): ShortBandTarget {

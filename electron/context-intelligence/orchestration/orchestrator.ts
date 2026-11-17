@@ -22,7 +22,7 @@ import { resolveModePolicy, generalKnowledgeAllowed, applyModeSourceContract, ty
 import { resolveAnswerPolicy, type AnswerPolicy } from '../policies/answer-policy';
 import { CLAIM_AUTHORITY, claimAuthority } from '../policies/source-authority-policy';
 import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
-import { classifyTurn, isBareFollowUp, isCurrentScreenRequest, stripSttFillers, isProspectiveJobQuestion } from '../question/turn-classifier';
+import { classifyTurn, isBareFollowUp, stripSttFillers, isProspectiveJobQuestion } from '../question/turn-classifier';
 import type { AnswerTrace, RetrievalAttemptTrace } from '../observability/answer-trace';
 import { mergeRewrittenEvidence, type QueryRewriter, type QueryRewriteOutcome } from '../retrieval/llm-query-rewrite';
 import {
@@ -269,13 +269,12 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   }
 
   const q = resolveQuestion(req);
-  const hasScreenContext = Boolean(req.hasScreenContext || req.screenText?.trim());
 
   const cls = classifyTurn({
     resolvedQuestion: q.resolved,
     policy,
     isFollowUp: Boolean(req.isFollowUp),
-    hasScreenContext,
+    hasScreenContext: req.hasScreenContext,
     hasAttachedDocuments: req.hasAttachedDocuments,
     attachedFileNames: req.attachedFileNames,
     corpusAnchored: req.corpusAnchored === true,
@@ -415,12 +414,7 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   const wholeAnswers = retrieves && answersFit;
   const wholeAnswersTokens = wholeAnswers ? ownAnswersTokens : 0;
   const profileDocs = (wholeProfile ? (req.profileWhole as { docs: number }).docs : 0) + (wholeAnswers ? 1 : 0);
-  const acceptedBase = Math.max(
-    multiFile
-      ? Math.max(policy.retrievalPolicy.maximumAcceptedEvidence, MULTI_FILE_EVIDENCE.accepted)
-      : policy.retrievalPolicy.maximumAcceptedEvidence,
-    largePack ? LARGE_PACK_ACCEPTED_EVIDENCE : 0,
-  ) + packFiles + profileDocs;
+  const acceptedBase = Math.max(multiFile ? Math.max(policy.retrievalPolicy.maximumAcceptedEvidence, MULTI_FILE_EVIDENCE.accepted) : policy.retrievalPolicy.maximumAcceptedEvidence, largePack ? LARGE_PACK_ACCEPTED_EVIDENCE : 0) + packFiles + profileDocs;
 
   // A source-primary turn reads the reference files, plus the meeting when one
   // is live (the meeting rule above would otherwise have been the whole plan).
@@ -525,8 +519,7 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
 
     rawQuestion: req.manualQuestion ?? req.transcriptQuestion ?? '',
     resolvedQuestion: q.resolved,
-    isFollowUp: !isCurrentScreenRequest(q.resolved, hasScreenContext)
-      && (Boolean(req.isFollowUp) || cls.questionTypes.includes('FOLLOW_UP')),
+    isFollowUp: Boolean(req.isFollowUp) || cls.questionTypes.includes('FOLLOW_UP'),
 
     questionTypes: cls.questionTypes,
     claimRequirements: buildClaimRequirements(policy, cls.claimTypes, cls.claimClauses),
@@ -1072,8 +1065,7 @@ export async function orchestrate(
       // T7: pass this turn's scope so a topic from the PREVIOUS meeting/mode
       // cannot rewrite this question. `advance()` resets on scope change, but it
       // runs AFTER this line -- resetting on write cannot protect a read.
-      const hasScreen = Boolean(req.hasScreenContext || (typeof req.screenText === 'string' && req.screenText.trim().length > 0));
-      const ref = resolveAgainstSession(req.sessionId, rawQ, req.scope, { hasScreenContext: hasScreen });
+      const ref = resolveAgainstSession(req.sessionId, rawQ, req.scope);
       referentResolution = {
         applied: Boolean(ref.usedState && ref.resolved !== rawQ),
         ...(ref.referent ? { referent: ref.referent } : {}),

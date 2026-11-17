@@ -218,7 +218,7 @@ test('the type contract preserves generationId as an optional 4th arg (backward 
   // Match the emit calls followed by generationId on the same logical
   // statement — narrowed by the leading pattern of the WTA fallback
   // site (`emit('suggested_answer', <var>, question || ..., confidence, generationId)`).
-  const emitCallPattern = /emit\(\s*'suggested_answer'\s*,\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*[^,]+,\s*confidence\s*,\s*generationId\s*(?:,|\))/g;
+  const emitCallPattern = /emit\(\s*'suggested_answer'\s*,\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*[^,]+,\s*confidence\s*,\s*generationId\s*\)/g;
   const wtaEmitsWithGen = src.match(emitCallPattern) || [];
   assert.ok(wtaEmitsWithGen.length >= 1,
     'expected the WTA path to emit at least one final with generationId');

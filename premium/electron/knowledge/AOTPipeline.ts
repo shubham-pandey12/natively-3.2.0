@@ -42,10 +42,6 @@ export class AOTPipeline {
         return { ...this.status };
     }
 
-    isRunning(): boolean {
-        return Object.values(this.status).some(s => s === 'running');
-    }
-
     getCachedDossier(): CompanyDossier | null {
         return this.cachedDossier;
     }
@@ -111,18 +107,13 @@ export class AOTPipeline {
     }
 
     private async preComputeCompanyResearch(jd: StructuredJD): Promise<void> {
-        this.cachedDossier = null;
         try {
             this.status.companyResearch = 'running';
             const dossier = await this.companyResearch.researchCompany(
                 jd.company, jdContextFromStructured(jd)
             );
             this.cachedDossier = dossier;
-            this.status.companyResearch = dossier ? 'done' : 'failed';
-            if (!dossier) {
-                console.warn(`[AOTPipeline] Company research returned no dossier for ${jd.company}`);
-                return;
-            }
+            this.status.companyResearch = 'done';
             console.log(`[AOTPipeline] Company research complete for ${jd.company}`);
         } catch (error: any) {
             this.status.companyResearch = 'failed';

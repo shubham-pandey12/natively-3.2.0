@@ -88,7 +88,7 @@ test('buildDirectWhatToSayPayload incorporates customScreenshotPrompt when scree
   });
   assert.equal(
     standard.currentRequest,
-    'Analyze the current attached screenshot and answer the question or task shown in it.'
+    'Analyze the attached screenshot and answer the interviewer question provided with it.'
   );
 
   const custom = buildDirectWhatToSayPayload({

@@ -399,7 +399,7 @@ export function resolveDiagramTurn(input: ResolveDiagramTurnInput): DiagramTurn 
       // Read only if a chart turn asks what was stated: it joins up to two
       // hours of meeting, which every turn paid for before (forensics
       // 2026-11-13, F-LAT-02).
-      material: input.material === undefined ? () => getRegisteredConversationText() ?? null : input.material,
+      material: input.material === undefined ? () => getRegisteredConversationText() as string | null : input.material,
     });
     const signals = diagramPromptSignals(request, { question: input.question, maxExamples: diagramExampleCount() });
     const turnBlock = renderDiagramTurnBlock(request, input.activeDesign ?? null);

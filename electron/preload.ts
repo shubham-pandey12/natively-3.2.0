@@ -1,4 +1,3 @@
-import type { WhatToSayOutcome } from '../src/types/whatToSayOutcome';
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SkillUploadPayload } from './services/skills/SkillValidator';
 import type { NativelyUsageResponse, NativelyPlansResponse } from '../src/types/nativelyUsage';
@@ -562,15 +561,12 @@ interface ElectronAPI {
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>;
-  retainScreenshotRetry: (imagePaths: string[]) => Promise<string>;
-  releaseScreenshotRetry: (lease: string) => Promise<void>;
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
     options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
   ) => Promise<{
     answer: string | null;
-    outcome?: WhatToSayOutcome;
     question?: string;
     error?: string;
     screenContextStatus?: 'not_available' | 'available' | 'failed';
@@ -723,7 +719,7 @@ interface ElectronAPI {
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void;
   onIntelligenceSuggestedAnswer: (
-    callback: (data: { answer: string; question: string; confidence: number; sourceLabel?: string; generationId?: number; stopReason?: string; outcome?: WhatToSayOutcome }) => void,
+    callback: (data: { answer: string; question: string; confidence: number; sourceLabel?: string; generationId?: number; stopReason?: string }) => void,
   ) => () => void;
   onIntelligenceSuggestedAnswerDiscard: (
     callback: (data: { reason: string }) => void,
@@ -911,7 +907,7 @@ interface ElectronAPI {
     options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean; liveQuestion?: boolean },
   ) => Promise<void>;
   onGeminiStreamToken: (callback: (token: string, meta?: { streamId?: number }) => void) => () => void;
-  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string; outcome?: WhatToSayOutcome }) => void) => () => void;
+  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string }) => void) => () => void;
   onGeminiStreamStarted: (callback: (data: { streamId: number }) => void) => () => void;
   onGeminiStreamError: (callback: (error: string, meta?: { streamId?: number | null; source?: string }) => void) => () => void;
 
@@ -1410,8 +1406,6 @@ interface ElectronAPI {
   permissionsCardRecord: (event: 'dismissed' | 'granted') => Promise<{ success: boolean; error?: string; record?: { dismissals: number; lastDismissedAt: number | null } }>;
   guideGet: () => Promise<any>;
   guideDispatch: (event: { type: string; [key: string]: unknown }) => Promise<any>;
-  getGuideState: () => Promise<any>;
-  dispatchGuideEvent: (event: { type: string; [key: string]: unknown }) => Promise<any>;
   onGuideChanged: (callback: (state: any) => void) => () => void;
   /** First-launch shortcut tour: taught shortcuts become practice presses. */
   onboardingSetShortcutTour: (active: boolean) => Promise<{ success: boolean }>;
@@ -2377,8 +2371,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Intelligence Mode IPC
   generateAssist: () => ipcRenderer.invoke('generate-assist'),
-  retainScreenshotRetry: (imagePaths: string[]) => ipcRenderer.invoke('retain-screenshot-retry', imagePaths),
-  releaseScreenshotRetry: (lease: string) => ipcRenderer.invoke('release-screenshot-retry', lease),
   generateWhatToSay: (
     question?: string,
     imagePaths?: string[],
@@ -2682,7 +2674,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
   onIntelligenceSuggestedAnswer: (
-    callback: (data: { answer: string; question: string; confidence: number; sourceLabel?: string; generationId?: number; stopReason?: string; outcome?: WhatToSayOutcome }) => void,
+    callback: (data: { answer: string; question: string; confidence: number; sourceLabel?: string; generationId?: number; stopReason?: string }) => void,
   ) => {
     const subscription = (_: any, data: any) => callback(data);
     ipcRenderer.on('intelligence-suggested-answer', subscription);
@@ -2852,8 +2844,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('gemini-stream-started', subscription);
     };
   },
-  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string; outcome?: WhatToSayOutcome }) => void) => {
-    const subscription = (_: any, data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string; outcome?: WhatToSayOutcome }) => callback(data);
+  onGeminiStreamDone: (callback: (data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string }) => void) => {
+    const subscription = (_: any, data?: { finalText?: string; streamId?: number; incomplete?: boolean; incompleteReason?: string }) => callback(data);
     ipcRenderer.on('gemini-stream-done', subscription);
     return () => {
       ipcRenderer.removeListener('gemini-stream-done', subscription);
@@ -3732,8 +3724,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   permissionsCardRecord: (event: 'dismissed' | 'granted') => ipcRenderer.invoke('permissions-card:record', event),
   guideGet: () => ipcRenderer.invoke('guide:get'),
   guideDispatch: (event: unknown) => ipcRenderer.invoke('guide:dispatch', event),
-  getGuideState: () => ipcRenderer.invoke('guide:get'),
-  dispatchGuideEvent: (event: { type: string; [key: string]: unknown }) => ipcRenderer.invoke('guide:dispatch', event),
   onGuideChanged: (cb: (state: any) => void) => {
     const sub = (_: unknown, state: any) => cb(state);
     ipcRenderer.on('guide:changed', sub);

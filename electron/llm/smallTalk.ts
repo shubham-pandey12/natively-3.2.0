@@ -20,10 +20,11 @@ export function isOnlySmallTalk(text: string | null | undefined): boolean {
   if (!t) return false;
   const sentences = t.split(/(?<=[.?!])\s+|,\s+(?=(?:and |so )?(?:did|do|can|could|are|is|how|shall|should|am)\b)/i)
     .map(s => s.replace(/^(?:and|so|okay|ok|well|oh)[,\s]+/i, '').trim()).filter(Boolean);
+  if (!sentences.length) return false;
   let sawSmallTalk = false;
-  for (const sentence of sentences) {
-    if (FILLER_ONLY.test(sentence)) continue;
-    if (!SMALL_TALK_SENTENCE.test(sentence)) return false;
+  for (const s of sentences) {
+    if (FILLER_ONLY.test(s)) continue;
+    if (!SMALL_TALK_SENTENCE.test(s)) return false;
     sawSmallTalk = true;
   }
   return sawSmallTalk;

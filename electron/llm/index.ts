@@ -41,7 +41,7 @@ export type { PlannerDecision, PlannerDecisionKind, PlannerInput } from "./Plann
 export { planAnswer, formatAnswerPlanForPrompt, shapedCodingTemplate, isCodingAnswerType, shouldScaffold, isJdFactualLookupNotNegotiationAdvice } from "./AnswerPlanner";
 export { detectAnswerStyle, styleSuppressesScaffold } from "./answerStyle";
 export type { AnswerStyle, AnswerStyleResult } from "./answerStyle";
-export { detectExplicitCodingContract, isCodingContinuation, isBareCodeRequest, looksLikeCodingAnswer, buildPriorCodingContextBlock, buildCodingContractPrompt, explicitContractProducesCode, withActiveCodingProblem, isActiveCodingProblemFollowUp, ACTIVE_CODING_PROBLEM_NOTE_RE } from "./codingFollowup";
+export { detectExplicitCodingContract, isCodingContinuation, isBareCodeRequest, looksLikeCodingAnswer, buildPriorCodingContextBlock, buildCodingContractPrompt, explicitContractProducesCode, withActiveCodingProblem, isActiveCodingProblemFollowUp } from "./codingFollowup";
 export { resolveCodingPromptSignals, screenPromotedCodingSignals, detectSuppliedCodeTemplate, codingTaskKindFor, isBuildTask, isDeicticAsk, isImageCodingAsk, isScreenOnlyAsk, isRepeatPressAsk, type CodingPromptSignals, type CodingTaskKind } from "./codingPromptSignals";
 export type { ExplicitCodingContract, PriorCodingTurn } from "./codingFollowup";
 export { shouldHumanize, shouldHumanizeOutput, detectCorporateFiller, humanizeDirectiveFor, HUMANIZE_DIRECTIVE, humanizeSpokenAnswer, humanizeForAnswerType } from "./humanLikeness";

@@ -1,6 +1,6 @@
 import { BrowserWindow } from 'electron';
 import { SettingsManager } from './SettingsManager';
-import { GUIDE_EVENT_TYPES, guideStopLockLeft, normalizeGuideState, reconcileGuide, reduceGuide } from './firstRunGuidePolicy';
+import { GUIDE_EVENT_TYPES, guideStopLockLeft, normalizeGuideState, reconcileGuide, reduceGuide } from '../../src/lib/onboarding/firstRunGuide.mjs';
 
 type GuideEvent = { type: string; [key: string]: unknown };
 type GuideDeps = {

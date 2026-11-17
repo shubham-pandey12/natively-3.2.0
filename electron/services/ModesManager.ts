@@ -502,18 +502,8 @@ export class ModesManager {
         // L1: id is the secondary sort key for stable ordering when two modes
         // share createdAt to the millisecond.
         modes.sort((a, b) => {
-            const aGeneral = a.templateType === 'general';
-            const bGeneral = b.templateType === 'general';
-            if (aGeneral !== bGeneral) {
-                return aGeneral ? -1 : 1;
-            }
-            if (aGeneral && bGeneral) {
-                const aCanonical = a.isBuiltin && a.name === 'General';
-                const bCanonical = b.isBuiltin && b.name === 'General';
-                if (aCanonical !== bCanonical) {
-                    return aCanonical ? -1 : 1;
-                }
-            }
+            if (a.templateType === 'general') return -1;
+            if (b.templateType === 'general') return 1;
             const ta = new Date(a.createdAt).getTime();
             const tb = new Date(b.createdAt).getTime();
             if (ta !== tb) return ta - tb;
@@ -531,40 +521,10 @@ export class ModesManager {
         }
     }
 
-    /** Finds or establishes the built-in Technical Interview fallback. */
-    public getBuiltinTechnicalInterviewMode(): Mode | null {
-        const modes = this.getModes();
-        const builtin = modes.find(m => m.templateType === 'technical-interview' && m.isBuiltin);
-        if (builtin) return builtin;
-        const existing = modes.find(m => m.templateType === 'technical-interview');
-        if (existing) return existing;
-        try {
-            const created = this.createMode({ name: BUILTIN_MODE_LABELS['technical-interview'], templateType: 'technical-interview' });
-            const db = DatabaseManager.getInstance();
-            db.setModeBuiltin(created.id, true);
-            return this.getModes().find(m => m.id === created.id) ?? { ...created, isBuiltin: true };
-        } catch (e) {
-            console.error('[ModesManager] Failed to create built-in Technical Interview mode:', e);
-            return null;
-        }
-    }
-
     public getActiveMode(): Mode | null {
         const row = DatabaseManager.getInstance().getActiveMode();
-        if (row && row.id !== PROFILE_OKF_RESERVED_MODE_ID
-            && ModesManager.isKnownTemplateType(row.template_type)) {
-            const mode = rowToMode(row);
-            return modeLockedWithoutPro(mode) ? null : mode;
-        }
-        const fallback = this.getBuiltinTechnicalInterviewMode();
-        if (!fallback) return null;
-        try {
-            this.setActiveMode(fallback.id);
-        } catch (e) {
-            console.warn('[ModesManager] Failed to persist fallback active mode:', e);
-        }
-        const activeRow = DatabaseManager.getInstance().getActiveMode();
-        const mode = activeRow?.id === fallback.id ? rowToMode(activeRow) : fallback;
+        if (!row) return null;
+        const mode = rowToMode(row);
         return modeLockedWithoutPro(mode) ? null : mode;
     }
 
@@ -841,9 +801,6 @@ export class ModesManager {
                 sortOrder: i,
             });
         });
-        // Compile extraction instructions for all seeded sections in parallel (fire-and-forget,
-        // bounded concurrency). Never blocks mode creation / UI.
-        this.compileAllSectionsAsync(id);
         return {
             id,
             name: params.name,
@@ -860,13 +817,6 @@ export class ModesManager {
     }
 
     public updateMode(id: string, updates: { name?: string; templateType?: ModeTemplateType; customContext?: string; sourceContract?: ModeSourceContract }): void {
-        if (id === PROFILE_OKF_RESERVED_MODE_ID) {
-            console.warn('[ModesManager] updateMode: refusing to update the reserved profile OKF mode');
-            return;
-        }
-        if (updates.name !== undefined && !updates.name.trim()) {
-            throw new Error('updateMode: name cannot be empty');
-        }
         // Reject an unusable template BEFORE it reaches the row (2026-08-09).
         // Persisting one is not a harmless typo: read-time resolution silently
         // degrades it to `general`, which has NO profile sources, so the mode
@@ -1120,14 +1070,6 @@ export class ModesManager {
     }
 
     public deleteMode(id: string): void {
-        if (id === PROFILE_OKF_RESERVED_MODE_ID) {
-            console.warn('[ModesManager] deleteMode: refusing to delete the reserved profile OKF mode');
-            return;
-        }
-        const current = this.resolveMode(id);
-        if (current?.isBuiltin) {
-            throw new Error('deleteMode: built-in modes cannot be deleted');
-        }
         // PI v3 (W3): mode_reference_files rows go via FK CASCADE, but the
         // persisted chunk vectors (mode_reference_chunks / index_state) have no
         // FK on purpose (the table is owned by the retriever) — drop them
@@ -1563,48 +1505,6 @@ export class ModesManager {
         })();
     }
 
-    /**
-     * Compile extraction instructions for EVERY section of a mode, in parallel with bounded
-     * concurrency. Used when a custom mode is created (many sections at once). Fire-and-forget.
-     */
-    public compileAllSectionsAsync(modeId: string): void {
-        void (async () => {
-            try {
-                // Yield one macrotask before reading provider state. Built-in seeding runs inside
-                // AppState.getInstance(), BEFORE loadStoredCredentials() in the same synchronous
-                // stretch of initializeApp, so a packaged build has no keys loaded yet. Checking
-                // now would permanently skip every seeded section for users who DO have keys
-                // (a release that adds a built-in template, an upgrade from before built-ins
-                // existed, or a rebuilt DB whose stored keys survived).
-                await new Promise<void>(resolve => setImmediate(resolve));
-                const llmHelper = ModesManager.llmHelperForCompiler;
-                if (!llmHelper || !llmHelper.hasAnyConfiguredProvider?.()) return;
-                try {
-                    const { SettingsManager } = require('./SettingsManager');
-                    if (SettingsManager.getInstance().get('providerDataScopes')?.post_call_summary === false) return;
-                } catch { /* default allow */ }
-                const mode = this.getModes().find(m => m.id === modeId);
-                const sections = this.getNoteSections(modeId).filter(s => !s.compiledPrompt || !s.compiledPrompt.trim());
-                if (sections.length === 0) return;
-                const { SectionPromptCompiler } = require('./meeting/SectionPromptCompiler');
-                const compiler = new SectionPromptCompiler(llmHelper);
-                const CONCURRENCY = 3;
-                let next = 0;
-                await Promise.all(Array.from({ length: Math.min(CONCURRENCY, sections.length) }, async () => {
-                    while (next < sections.length) {
-                        const s = sections[next++];
-                        try {
-                            const { instruction, compiled } = await compiler.compile({ sectionTitle: s.title, sectionDescription: s.description, meetingMode: mode?.templateType });
-                            if (compiled && instruction) DatabaseManager.getInstance().updateNoteSection(s.id, { compiledPrompt: instruction });
-                        } catch { /* per-section non-fatal */ }
-                    }
-                }));
-            } catch (e) {
-                console.warn('[ModesManager] compileAllSections skipped (non-fatal):', (e as any)?.message);
-            }
-        })();
-    }
-
     private static llmHelperForCompiler: import('../LLMHelper').LLMHelper | null = null;
 
     /** Wire the LLMHelper used by the async section-prompt compiler (called at startup). */
@@ -1631,7 +1531,6 @@ export class ModesManager {
     public replaceNoteSectionsWith(modeId: string, sections: ReadonlyArray<{ title: string; description: string }>): ModeNoteSection[] | null {
         const rows = sections.map(s => ({ id: `ns_${crypto.randomUUID()}`, title: s.title, description: s.description }));
         if (!DatabaseManager.getInstance().replaceNoteSections(modeId, rows)) return null;
-        this.compileAllSectionsAsync(modeId);
         return this.getNoteSections(modeId);
     }
 

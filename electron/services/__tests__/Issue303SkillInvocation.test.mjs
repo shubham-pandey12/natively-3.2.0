@@ -44,8 +44,8 @@ describe('Issue #303: /skill and $skill prefix handling in gemini-chat-stream', 
 
     // The injection happens before streamChat is called
     const skillInjectionIdx = source.indexOf('skillPromptBlock');
-    const streamChatIdx = source.indexOf('llmHelper.streamChatWithOutcome(..._manualAnswerArgs)');
-    assert.ok(skillInjectionIdx >= 0 && streamChatIdx > skillInjectionIdx,
+    const streamChatIdx = source.indexOf('const stream = llmHelper.streamChat(');
+    assert.ok(skillInjectionIdx < streamChatIdx,
       'skill injection must occur before the streamChat call');
   });
 

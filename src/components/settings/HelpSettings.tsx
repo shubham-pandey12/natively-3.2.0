@@ -1145,7 +1145,7 @@ const HelpPane: React.FC<{
                         icon={<NativelyGlyph size={20} />}
                         title={t('Show the guide again')}
                         description={t('Walks you through your first meeting, one step at a time.')}
-                        control={<GoButton label={t('Start')} onClick={() => { void window.electronAPI?.dispatchGuideEvent?.({ type: 'restart' }); }} />}
+                        control={<GoButton label={t('Start')} onClick={() => { void window.electronAPI?.guideDispatch?.({ type: 'restart' }); }} />}
                     />
                 </div>
                 <SettingsMotionReady.Provider value={setupReady}>
