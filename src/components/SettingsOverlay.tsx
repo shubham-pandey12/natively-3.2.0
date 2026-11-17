@@ -2806,18 +2806,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                             ? t('Auto Answer is free while this is on. Turning it off stops Auto Answer unless you have Pro.')
                                                                             : t('Optional with Pro. Only meetings where Auto Answer runs.')}
                                                                     </p>
-                                                                    {autoAnswerAccess.uploads && (
-                                                                        <button
-                                                                            type="button"
-                                                                            className="text-xs text-text-tertiary hover:text-text-primary underline mt-1"
-                                                                            onClick={async () => {
-                                                                                if (!(await askConfirm({ title: t('Delete everything you shared?'), description: t('Stops sharing and deletes the transcripts already sent from this computer.'), confirmLabel: t('Delete') }))) return;
-                                                                                const r = await window.electronAPI?.deleteAutoAnswerSharedData?.();
-                                                                                refreshAutoAnswerAccess();
-                                                                                if (r && !r.success) console.error('[Settings] Shared data not deleted:', r.error);
-                                                                            }}
-                                                                        >{t('Delete shared transcripts')}</button>
-                                                                    )}
                                                                 </div>
                                                                 <SettingsToggle
                                                                     checked={autoAnswerAccess.uploads}

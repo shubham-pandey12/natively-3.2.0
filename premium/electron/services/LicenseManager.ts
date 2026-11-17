@@ -73,14 +73,16 @@ if (!_nativeMod) {
 }
 
 const LICENSE_PATH = path.join(app.getPath('userData'), 'license.enc');
-const OFFLINE_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
+export const OFFLINE_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 const SEEN_WRITE_EVERY_MS = 60 * 60 * 1000;
-const GUMROAD_PRODUCT_IDS = ['1HETxGKGYYf6DNDp5SnWVw==', 'mzhzpt'];
 export function offlineTooLong(license: { verifiedAt?: string; seenAt?: string }, nowMs: number): boolean {
     const verified = Date.parse(license.verifiedAt ?? '');
     if (!Number.isFinite(verified)) return false;
-    return Math.max(nowMs, Date.parse(license.seenAt ?? '') || 0) - verified > OFFLINE_GRACE_MS;
+    const seen = Math.max(nowMs, Date.parse(license.seenAt ?? '') || 0);
+    return seen - verified > OFFLINE_GRACE_MS;
 }
+const NATIVELY_API_BASE = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
+const GUMROAD_PRODUCT_IDS = ['1HETxGKGYYf6DNDp5SnWVw==', 'mzhzpt'];
 async function gumroadStanding(key: string): Promise<{ verdict: 'active' | 'revoke' | 'keep'; why: string }> {
     let notFound = 0;
     let lastWhy = 'no answer';
@@ -94,17 +96,21 @@ async function gumroadStanding(key: string): Promise<{ verdict: 'active' | 'revo
                 signal: AbortSignal.timeout(8000),
             });
             status = res.status;
-            data = await res.json().catch(() => null);
+            try {
+                data = await res.json();
+            } catch {
+                data = null;
+            }
         } catch { return { verdict: 'keep', why: 'network error' }; }
         const { decision, why } = classifyGumroadVerify(status, data);
-        if (decision === 'active' || decision === 'keep') return { verdict: decision, why };
+        if (decision === 'active') return { verdict: 'active', why };
+        if (decision === 'keep') return { verdict: 'keep', why };
         if (status !== 404) return { verdict: 'revoke', why };
         notFound++;
         lastWhy = why;
     }
-    return { verdict: notFound === GUMROAD_PRODUCT_IDS.length ? 'revoke' : 'keep', why: lastWhy };
+    return notFound === GUMROAD_PRODUCT_IDS.length ? { verdict: 'revoke', why: lastWhy } : { verdict: 'keep', why: lastWhy };
 }
-const NATIVELY_API_BASE = (process.env.NATIVELY_API_URL || 'https://api.natively.software').replace(/\/+$/, '');
 
 interface StoredLicense {
     key: string;
@@ -369,7 +375,10 @@ export class LicenseManager {
 
                 if (gumroadResult === 'OK') {
                     const standing = await gumroadStanding(trimmedKey);
-                    if (standing.verdict === 'revoke') return { success: false, error: `Gumroad licence ${standing.why}.` };
+                    if (standing.verdict === 'revoke') {
+                        console.warn(`[LicenseManager] Gumroad key verified but the purchase is ${standing.why} — not activated.`);
+                        return { success: false, error: 'This Gumroad purchase was refunded or reversed, so it no longer unlocks Pro. Contact support@natively.software if this is wrong.' };
+                    }
                     return await this.storeLicense(trimmedKey, 'gumroad', undefined, undefined, { replacePerpetual: true });
                 }
 
@@ -521,7 +530,6 @@ export class LicenseManager {
      * rather than trusting a verdict taken before a network round trip.
      */
     private perpetualLicenseGuard(): { success: false; skipped: true; error?: string } | null {
-        if (this.readStoredLicense()?.revokedAt) return null;
         const existingProvider = this.peekStoredProvider();
         if (!existingProvider || existingProvider === 'natively_api') return null;
 
@@ -618,7 +626,6 @@ export class LicenseManager {
                 hwid,
                 activatedAt: new Date().toISOString(),
                 verifiedAt: new Date().toISOString(),
-                seenAt: new Date().toISOString(),
                 provider,
                 ...(instanceId ? { instanceId } : {}),
                 ...(plan ? { plan } : {}),
@@ -726,6 +733,7 @@ export class LicenseManager {
                 return null;
             }
 
+            if (license.revokedAt) return null;
             return provider;
         } catch {
             // Unreadable/corrupt file — nothing to go on, so it cannot be
@@ -752,14 +760,22 @@ export class LicenseManager {
 
         const license = this.readStoredLicense();
         this.cachedPremium = license !== null && !license.revokedAt && !offlineTooLong(license, Date.now());
+        if (license && !license.revokedAt && !this.cachedPremium) {
+            console.warn('[LicenseManager] licence not confirmed by the seller for over 14 days — Pro locked until a check gets through.');
+        }
         return this.cachedPremium;
     }
 
     public storedLicenceState(): 'none' | 'held' | 'valid' | 'unreadable' {
-        if (!fs.existsSync(LICENSE_PATH)) return 'none';
+        try {
+            if (!fs.existsSync(LICENSE_PATH)) return 'none';
+        } catch {
+            return 'unreadable';
+        }
         const license = this.readStoredLicense();
         if (!license) return 'unreadable';
-        return license.revokedAt || offlineTooLong(license, Date.now()) ? 'held' : 'valid';
+        if (license.revokedAt || offlineTooLong(license, Date.now())) return 'held';
+        return 'valid';
     }
 
     /**
@@ -781,7 +797,8 @@ export class LicenseManager {
     public getLicenseDetails(): { isPremium: boolean; plan?: string; provider?: string } {
         // Native-module availability is enforced per-provider by readStoredLicense().
         const license = this.readStoredLicense();
-        if (!license || license.revokedAt || this.cachedPremium === false || offlineTooLong(license, Date.now())) return { isPremium: false };
+        if (!license) return { isPremium: false };
+        if (license.revokedAt || this.cachedPremium === false || offlineTooLong(license, Date.now())) return { isPremium: false };
 
         let plan = license.plan;
 
@@ -806,81 +823,141 @@ export class LicenseManager {
      */
     public async isPremiumAsync(): Promise<boolean> {
         const license = this.readStoredLicense();
-        if (!license) { this.cachedPremium = false; return false; }
-        const held = !!license.revokedAt;
+        if (!license) {
+            this.cachedPremium = false;
+            return false;
+        }
+        const heldRevoked = !!license.revokedAt;
         const stale = offlineTooLong(license, Date.now());
-        if (!held && !stale && !this.isPremium()) return false;
-        const seenMs = Math.max(Date.now(), Date.parse(license.seenAt ?? '') || 0);
+        if (!heldRevoked && !stale && !this.isPremium()) return false;
+        const who = license.provider ?? 'legacy';
+        const nowMs = Date.now();
+        const seenMs = Math.max(nowMs, Date.parse(license.seenAt ?? '') || 0);
         const unanswered = () => {
-            if (!held) {
+            if (!heldRevoked) {
                 const noLimitYet = !Number.isFinite(Date.parse(license.verifiedAt ?? ''));
                 const seenMoved = seenMs - (Date.parse(license.seenAt ?? '') || 0) >= SEEN_WRITE_EVERY_MS;
-                if (noLimitYet || seenMoved) this.rewriteStoredLicense({ ...license, ...(noLimitYet ? { verifiedAt: new Date(seenMs).toISOString() } : {}), seenAt: new Date(seenMs).toISOString() });
+                if (noLimitYet || seenMoved) {
+                    this.rewriteStoredLicense({
+                        ...license,
+                        ...(noLimitYet ? { verifiedAt: new Date(seenMs).toISOString() } : {}),
+                        seenAt: new Date(seenMs).toISOString(),
+                    });
+                }
             }
-            this.cachedPremium = !held && !stale;
-            return this.cachedPremium;
+            const keep = !heldRevoked && !stale;
+            if (stale && !heldRevoked) {
+                console.warn(`[LicenseManager] ${who} licence not confirmed for over 14 days and the check got no answer — Pro locked until one does.`);
+            }
+            this.cachedPremium = keep;
+            return keep;
         };
         const valid = (provider?: StoredLicense['provider']) => {
-            const { revokedAt: _revoked, ...rest } = license;
-            const confirmed = { ...rest, verifiedAt: new Date(seenMs).toISOString(), seenAt: new Date(seenMs).toISOString(), ...(provider ? { provider } : {}) };
-            if (held || stale || provider || seenMs - (Date.parse(license.verifiedAt ?? '') || 0) >= 12 * 60 * 60 * 1000) this.rewriteStoredLicense(confirmed);
+            const at = new Date(seenMs).toISOString();
+            const { revokedAt: _was, ...rest } = license;
+            const confirmed = { ...rest, verifiedAt: at, seenAt: at, ...(provider ? { provider } : {}) };
+            const lastVerified = Date.parse(license.verifiedAt ?? '') || 0;
+            const worthWriting = heldRevoked || stale || !!provider || seenMs - lastVerified >= 12 * 60 * 60 * 1000;
+            if (worthWriting && !this.rewriteStoredLicense(confirmed)) {
+                console.warn(`[LicenseManager] ${who} license valid, but license.enc could not be rewritten.`);
+            } else if (heldRevoked || stale) {
+                console.log(`[LicenseManager] ${who} license confirmed again — Pro restored.`);
+            }
             this.cachedPremium = true;
             return true;
         };
         const hold = (why: string) => {
-            if (!held && !this.rewriteStoredLicense({ ...license, revokedAt: new Date().toISOString() })) this.removeLocalLicenseFile();
-            try { if (fs.existsSync(LICENSE_PATH + '.tmp')) fs.unlinkSync(LICENSE_PATH + '.tmp'); } catch { /* best effort */ }
-            console.warn(`[LicenseManager] licence held: ${why}`);
+            if (!heldRevoked) {
+                console.warn(`[LicenseManager] ${who} license no longer valid (${why}) — Pro locked on this device.`);
+                if (!this.rewriteStoredLicense({ ...license, revokedAt: new Date().toISOString() })) {
+                    this.removeLocalLicenseFile();
+                }
+            }
+            try { if (fs.existsSync(LICENSE_PATH + '.tmp')) fs.unlinkSync(LICENSE_PATH + '.tmp'); } catch { }
             this.cachedPremium = false;
             return false;
         };
         if (license.provider === 'dodo') {
             if (!validateDodoKeyNative) return unanswered();
             let result: string;
-            try { result = await validateDodoKeyNative(license.key); } catch { return unanswered(); }
+            try {
+                result = await validateDodoKeyNative(license.key);
+            } catch (e: any) {
+                console.warn('[LicenseManager] validateDodoKey binding error (fail-open):', e?.message ?? e);
+                return unanswered();
+            }
             if (result === 'OK') return valid();
             if (result === 'REVOKED') return hold('Dodo: not valid');
+            if (result.startsWith('ERR:dodo:network:')) {
+                console.log('[LicenseManager] Dodo validate: network error — fail-open.');
+                return unanswered();
+            }
+            console.warn('[LicenseManager] Dodo validate unexpected result — fail-open:', result);
             return unanswered();
         }
         if (license.provider === 'natively_api') {
             let status = 0;
             let data: { ok?: boolean; has_pro?: boolean; error?: string } | null = null;
             try {
-                const res = await fetch(`${NATIVELY_API_BASE}/v1/pro/verify`, { headers: { 'x-natively-key': license.key }, signal: AbortSignal.timeout(8000) });
+                const res = await fetch(`${NATIVELY_API_BASE}/v1/pro/verify`, {
+                    headers: { 'x-natively-key': license.key },
+                    signal: AbortSignal.timeout(8000),
+                });
                 status = res.status;
-                data = await res.json().catch(() => null) as { ok?: boolean; has_pro?: boolean; error?: string } | null;
-            } catch { return unanswered(); }
+                try {
+                    data = await res.json() as { ok?: boolean; has_pro?: boolean; error?: string } | null;
+                } catch {
+                    data = null;
+                }
+            } catch {
+                console.log('[LicenseManager] natively_api verify: network error — fail-open.');
+                return unanswered();
+            }
             const decision = classifyProVerify(status, data);
             if (decision === 'active') return valid();
             if (decision === 'hold') return hold(`Natively API: ${data?.error ?? 'payment hold'}`);
-            if (decision === 'revoke') { this.removeLocalLicenseFile(); this.cachedPremium = false; return false; }
+            if (decision === 'revoke') {
+                console.warn(
+                    `[LicenseManager] Natively API Pro entitlement lost (${data?.error ?? 'plan downgraded'}) — revoking locally.`
+                );
+                this.removeLocalLicenseFile();
+                this.cachedPremium = false;
+                return false;
+            }
+            console.log(
+                `[LicenseManager] natively_api verify non-definitive (status ${status}, error ${data?.error ?? 'none'}) — fail-open (no revoke).`
+            );
             return unanswered();
         }
         if (license.provider === 'gumroad') {
             const decision = await gumroadStanding(license.key);
             if (decision.verdict === 'active') return valid();
             if (decision.verdict === 'revoke') return hold(`Gumroad: ${decision.why}`);
+            console.log(`[LicenseManager] Gumroad verify non-definitive (${decision.why}) — fail-open.`);
             return unanswered();
         }
         const gum = await gumroadStanding(license.key);
         if (gum.verdict === 'active') return valid('gumroad');
         let dodo = 'ERR:dodo:unavailable';
-        if (validateDodoKeyNative) try { dodo = await validateDodoKeyNative(license.key); } catch { dodo = 'ERR:dodo:binding'; }
+        if (validateDodoKeyNative) {
+            try { dodo = await validateDodoKeyNative(license.key); } catch { dodo = 'ERR:dodo:binding'; }
+        }
         if (dodo === 'OK') return valid('dodo');
-        if (gum.verdict === 'revoke' && dodo === 'REVOKED') return hold('legacy licence: neither seller stands behind it');
+        if (gum.verdict === 'revoke' && dodo === 'REVOKED') return hold(`legacy licence: neither Gumroad (${gum.why}) nor Dodo stands behind it`);
+        console.log(`[LicenseManager] legacy licence check non-definitive (Gumroad: ${gum.why}; Dodo: ${dodo.startsWith('ERR:') ? 'no answer' : dodo}) — fail-open.`);
         return unanswered();
     }
 
     private rewriteStoredLicense(license: StoredLicense): boolean {
-        const tmp = LICENSE_PATH + '.tmp';
+        const tmpPath = LICENSE_PATH + '.tmp';
         try {
             if (!safeStorage.isEncryptionAvailable()) return false;
-            fs.writeFileSync(tmp, safeStorage.encryptString(JSON.stringify(license)));
-            fs.renameSync(tmp, LICENSE_PATH);
+            fs.writeFileSync(tmpPath, safeStorage.encryptString(JSON.stringify(license)));
+            fs.renameSync(tmpPath, LICENSE_PATH);
             return true;
         } catch (error: any) {
             console.error('[LicenseManager] rewriteStoredLicense error:', error?.message ?? error);
-            try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* best effort */ }
+            try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch { /* best effort */ }
             return false;
         }
     }

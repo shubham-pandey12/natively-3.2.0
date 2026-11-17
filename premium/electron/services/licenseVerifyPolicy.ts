@@ -31,12 +31,14 @@ const ENTITLEMENT_LOST_ERRORS: ReadonlySet<string> = new Set([
 ]);
 
 /** Errors/states that are transient or recoverable → NEVER revoke a paying user on these. */
+const HOLD_ERRORS = new Set([
+  'account_suspended', // payment-method hold; "contact support"
+]);
 const TRANSIENT_ERRORS: ReadonlySet<string> = new Set([
   'ip_blocked',        // 429 rate-limit / DDoS edge throttle
   'rate_limited',
   'server_error',
 ]);
-const HOLD_ERRORS = new Set(['account_suspended']);
 
 /**
  * Decide what to do with a stored natively_api license given the verify response.

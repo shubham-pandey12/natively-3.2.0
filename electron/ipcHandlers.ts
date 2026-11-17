@@ -8113,21 +8113,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     return ok ? { success: true } : { success: false, error: 'Settings store is unavailable; the change was not saved.' };
   });
 
-  // Delete what this install already shared: queued files here, then the
-  // server's copies (DELETE /v1/training/meeting-transcripts). Also withdraws.
-  safeHandle('auto-answer:delete-shared-data', async () => {
-    appState.setAutoAnswerTrainingConsent(false);
-    try {
-      const uploader = appState.trainingUploader();
-      const deleteShared = uploader.requestDeletion;
-      return typeof deleteShared === 'function'
-        ? await deleteShared.call(uploader)
-        : { success: false, error: 'Deletion is unavailable in this build.' };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  });
-
   // The Auto Answer model: a paid, private download for API keys and Pro
   // (premium/electron/autoAnswer/decider/deciderModelInstaller.ts), and its
   // before/after judge-call card (deciderSavings.ts, numbers only).

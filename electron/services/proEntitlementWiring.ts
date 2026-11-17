@@ -76,7 +76,14 @@ export function getProEntitlementReconciler(): Reconciler {
       if (!lm) return { success: false, skipped: true };
       return lm.activateWithApiKey(key);
     },
-    onActivated: () => broadcast('license-status-changed', { isPremium: true }),
+    onActivated: () => {
+      let isPremium = true;
+      try {
+        isPremium = require('./proAccess').isLicencePremium();
+      } catch {
+      }
+      broadcast('license-status-changed', { isPremium });
+    },
     onStatus: (status: ReconcilerStatus) => broadcast('pro-activation-status', status),
     schedule: (fn, ms) => {
       const t = setTimeout(() => { void fn(); }, ms);

@@ -42,6 +42,17 @@ test('background work waits while live answers are recent', async () => {
   await bg;
 });
 
+test('quiet background work wakes without waiting for a newly refilled token', async () => {
+  const rl = new RateLimiter(10, 0.001, { liveQuietMs: 5 });
+  await rl.acquire();
+  const bg = runAsBackgroundLlmWork(() => rl.acquire());
+  await new Promise((r) => setTimeout(r, 10));
+  rl.refill();
+  await bg;
+  assert.equal(rl.tokens, 8);
+  rl.destroy();
+});
+
 test('destroy rejects background waiters too', async () => {
   const rl = new RateLimiter(2, 0.001, { liveQuietMs: 60_000 });
   await rl.acquire();

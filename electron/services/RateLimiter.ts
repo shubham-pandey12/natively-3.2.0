@@ -130,10 +130,10 @@ export class RateLimiter {
                 const waiter = this.waitQueue.shift()!;
                 waiter.resolve();
             }
-            while (this.backgroundQueue.length > 0 && this.backgroundMayTake()) {
-                this.tokens -= 1;
-                this.backgroundQueue.shift()!.resolve();
-            }
+        }
+        while (this.backgroundQueue.length > 0 && this.backgroundMayTake()) {
+            this.tokens -= 1;
+            this.backgroundQueue.shift()!.resolve();
         }
     }
 

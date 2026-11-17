@@ -9,9 +9,3 @@ test('Auto Answer model status reports whether the judge uses Natively', () => {
   assert.match(llm, /judgeRunsOnNatively\(\): boolean/);
   assert.match(ipc, /judgeViaNatively: llm\?\.getCurrentModelId\?\.\(\) === 'natively' \|\| llm\?\.judgeRunsOnNatively\?\.\(\) === true/);
 });
-
-test('deletion returns a failure result if the recovered uploader has no deletion method', () => {
-  assert.match(ipc, /typeof deleteShared === 'function'/);
-  assert.match(ipc, /success: false, error: 'Deletion is unavailable in this build\.'/);
-  assert.match(ipc, /catch \(error\) \{\s*return \{ success: false/);
-});

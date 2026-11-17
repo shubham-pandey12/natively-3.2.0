@@ -1321,7 +1321,6 @@ interface ElectronAPI {
   setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; message?: string }>;
   getAutoAnswerAccess: () => Promise<{ available: boolean; allowed: boolean; basis: 'pro' | 'sharing' | 'none'; uploads: boolean; consent: { version: number; grantedAt: string } | null; enabled: boolean }>;
   setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
-  deleteAutoAnswerSharedData: () => Promise<{ success: boolean; error?: string }>;
   onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => () => void;
   getAutoAnswerModelStatus: () => Promise<AutoAnswerModelState>;
   installAutoAnswerModel: () => Promise<AutoAnswerModelState>;
@@ -3636,7 +3635,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setAutoAnswerEnabled: (enabled: boolean) => ipcRenderer.invoke('set-auto-answer-enabled', enabled),
   getAutoAnswerAccess: () => ipcRenderer.invoke('auto-answer:get-access'),
   setAutoAnswerTrainingConsent: (granted: boolean) => ipcRenderer.invoke('auto-answer:set-training-consent', granted),
-  deleteAutoAnswerSharedData: () => ipcRenderer.invoke('auto-answer:delete-shared-data'),
   onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => {
     const subscription = (_: any, info: { reason: string }) => callback(info);
     ipcRenderer.on('auto-answer:access-required', subscription);
