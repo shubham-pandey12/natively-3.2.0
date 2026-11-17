@@ -477,27 +477,6 @@ const GO_BINDING_RE = new RegExp(String.raw`\b(?:in|use|using)\s+Go(?![A-Za-z0-9
 const GO_LOWER_BINDING_RE = /\b(?:in|use|using)\s+go(?=\s*(?:$|[.,;!]|only\b|lang\b|language\b|for\s+(?:code|coding|dsa|everything|all)\b))/;
 const C_BINDING_RE = new RegExp(String.raw`\b(?:in|use|using)\s+C(?![A-Za-z0-9_+#-])(?!\s*(?:plus|sharp))${NOT_A_TARGET}|\bcode\s+in\s+c(?![A-Za-z0-9_+#])(?!\s*(?:plus|sharp))`);
 
-// A clause that is just a programming language name (possibly with a version) with
-// no binding verb/preposition is a "bare name clause". It should only bind when
-// another clause in the same instruction already imperatively names a language —
-// i.e., the user wrote a list like "use Python, Go" that the clause splitter cut.
-const LANGUAGE_MENTION_RE = new RegExp(
-  LANGUAGES.map(([, src]) => String.raw`(?:^|\b)(?:${src})(?:\s*\d+(?:\.\d+)?)?(?:\b|$)`).join('|')
-  + String.raw`|(?:^|\b)Go(?![A-Za-z0-9_+#-])${NOT_A_TARGET}`
-  + String.raw`|(?:^|\b)C(?![A-Za-z0-9_+#-])(?!\s*(?:plus|sharp))`,
-  'i',
-);
-const BARE_NAME_CLAUSE_RE = new RegExp(
-  String.raw`^\s*(?:` + [
-    ...LANGUAGES.map(([, src]) => src),
-    String.raw`Go(?![A-Za-z0-9_+#-])`,
-    String.raw`C(?![A-Za-z0-9_+#-])(?!\s*(?:plus|sharp))`,
-  ].join('|') + String.raw`)(?:\s*\d+(?:\.\d+)?)?\s*[.,;!]?\s*$`,
-  'i',
-);
-export const namesLanguage = (clause: string): boolean => LANGUAGE_MENTION_RE.test(clause);
-export const isBareLanguageName = (clause: string): boolean => BARE_NAME_CLAUSE_RE.test(clause.replace(/["'`*_]+/g, ''));
-
 // Everything after an EMPHATIC concessive names what to IGNORE ("in Java even if
 // the screenshot has Python" binds Java, hard). Everything after an EXCLUSION or a
 // NEGATOR names what is forbidden ("Any language but Java", "Never use Python"
@@ -509,6 +488,15 @@ const NEGATOR_SPLIT_RE = /\b(?:never|not|don'?t|dont|do\s+not|avoid|no|stop|with
 // when the other speaker uses a different one": that contradicts the user's own
 // "unless they ask for Python" / "for frontend questions".
 const LANGUAGE_CONDITION_RE = /\b(?:unless|except|otherwise|else|only\s+if|if|when\s+(?:asked|they|the)|for\s+[\w/+#-]+(?:\s+[\w/+#-]+)?\s+(?:questions?|problems?|rounds?|tasks?|stuff))\b/i;
+
+// A clause that is only a language name ("Python 3", "**Go**") is a list item
+// or a restatement. When another clause of the same sentence already names a
+// language (in its positive part), the bare name is skipped so it cannot add a
+// second binding; alone, it is treated like any other clause (3.2.0).
+const BARE_NAME_CLAUSE_RE = /^[\s"'`*_(]*[A-Za-z][A-Za-z+#]*(?:\s?\d+(?:\.\d+)?)?[\s"'`*_)]*[.!]?\s*$/;
+const LANGUAGE_MENTION_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(?:${LANGUAGES.map(([, src]) => src).join('|')})(?![A-Za-z_+#])`, 'i');
+export const namesLanguage = (text: string): boolean => LANGUAGE_MENTION_RE.test(text) || /(?<![A-Za-z0-9_])(?:Go|C)(?![A-Za-z0-9_+#-])/.test(text);
+export const isBareLanguageName = (text: string): boolean => BARE_NAME_CLAUSE_RE.test(asText(text)) && namesLanguage(asText(text));
 
 const detectProgrammingLanguages = (sentences: string[]): { found: string[]; conditional: boolean } => {
   const found: string[] = [];
@@ -523,20 +511,12 @@ const detectProgrammingLanguages = (sentences: string[]): { found: string[]; con
     // which turned "Any language but Java" into a bare clause "Java." that bound.
     const head = s.split(EXCLUSION_SPLIT_RE)[0] || '';
     const clauses = splitInstructionClauses(head);
-    // If any clause imperatively binds a language, bare-name clauses in the
-    // same instruction are list continuations ("use Python, Go") and may also
-    // bind. Without a directive clause, a bare name is just a mention.
-    const hasDirectiveClause = clauses.some(c =>
-      !isFirstPersonFact(c) && isDirectiveShaped(c) && namesLanguage(c) && !isBareLanguageName(c)
-    );
     for (const c of clauses) {
+      if (isBareLanguageName(c) && clauses.some(o => o !== c && namesLanguage(o.split(NEGATOR_SPLIT_RE)[0] || ''))) continue;
       // "if the question is about databases use SQL ..." is an instruction whose
       // imperative is not at the front.
       const instructs = acceptsInstructionClause(c) || (!hasFactSignature(c) && /\b(?:use|using|write|answer|respond|reply|code)\b/i.test(c));
       if (isFirstPersonFact(c) || !instructs || (besideFact && !isDirectiveShaped(c))) continue;
-      // A clause that is literally just a language name binds only when the same
-      // instruction has a proper directive clause naming a language (list context).
-      if (isBareLanguageName(c) && !hasDirectiveClause) continue;
       // "Java mein mat likho" negates AFTER the language, so the before-the-negator
       // rule below cannot see it: a Hinglish negator voids the whole clause.
       if (HINGLISH_NEGATOR_RE.test(c) && /\b(?:mein|me|likh\w*|karo|batao|chahiye|sirf)\b/i.test(c)) continue;

@@ -235,6 +235,12 @@ describe('option 2 — "Only answer from references" keeps every refusal', () =>
     // 2026-09-07 (always answer): the strict policy still names the gap and
     // the remedy, but no longer forbids a clearly-marked general-knowledge answer.
     assert.match(r.user, /still answer the question itself helpfully from general knowledge, clearly marked as general knowledge and never presented as sourced/);
-    assert.match(r.user, /Profile Intelligence/);
+    // F-ACC-14 (3.2.0): the remedy points at Profile Intelligence only when the
+    // build has it. Under the test runner the bundled premium modules cannot
+    // initialise, so the bridge sees the source-available build; either way the
+    // wording must never send the user to a profile feature that is absent.
+    if (!/Profile Intelligence/.test(r.user)) {
+      assert.doesNotMatch(r.user, /profile-enabled mode|adding a r\u00e9sum\u00e9|adding a résumé/);
+    }
   });
 });

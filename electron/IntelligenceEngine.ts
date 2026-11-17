@@ -18,7 +18,7 @@ import {
     FollowUpQuestionsLLM, WhatToAnswerLLM,
     prepareTranscriptForWhatToAnswer, buildTemporalContext,
     AssistantResponse as LLMAssistantResponse, classifyIntent, hasQuestionSignal, planNextAssistantAction, PlannerDecision,
-    extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCompleteShortAnswer, detectExplicitCodingContract, isCodingContinuation, detectAndExtractScaffoldMisfire, hasUnrecoveredScaffoldContamination, isScaffoldRegenerationEligible, isCodingAnswerType, isJdFactualLookupNotNegotiationAdvice, resolveFollowUp, resolveFollowUpOrClarify,
+    extractLatestQuestion, toCandidateFraming, planAnswer, validateAnswerStructure, isCompleteShortAnswer, detectExplicitCodingContract, isCodingContinuation, detectAndExtractScaffoldMisfire, hasUnrecoveredScaffoldContamination, isScaffoldRegenerationEligible, isCodingAnswerType, isJdFactualLookupNotNegotiationAdvice, withActiveCodingProblem, resolveFollowUp, resolveFollowUpOrClarify,
     isLiveSessionMemoryEnabled, resolveLiveFollowup, toMemoryMode, toSurface, effectiveMemoryMode,
     resolveLiveSessionMemoryConfig, piTelemetry, ageBucket,
     buildContextRoute, summarizeContextRoute, shouldThrottleTrigger,
@@ -235,6 +235,8 @@ interface SpeculativeAnswer {
      * under the text instead of reading as finished (forensics 2026-11-13, F-ACC-01).
      */
     stopReason?: string;
+    /** The overlay source badge, carried so the reveal is labelled too (F-ACC-04). */
+    sourceLabel?: string;
 }
 
 export class IntelligenceEngine extends EventEmitter {
@@ -500,6 +502,13 @@ export class IntelligenceEngine extends EventEmitter {
      * of each other. 800 ms does that without the user feeling it.
      */
     private readonly automaticTriggerCooldown: number = 800;
+    /**
+     * When a PREFETCH last declined (the "Nothing actionable" sentinel, or the
+     * router's stay-silent). It throttles the next prefetch only. It used to
+     * stamp lastTriggerTime/lastTriggerQuestion, the answered-turn cooldown, so
+     * the judge's slower "answer" verdict on the same ask then read as a
+     * repeat of it and was silenced (forensics 2026-11-13, F-ACC-08 / D4).
+     */
     private lastSpeculativeDeclineAt = 0;
     /**
      * Generation id of the answer run started by an AUTOMATIC trigger
@@ -1596,6 +1605,16 @@ export class IntelligenceEngine extends EventEmitter {
         this.speculativeAdoptedGenerationId = null;
     }
 
+    /** The overlay source badge for a What-to-Answer final (F-ACC-04). Never throws. */
+    private answerSourceLabel(snapshot: any, turnPlan: any): string {
+        try {
+            const { computeAnswerSourceLabel } = require('./llm/SourceBadge') as typeof import('./llm/SourceBadge');
+            return computeAnswerSourceLabel({ v3Prompt: snapshot?.v3Prompt ?? null, turnPlan: turnPlan ?? null });
+        } catch {
+            return 'General knowledge';
+        }
+    }
+
     /**
      * A speculative run finished. It never rendered, so this is where its text
      * is kept for adoption — or revealed at once if the dispatch already
@@ -1611,13 +1630,14 @@ export class IntelligenceEngine extends EventEmitter {
         generationId: number, question: string | undefined, confidence: number, text: string,
         writeDecision: SessionWriteDecision | undefined,
         streamed?: SpeculativeStreamed,
-        plan?: { answerType?: AnswerType; answerStyle?: string; stopReason?: string },
+        plan?: { answerType?: AnswerType; answerStyle?: string; stopReason?: string; sourceLabel?: string },
     ): string {
         const finished: SpeculativeAnswer = {
             generationId, question: question || 'inferred', confidence, text, writeDecision,
             ...(plan?.answerType ? { answerType: plan.answerType } : {}),
             ...(plan?.answerStyle ? { answerStyle: plan.answerStyle } : {}),
             ...(plan?.stopReason ? { stopReason: plan.stopReason } : {}),
+            ...(plan?.sourceLabel ? { sourceLabel: plan.sourceLabel } : {}),
         };
         const adoptedInFlight = this.speculativeAdoptedGenerationId === generationId && this.currentGenerationId === generationId;
         if (this.speculativeAdoptedGenerationId === generationId) this.speculativeAdoptedGenerationId = null;
@@ -1760,7 +1780,7 @@ export class IntelligenceEngine extends EventEmitter {
         const outcome: WhatToSayOutcome = finished.writeDecision?.policy === 'do_not_store'
             ? { status: 'failed', retryable: true, reason: finished.writeDecision.reason }
             : { status: 'success', retryable: false };
-        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, undefined, finished.stopReason, outcome);
+        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, finished.sourceLabel, finished.stopReason, outcome);
     }
 
     /** Auto Answer V3: identity of the speculative cache, for keyed/embedding reuse. */
@@ -2134,7 +2154,7 @@ export class IntelligenceEngine extends EventEmitter {
         // recording `question` filed the turn under whatever question last
         // advanced the state, or, with no state yet, not at all: the turn and
         // its screenshot were simply never recorded.
-        const turnOut: { question?: string } = {};
+        const turnOut: { question?: string; writeDecision?: SessionWriteDecision } = {};
         const outcomeOut = options?.outcomeOut ?? {};
         outcomeOut.value = { status: 'failed', retryable: true, reason: 'generation_not_completed' };
         const startedUnder = this.conversationSessionId();
@@ -2145,6 +2165,9 @@ export class IntelligenceEngine extends EventEmitter {
         // and recording it put that message into the conversation as the reply
         // to the screenshot.
         const answered = Boolean(question?.trim()) || turnOut.question !== undefined;
+        if (turnOut.writeDecision?.policy === 'do_not_store' && !options?.speculative && answered) {
+            console.warn(`[IntelligenceEngine] What to answer turn not recorded in the conversation ring (${turnOut.writeDecision?.reason ?? 'do_not_store'})`);
+        }
         if (!options?.speculative && answered && outcomeOut.value?.status === 'success') {
             // A run that resolved no question ('') and saw no screen or page
             // still answered something; filed with no question it took the
@@ -2163,7 +2186,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2284,6 +2307,9 @@ export class IntelligenceEngine extends EventEmitter {
         // mints a newer id and the automatic/speculative one is no longer live.
         this.automaticGenerationId = this.nextRunIsAutomatic ? generationId : null;
         this.speculativeGenerationId = isSpeculative ? generationId : null;
+        // A question that the user typed (not one the automatic trigger or a
+        // prefetch passed in) is manual input (3.2.0).
+        const questionTyped = Boolean(question) && !isSpeculative && this.automaticGenerationId !== generationId;
         this.nextRunIsAutomatic = false;
         const isWtaSuperseded = () => (
             this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken
@@ -2390,11 +2416,22 @@ export class IntelligenceEngine extends EventEmitter {
         // never a fresh orchestrator read after a pre-stream await.
         // Derived-evidence hygiene (2026-09-30): only raw-text-supported
         // project descriptions reach evidence (profile-derived-support.ts).
+        // Profile documents ground answers only while Pro / trial access
+        // allows it (v3ProfileSources.profileReadableForAnswers, 3.2.0).
+        const snapshotProfileReadable = (() => {
+            try {
+                const { profileReadableForAnswers } = require('./services/knowledge/v3ProfileSources') as typeof import('./services/knowledge/v3ProfileSources');
+                return profileReadableForAnswers() === true;
+            } catch {
+                return false;
+            }
+        })();
+        const snapshotReadableKnowledge = snapshotProfileReadable ? snapshotKnowledge : null;
         const snapshotProfileFacts = stripUnsupportedDerivedResumeFields(
-            (snapshotKnowledge as any)?.activeResume?.structured_data ?? null,
-            (snapshotKnowledge as any)?.activeResume?.raw_text,
+            (snapshotReadableKnowledge as any)?.activeResume?.structured_data ?? null,
+            (snapshotReadableKnowledge as any)?.activeResume?.raw_text,
         );
-        const snapshotJobDescriptionFacts = (snapshotKnowledge as any)?.activeJD?.structured_data ?? null;
+        const snapshotJobDescriptionFacts = (snapshotReadableKnowledge as any)?.activeJD?.structured_data ?? null;
         const snapshotSourceAvailability = Object.freeze({
             hasReferenceFiles: Boolean((snapshotModeInfo as any)?.hasReferenceFiles),
             hasProfileFacts: Boolean(snapshotProfileFacts),
@@ -2896,20 +2933,19 @@ export class IntelligenceEngine extends EventEmitter {
             // asked next went out carrying "(follow-up to the coding problem…)".
             let askAsHeard: string | undefined;
             try {
-                const activeCoding = this.session.getDetectedCodingQuestion();
-                const problem = activeCoding.question?.trim() ?? '';
+                const activeCoding = this.session.getActiveCodingProblem(IntelligenceEngine.ACTIVE_CODING_PROBLEM_MAX_AGE_MS);
+                const problem = activeCoding?.question.trim() ?? '';
                 const latestAsk = (question || extractedQuestion.latestQuestion || '').trim();
-                const fresh = activeCoding.setAt != null && Date.now() - activeCoding.setAt <= IntelligenceEngine.ACTIVE_CODING_PROBLEM_MAX_AGE_MS;
-                if (problem && fresh && latestAsk && latestAsk.toLowerCase() !== problem.toLowerCase() && isCodingContinuation(latestAsk)) {
+                if (activeCoding && problem && latestAsk && latestAsk.toLowerCase() !== problem.toLowerCase() && isCodingContinuation(latestAsk)) {
                     const inWindow = preparedTranscript.toLowerCase().includes(problem.slice(0, 60).toLowerCase());
                     if (!inWindow) preparedTranscript = `[INTERVIEWER]: ${problem}\n${preparedTranscript}`;
                     if (!question) {
                         askAsHeard = latestAsk;
-                        extractedQuestion.latestQuestion = `${latestAsk} (follow-up to the coding problem: "${problem}")`;
+                        extractedQuestion.latestQuestion = withActiveCodingProblem(latestAsk, problem, activeCoding.saidAfter);
                         extractedQuestion.isFollowUp = true;
                     }
                     trace.mark('repair_used', { reason: 'active_coding_problem', spliced: !inWindow, source: activeCoding.source });
-                    console.log('[IntelligenceEngine] coding continuation resolved against the active coding problem', { spliced: !inWindow, source: activeCoding.source, ageMs: Date.now() - (activeCoding.setAt ?? Date.now()) });
+                    console.log('[IntelligenceEngine] coding continuation resolved against the active coding problem', { spliced: !inWindow, source: activeCoding.source, ageMs: Date.now() - activeCoding.setAt, saidAfterStatements: activeCoding.saidAfter.length });
                 }
             } catch { /* keep extractor result */ }
             trace.mark('latest_question_extracted', {
@@ -3029,7 +3065,19 @@ export class IntelligenceEngine extends EventEmitter {
             // Governed document turns resolve through EvidenceResolver inside
             // WhatToAnswerLLM. Do not start the legacy prefetch in parallel: even
             // an ignored retrieval is an unauthorized competing evidence path.
-            const modeContextPromise: Promise<string> = options?.activeSkill || docGroundedEnforcementActive || !wtaPrefetchDecision.allowed
+            // A turn V3 will compose reads mode files through its own port;
+            // the legacy prefetch and knowledge-mode block would be a second,
+            // competing evidence path (3.2.0).
+            const wtaV3ExpectedToCompose = (() => {
+                try {
+                    const { isContextIntelligenceV3Enabled } = require('./context-intelligence/contracts/flag') as typeof import('./context-intelligence/contracts/flag');
+                    return isContextIntelligenceV3Enabled() === true
+                        && String(question || extractedQuestion.latestQuestion || lastInterviewerTurn || '').trim().length > 0;
+                } catch {
+                    return false;
+                }
+            })();
+            const modeContextPromise: Promise<string> = options?.activeSkill || docGroundedEnforcementActive || !wtaPrefetchDecision.allowed || wtaV3ExpectedToCompose
                 ? Promise.resolve('') // skill/governed-document mode skips legacy retrieval; blind turn (no user-originated query) skips it too
                 : (async () => {
                     try {
@@ -3167,7 +3215,7 @@ export class IntelligenceEngine extends EventEmitter {
                     processQuestion(question: string): Promise<PromptAssemblyResult | null>;
                 }) | undefined = this.llmHelper.getKnowledgeOrchestrator?.();
                 if (orchestrator?.isKnowledgeMode?.() && !strictDocumentGroundedActive
-                    && wtaDecisionAllowsCandidateProfile && snapshotProfileIntelligenceAllowed) {
+                    && wtaDecisionAllowsCandidateProfile && snapshotProfileIntelligenceAllowed && !wtaV3ExpectedToCompose) {
                     const extracted = extractedQuestion;
                     // Only ground question types that resolve to the candidate's
                     // own plain facts. jd_alignment/company questions are
@@ -3537,7 +3585,7 @@ export class IntelligenceEngine extends EventEmitter {
             if (!candidateProfile && wtaDecisionAllowsCandidateProfile && snapshotProfileIntelligenceAllowed
                 && (wtaProfileAllowed || _jdShapeAllowed)) {
                 try {
-                    const orch = this.llmHelper.getKnowledgeOrchestrator?.();
+                    const orch = snapshotProfileReadable ? this.llmHelper.getKnowledgeOrchestrator?.() : null;
                     const resume = stripUnsupportedDerivedResumeFields(
                         (orch as any)?.activeResume?.structured_data ?? null,
                         (orch as any)?.activeResume?.raw_text,
@@ -3635,7 +3683,18 @@ export class IntelligenceEngine extends EventEmitter {
                                 answerShape: evidence.answerShape,
                                 sourceOwner: evidence.sourceOwner,
                                 evidence,
-                                maxAnswerWords: (require('./llm/answerLength') as typeof import('./llm/answerLength')).profileAnswerWordCap(undefined, (require('./llm/answerLength') as typeof import('./llm/answerLength')).getRegisteredAnswerLength(), (require('./llm/userInstructionContract') as typeof import('./llm/userInstructionContract')).registeredInstructionsSetLength(snapshotModeInfo?.id)) ?? undefined,
+                                // Spoken answer: the Answer length setting sets the target (Smart = 90),
+                                // unless the mode's Real-time prompt sets a length: then it states none.
+                                maxAnswerWords: (() => {
+                                    try {
+                                        const { registeredInstructionsSetLength } = require('./llm/userInstructionContract') as typeof import('./llm/userInstructionContract');
+                                        if (registeredInstructionsSetLength(snapshotModeInfo?.id ?? null)) return null;
+                                        const { profileAnswerWordCap, getRegisteredAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
+                                        return profileAnswerWordCap(undefined, getRegisteredAnswerLength());
+                                    } catch {
+                                        return 90;
+                                    }
+                                })(),
                                 // Campaign-3 (fix/answer-policy-engine, 2026-07-19,
                                 // founder §2.5): pass the TurnPlanner seeder-leash
                                 // through to the prompt builder so a salary /
@@ -3643,7 +3702,8 @@ export class IntelligenceEngine extends EventEmitter {
                                 // auto-open with a candidate self-introduction.
                                 // _c3TurnPlan is computed above in the same
                                 // try block; null-safe here.
-                                seedCandidateBackground: (_c3TurnPlan?.answerDirectives?.seedCandidateBackground ?? true),
+                                // F-ACC-12: a failed plan does not seed (was `?? true`).
+                                seedCandidateBackground: (_c3TurnPlan?.answerDirectives?.seedCandidateBackground ?? false),
                             });
                             candidateProfile = `<profile_jit_evidence_request>\n${jit.userPrompt}\n</profile_jit_evidence_request>`;
                             trace.mark('repair_used', { reason: 'identity_jit_evidence_grounding', evidenceItems: evidence.items.length, promptChars: jit.promptChars });
@@ -3674,7 +3734,7 @@ export class IntelligenceEngine extends EventEmitter {
             const canonicalTurn = resolveCanonicalTurn({
                 answerInput: {
                     question: question || extractedQuestion.latestQuestion || lastInterviewerTurn,
-                    source: question ? 'manual_input' : 'what_to_answer',
+                    source: questionTyped ? 'manual_input' : 'what_to_answer',
                     speakerPerspective: extractedQuestion.detectedSpeaker === 'interviewer' ? 'interviewer' : 'user',
                     extractedQuestion,
                     intentResult,
@@ -3705,7 +3765,7 @@ export class IntelligenceEngine extends EventEmitter {
                     piTelemetry.emit('wta_plan_divergence', {
                         legacyType,
                         canonicalType: answerPlan.answerType,
-                        typedPress: Boolean(question),
+                        typedPress: questionTyped,
                     });
                 }
             } catch { /* telemetry only */ }
@@ -3895,6 +3955,7 @@ export class IntelligenceEngine extends EventEmitter {
                 && canonicalTurn.turnSourceDecision
                 && wtaCoordinatorInScope
                 && snapshotProfileIntelligenceAllowed
+                && !wtaV3ExpectedToCompose
                 && isIntelligenceFlagEnabled('contextOsEvidencePackEnabled')
                 && isIntelligenceFlagEnabled('contextOsMultiFamilyEvidenceEnabled')) {
                 try {
@@ -4332,7 +4393,7 @@ export class IntelligenceEngine extends EventEmitter {
                             ? (require('./services/screen/screenPrepass') as typeof import('./services/screen/screenPrepass')).SCREEN_IN_ATTACHED_IMAGE
                             : '',
                     ].filter(Boolean).join('\n\n') || undefined;
-                    const _ctx = this.v3ModeRetrievalContext(_screenPortText);
+                    const _ctx = this.v3ModeRetrievalContext(_screenPortText, { modeInfo: snapshotModeInfo, referenceFiles: snapshotReferenceFiles });
                     if (!_ctx) return undefined;
                     const _v3 = await buildV3Prompt({
                         // What the user told the app about themselves: About you (Cue Cards, Pro),
@@ -4459,7 +4520,7 @@ export class IntelligenceEngine extends EventEmitter {
                         defaultLengthDirective: (() => {
                             try {
                                 const { renderLengthDirectiveForPlan } = require('./llm/AnswerPlanner') as typeof import('./llm/AnswerPlanner');
-                                return renderLengthDirectiveForPlan(answerPlan, { pinnedModeId: snapshotModeInfo?.id }) || undefined;
+                                return renderLengthDirectiveForPlan(answerPlan, { pinnedModeId: snapshotModeInfo?.id ?? null }) || undefined;
                             } catch { return undefined; /* length directive is best-effort */ }
                         })(),
                         // The diagram turn's note and the design on the table
@@ -4695,7 +4756,7 @@ export class IntelligenceEngine extends EventEmitter {
                                 // screenshot is promoted too, and this directive
                                 // used to override their shape with "the complete
                                 // solution".
-                                if (!_promoted || !_base || _codingShape !== 'solve') return _base;
+                                if (!_promoted || !_base || !(require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals')).isRepeatPressAsk(answerPlan.question, _codingShape ?? '')) return _base;
                                 return `${_base}\n\n<repeat_press_directive>\nThe user triggered this action with a coding problem on screen and NO new question. That is a request for the COMPLETE solution to the on-screen problem, in the shape the coding contract asks for, even if a previous answer in this conversation already covered it, and even if this looks like a follow-up. Never respond with commentary on, agreement with, or a summary of an earlier answer. Produce the answer as if asked for the first time.\n</repeat_press_directive>`;
                             } catch { return null; } // no persona ⇒ composition unchanged
                         },
@@ -5478,7 +5539,9 @@ export class IntelligenceEngine extends EventEmitter {
                     validationOk: false,
                     criticalViolations: ['leaked_schema_stub'],
                 });
+                if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 if (openedStreamRow) emitChunk(stubFallback);
+                if (options?.turnOut) options.turnOut.writeDecision = stubWriteDecision;
                 this.session.addAssistantMessage(stubFallback, stubWriteDecision, 'what_to_answer');
                 // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
                 this.emit('suggested_answer', stubFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId, undefined, undefined, options?.outcomeOut?.value);
@@ -5501,7 +5564,9 @@ export class IntelligenceEngine extends EventEmitter {
                     validationOk: false,
                     criticalViolations: ['provider_transport_error'],
                 });
+                if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 if (openedStreamRow) emitChunk(fullAnswer);
+                if (options?.turnOut) options.turnOut.writeDecision = transportWriteDecision;
                 this.session.addAssistantMessage(fullAnswer, transportWriteDecision, 'what_to_answer');
                 // Campaign-3 (fix/answer-policy-engine, 2026-07-19, founder §2.6):
                 // Source badge label. Computed from the TurnPlan (already
@@ -5511,18 +5576,9 @@ export class IntelligenceEngine extends EventEmitter {
                 // `sourceLabel` field on the `intelligence-suggested-answer`
                 // payload. Defensive fallback to 'General knowledge' if the
                 // helper throws — the emit boundary must never throw.
-                const { computeEngineSourceLabel } = require('./llm/SourceBadge');
-                // When V3 composed this turn's prompt, the legacy TurnPlan did
-                // not drive the answer — labelling from it said "General
-                // knowledge" over reference-grounded V3 answers. Derive from
-                // the V3 decision instead.
-                const _v3ForLabel = (requestSnapshot as any)?.v3Prompt;
-                const _c3SourceLabel = _v3ForLabel
-                    ? ((_v3ForLabel.evidenceCount ?? 0) > 0 ? 'Reference material' : 'General knowledge')
-                    : computeEngineSourceLabel({
-                        turnPlan: _c3TurnPlan,
-                        evidenceFound: true,
-                    });
+                // V3-composed turns label from the evidence actually rendered
+                // into the prompt; legacy turns from the TurnPlan (F-ACC-04).
+                const _c3SourceLabel = this.answerSourceLabel(requestSnapshot, _c3TurnPlan);
                 // A canned opener that a real answer followed is thrown away here
                 // too, so the committed text matches what first paint showed
                 // (cannedOpener.ts, 2026-09-07).
@@ -5573,7 +5629,9 @@ export class IntelligenceEngine extends EventEmitter {
                     validationOk: false,
                     criticalViolations: ['leaked_internal_tag_block'],
                 });
+                if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 if (openedStreamRow) emitChunk(tagLeakFallback);
+                if (options?.turnOut) options.turnOut.writeDecision = tagLeakWriteDecision;
                 this.session.addAssistantMessage(tagLeakFallback, tagLeakWriteDecision, 'what_to_answer');
                 // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
                 this.emit('suggested_answer', tagLeakFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, generationId, undefined, undefined, options?.outcomeOut?.value);
@@ -7174,6 +7232,8 @@ export class IntelligenceEngine extends EventEmitter {
                     // Same rule as the live final below: not when the cut-off
                     // text was replaced, because the user reads the replacement.
                     stopReason: wtaTruncation.truncated && !streamedAnswerReplaced ? wtaTruncation.reason : undefined,
+                    // The badge rides with the held answer so its reveal is labelled too (F-ACC-04).
+                    sourceLabel: this.answerSourceLabel(requestSnapshot, _c3TurnPlan),
                 });
             }
 
@@ -7336,6 +7396,8 @@ export class IntelligenceEngine extends EventEmitter {
 
             setOutcome(wtaWriteDecision.policy !== 'do_not_store' && finalWtaAnswer.trim() ? 'success' : 'failed',
                 wtaWriteDecision.policy === 'do_not_store' ? wtaWriteDecision.reason : undefined);
+            if (isWtaSuperseded()) return yieldToSupersedingRun(false);
+            if (options?.turnOut) options.turnOut.writeDecision = wtaWriteDecision;
             this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer');
 
             // Full-JIT write-gating law (§6): a provider-error/no-answer WTA
@@ -7370,7 +7432,7 @@ export class IntelligenceEngine extends EventEmitter {
             // under the text instead of reading as finished (#644). Not when
             // the cut-off text was replaced: the user reads the replacement.
             const wtaStopReason = wtaTruncation.truncated && !streamedAnswerReplaced ? wtaTruncation.reason : undefined;
-            this.emit('suggested_answer', finalWtaAnswer, question || 'What to Answer', confidence, generationId, undefined, wtaStopReason, options?.outcomeOut?.value);
+            this.emit('suggested_answer', finalWtaAnswer, question || 'What to Answer', confidence, generationId, this.answerSourceLabel(requestSnapshot, _c3TurnPlan), wtaStopReason, options?.outcomeOut?.value);
             // Compile-only syntax check of fenced JavaScript (observe-only: the
             // turn trace + telemetry record it, the answer is never changed).
             try {
@@ -7640,7 +7702,13 @@ export class IntelligenceEngine extends EventEmitter {
     // the active mode. WTA and runManualAnswer previously each carried a copy of
     // this block; a third copy for the proactive surfaces is where drift starts,
     // so all of them now call this.
-    private v3ModeRetrievalContext(screenDescription?: string): {
+    /**
+     * `snapshot`: the mode and files the turn captured at t0. Without it this
+     * read the LIVE mode, so a mode switch between dispatch and the V3 build
+     * gave one answer the old mode's plan and the new mode's files
+     * (pipeline forensics 2026-11-13, F-CTX-11).
+     */
+    private v3ModeRetrievalContext(screenDescription?: string, snapshot?: { modeInfo: any; referenceFiles: ReadonlyArray<any> }): {
         raw: string; modeUniqueId: string | null; modeName: string | null; meetingId: string | null;
         attachedSourceCount: number;
         attachedFileNames: string[];
@@ -7662,8 +7730,12 @@ export class IntelligenceEngine extends EventEmitter {
             const { resolveModePolicy, isModeId, resolveModeIdOrWarn } = require('./context-intelligence/policies/mode-policy-registry');
             const { ModesManager } = require('./services/ModesManager');
             const _mm = ModesManager.getInstance();
-            const _mi = _mm.getActiveModeInfo?.() ?? null;
-            const _files = _mi?.id ? (_mm.getReferenceFiles?.(_mi.id) ?? []) : [];
+            // The answer path passes the mode it froze at press time, so a mode
+            // switch mid-turn cannot mix two source universes (3.2.0).
+            const _mi = snapshot ? snapshot.modeInfo : (_mm.getActiveModeInfo?.() ?? null);
+            const _files = snapshot
+                ? (_mi?.id ? [...snapshot.referenceFiles] : [])
+                : (_mi?.id ? (_mm.getReferenceFiles?.(_mi.id) ?? []) : []);
             const raw = (_mi as any)?.templateType ?? 'general';
             // Announced, not silent — see resolveModeIdOrWarn (2026-08-09).
             const _modeId = resolveModeIdOrWarn(_mi ? raw : null, 'engine/transcript-surface', { quietWhenAbsent: true });

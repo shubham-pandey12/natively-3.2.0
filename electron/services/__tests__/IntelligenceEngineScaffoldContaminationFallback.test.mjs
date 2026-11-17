@@ -327,7 +327,9 @@ Time O(n), Space O(1).`;
 
     const answer = await engine.runWhatShouldISay(undefined, 0.9, undefined, { skipCooldown: true });
 
-    assert.equal(answer, A4_UNRECOVERED_SCAFFOLD);
+    // 3.2.0: a superseded run yields to the run that superseded it (returns
+    // null, stores nothing) instead of finishing with its own pre-repair text.
+    assert.equal(answer, null);
     assert.equal(
       session.getFullTranscript().some(segment => segment.text.includes('tail-aggregation for high-cardinality')),
       false,

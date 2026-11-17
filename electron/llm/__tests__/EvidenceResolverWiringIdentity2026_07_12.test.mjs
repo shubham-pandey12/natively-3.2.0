@@ -561,8 +561,12 @@ describe('evidence-execution-repair: EvidenceResolver wiring identity (a524329 r
     assert.equal(resolveCalls, 1, 'resolver must have been attempted once');
     assert.equal(hybridLegacyCalls, 0, 'a governed resolver failure must never fall back to legacy hybrid retrieval');
     assert.equal(lexicalLegacyCalls, 0, 'a governed resolver failure must never fall back to legacy lexical retrieval');
+    // Recovered 3.2.0: a refusal pack never governs generation (refusalPolicy
+    // "always answer", 2026-09-07), so LLMHelper dispatches to the model with
+    // the composer's absence framing instead of a canned decline. Legacy
+    // retrieval stays forbidden (asserted above).
     const dispatched = calls.find(c => c.via === 'executeCustomProvider');
-    assert.equal(dispatched, undefined, 'a governed resolver failure must return deterministic refusal before provider dispatch');
+    assert.ok(dispatched, 'a refusal pack that does not govern goes to the model (3.2.0 refusal policy)');
   });
 
   // Evidence-execution-repair (2026-07-12) — regression guard for a SECOND,

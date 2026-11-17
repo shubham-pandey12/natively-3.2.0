@@ -113,3 +113,65 @@
 
 Tests: `NativelyLimitNotNoProvider2026_11_03` updated to the 3.2.0 signature; new `ProvidersExhausted320.test.mjs` (3 pass). LLM + services suites: 13722 tests, 9 fail before the test update; the 8 that remain also fail on the unmodified tree (git stash check: FastModelPreferFast, CodingTemplateContract, InstructionAnalysisAdversarial).
 Billing/charging paths untouched. Pure TypeScript logic: no platform branches. Reviewed but not executed on Windows.
+
+## Phase 2 — Remaining LLMHelper gaps (2026-11-17)
+
+Compiled diff of the `LLMHelper.ts` section, built vs recovered: **38 hunks → 3**.
+
+| Item | Result |
+|---|---|
+| Gemini summary cascade `geminiKeyDead` | Added: a permanent key error (invalid/expired/billing) stops Flash-Lite → Flash → Pro instead of retrying ~11 times |
+| Custom provider pre-commit error | Now yields `Error: Custom Provider returned HTTP <status>` / `Error streaming from custom provider.` (3.2.0) instead of throwing |
+| CONTEXT-OS refusal policy | `_refusalYieldsLLM` via `packGovernsGeneration`: a refusal pack that does not govern dispatches to the model |
+| `judgeRunsOnNatively` / `fastResponseFamilyNow` | Logic split and positions matched to 3.2.0, with doc comments |
+| `withTimeout` | Matched 3.2.0 (clear on resolve, no `unref`) |
+| `sdkRetryOptions` | Moved from the OpenAI vision call to the AgentRouter stream call (the prior session put it on the wrong call) |
+| Turn budget alias on answer retry; budget/breaker accessor placement; scope-push order; guard wrappers; import/init order; exhausted-chain doc | Matched |
+
+Remaining 3 hunks, all intentional:
+- `BrowserWindow6` vs `BrowserWindow4`: esbuild renaming noise.
+- `answerTurn` excludes `project_link_answer`: main commit 4eae567b (2026-11-08), newer than the 3.2.0 build. Kept.
+- `[DISPATCHED IMAGE IDENTITIES]` block: main commit f3e1eacf (2026-11-07), newer than the 3.2.0 build. Kept.
+
+Tests: `EvidenceResolverWiringIdentity2026_07_12` now expects 3.2.0 dispatch on a non-governing refusal pack (legacy-retrieval bans kept). `CodingTemplateContract2026_08_18` now checks `isImageCodingAsk`. LLM + services suites: 13725 tests, 7 failures remain, all of them pre-existing (6 `InstructionAnalysisAdversarial` language cases, 1 `FastModelPreferFast` source check), for a later phase.
+Billing/charging paths untouched. No platform branches changed. Reviewed but not executed on Windows.
+
+## Phase 3 — IntelligenceEngine (2026-11-17, uncommitted)
+
+Compiled `electron/IntelligenceEngine.ts` section diff vs recovered 3.2.0: **78 → 38 hunks**.
+
+Ported from 3.2.0:
+- `SourceBadge.sourceLabelFromEvidenceBlock` / `computeAnswerSourceLabel`; engine `answerSourceLabel()` labels the transport-error, final and held (speculative) answers; the reveal of an adopted prefetch now carries its badge (F-ACC-04). Replaces the local "Reference material" V3 label.
+- `turnOut.writeDecision` set on stub / transport / tag-leak / final paths, plus `isWtaSuperseded()` yield before each store; wrapper warns when a turn is not recorded.
+- `questionTyped` (manual_input source and typedPress only for presses the user typed).
+- `v3ProfileSources.profileReadableForAnswers` / `collectProfileSourcesForIndex`: profile docs ground answers only under Pro/trial (dev Ultra override passes via `isProOrTrialActive`); raw-text index still reads all docs. Engine snapshot uses `snapshotReadableKnowledge`.
+- `wtaV3ExpectedToCompose` skips the legacy mode prefetch, knowledge-mode block and context-OS multi-family pack on V3 turns.
+- Coding continuation uses `getActiveCodingProblem` + `withActiveCodingProblem(…, saidAfter)`.
+- `maxAnswerWords` null when the mode's Real-time prompt sets a length (ProfileJitPromptBuilder accepts null); `seedCandidateBackground ?? false` (F-ACC-12).
+- `v3ModeRetrievalContext(screen, snapshot)` uses the press-time mode/files (F-CTX-11); `pinnedModeId ?? null`; `isRepeatPressAsk` for the repeat-press directive (engine + WhatToAnswerLLM).
+- WhatToAnswerLLM: V3-composed turns skip mode-context retrieval; refusal policy dispatches; exhausted-chain user line. transcriptQuestionExtractor: generic-closer anchoring.
+
+Kept intentionally (local, newer than or parallel to 3.2.0):
+- `setOutcome` / `outcomeOut` What-to-say outcome reporting and the extra `outcome` emit arg.
+- `decideSessionWritePolicy` on speculative empty, invalid identity and non-answer paths; no-context message not stored as an assistant turn.
+- Nov 7 `_wtaUserBase` screen-instruction prefixing in WhatToAnswerLLM; `recordLiveTurn` 'user' vs 'meeting'; image-press default question.
+- `?? ''` type guards on `isRepeatPressAsk` (compile noise only); `onlySmallTalk` placement (ordering only).
+
+Tests updated to 3.2.0 behaviour: CodingResponseShape2026_09_29 (repeat-press regex), ScreenPrepassSkip2026_11_06 (snapshot arg), IntelligenceEngineScaffoldContaminationFallback (superseded run yields `null`).
+
+Validation: `tsc` clean; `npm run build:electron` ok; LLM + services suites 13725 tests, 7 failures — the same pre-existing 7 (6 InstructionAnalysisAdversarial language cases, 1 FastModelPreferFast).
+Not covered: `services/meeting/sectionInstructions.ts` (missing locally) is deferred to Phase 5. Reviewed but not executed on Windows; no platform branches touched.
+
+## Phase 4 — prompt-composer (2026-11-17, uncommitted)
+
+Compiled `context-intelligence/generation/prompt-composer.js` vs recovered 3.2.0: **25 → 11 diff hunks**, all remaining are the kept Nov 7 screenshot fix (`isScreenPointerQuestion` / `isCurrentScreenRequest`, main f3e1eacf) or esbuild renames (`FIRST_PERSON_RE` ↔ `FIRST_PERSON_RE2`, `init_turn_classifier`).
+
+Ported:
+- `userInstructionContract.ts`: replaced the Phase 1 approximation of bare language-name handling with the exact 3.2.0 logic (`BARE_NAME_CLAUSE_RE`, `namesLanguage`, `isBareLanguageName`; a bare name is skipped only when another clause already names a language). This clears the 6 long-standing InstructionAnalysisAdversarial language failures.
+- `turn-classifier.ts`: identifier heads detect capitals after the first letter or any digit (a sentence-initial word is no longer an identifier).
+- `prompt-composer.ts`: `profileFeatureAvailable` input threads through `noEvidenceNotice` / `absenceNoticeBody`; with no Profile Intelligence in the build the notice neither claims a profile could serve nor suggests adding one (F-ACC-14). Unused conversation budget is added to the evidence budget. Conversation header now says follow-up references resolve to what the latest assistant line named.
+- `engine-bridge.ts`: `profileFeatureAvailable()` via `premium/featureGate.isPremiumAvailable`; passed to the composer and traced as `profileFeature`.
+
+Test updated: AnswerPolicyLiveDenials2026_08_07 "exact strict wording" — the Profile Intelligence remedy is now build-dependent (absent under the test runner where premium modules cannot initialise).
+
+Validation: `tsc` clean; `npm run build:electron` ok; llm + services + context-intelligence suites 15834 tests, 1 failure (pre-existing FastModelPreferFast `preferFast`). Reviewed but not executed on macOS or Windows; no platform branches touched.

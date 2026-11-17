@@ -47,6 +47,20 @@ function redactTracePayload<T>(payload: T): unknown {
   try { return require('../../utils/redactForLog').redactSecretsOnly(payload); } catch { return payload; }
 }
 
+/**
+ * Whether this build has Profile Intelligence at all (F-ACC-14). The
+ * source-available build has no premium modules, so no profile can exist and
+ * the no-evidence notice must not send the user to it.
+ */
+function profileFeatureAvailable(): boolean {
+  try {
+    const { isPremiumAvailable } = require('../../premium/featureGate') as typeof import('../../premium/featureGate');
+    return isPremiumAvailable() !== false;
+  } catch {
+    return true;
+  }
+}
+
 
 /**
  * A rendered COMPLETED exchange — an answer, in one of the two shapes this
@@ -630,6 +644,9 @@ export async function buildV3Prompt(input: BridgeInput): Promise<BridgeResult | 
       conversationHasScreenObservation: historyCarriesScreenText && Boolean(convoSummary),
       attachedSourceCount: input.attachedSourceCount,
       profileSourceCount: input.profileSourceCount,
+      // F-ACC-14: the source-available build has no Profile Intelligence; its
+      // no-evidence wording must not send the user there.
+      profileFeatureAvailable: profileFeatureAvailable(),
       // Defect D (2026-08-01): the CLARIFICATION verdict was computed and then
       // dropped here — the composer is the only place it can act.
       fallbackUsed: result.trace.fallbackUsed,
@@ -714,6 +731,8 @@ export async function buildV3Prompt(input: BridgeInput): Promise<BridgeResult | 
         attachedFiles: input.attachedSourceCount ?? null,
         modeAttachedFiles: input.attachedSourceCount ?? null,
         profileSources: input.profileSourceCount ?? 0,
+        // F-ACC-14: 'not_in_build' = source-available build, no profile can exist.
+        profileFeature: profileFeatureAvailable() ? 'available' : 'not_in_build',
         profileResumeSources: (input.resolvedProfileSources ?? []).filter((s) => s.role === 'profile_resume').length,
         profileJobDescriptionSources: (input.resolvedProfileSources ?? []).filter((s) => s.role === 'profile_job_description').length,
         profileFactSources: (input.resolvedProfileSources ?? []).filter((s) => s.role === 'profile_fact').length,

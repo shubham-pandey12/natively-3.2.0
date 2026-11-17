@@ -510,7 +510,7 @@ describe('C5 — channel audit: every screen transport reaches the contract (202
 
   test('both legacy LLMHelper transports promote an attached screenshot', () => {
     const src = read('../../LLMHelper.ts');
-    const hits = (src.match(/imagePaths\?\.length \?\? 0\) > 0\s*&&\s*\(!message\?\.trim\(\) \|\| isDeicticAsk\(message\)/g) || []).length;
+    const hits = (src.match(/imagePaths\?\.length \?\? 0\) > 0\s*&&\s*isImageCodingAsk\(message\)/g) || []).length;
     assert.equal(hits, 2, `expected the promotion on BOTH LLMHelper entry points, got ${hits}`);
   });
 

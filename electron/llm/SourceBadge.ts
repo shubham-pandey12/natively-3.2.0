@@ -214,3 +214,61 @@ export function computeEngineSourceLabel(input: {
     return 'General knowledge';
   }
 }
+/**
+ * Derive the badge from the evidence actually rendered into a V3-composed
+ * prompt (3.2.0). Counts `<evidence source_type="...">` tags and reports the
+ * one or two dominant sources.
+ */
+export function sourceLabelFromEvidenceBlock(evidenceBlock: string | null | undefined): SourceLabel {
+  if (!evidenceBlock) return 'General knowledge';
+  const counts: Record<'resume' | 'jd' | 'ref', number> = { resume: 0, jd: 0, ref: 0 };
+  for (const m of evidenceBlock.matchAll(/<evidence\b[^>]*\bsource_type="([A-Za-z_]+)"/g)) {
+    switch (m[1]) {
+      case 'RESUME':
+      case 'PROFILE_FACT':
+        counts.resume += 1;
+        break;
+      case 'JOB_DESCRIPTION':
+        counts.jd += 1;
+        break;
+      case 'REFERENCE_FILE':
+      case 'PROJECT_FILE':
+      case 'CODING_SAMPLE':
+      case 'CANDIDATE_FILE':
+        counts.ref += 1;
+        break;
+      default:
+        break;
+    }
+  }
+  const present = (Object.keys(counts) as Array<keyof typeof counts>)
+    .filter((k) => counts[k] > 0)
+    .sort((a, b) => counts[b] - counts[a])
+    .slice(0, 2);
+  const has = (k: keyof typeof counts) => present.includes(k);
+  if (present.length === 0) return 'General knowledge';
+  if (present.length === 1) {
+    if (has('resume')) return 'From: Resume';
+    if (has('jd')) return 'From: Job description';
+    return 'From: Reference files';
+  }
+  if (has('resume') && has('jd')) return 'Mixed: Resume + Job description';
+  if (has('resume') && has('ref')) return 'Mixed: Resume + Reference files';
+  return 'Mixed: Job description + Reference files';
+}
+
+/**
+ * Answer-path badge (3.2.0): V3-composed turns label from the rendered
+ * evidence; legacy turns fall back to the TurnPlan matrix. Never throws.
+ */
+export function computeAnswerSourceLabel(input: {
+  v3Prompt?: { evidenceBlock?: string | null } | null;
+  turnPlan?: Partial<TurnPlan> | null;
+}): SourceLabel {
+  try {
+    if (input.v3Prompt) return sourceLabelFromEvidenceBlock(input.v3Prompt.evidenceBlock);
+    return computeEngineSourceLabel({ turnPlan: input.turnPlan, evidenceFound: true });
+  } catch {
+    return 'General knowledge';
+  }
+}

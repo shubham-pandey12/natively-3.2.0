@@ -250,7 +250,7 @@ export const canonicalizeSttSpellings = (s: string): string => {
     // identifier-shaped head (has an uppercase letter or a digit, or is one of
     // the explicit nouns) or a run of at least two number words.
     const runWords = run.trim().split(/[\s-]+/).filter((w) => w && w.toLowerCase() !== 'and');
-    const identifierHead = /[A-Z0-9]/.test(head) || /^(?:number|no\.?|ticket|incident|issue|item|case|question|step|section|version|page|chapter|round|level)$/i.test(head);
+    const identifierHead = /[A-Z0-9]/.test(head.slice(1)) || /\d/.test(head) || /^(?:number|no\.?|ticket|incident|issue|item|case|question|step|section|version|page|chapter|round|level)$/i.test(head);
     if (!digits || (!identifierHead && runWords.length < 2)) return m;
     const trailing = run.slice(run.trimEnd().length);
     return `${head} ${digits}${trailing}`;

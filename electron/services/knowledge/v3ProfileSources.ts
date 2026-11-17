@@ -105,8 +105,48 @@ const EMPTY: CollectedProfileSources = {
  * to "mode attachments only", never break a live answer.
  */
 export function collectV3ProfileSources(orchestrator: unknown): CollectedProfileSources {
+  if (!orchestrator) return EMPTY;
+  return collectProfileSources(orchestrator, {
+    docs: profileReadableForAnswers(),
+    ownAnswers: profileReadableForAnswers(),
+  });
+}
+
+/**
+ * The raw-text index reads every profile document regardless of plan: it is
+ * local storage, not an answer. Answers are gated by collectV3ProfileSources.
+ */
+export function collectProfileSourcesForIndex(orchestrator: unknown): CollectedProfileSources {
+  if (!orchestrator) return EMPTY;
+  return collectProfileSources(orchestrator, { docs: true, ownAnswers: true });
+}
+
+/** Same global the KnowledgeOrchestrator's setProAccessCheck installs. */
+const KNOWLEDGE_PRO_ACCESS_KEY = '__nativelyKnowledgeProAccessV1__';
+
+function proAccessAllows(): boolean {
+  const check = (globalThis as Record<string, unknown>)[KNOWLEDGE_PRO_ACCESS_KEY];
+  if (typeof check !== 'function') return true;
+  try {
+    return (check as () => unknown)() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether profile documents (resume, JD, own answers) may ground an answer
+ * this turn (3.2.0). No access check installed means the engine runs outside
+ * the app (tests, harness) and is allowed.
+ */
+export function profileReadableForAnswers(): boolean {
+  return proAccessAllows();
+}
+
+function collectProfileSources(orchestrator: unknown, allow: { docs: boolean; ownAnswers: boolean }): CollectedProfileSources {
   try {
     if (!orchestrator) return EMPTY;
+    if (!allow.docs && !allow.ownAnswers) return EMPTY;
     const { buildActiveProfileContext } = require('../../llm/ActiveProfileContext') as
       typeof import('../../llm/ActiveProfileContext');
     const ctx = buildActiveProfileContext(orchestrator as never);
@@ -135,7 +175,7 @@ export function collectV3ProfileSources(orchestrator: unknown): CollectedProfile
     const docs: ProfileDocLike[] = [];
     const resolved: Array<{ role: string; id: string }> = [];
 
-    if (ctx.activeResume?.structured) {
+    if (allow.docs && ctx.activeResume?.structured) {
       const id = canonicalProfileSourceId('resume');
       docs.push({
         kind: 'resume',
@@ -148,7 +188,7 @@ export function collectV3ProfileSources(orchestrator: unknown): CollectedProfile
       });
       resolved.push({ role: 'profile_resume', id });
     }
-    if (ctx.activeJD?.structured) {
+    if (allow.docs && ctx.activeJD?.structured) {
       const id = canonicalProfileSourceId('jd');
       docs.push({
         kind: 'jd',
@@ -161,7 +201,7 @@ export function collectV3ProfileSources(orchestrator: unknown): CollectedProfile
       });
       resolved.push({ role: 'profile_job_description', id });
     }
-    const own = ownAnswersDoc();
+    const own = allow.ownAnswers ? ownAnswersDoc() : null;
     if (own) {
       docs.push(own);
       resolved.push({ role: 'profile_fact', id: own.sourceId });
@@ -170,8 +210,8 @@ export function collectV3ProfileSources(orchestrator: unknown): CollectedProfile
     return {
       docs,
       counts: {
-        profileResume: ctx.activeResume ? 1 : 0,
-        profileJd: ctx.activeJD ? 1 : 0,
+        profileResume: allow.docs && ctx.activeResume ? 1 : 0,
+        profileJd: allow.docs && ctx.activeJD ? 1 : 0,
         // Only what the user wrote or approved (see the note above). No derived
         // fact is served: a salary ESTIMATE is not a profile fact.
         profileFact: own ? 1 : 0,
@@ -296,7 +336,7 @@ let profileIndexChain: Promise<unknown> = Promise.resolve();
 export function indexProfileRawText(modesManager: ProfileRawModesManager | null | undefined, orchestrator: unknown): Promise<number> {
   const run = async (): Promise<number> => {
     if (!modesManager) return 0;
-    const current = () => profilePseudoFiles(collectV3ProfileSources(orchestrator).docs as never);
+    const current = () => profilePseudoFiles(collectProfileSourcesForIndex(orchestrator).docs as never);
     const files = current();
     pruneSupersededProfileIndexes(modesManager, files);
     if (modesManager.indexReferenceFile) {

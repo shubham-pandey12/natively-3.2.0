@@ -46,6 +46,7 @@ import {
   type TextStreamProvider,
 } from "./llm/textStreamFallback"
 import { isPermanentKeyError, PROVIDERS_EXHAUSTED_CODE } from "./llm/providerErrorClassifier"
+import { TurnCallBudget, ProviderCircuitBreaker, guardProviderOpen, sdkRetryOptions } from './llm/providerCallBudget';
 import { telemetryService } from "./services/telemetry/TelemetryService"
 import {
   ollamaVisionFromShow,
@@ -79,7 +80,6 @@ import { emitNativelyPlanLimit, nativelyLimitErrorMessage } from './llm/natively
 import { interactiveSeedFor } from './llm/interactiveSeed';
 import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
-import { TurnCallBudget, ProviderCircuitBreaker, guardProviderOpen, sdkRetryOptions } from './llm/providerCallBudget';
 import { chatGptCompatibleModel, CodexCliConfig, CodexCliService, codexSignedOutMessage, DEFAULT_CODEX_CLI_CONFIG, getCodexAuthStatus } from './services/CodexCliService';
 import { AntigravityService } from './services/AntigravityService';
 import { GROQ_PRIMARY_MODEL, groqFallbackFor, isGroqModelGone, groqReasoningParams } from './llm/groqModels';
@@ -1152,6 +1152,7 @@ export class LLMHelper {
     if (!args) return null;
     const retried = [...args] as Parameters<LLMHelper['streamChat']>;
     retried[7] = signal;
+    if (signal) this.callBudget().alias(signal, key);
     return retried;
   }
 
@@ -1213,8 +1214,8 @@ export class LLMHelper {
     if (!context?.trim()) return scopes;
     if (/<reference_file|<active_mode_retrieved_context|mode_retrieval/i.test(context)) scopes.push('reference_files');
     if (/<meeting_history|USER-PROVIDED PERSONA CONTEXT|<user_context|<candidate_|<active_mode_custom_instructions/i.test(context)) scopes.push('profile_history');
-    if (PREMIUM_PROFILE_BLOCK_RE.test(context)) scopes.push('profile_history');
     if (/<post_call_summary|meeting summary|silent meeting summarizer|silent meeting note-taker/i.test(context)) scopes.push('post_call_summary');
+    if (PREMIUM_PROFILE_BLOCK_RE.test(context)) scopes.push('profile_history');
     // Context Intelligence V3 evidence markup. The patterns above are the
     // LEGACY tag vocabulary; V3 has been the default answer path since
     // 2026-07-30 and packs every source as `<evidence source_type="…">`, which
@@ -1229,8 +1230,8 @@ export class LLMHelper {
     if (!message?.trim()) return scopes;
     if (/<reference_file|<active_mode_retrieved_context|mode_retrieval/i.test(message)) scopes.push('reference_files');
     if (/<meeting_history|USER-PROVIDED PERSONA CONTEXT|<user_context|<candidate_|<active_mode_custom_instructions/i.test(message)) scopes.push('profile_history');
-    if (PREMIUM_PROFILE_BLOCK_RE.test(message)) scopes.push('profile_history');
     if (/<post_call_summary/i.test(message)) scopes.push('post_call_summary');
+    if (PREMIUM_PROFILE_BLOCK_RE.test(message)) scopes.push('profile_history');
     // V3 evidence markup — see inferContextScopes. A V3 prompt carries its
     // evidence in the MESSAGE (context is undefined), so this is the branch
     // that actually fires on the default path.
@@ -3137,6 +3138,18 @@ export class LLMHelper {
    * delay comes from the same decaying max the adaptive ceiling uses; a second
    * latency statistic for one provider is the recurring mistake in this area.
    */
+  // Lazily materialised, like textHealth: suites drive this class on
+  // Object.create(LLMHelper.prototype) instances that never run initialisers.
+  private _turnCallBudget?: TurnCallBudget;
+  private _providerBreaker?: ProviderCircuitBreaker;
+  private callBudget(): TurnCallBudget {
+    if (!this._turnCallBudget) this._turnCallBudget = new TurnCallBudget();
+    return this._turnCallBudget;
+  }
+  private providerBreakerFor(): ProviderCircuitBreaker {
+    if (!this._providerBreaker) this._providerBreaker = new ProviderCircuitBreaker();
+    return this._providerBreaker;
+  }
   private hedgeDelayForBudget(budgetMs: number): number {
     // The Active Model's own measurement: this runs inside its rung, which is
     // reached only when no Background Model answered the turn.
@@ -3146,10 +3159,6 @@ export class LLMHelper {
     if (!observed || observed.count <= 0) return Math.round(budgetMs * 0.6);
     return Math.min(ceil, Math.max(floor, Math.round(observed.maxMs) + 1500));
   }
-  private _turnCallBudget?: TurnCallBudget;
-  private _providerBreaker?: ProviderCircuitBreaker;
-  private callBudget(): TurnCallBudget { return this._turnCallBudget ??= new TurnCallBudget(); }
-  private providerBreakerFor(): ProviderCircuitBreaker { return this._providerBreaker ??= new ProviderCircuitBreaker(); }
 
   /**
    * Run a single-terminal-rung text turn through the shared fallback engine, so
@@ -3237,14 +3246,15 @@ export class LLMHelper {
     const guard = (family: string, name: string, open: (signal: AbortSignal) => AsyncGenerator<string, void, unknown>) =>
       guardProviderOpen({ family, name, turnKey, budget, breaker, outerSignal: opts.abortSignal, open });
     for (let i = 0; i < fittedSpares.length; i++) {
-      const spare = fittedSpares[i], spareOpen = spare.open;
-      fittedSpares[i] = { ...spare, open: (signal, attempt) => guard(spare.id, spare.name, s => spareOpen(s, attempt))(signal) };
+      const spare = fittedSpares[i];
+      const spareOpen = spare.open;
+      fittedSpares[i] = { ...spare, open: (sig, attempt) => guard(spare.id, spare.name, s => spareOpen(s, attempt))(sig) };
     }
     const hedging = fittedSpares.length === 0 && budget.remaining(turnKey) >= 2;
     const primary: TextStreamProvider = {
       id: opts.id, name: opts.name, isLocal: false, priority: 0,
       ttftTimeoutMs: primaryTtftMs,
-      open: guard(opts.id, opts.name, opts.open),
+      open: guard(opts.id, opts.name, sig => opts.open(sig)),
     };
     if (hedging) {
       // A distinct id so the primary's own breaker does not suppress its hedge.
@@ -3255,7 +3265,7 @@ export class LLMHelper {
       primary.hedgeWith = {
         id: `${opts.id}#hedge`,
         name: `${opts.name} (parallel retry)`,
-        open: guard(opts.id, `${opts.name} (parallel retry)`, opts.open),
+        open: guard(opts.id, `${opts.name} (parallel retry)`, sig => opts.open(sig)),
       };
     }
 
@@ -3293,10 +3303,10 @@ export class LLMHelper {
           maxAttempts: 1,
           ttftTimeoutMs: budgetMs,
           hedgeEnabled: hedging,
-          // The lone provider's only failover fires at a first-useful point
-          // (F-LAT-03): 4 s unmeasured instead of ~9 s, just above the
-          // endpoint's slowest first token once measured. The same number is
-          // the floor, so the engine's EWMA can only push it later.
+          // The lone provider's only failover, so it fires at a first-useful
+          // point (F-LAT-03): 4 s unmeasured instead of 9 s, and just above the
+          // endpoint's own slowest first token once measured. The same number is
+          // the floor, so the engine's EWMA (~p50) can only push it later.
           hedgeDelayDefaultMs: loneHedgeMs,
           hedgeDelayMinMs: loneHedgeMs,
           hedgeDelayMaxMs: Math.max(loneHedgeMs, Math.round(budgetMs * 0.9)),
@@ -4019,7 +4029,12 @@ export class LLMHelper {
   }
 
   /** The error for an answer nothing could give: the Natively limit while it
-   *  holds, else "no provider". */
+   *  holds; else, when at least one provider was actually tried, "the providers
+   *  failed" (carrying the last provider's own error); else "no provider".
+   *
+   *  Forensics 2026-11-13 (F-ACC-10): a chain whose configured providers all
+   *  failed (an outage, a DNS failure) ended here as "No AI provider
+   *  configured", and the user — keys and all — was told to add one. */
   private exhaustedChainError(lastProviderError?: unknown): Error {
     if (this.nativelyLimit && this.nativelyQuotaBlockedUntil > Date.now()) {
       return new Error(nativelyLimitErrorMessage(this.nativelyLimit));
@@ -5769,6 +5784,18 @@ let isMultimodal = !!(imagePaths?.length);
    * will use — and null once the turn was answered by someone else (no pick
    * applied, or the pick failed and the fallback rescued it).
    */
+  /**
+   * The provider family Fast Response would answer a text turn with right now,
+   * or null when it is off or the Active Model answers. Read-only: the Pro pack
+   * rule asks it (services/packs/packProRule.ts).
+   */
+  public fastResponseFamilyNow(): string | null {
+    try {
+      return this.resolveFastPick()?.family ?? null;
+    } catch {
+      return null;
+    }
+  }
   private fastPickForTextTurn(): FastPick | null {
     const turn = this._fastTurn;
     if (!turn) return this.resolveFastPick();
@@ -6535,7 +6562,10 @@ let isMultimodal = !!(imagePaths?.length);
         const ollamaAvailable = this.useOllama && await this.ensureOllamaModelSelected();
         for (const scope of deniedStructured) this.logScopeFallback(scope, ollamaAvailable ? 'routing' : 'omitting');
         if (ollamaAvailable) return this.processResponse(await this.callOllama(message));
-        throw Object.assign(new Error(`Not sent: a privacy setting keeps this data off cloud providers (Settings > AI Providers > Privacy — cloud data scopes: ${scopeLabels(deniedStructured)}).`), { name: 'ProviderScopeDenied' });
+        throw Object.assign(
+          new Error(`Not sent: a privacy setting keeps this data off cloud providers (Settings > AI Providers > Privacy — cloud data scopes: ${scopeLabels(deniedStructured)}).`),
+          { name: 'ProviderScopeDenied' },
+        );
       }
     }
 
@@ -7828,7 +7858,7 @@ let isMultimodal = !!(imagePaths?.length);
     try {
       stream = await client.chat.completions.create(
         { model, messages, stream: true, ...this.agentRouterOpenAIParams(model, opts, [systemPrompt, userMessage, (imagePaths ?? []).join('|')]) } as any,
-        { signal: abortSignal },
+        { signal: abortSignal, ...sdkRetryOptions(abortSignal) },
       );
     } catch (e: any) {
       if (abortSignal?.aborted) return;
@@ -11120,12 +11150,23 @@ let isMultimodal = !!(imagePaths?.length);
         // universe. Dispatch for either attached pixels or request-scoped
         // browser DOM/screen OCR; the WTA govern block draws the same line.
         const { declineYieldsToAttachedImages: _declineYieldsLLM } = require('./intelligence/context-os') as typeof import('./intelligence/context-os');
+        // A refusal pack the refusal policy says does not govern (e.g. the mode's
+        // source authority lets the model answer from general knowledge) goes to
+        // the model instead of the canned decline.
+        const { packGovernsGeneration } = require('./intelligence/context-os/refusalPolicy') as typeof import('./intelligence/context-os/refusalPolicy');
+        const _refusalYieldsLLM = pack.answerPolicy === 'refuse_insufficient_evidence' && !packGovernsGeneration({
+          answerPolicy: pack.answerPolicy,
+          sourceAuthority: _cog.modeSnapshot?.sourceAuthority ?? null,
+          hasReferenceFiles: true,
+        });
         if (_declineYieldsLLM({
           answerPolicy: pack.answerPolicy,
           hasAttachedImages: Boolean(imagePaths?.length),
           hasScreenText: routeOptions?.hasScreenText === true,
         })) {
           console.log('[CONTEXT-OS] text-evidence decline yields to current-screen context — dispatching with visual evidence');
+        } else if (_refusalYieldsLLM) {
+          console.log('[CONTEXT-OS] refusal pack does not govern (refusal policy) — dispatching to the model');
         } else {
         if (pack.answerPolicy === 'ask_clarification') {
           const { recordContextOsBenchmarkAudit } = require('./intelligence/context-os') as typeof import('./intelligence/context-os');
@@ -11650,7 +11691,7 @@ let isMultimodal = !!(imagePaths?.length);
           yield LLMHelper.TRUNCATION_SENTINEL;
           return;
         }
-        throw e;
+        yield typeof e?.status === 'number' ? `Error: Custom Provider returned HTTP ${e.status}` : 'Error streaming from custom provider.';
       }
       return;
     }
@@ -13150,7 +13191,7 @@ let isMultimodal = !!(imagePaths?.length);
       max_completion_tokens: model.toLowerCase().includes('claude') ? this.getClaudeMaxOutput(model) : getOpenAiMaxOutput(model, MAX_OUTPUT_TOKENS),
       ...openaiReasoningParam(model), // minimal reasoning for gpt-5/o-series (fast TTFT)
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
-    }, { signal: abortSignal, ...sdkRetryOptions(abortSignal) });
+    }, { signal: abortSignal });
 
     try {
       for await (const chunk of stream) {
@@ -14142,6 +14183,27 @@ let isMultimodal = !!(imagePaths?.length);
   }
 
   /**
+   * True when the Auto Answer judge would run on Natively API: the first rung of
+   * generateJudgeVerdict that is configured is the Natively one. Mirrors that
+   * ladder without calling it: a dispatchable Fast Response pick (never
+   * 'natively': resolveFastModelFamily excludes it), then the user's own Gemini,
+   * Groq, OpenAI, DeepSeek or Claude key, and only then a Natively key.
+   * Settings › Auto Answer uses it to leave the reference model's name out of
+   * its cost estimate (Evin 2026-11-14): a Natively API user has no provider
+   * list price to compare against.
+   */
+  public judgeRunsOnNatively(): boolean {
+    if (!this.nativelyKey || this.isLocalOnlyMode) return false;
+    const pick = this.fastModelId;
+    const family = pick ? this.resolveFastModelFamily(pick) : null;
+    if (pick && family && this.fastFamilyReady(family)) return false;
+    if (this.client) return false;
+    if (this.groqClient && !this._groqLocalDisabled) return false;
+    if (this.openaiClient || this.deepseekClient || this.claudeClient) return false;
+    return true;
+  }
+
+  /**
    * True when this turn routes through natively-api's SEQUENTIAL server-side
    * provider cascade (`${NATIVELY_API_URL}/v1/chat`) rather than straight to a
    * provider.
@@ -14602,21 +14664,6 @@ let isMultimodal = !!(imagePaths?.length);
     if (this.customProvider) return this.customProvider.id;
     if (this.activeCurlProvider) return this.activeCurlProvider.id;
     return this.useOllama ? this.ollamaModel : this.currentModelId;
-  }
-
-  /** Provider family Fast Response would use for a text turn now. */
-  public fastResponseFamilyNow(): string | null {
-    try { return this.resolveFastPick()?.family ?? null; } catch { return null; }
-  }
-
-  public judgeRunsOnNatively(): boolean {
-    if (!this.nativelyKey || this.isLocalOnlyMode) return false;
-    const pick = this.fastModelId;
-    const family = pick ? this.resolveFastModelFamily(pick) : null;
-    if (pick && family && this.fastFamilyReady(family)) return false;
-    if (this.client || (this.groqClient && !this._groqLocalDisabled)) return false;
-    if (this.openaiClient || this.deepseekClient || this.claudeClient) return false;
-    return true;
   }
 
   /**
@@ -15898,20 +15945,18 @@ let isMultimodal = !!(imagePaths?.length);
     let timeoutHandle: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<T>((_, reject) => {
       timeoutHandle = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
-      timeoutHandle.unref?.();
     });
 
     // Suppress unhandled-rejection if the original promise settles after the timeout wins the race
     promise.catch(() => { });
 
-    try {
-      return await Promise.race([
-        promise,
-        timeoutPromise,
-      ]);
-    } finally {
-      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-    }
+    return Promise.race([
+      promise.then((result) => {
+        clearTimeout(timeoutHandle);
+        return result;
+      }),
+      timeoutPromise,
+    ]);
   }
 
   /**
@@ -16174,6 +16219,9 @@ let isMultimodal = !!(imagePaths?.length);
 
     // ATTEMPT 3: Gemini Flash-Lite (cheapest/fastest — leads the Gemini cascade).
     // 3 attempts with linear backoff before dropping to full Flash.
+    // A permanently rejected key (invalid, expired, billing) fails every rung
+    // the same way: stop the Gemini cascade instead of retrying it 11 times.
+    let geminiKeyDead = false;
     if (this.client) {
       console.log(`[LLMHelper] Attempting Gemini Flash-Lite for summary...`);
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -16189,6 +16237,10 @@ let isMultimodal = !!(imagePaths?.length);
           }
         } catch (e: any) {
           console.warn(`[LLMHelper] ⚠️ Gemini Flash-Lite attempt ${attempt}/3 failed: ${e.message}`);
+          if (isPermanentKeyError(e)) {
+            geminiKeyDead = true;
+            break;
+          }
           if (attempt < 3) {
             await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
           }
@@ -16196,8 +16248,8 @@ let isMultimodal = !!(imagePaths?.length);
       }
 
       // ATTEMPT 4: Gemini Flash (with 2 retries = 3 attempts total)
-      console.log(`[LLMHelper] ⚠️ Flash-Lite exhausted. Switching to Gemini Flash...`);
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      if (!geminiKeyDead) console.log(`[LLMHelper] ⚠️ Flash-Lite exhausted. Switching to Gemini Flash...`);
+      for (let attempt = 1; attempt <= 3 && !geminiKeyDead; attempt++) {
         try {
           const text = await this.withTimeout(
             this.generateWithFlash(contents),
@@ -16210,6 +16262,10 @@ let isMultimodal = !!(imagePaths?.length);
           }
         } catch (e: any) {
           console.warn(`[LLMHelper] ⚠️ Gemini Flash attempt ${attempt}/3 failed: ${e.message}`);
+          if (isPermanentKeyError(e)) {
+            geminiKeyDead = true;
+            break;
+          }
           if (attempt < 3) {
             await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
           }
@@ -16220,10 +16276,12 @@ let isMultimodal = !!(imagePaths?.length);
     }
 
     // ATTEMPT 5: Gemini Pro
-    console.log(`[LLMHelper] ⚠️ Flash exhausted. Switching to Gemini Pro for robust retry...`);
     const maxProRetries = 5;
 
-    if (this.client) {
+    if (geminiKeyDead) {
+      console.warn(`[LLMHelper] Gemini key rejected (invalid, expired or billing) — skipping the rest of the Gemini summary cascade.`);
+    } else if (this.client) {
+      console.log(`[LLMHelper] ⚠️ Flash exhausted. Switching to Gemini Pro for robust retry...`);
       for (let attempt = 1; attempt <= maxProRetries; attempt++) {
         try {
           console.log(`[LLMHelper] 🔄 Gemini Pro Attempt ${attempt}/${maxProRetries}...`);
@@ -16249,6 +16307,7 @@ let isMultimodal = !!(imagePaths?.length);
           }
         } catch (e: any) {
           console.warn(`[LLMHelper] ⚠️ Gemini Pro attempt ${attempt} failed: ${e.message}`);
+          if (isPermanentKeyError(e)) break;
           // Aggressive backoff for Pro: 2s, 4s, 8s, 16s, 32s
           const backoff = 2000 * Math.pow(2, attempt - 1);
           console.log(`[LLMHelper] Waiting ${backoff}ms before next retry...`);

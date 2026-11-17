@@ -63,7 +63,7 @@ test('What to answer: skip gates understand() and is passed to the answer and it
 
 test('What to answer: the image note reaches the screen port only, never the retrieval query', () => {
   const src = read('electron/IntelligenceEngine.ts');
-  assert.match(src, /const _ctx = this\.v3ModeRetrievalContext\(_screenPortText\);/);
+  assert.match(src, /const _ctx = this\.v3ModeRetrievalContext\(_screenPortText, \{ modeInfo: snapshotModeInfo, referenceFiles: snapshotReferenceFiles \}\);/);
   assert.match(src, /screenText: _screenDescription,/);
   assert.doesNotMatch(src, /screenText: _screenPortText/);
 });
