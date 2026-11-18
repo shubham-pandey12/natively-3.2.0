@@ -17,7 +17,8 @@
 // and buttons slide to their new places with a FLIP transform.
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
-import { AppWindow, Camera, ChevronDown, Layout, Monitor, NotebookPen, RotateCcw } from 'lucide-react';
+import { AlignLeft, AppWindow, Camera, ChevronDown, Layout, Monitor, NotebookPen, RotateCcw } from 'lucide-react';
+import { failureText } from '../../lib/proRefusal.mjs';
 import NotesWindow, { type NotesWindowPreview } from '../NotesWindow';
 import { NOTEPAD_DEMO_PEOPLE, NOTEPAD_DEMO_TEMPLATE, NOTEPAD_DEMO_THEM, NOTEPAD_DEMO_TITLE } from '../notes/notepadDemo';
 import { useT } from '../../i18n';
@@ -580,6 +581,100 @@ const ScreenshotQuestionRow: React.FC = () => {
     );
 };
 
+type AnswerLength = 'shorter' | 'smart' | 'longer';
+
+const ANSWER_LENGTHS: { value: AnswerLength; label: string; description: string }[] = [
+    { value: 'shorter', label: 'Shorter', description: '1–2 sentences, 15–35 words' },
+    { value: 'smart', label: 'Smart', description: 'Fits each question, usually 40–60 words' },
+    { value: 'longer', label: 'Longer', description: 'Fuller answers, 90–200 words' },
+];
+
+const AnswerLengthRow: React.FC = () => {
+    const t = useT();
+    const [value, setValue] = useState<AnswerLength>('smart');
+    const [note, setNote] = useState<string | null>(null);
+    const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
+
+    useEffect(() => {
+        window.electronAPI?.getAnswerLength?.()
+            .then((res) => { if (res?.value) setValue(res.value); })
+            .catch(() => {});
+    }, []);
+
+    const choose = (next: AnswerLength) => {
+        if (next === value) return;
+        const previous = value;
+        setValue(next);
+        setNote(null);
+        const fail = (res?: unknown) => {
+            setValue(previous);
+            setNote(failureText(res, t("Couldn't save the answer length. Please try again.")));
+        };
+        window.electronAPI?.setAnswerLength?.(next)
+            .then((res) => { if (!res?.success) fail(res); })
+            .catch(() => fail());
+    };
+
+    const activeIndex = Math.max(0, ANSWER_LENGTHS.findIndex((o) => o.value === value));
+
+    const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        const delta = e.key === 'ArrowRight' || e.key === 'ArrowDown'
+            ? 1
+            : e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+                ? -1
+                : 0;
+        if (!delta) return;
+        e.preventDefault();
+        const nextIndex = (activeIndex + delta + ANSWER_LENGTHS.length) % ANSWER_LENGTHS.length;
+        buttonsRef.current[nextIndex]?.focus();
+        choose(ANSWER_LENGTHS[nextIndex].value);
+    };
+
+    const control = (
+        <div
+            role="radiogroup"
+            aria-label={t('Answer length')}
+            onKeyDown={onKeyDown}
+            className="relative grid grid-cols-3 rounded-lg border border-border-subtle bg-bg-input p-0.5"
+        >
+            <span
+                aria-hidden="true"
+                className="absolute inset-y-0.5 left-0.5 rounded-md border border-border-subtle bg-bg-component shadow-sm transition-transform duration-[250ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+                style={{
+                    width: 'calc((100% - 4px) / 3)',
+                    transform: `translateX(${activeIndex * 100}%)`,
+                }}
+            />
+            {ANSWER_LENGTHS.map((option, idx) => (
+                <button
+                    key={option.value}
+                    ref={(el) => { buttonsRef.current[idx] = el; }}
+                    type="button"
+                    role="radio"
+                    aria-checked={option.value === value}
+                    tabIndex={option.value === value ? 0 : -1}
+                    onClick={() => choose(option.value)}
+                    className={`relative z-10 rounded-md px-2.5 py-1 text-xs font-medium transition-colors duration-150 ease-out ${option.value === value ? 'text-text-primary' : 'text-text-secondary hover:text-text-primary'}`}
+                >
+                    {t(option.label)}
+                </button>
+            ))}
+        </div>
+    );
+
+    return (
+        <div className={SETTINGS_CARD}>
+            <SettingsRow
+                icon={<AlignLeft size={20} />}
+                title={t('Answer length')}
+                description={note ?? t(ANSWER_LENGTHS[activeIndex].description)}
+                descriptionKey={note ? 'note' : value}
+                control={control}
+            />
+        </div>
+    );
+};
+
 type ScreenshotDisplay = { id: number; number: number; name: string; width: number; height: number; primary: boolean };
 
 /**
@@ -719,6 +814,7 @@ export const OverlaySettings: React.FC<{
                     />
                     <NotepadPreview />
                 </section>
+                <AnswerLengthRow />
                 <ScreenshotQuestionRow />
                 <ScreenshotScreenRow />
             </div>
@@ -762,6 +858,8 @@ export const OverlaySettings: React.FC<{
             </div>
 
             {opacityControl}
+
+            <AnswerLengthRow />
 
             <ScreenshotQuestionRow />
 

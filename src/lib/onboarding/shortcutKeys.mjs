@@ -69,3 +69,17 @@ function codeToKey(code) {
   const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(String(code || ''));
   return m ? (m[1] || m[2]).toLowerCase() : null;
 }
+
+const GUIDE_SHORTCUT_FALLBACKS = Object.freeze({
+  'chat:whatToAnswer': 'CommandOrControl+1',
+  'general:take-screenshot': 'CommandOrControl+H',
+  'general:selective-screenshot': 'CommandOrControl+Shift+H',
+});
+
+export function shortcutKeysFor(keybinds, id, platform) {
+  const acc =
+    (Array.isArray(keybinds) ? keybinds.find((s) => s && s.id === id)?.accelerator : undefined) ||
+    GUIDE_SHORTCUT_FALLBACKS[id] ||
+    '';
+  return acceleratorToKeys(acc, platform);
+}

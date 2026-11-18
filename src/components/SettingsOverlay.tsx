@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { AutoAnswerIcon } from './AutoAnswerIcon';
 import { LauncherSettingsGuide } from './onboarding/LauncherGuide';
+import { dispatchGuide } from './onboarding/useRecoveredGuide';
 import { HiCreditCard } from 'react-icons/hi2';
 import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
@@ -111,7 +112,7 @@ const DISGUISE_TILE_RESTING = {
 import { NVIDIA_NIM_STT_MODELS, DEFAULT_NVIDIA_NIM_STT_MODEL, allowedLanguageKeysForNvidiaModel } from '../../electron/audio/nvidiaNimSttModels';
 import { STT_MODEL_CATALOG, isEnglishOnlySttModel, sttModelRejectsLanguage, type SttModelProvider } from '../../electron/audio/sttModelCatalog';
 import { isDefaultOpenAiSttBase } from '../../electron/audio/openaiSttBaseUrl';
-import { isRecognitionLanguageOffered, PARAKEET_ONLY_LANGUAGE_KEYS } from '../../electron/config/languages';
+import { isRecognitionLanguageOffered, PARAKEET_ONLY_LANGUAGE_KEYS, sttProviderRejectsLanguage } from '../../electron/config/languages';
 
 // ---------------------------------------------------------------------------
 // StarRating — renders filled/empty stars for culture ratings
@@ -787,9 +788,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [exportResult, setExportResult] = useState<string | null>(null);
     const [ambientChatEnabled, setAmbientChatEnabled] = useState(false);
     const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
-    const [answerLength, setAnswerLength] = useState<'shorter' | 'smart' | 'longer'>('smart');
-    const [answerLengthError, setAnswerLengthError] = useState<string | null>(null);
-    useEffect(() => { window.electronAPI?.getAnswerLength?.().then(r => setAnswerLength(r.value)).catch(() => {}); }, []);
     // Auto Answer is Pro, or free with transcript sharing (autoAnswerAccess.ts).
     const [autoAnswerAccess, setAutoAnswerAccess] = useState<{ basis: 'pro' | 'sharing' | 'none'; uploads: boolean } | null>(null);
     // False in builds without the premium submodule: the Auto Answer rows are hidden.
@@ -1543,7 +1541,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     // A multilingual Deepgram model sends `multi` for a stored language it has
     // no model for (DeepgramStreamingSTT.connectLanguage), so that is shown as
     // the Auto Detect it gets rather than a value missing from the list.
-    const showsAutoFallback = !showsEnglishFallback && sttProvider === 'deepgram' && storedLanguageUnsupported;
+    const showsAutoFallback = !showsEnglishFallback && (
+        (sttProvider === 'deepgram' && storedLanguageUnsupported)
+        || sttProviderRejectsLanguage(sttProvider, recognitionLanguage)
+    );
     const displayedSttGroup = showsEnglishFallback ? 'English' : showsAutoFallback ? 'Auto' : selectedSttGroup;
     const displayedRecognitionLanguage = showsEnglishFallback ? 'english-us' : showsAutoFallback ? 'auto' : recognitionLanguage;
 
@@ -2315,7 +2316,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         <div
             id="opacity-slider-card"
             style={isPreviewingOpacity ? { visibility: 'visible', position: 'relative', zIndex: 9999 } : {}}
-            className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle`}
+            className="bg-bg-card rounded-xl p-5 border border-border-subtle"
         >
             <div className="flex items-center justify-between mb-3">
                 <label className="flex items-center gap-2 text-xs font-medium text-text-secondary uppercase tracking-wide">
@@ -2376,6 +2377,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     return (
         <>
             {confirmDialog}
+            {isOpen && <LauncherSettingsGuide />}
             <AutoAnswerStopSharingDialog
                 open={stopSharingOpen}
                 busy={stopSharingBusy}
@@ -2653,7 +2655,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 {/* Detectable / Undetectable */}
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             {/* The row's state, in all three places it shows: the glyph
                                                                 cross-fades, title and sentence swap (Presence). */}
                                                             <Presence kind="icon" id={isUndetectable ? 'undetectable' : 'detectable'} slotClassName="w-5 h-5">
@@ -2709,7 +2711,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 {/* Open at Login */}
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <Power size={20} />
                                                         </div>
                                                         <div>
@@ -2736,7 +2738,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 {isWindows && (
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <Keyboard size={20} />
                                                             </div>
                                                             <div>
@@ -2771,7 +2773,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 {autoAnswerAvailable && (
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <AutoAnswerIcon size={20} />
                                                         </div>
                                                         <div>
@@ -2822,7 +2824,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 {/* Ambient AI Chat */}
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <MicOff size={20} />
                                                         </div>
                                                         <div>
@@ -2845,7 +2847,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 {/* Theme */}
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <Palette size={20} />
                                                         </div>
                                                         <div>
@@ -2907,7 +2909,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 {/* Language */}
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <Globe size={20} />
                                                         </div>
                                                         <div>
@@ -2973,7 +2975,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     buttons, which sit on their tile's centre line. */}
                                                 <div className="flex items-center justify-between gap-4 px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <BadgeCheck size={20} />
                                                         </div>
                                                         <div>
@@ -3050,7 +3052,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Meeting Retention */}
                                                     <div className="flex items-start justify-between px-4 py-3 gap-4">
                                                         <div className="flex items-start gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <Shield size={20} />
                                                             </div>
                                                             <div className="flex-1">
@@ -3073,7 +3075,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Mouse Passthrough Toggle — Adapted from public PR #113 */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <PointerOff size={20} />
                                                             </div>
                                                             <div>
@@ -3098,7 +3100,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Genie animation — off uses the plain fade and keeps no pictures of popups */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <PanelBottomClose size={20} />
                                                             </div>
                                                             <div>
@@ -3119,7 +3121,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Keep overlay size — off: the overlay narrows again and each answer starts from the automatic size */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <Maximize2 size={20} />
                                                             </div>
                                                             <div>
@@ -3140,7 +3142,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Code Verification — runs LLM-generated code against test cases + one-shot correction */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <Code2 size={20} />
                                                             </div>
                                                             <div>
@@ -3166,7 +3168,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Interviewer Transcript */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <MessageSquare size={20} />
                                                             </div>
                                                             <div>
@@ -3190,7 +3192,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Usage statistics */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <Activity size={20} />
                                                             </div>
                                                             <div>
@@ -3221,7 +3223,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     {/* Debug Logging */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <Terminal size={20} />
                                                             </div>
                                                             <div>
@@ -3288,7 +3290,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                         header into one folder and reveals it. */}
                                                     <div className="flex items-center justify-between px-4 py-3">
                                                         <div className="flex items-center gap-4">
-                                                            <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                                 <Download size={20} />
                                                             </div>
                                                             <div>
@@ -3336,7 +3338,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     </div>
 
                                     {/* Process Disguise */}
-                                    <div className={`${isLight ? 'bg-bg-card' : 'bg-bg-item-surface'} rounded-xl p-5 border border-border-subtle`}>
+                                    <div className="bg-bg-card rounded-xl p-5 border border-border-subtle">
                                         <div className="flex flex-col gap-1 mb-3">
                                             <div className="flex items-center gap-2">
                                                 <h3 className="settings-heading text-text-primary">{t('Process Disguise')}</h3>
@@ -4556,7 +4558,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                             <div className="rounded-xl border border-border-subtle bg-bg-card">
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <MicOff size={20} />
                                                         </div>
                                                         <div>
@@ -4586,7 +4588,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                             <div className="rounded-xl border border-border-subtle bg-bg-card">
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 bg-bg-item-surface rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
                                                             <Mic size={20} />
                                                         </div>
                                                         <div>
@@ -4635,7 +4637,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
 
 
                             {activeTab === 'overlay' && (
-                                <><OverlaySettings
+                                <OverlaySettings
                                     opacity={previewOverlayOpacity}
                                     opacityControl={opacityCard}
                                     theme={meetingInterfaceTheme}
@@ -4644,33 +4646,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         setMeetingInterfaceThemeState(theme);
                                     }}
                                 />
-                                <div className="px-4 py-3">
-                                    <h3 className="settings-title text-text-primary">{t('Answer length')}</h3>
-                                    <p className="text-xs text-text-secondary mt-0.5" role={answerLengthError ? 'alert' : undefined}>
-                                        {answerLengthError ?? t(({ shorter: '1–2 sentences, 15–35 words', smart: 'Fits each question, usually 40–60 words', longer: 'Fuller answers, 90–200 words' })[answerLength])}
-                                    </p>
-                                    <div role="radiogroup" aria-label={t('Answer length')} className="flex gap-2 mt-2">
-                                        {(['shorter', 'smart', 'longer'] as const).map(value => (
-                                            <button key={value} type="button" role="radio" aria-checked={answerLength === value}
-                                                className="px-3 py-1 rounded border border-border-subtle text-text-primary"
-                                                onClick={async () => {
-                                                    if (answerLength === value) return;
-                                                    const previous = answerLength;
-                                                    setAnswerLength(value);
-                                                    setAnswerLengthError(null);
-                                                    try {
-                                                        const result = await window.electronAPI?.setAnswerLength?.(value);
-                                                        if (!result?.success) throw new Error('save refused');
-                                                    } catch {
-                                                        setAnswerLength(previous);
-                                                        setAnswerLengthError(t("Couldn't save the answer length. Please try again."));
-                                                    }
-                                                }}>
-                                                {t(value === 'shorter' ? 'Shorter' : value === 'longer' ? 'Longer' : 'Smart')}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div></>
                             )}
 
                             {activeTab === 'calendar' && <CalendarSettings />}
@@ -4719,7 +4694,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                             )}
 
                             {activeTab === 'help' && (
-                                <HelpSettings onNavigate={setActiveTab} onOpenModes={onOpenModes} onOpenProfile={onOpenProfile} onShowGuide={() => { void window.electronAPI?.guideDispatch?.({ type: 'restart' }); onClose(); }} />
+                                <HelpSettings onNavigate={setActiveTab} onOpenModes={onOpenModes} onOpenProfile={onOpenProfile} onShowGuide={() => { dispatchGuide({ type: 'restart' }); onClose(); }} />
                             )}
 
                             {activeTab === 'about' && (
@@ -4730,7 +4705,6 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                         </div>
                     </div>
             </GenieModal>
-            {isOpen && <LauncherSettingsGuide />}
 
 
             {/* ------------------------------------------------------------------ */}

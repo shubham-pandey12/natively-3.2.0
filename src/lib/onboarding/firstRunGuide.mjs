@@ -37,6 +37,8 @@ const GUIDE_STEP_NUMBER = Object.freeze({
   plans: 14,
   keys: 14
 });
+const GUIDE_STEP_TOTAL = 14;
+const GUIDE_DONE_HOLD_MS = 1e3;
 const GUIDE_STOP_LOCK_MS = 3e4;
 function guideStopLockLeft(state, now) {
   if (!state || state.status !== "active" || typeof state.stopLockUntil !== "number") return 0;
@@ -170,7 +172,11 @@ function guideFactsFromSources({ nativelyKey, trialSentinel, licensed, hasOwnAiK
   };
 }
 export {
+  GUIDE_DONE_HOLD_MS,
   GUIDE_EVENT_TYPES,
+  GUIDE_STEP_NUMBER,
+  GUIDE_STEP_TOTAL,
+  GUIDE_STOP_LOCK_MS,
   emptyGuideState,
   guideFactsFromSources,
   guideStopLockLeft,

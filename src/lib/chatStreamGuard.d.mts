@@ -43,6 +43,11 @@ export function resolveLiveAnswerBatch(
   incomingId: number | null | undefined,
 ): { accept: boolean; activeId: number | null };
 
+export function shouldHonorLiveAnswerDiscard(
+  activeId: number | null | undefined,
+  incomingId: number | null | undefined,
+): boolean;
+
 export function resolveChatStreamSurfaceError(
   activeSource: string | null | undefined,
   incomingSource: string | null | undefined,

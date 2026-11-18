@@ -4831,11 +4831,6 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
             if (result?.success) {
                 setCodexAuthStatus('success');
                 setCodexAuthMessage(result.output || `Codex ${action} succeeded.`);
-                // Sync OAuth status after status/logout IPCs.
-                if (action === 'status' || action === 'logout') {
-                    const status = await readCodexSignInStatus();
-                    if (status) setCodexOauthStatus(status);
-                }
             } else {
                 setCodexAuthStatus('error');
                 const msg = result?.error || result?.output || `Codex ${action} failed.`;

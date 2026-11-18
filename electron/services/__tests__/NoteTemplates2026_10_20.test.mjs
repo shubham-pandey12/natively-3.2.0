@@ -229,7 +229,7 @@ describe('a template as a mode\'s notes template', () => {
     });
     test('Modes Manager: Use a template beside Remove template, applied only to the mode still open', () => {
         const mm = src('premium/src/ModesSettings.tsx');
-        assert.match(mm, /<NotesTemplatePicker[\s\S]*?currentTitles=\{noteSections\.map\(s => s\.title\)\}[\s\S]*?modeDefault=\{modeDefault\}[\s\S]*?onPick=\{applyNoteTemplate\}/);
+        assert.match(mm, /<NotesTemplatePicker[\s\S]*?currentTitles=\{noteSections\.map\(s => s\.title\)\}[\s\S]*?modeDefault=\{modeDefaultNoteTemplate\}[\s\S]*?onPick=\{id => \{ void applyNoteTemplate\(id\); \}\}/);
         const apply = mm.slice(mm.indexOf('const applyNoteTemplate = async'), mm.indexOf('// ─── Render', mm.indexOf('const applyNoteTemplate = async')));
         assert.ok(apply.indexOf('const id = selectedId;') < apply.indexOf('modesApplyNoteTemplate'));
         assert.ok(apply.indexOf('if (selectedIdRef.current !== id) return;') < apply.indexOf('setNoteSections(result.sections)'));
@@ -265,10 +265,10 @@ describe('a mode\'s own default back from Use a template', () => {
     test('Modes Manager: loads the mode-type default and offers it in the template picker', () => {
         const mm = src('premium/src/ModesSettings.tsx');
         assert.match(mm, /api\(\)\?\.modesGetDefaultNoteSections\?\.\(selectedId\)/);
-        assert.match(mm, /setDefaultNoteSections\(Array\.isArray\(defaults\) \? defaults : \[\]\)/);
-        assert.match(mm, /label: mode\.templateType === 'general' \? 'General' : \(TEMPLATE_MAP\[mode\.templateType\]\?\.label \?\? 'Default'\)/);
-        assert.match(mm, /modeDefault=\{modeDefault\}/);
-        assert.match(mm, /onPick=\{applyNoteTemplate\}/);
+        assert.match(mm, /if \(!cancelled && Array\.isArray\(defaults\)\) setDefaultNoteSections\(defaults\)/);
+        assert.match(mm, /label: modeTemplateType === 'general' \? 'General' : \(TEMPLATE_MAP\[modeTemplateType\]\?\.label \?\? 'Default'\)/);
+        assert.match(mm, /modeDefault=\{modeDefaultNoteTemplate\}/);
+        assert.match(mm, /onPick=\{id => \{ void applyNoteTemplate\(id\); \}\}/);
     });
 });
 

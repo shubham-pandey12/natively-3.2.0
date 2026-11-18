@@ -1145,7 +1145,7 @@ const HelpPane: React.FC<{
                         control={<GoButton label={t('Watch')} onClick={openDemoVideo} />}
                     />
                     {onShowGuide && <SettingsRow
-                        icon={<NativelyGlyph size={20} />}
+                        icon={<NativelyGlyph />}
                         title={t('Show the guide again')}
                         description={t('Walks you through your first meeting, one step at a time.')}
                         control={<GoButton label={t('Start')} onClick={onShowGuide} />}

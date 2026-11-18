@@ -2218,7 +2218,6 @@ export function ProfileIntelligenceSettings({
     const [companyResearching, setCompanyResearching] = useState(false);
     const [companyDossier, setCompanyDossier] = useState<any>(null);
     const [companySearchQuotaExhausted, setCompanySearchQuotaExhausted] = useState(false);
-    const [companyResearchError, setCompanyResearchError] = useState('');
 
     // Apply the dossier carried by a getProfileData() payload (2026-09-21).
     // getProfileData returns the wrapper { dossier, sources, last_checked } from
@@ -2495,13 +2494,9 @@ export function ProfileIntelligenceSettings({
             const result = await window.electronAPI?.profileUploadJD?.(filePath);
             if (token.cancelled) return;
             if (result?.success) {
-                const [data, status] = await Promise.all([
-                    window.electronAPI?.profileGetProfile?.(),
-                    window.electronAPI?.profileGetStatus?.(),
-                ]);
+                const data = await window.electronAPI?.profileGetProfile?.();
                 if (token.cancelled) return;
                 if (data) setProfileData(data);
-                if (status) setProfileStatus(status);
                 // Clear the previous company's dossier and pick up the new one if
                 // it somehow already exists (cached from an earlier session at the
                 // same company). Usually it does NOT: ingest fires the AOT pipeline
@@ -2558,15 +2553,12 @@ export function ProfileIntelligenceSettings({
     const doCompanyResearch = async (forceRefresh: boolean) => {
         const company = profileData?.activeJD?.company;
         if (!company) return;
-        setCompanyResearching(true); setCompanySearchQuotaExhausted(false); setCompanyResearchError('');
+        setCompanyResearching(true); setCompanySearchQuotaExhausted(false);
         try {
             const result = await window.electronAPI?.profileResearchCompany?.(company, forceRefresh);
             if (result?.success && result.dossier) setCompanyDossier(result.dossier);
-            else setCompanyResearchError(result?.error || 'Company research could not produce a dossier. Check that an AI provider is configured and try again.');
             if (result?.searchQuotaExhausted) setCompanySearchQuotaExhausted(true);
-        } catch (error) {
-            setCompanyResearchError(error instanceof Error ? error.message : String(error));
-        }
+        } catch { /**/ }
         finally { setCompanyResearching(false); }
     };
 
@@ -2686,16 +2678,9 @@ export function ProfileIntelligenceSettings({
                                 if (!(await askConfirm({ title: 'Delete your resume and its extracted data?', confirmLabel: 'Delete' }))) return;
                                 try {
                                     await window.electronAPI?.profileDelete?.();
-                                    const [freshData, freshStatus] = await Promise.all([
-                                        window.electronAPI?.profileGetProfile?.(),
-                                        window.electronAPI?.profileGetStatus?.(),
-                                    ]);
+                                    setProfileStatus({ hasProfile: false, profileMode: false });
+                                    const freshData = await window.electronAPI?.profileGetProfile?.();
                                     setProfileData(freshData ?? null);
-                                    if (freshStatus) {
-                                        setProfileStatus(freshStatus);
-                                    } else {
-                                        setProfileStatus({ hasProfile: false, profileMode: false });
-                                    }
                                 } catch { /**/ }
                             }}
                         >
@@ -2802,12 +2787,8 @@ export function ProfileIntelligenceSettings({
                                 if (jdUploading) return;
                                 try {
                                     await window.electronAPI?.profileDeleteJD?.();
-                                    const [data, status] = await Promise.all([
-                                        window.electronAPI?.profileGetProfile?.(),
-                                        window.electronAPI?.profileGetStatus?.(),
-                                    ]);
+                                    const data = await window.electronAPI?.profileGetProfile?.();
                                     setProfileData(data ?? null);
-                                    if (status) setProfileStatus(status);
                                     setCompanyDossier(null);
                                 } catch { /**/ }
                             }}
@@ -3316,11 +3297,6 @@ export function ProfileIntelligenceSettings({
                     <div style={{ display: 'flex', gap: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)', marginBottom: 12, fontSize: 11, color: '#f59e0b', lineHeight: 1.5 }}>
                         <span style={{ flexShrink: 0 }}>⚠</span>
                         Web search credits exhausted — showing AI-only research.
-                    </div>
-                )}
-                {companyResearchError && (
-                    <div role="alert" style={{ padding: '9px 12px', borderRadius: 8, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', marginBottom: 12, fontSize: 11, color: '#f87171', lineHeight: 1.5 }}>
-                        {companyResearchError}
                     </div>
                 )}
                 {!companyDossier && !companyResearching && !aotResearching && companyName && (

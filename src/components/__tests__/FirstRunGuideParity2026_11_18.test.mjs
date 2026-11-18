@@ -8,7 +8,7 @@ test('recovered guide uses separate launcher, overlay and notepad surfaces', () 
   const app = read('src/App.tsx');
   const notes = read('src/components/NotesWindow.tsx');
   const overlay = read('src/components/NativelyInterface.tsx');
-  assert.match(app, /<LauncherGuide /);
+  assert.match(app, /<LauncherGuide\b/);
   assert.match(overlay, /useOverlayFirstRunGuide/);
   assert.match(notes, /Write while you talk\./);
   assert.match(notes, /Ask about the meeting\./);
@@ -20,7 +20,7 @@ test('recovered guide uses separate launcher, overlay and notepad surfaces', () 
 test('Help restarts the guide and closes Settings as in 3.2.0', () => {
   const settings = read('src/components/SettingsOverlay.tsx');
   const help = read('src/components/settings/HelpSettings.tsx');
-  assert.match(settings, /onShowGuide=\{\(\) => \{ void window\.electronAPI\?\.guideDispatch\?\.\(\{ type: 'restart' \}\); onClose\(\); \}\}/);
+  assert.match(settings, /onShowGuide=\{\(\) => \{ dispatchGuide\(\{ type: 'restart' \}\); onClose\(\); \}\}/);
   assert.match(help, /\{onShowGuide && <SettingsRow/);
   assert.match(help, /onClick=\{onShowGuide\}/);
 });

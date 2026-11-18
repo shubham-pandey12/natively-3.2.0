@@ -329,7 +329,7 @@ import {
   pinnedViewportBudget,
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
-import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent } from '../lib/chatStreamGuard.mjs';
+import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, shouldHonorLiveAnswerDiscard, resolveChatStreamSurfaceError, isStaleDesktopChatEvent } from '../lib/chatStreamGuard.mjs';
 import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
 import { resolveScreenshotPromptText, getScreenshotPresetPrompt } from '../lib/screenshotPrompt';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
@@ -7069,20 +7069,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     setMessages((prev) => commitStreamingFlush(prev, msgId, withDiagramRepairs(text)));
   }, []);
 
-  const releasePhoneOverlayAnswer = useCallback(() => {
-    if (chatStreamSourceRef.current !== 'phone') return;
-    const replyId = streamingMsgIdRef.current;
-    flushToken();
-    streamingMsgIdRef.current = null;
-    streamingIntentRef.current = null;
-    chatStreamIdRef.current = null;
-    chatStreamSourceRef.current = null;
-    requestStartTimeRef.current = null;
-    setIsProcessing(false);
-    // The phone keeps its answer. This partial overlay copy must not become chat context.
-    setMessages((prev) => prev.filter((message) => message.id !== replyId));
-  }, [flushToken]);
-
   const tryBeginOverlayAction = useCallback((actionKey: string): boolean => {
     if (overlayActionInFlightRef.current.has(actionKey)) return false;
     const nowMs = Date.now();
@@ -7097,11 +7083,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     ) {
       return false;
     }
-    releasePhoneOverlayAnswer();
     overlayActionInFlightRef.current.add(actionKey);
     lastOverlayActionRef.current = { key: actionKey, atMs: nowMs };
     return true;
-  }, [releasePhoneOverlayAnswer]);
+  }, []);
 
   const endOverlayAction = useCallback((actionKey: string) => {
     overlayActionInFlightRef.current.delete(actionKey);
@@ -7442,7 +7427,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Direct and legacy streams share the single answer panel. Retire any legacy
     // owner before reserving the Direct placeholder; requestId correlation then
     // rejects every late Direct event from an older turn.
-    releasePhoneOverlayAnswer();
     window.electronAPI?.cancelChatStream?.();
     chatStreamIdRef.current = null;
     chatStreamSourceRef.current = null;
@@ -7516,7 +7500,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         message: '',
       });
     }
-  }, [flushToken, forceFinalizeStaleRagStream, releasePhoneOverlayAnswer, settleDirectAssistFailure, settleDirectAssistIncomplete, resumeAutoScroll]);
+  }, [flushToken, forceFinalizeStaleRagStream, settleDirectAssistFailure, settleDirectAssistIncomplete, resumeAutoScroll]);
 
   const cancelActiveChatStream = useCallback(() => {
     // Stop also stops diagram repairs: any in flight is cancelled, and the
@@ -7987,9 +7971,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Clear streaming refs FIRST (same ordering rationale as the null-feedback
     // path) so a late token batch can't append onto a row we're removing.
     cleanups.push(
-      window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.(() => {
+      window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.((data) => {
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
+        if (!shouldHonorLiveAnswerDiscard(liveAnswerGenIdRef.current, data?.generationId)) return;
         setIsProcessing(false);
         if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
         streamingNodeRef.current = null;
@@ -8419,15 +8404,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     if (currentAttachments.length > 0) {
       setAttachedContext([]);
+      const screenshotPromptText = resolveScreenshotPromptText();
       // Show the attached image in chat FIRST — question card must appear before AI response
       setMessages((prev) => [
         ...prev,
         {
           id: questionCardId,
           role: 'user',
-          text: dynamicPromptInstruction
-            ? (QUICK_ACTION_LABELS[dynamicPromptInstruction] || dynamicPromptInstruction)
-            : resolveScreenshotPromptText(),
+          text: screenshotPromptText,
           hasScreenshot: true,
           screenshotPreview: currentAttachments[0].preview,
           screenshotPreviews: currentAttachments.map((a) => a.preview).filter(Boolean),
@@ -9790,7 +9774,6 @@ Provide only the answer, nothing else.`;
     // surfacing as the next answer starting mid-sentence with leftover
     // text from the previous turn. Also flush any tokens still pending
     // in the rAF buffer so they land on the prior row, not the new one.
-    releasePhoneOverlayAnswer();
     flushToken();
     tokenBufRef.current.intent = '';
     tokenBufRef.current.text = '';
@@ -10700,7 +10683,7 @@ Provide only the answer, nothing else.`;
     handleBrainstorm,
   };
 
-  const guide = useOverlayFirstRunGuide(() => handlersRef.current.handleWhatToSay());
+  const guide = useOverlayFirstRunGuide({ whatToAnswer: () => handlersRef.current.handleWhatToSay() });
 
   useEffect(() => {
     // ── Continuous, frame-rate-independent scroll with momentum ──
@@ -13033,7 +13016,14 @@ Provide only the answer, nothing else.`;
                       }
                       const { Icon, label } = overlayButtonFace(id, t, overlayCustomButtons);
                       return (
-                        <HeroGlassButton key={id} variant="lavender" onClick={onChip(id)} className={heroChipClass} icon={heroIcon(Icon)}>
+                        <HeroGlassButton
+                          key={id}
+                          variant="lavender"
+                          onClick={onChip(id)}
+                          className={heroChipClass}
+                          icon={heroIcon(Icon)}
+                          data-guide={id === 'what_to_answer' ? 'what-to-answer' : undefined}
+                        >
                           {label}
                         </HeroGlassButton>
                       );
@@ -13059,7 +13049,13 @@ Provide only the answer, nothing else.`;
                     }
                     const { Icon, label } = overlayButtonFace(id, t, overlayCustomButtons);
                     return (
-                      <button key={id} onClick={onChip(id)} className={chipClass} style={appearance.chipStyle}>
+                      <button
+                        key={id}
+                        onClick={onChip(id)}
+                        className={chipClass}
+                        style={appearance.chipStyle}
+                        data-guide={id === 'what_to_answer' ? 'what-to-answer' : undefined}
+                      >
                         <Icon className="w-3 h-3 opacity-70" /> {label}
                       </button>
                     );

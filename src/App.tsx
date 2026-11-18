@@ -54,6 +54,7 @@ import { useResolvedTheme } from "./hooks/useResolvedTheme"
 import { useDiagramRenderHost } from "./lib/diagram/diagramRuntime"
 import { WelcomeFlow } from "./components/onboarding/WelcomeFlow"
 import { LauncherGuide } from "./components/onboarding/LauncherGuide"
+import { dispatchGuide, useRecoveredGuide } from "./components/onboarding/useRecoveredGuide"
 import { shouldShowWelcome, hasOnboardingHistory, WELCOME_SEEN_KEY, LEGACY_PERMS_SHOWN_KEY, ONBOARDING_STATE_KEY } from "./lib/onboarding/welcomeGate.mjs"
 
 // How often the launcher may re-read the card inputs when it regains focus
@@ -357,33 +358,10 @@ const App: React.FC = () => {
     setIsSettingsOpen(false);
     setLauncherRequest({ kind: 'meeting', id, seq: Date.now() });
   }, []);
-  useEffect(() => {
-    if (!isLauncherWindow && !isDefault) return;
-    let opened = '';
-    const showNotes = (state: { status?: string; step?: string; endedMeetingId?: string | null }) => {
-      if (state.status === 'active' && (state.step === 'notes' || state.step === 'notes2') && state.endedMeetingId && state.endedMeetingId !== opened) {
-        opened = state.endedMeetingId;
-        openLauncherMeeting(opened);
-      }
-    };
-    void window.electronAPI?.guideGet?.().then(showNotes).catch(() => {});
-    return window.electronAPI?.onGuideChanged?.(showNotes);
-  }, [isLauncherWindow, isDefault, openLauncherMeeting]);
-  useEffect(() => {
-    if (!isLauncherWindow && !isDefault) return;
-    const orch = getOrchestrator();
-    let active = false;
-    let release: (() => void) | undefined;
-    const claim = () => { if (active) orch.claimExternalCard('first_run_guide', { force: true }); };
-    const changed = (state: { status?: string }) => {
-      active = state.status === 'active';
-      if (active) { claim(); release ??= orch.subscribe(claim); }
-      else { release?.(); release = undefined; orch.releaseExternalCard('first_run_guide'); }
-    };
-    void window.electronAPI?.guideGet?.().then(changed).catch(() => {});
-    const off = window.electronAPI?.onGuideChanged?.(changed);
-    return () => { off?.(); release?.(); orch.releaseExternalCard('first_run_guide'); };
-  }, [isLauncherWindow, isDefault]);
+  const showLauncherHome = useCallback(() => {
+    setIsSettingsOpen(false);
+    setLauncherRequest({ kind: 'home', seq: Date.now() });
+  }, []);
   // The notes window's "Open meeting" after Stop (main sends it to the launcher only).
   useEffect(() => {
     const off = window.electronAPI?.onLauncherOpenMeeting?.((id) => { if (id) openLauncherMeeting(id); });
@@ -559,6 +537,24 @@ const App: React.FC = () => {
     && !showTrialExpiredModal && !trialEndedDue && !orchState?.activeToasterId;
   const claimUpdateSlot = useCallback((force?: boolean) => (orch ? orch.claimExternalCard('update', { force }) : true), [orch]);
   const releaseUpdateSlot = useCallback(() => { orch?.releaseExternalCard('update'); }, [orch]);
+  const guide = useRecoveredGuide();
+  const guideActive = (isLauncherWindow || isDefault) && guide.state?.status === 'active';
+  useEffect(() => {
+    if (!orch || !guideActive) return;
+    let claimed = orch.claimExternalCard('first_run_guide', { force: true });
+    const unsub = claimed ? undefined : orch.subscribe(() => {
+      if (!claimed) claimed = orch.claimExternalCard('first_run_guide', { force: true });
+    });
+    return () => {
+      unsub?.();
+      orch.releaseExternalCard('first_run_guide');
+    };
+  }, [orch, guideActive]);
+  useEffect(() => {
+    if (guideActive && (showTrialExpiredModal || trialEndedDue)) {
+      dispatchGuide({ type: 'trial_out' });
+    }
+  }, [guideActive, showTrialExpiredModal, trialEndedDue]);
   // ── Card scheduler inputs (toaster policy) ──────────────────────────────
   // What decides which card is relevant (keys, plan, profile, JD, trial,
   // extension, quota) is read live and re-read whenever it can have changed;
@@ -638,8 +634,8 @@ const App: React.FC = () => {
   // The Trial ended card owns the screen while it is open.
   useEffect(() => {
     if (!isLauncherWindow && !isDefault) return;
-    setOrchestratorUserState({ trialEndedOpen: showTrialExpiredModal || trialEndedDue });
-  }, [showTrialExpiredModal, trialEndedDue, isLauncherWindow, isDefault]);
+    setOrchestratorUserState({ trialEndedOpen: (showTrialExpiredModal || trialEndedDue) && !guideActive });
+  }, [showTrialExpiredModal, trialEndedDue, guideActive, isLauncherWindow, isDefault]);
 
   // Start the onboarding orchestrator (launcher window only). Stages are
   // registered lazily; the drain loop only runs while foreground + homepage
@@ -1483,7 +1479,6 @@ const App: React.FC = () => {
                     ollamaPullPercent={ollamaPullPercent}
                     ollamaPullMessage={ollamaPullMessage}
                   />
-                  {!isolateOnboarding && !isSettingsOpen && !isManagerOpen && <LauncherGuide onOpenSettings={openSettingsExclusive} onOpenMeeting={openLauncherMeeting} onShowHome={() => setLauncherRequest({ kind: 'home', seq: Date.now() })} />}
                 </div>
                 <SettingsOverlay
                   isOpen={isSettingsOpen}
@@ -1596,10 +1591,16 @@ const App: React.FC = () => {
             <OrchestratedToasterHost onOpenSettings={openSettingsExclusive} onOpenProfile={openProfileExclusive} />
           </OrchestratorProvider>
         )}
-
+        {!isolateOnboarding && showWelcome === false && (isLauncherWindow || isDefault) && (
+          <LauncherGuide
+            onOpenSettings={openSettingsExclusive}
+            onOpenMeeting={openLauncherMeeting}
+            onShowHome={showLauncherHome}
+          />
+        )}
 
         {/* Post-trial upgrade modal — shown when trial expires */}
-        {!isolateModals && (isLauncherWindow || isDefault) && showTrialExpiredModal && (
+        {!isolateModals && (isLauncherWindow || isDefault) && showTrialExpiredModal && !guideActive && (
           <FreeTrialModal
             // activeTrial is already cleared when the card opens: the last
             // figures seen, never zeros (src/lib/trial/endedTrialUsage.mjs).

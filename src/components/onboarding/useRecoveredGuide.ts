@@ -1,4 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useT } from '../../i18n';
+import {
+  GUIDE_DONE_HOLD_MS,
+  GUIDE_STEP_NUMBER,
+  GUIDE_STEP_TOTAL,
+  GUIDE_STOP_LOCK_MS,
+  guideStopLockLeft,
+} from '../../lib/onboarding/firstRunGuide.mjs';
+import { shortcutKeysFor } from '../../lib/onboarding/shortcutKeys.mjs';
+import { isMac, isWindows } from '../../utils/platformUtils';
 
 export type GuideState = {
   status: string;
@@ -10,12 +20,8 @@ export type GuideState = {
   stopLockUntil?: number | null;
 };
 
-export const GUIDE_STEP_NUMBERS: Record<string, number> = {
-  start: 1, overlay: 2, answer: 3, screenshot: 4, stop: 5,
-  notes: 6, surface: 7, start2: 8, notepad: 9, ask: 10,
-  recipe: 11, stop2: 12, notes2: 13, plans: 14, keys: 14,
-};
-export const GUIDE_STEP_TOTAL = 14;
+export { GUIDE_DONE_HOLD_MS, GUIDE_STEP_NUMBER, GUIDE_STEP_TOTAL, GUIDE_STOP_LOCK_MS };
+export const GUIDE_STEP_NUMBERS: Readonly<Record<string, number>> = GUIDE_STEP_NUMBER;
 
 let leavingCount = 0;
 function setLeaving(value: boolean) {
@@ -70,6 +76,62 @@ export function useRecoveredGuide() {
     };
   }, [accept, markLeaving]);
   return { state, justDone, dispatch: dispatchGuide };
+}
+
+export function useGuideStopLock(): { seconds: number; label: string } {
+  const t = useT();
+  const [state, setState] = useState<GuideState | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    let alive = true;
+    window.electronAPI?.guideGet?.().then((next) => {
+      if (alive && next) setState(next);
+    }).catch(() => {});
+    const off = window.electronAPI?.onGuideChanged?.((next) => {
+      if (next) {
+        setState(next);
+        setNow(Date.now());
+      }
+    });
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, []);
+  const remainingMs = guideStopLockLeft(state, now);
+  useEffect(() => {
+    if (remainingMs <= 0) return;
+    const timer = setTimeout(() => setNow(Date.now()), remainingMs % 1000 || 1000);
+    return () => clearTimeout(timer);
+  }, [remainingMs]);
+  const seconds = Math.ceil(remainingMs / 1000);
+  return {
+    seconds,
+    label: seconds > 0 ? t('Stop unlocks in {n} s').replace('{n}', String(seconds)) : '',
+  };
+}
+
+export function isGuideStep(state: GuideState | null | undefined, ...steps: string[]): boolean {
+  return !!state && state.status === 'active' && steps.includes(state.step);
+}
+
+const GUIDE_PLATFORM = isMac ? 'darwin' : isWindows ? 'win32' : 'linux';
+
+export function useGuideShortcuts(active: boolean) {
+  const [keybinds, setKeybinds] = useState<Array<{ id: string; accelerator?: string }> | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    let alive = true;
+    window.electronAPI?.getKeybinds?.().then((next) => {
+      if (alive) setKeybinds(next ?? null);
+    }).catch(() => {});
+    const off = window.electronAPI?.onKeybindsUpdate?.((next) => setKeybinds(next ?? null));
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, [active]);
+  return useCallback((id: string) => shortcutKeysFor(keybinds, id, GUIDE_PLATFORM), [keybinds]);
 }
 
 function observeGuideTarget(update: () => void) {

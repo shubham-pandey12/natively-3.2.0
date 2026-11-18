@@ -11,6 +11,21 @@ interface TopPillProps {
     onLogoClick?: () => void;
     /** Lavender draws the website hero's pill (NativelyInterfaceCard) instead. */
     interfaceTheme?: string;
+    stopLockSeconds?: number;
+    stopLockLabel?: string;
+}
+
+function StopGlyph({ seconds, square }: { seconds: number; square: string }) {
+    return seconds > 0 ? (
+        <span
+            key={seconds}
+            className="guide-stop-count text-[11px] font-semibold tabular-nums leading-none"
+        >
+            {seconds}
+        </span>
+    ) : (
+        <div className={square} />
+    );
 }
 
 const MARK_MASK = {
@@ -31,7 +46,16 @@ export default function TopPill({
     appearance,
     onLogoClick,
     interfaceTheme,
+    stopLockSeconds = 0,
+    stopLockLabel,
 }: TopPillProps) {
+    const stopLocked = stopLockSeconds > 0;
+    const stopProps = {
+        onClick: stopLocked ? undefined : onQuit,
+        "aria-disabled": stopLocked || undefined,
+        title: stopLocked ? stopLockLabel : undefined,
+        "data-stop-locked": stopLocked ? "true" : undefined,
+    };
     if (interfaceTheme === "lavender") {
         // The hero card's pill markup, as the website draws it, with the
         // app's three actions wired to it.
@@ -59,11 +83,15 @@ export default function TopPill({
                         <span className="relative">{expanded ? "Hide" : "Show"}</span>
                     </button>
                     <button
-                        onClick={onQuit}
-                        aria-label="Stop"
+                        {...stopProps}
+                        data-guide="overlay-stop"
+                        aria-label={stopLocked ? stopLockLabel : "Stop"}
                         className="overlay-icon-surface overlay-icon-surface-hover interaction-base interaction-press overlay-text-muted w-8 h-8 rounded-full flex items-center justify-center"
                     >
-                        <div className="w-3 h-3 rounded-[2px] bg-current opacity-90 relative" />
+                        <StopGlyph
+                            seconds={stopLockSeconds}
+                            square="w-3 h-3 rounded-[2px] bg-current opacity-90 relative"
+                        />
                     </button>
                 </div>
             </div>
@@ -137,7 +165,9 @@ export default function TopPill({
 
                 {/* STOP / QUIT BUTTON */}
                 <button
-                    onClick={onQuit}
+                    {...stopProps}
+                    data-guide="overlay-stop"
+                    aria-label={stopLocked ? stopLockLabel : "Stop"}
                     className={`
             w-7 h-7
             rounded-full
@@ -145,11 +175,14 @@ export default function TopPill({
             overlay-text-primary
             flex items-center justify-center
             interaction-base interaction-press
-            hover:bg-red-500/10 hover:text-red-400
+            ${stopLocked ? "" : "hover:bg-red-500/10 hover:text-red-400"}
           `}
                     style={appearance.iconStyle}
                 >
-                    <div className="w-3.5 h-3.5 rounded-[3px] bg-current opacity-80" />
+                    <StopGlyph
+                        seconds={stopLockSeconds}
+                        square="w-3.5 h-3.5 rounded-[3px] bg-current opacity-80"
+                    />
                 </button>
             </div>
         </div>

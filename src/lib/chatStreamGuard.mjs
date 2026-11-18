@@ -228,6 +228,20 @@ export function resolveLiveAnswerBatch(activeId, incomingId) {
 }
 
 /**
+ * Decide whether a live-answer discard event should drop the currently open
+ * `what_to_answer` scaffold row (3.2.0 `Eh`).
+ *
+ * @param {number|null|undefined} activeId
+ * @param {number|null|undefined} incomingId
+ * @returns {boolean}
+ */
+export function shouldHonorLiveAnswerDiscard(activeId, incomingId) {
+  return typeof incomingId !== 'number' || typeof activeId !== 'number'
+    ? true
+    : incomingId >= activeId;
+}
+
+/**
  * Decide whether a `gemini-stream-error` from `incomingSource` must RELEASE the
  * adopted stream guard.
  *

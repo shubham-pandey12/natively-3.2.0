@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const app = readFileSync(join(here, '..', '..', 'App.tsx'), 'utf8');
 
 test('the orchestrator hears Trial ended while it is due, not only once it paints', () => {
-  assert.ok(app.includes('setOrchestratorUserState({ trialEndedOpen: showTrialExpiredModal || trialEndedDue });'));
+  assert.ok(app.includes('setOrchestratorUserState({ trialEndedOpen: (showTrialExpiredModal || trialEndedDue) && !guideActive });'));
 });
 
 test('the launch path marks the card due before its 10 s delay', () => {
@@ -42,6 +42,6 @@ test('unmount clears the delay', () => {
 });
 
 test('closing the card releases the slot', () => {
-  const done = app.slice(app.indexOf('onDone={(reason) => {', app.indexOf('showTrialExpiredModal && (')));
+  const done = app.slice(app.indexOf('onDone={(reason) => {', app.indexOf('showTrialExpiredModal && !guideActive && (')));
   assert.ok(done.slice(0, 200).includes('setTrialEndedDue(false);'));
 });

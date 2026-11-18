@@ -1,3 +1,7 @@
+export declare const GUIDE_STEP_NUMBER: Readonly<Record<string, number>>;
+export declare const GUIDE_STEP_TOTAL: number;
+export declare const GUIDE_DONE_HOLD_MS: number;
+export declare const GUIDE_STOP_LOCK_MS: number;
 export declare function guideStopLockLeft(state: any, now: number): number;
 export declare const GUIDE_EVENT_TYPES: readonly string[];
 export declare function emptyGuideState(): {
