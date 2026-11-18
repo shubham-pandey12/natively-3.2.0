@@ -261,6 +261,15 @@ jobs:
         if: runner.os == 'Windows'
         run: node scripts/verify-packaged-local-assets.mjs --app release/win-unpacked --platform win32
 
+      - name: Build unsigned Windows NSIS installer
+        if: runner.os == 'Windows' && steps.smoke_scope.outputs.mode == 'full'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GOOGLE_CALENDAR_CLIENT_SECRET: ${{ secrets.GOOGLE_CALENDAR_CLIENT_SECRET }}
+        run: |
+          npm run build:electron
+          node scripts/package-app.js --win nsis --x64 --publish never
+
       # Windows runs these ADVISORY (2026-08-10). Previously both steps were
       # skipped outright on Windows, which meant the windows-latest leg reported
       # green while running ZERO tests — its signal covered install and build

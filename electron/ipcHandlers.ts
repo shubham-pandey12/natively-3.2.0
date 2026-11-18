@@ -17973,8 +17973,8 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (surface !== 'overlay' && surface !== 'notepad') return { success: false };
     const before = normalizeMeetingSurface(SettingsManager.getInstance().get('meetingSurface'));
     if (!SettingsManager.getInstance().set('meetingSurface', surface)) return { success: false, error: 'settings_store_degraded' };
-    guideSurfaceSet(surface);
     try { funnelTelemetry.meetingSurfaceSet(before, surface); } catch { /* analytics only */ }
+    guideSurfaceSet(surface);
     return { success: true };
   });
   safeHandle('live-notes:get-state', async () => appState.getLiveNotes().getState());

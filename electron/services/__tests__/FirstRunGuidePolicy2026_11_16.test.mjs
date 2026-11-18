@@ -21,4 +21,5 @@ test('changing to the notepad surface advances the guide after the setting saves
   const ipc = readFileSync(new URL('../../ipcHandlers.ts', import.meta.url), 'utf8');
   const setter = ipc.slice(ipc.indexOf("safeHandle('meeting-surface:set'"), ipc.indexOf("safeHandle('live-notes:get-state'"));
   assert.match(setter, /SettingsManager\.getInstance\(\)\.set\('meetingSurface', surface\)[\s\S]*guideSurfaceSet\(surface\)/);
+  assert.ok(setter.indexOf('funnelTelemetry.meetingSurfaceSet(before, surface)') < setter.indexOf('guideSurfaceSet(surface)'));
 });
