@@ -257,7 +257,6 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   let policy: ModePolicy = resolvedGrounding.source === 'user_choice'
     ? { ...basePolicy, groundingPolicy: resolvedGrounding.groundingPolicy }
     : basePolicy;
-  policy = applyModeSourceContract(policy, req.modeSourceContract);
 
   // Attachment-derived source types (deep-test D10). Additive and LOW priority:
   // extras never displace the mode's primary source, they only make the claim →
@@ -267,6 +266,10 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   if (extra.length) {
     policy = { ...policy, allowedSourceTypes: [...policy.allowedSourceTypes, ...extra] };
   }
+  // The mode's source contract runs AFTER the attachment extras, as in 3.2.0:
+  // it sees the final allowlist, so an extra REFERENCE_FILE is not appended twice
+  // and an already-top reference priority leaves the policy unchanged.
+  policy = applyModeSourceContract(policy, req.modeSourceContract);
 
   const q = resolveQuestion(req);
 
