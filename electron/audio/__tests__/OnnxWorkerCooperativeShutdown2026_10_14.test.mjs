@@ -107,7 +107,7 @@ for (const rel of [
   'electron/rag/providers/LocalEmbeddingProvider.ts',
   'electron/rag/LocalReranker.ts',
   'electron/llm/routing/RouterModel.ts',
-  'premium/electron/autoAnswer/decider/LocalLayaBackend.js',
+  'premium/electron/autoAnswer/decider/LocalLayaBackend.ts',
 ]) {
   test(`${rel} never calls terminate() on a worker`, () => {
     const code = stripComments(fs.readFileSync(path.join(repo, rel), 'utf8'));
@@ -126,7 +126,7 @@ for (const rel of [
   'electron/rag/providers/localEmbeddingWorker.ts',
   'electron/rag/localRerankerWorker.ts',
   'electron/llm/routing/routerWorker.ts',
-  'premium/electron/autoAnswer/decider/deciderWorker.js',
+  'premium/electron/autoAnswer/decider/deciderWorker.ts',
 ]) {
   test(`${rel} exits on shutdown before it looks at any other message`, () => {
     const src = fs.readFileSync(path.join(repo, rel), 'utf8');

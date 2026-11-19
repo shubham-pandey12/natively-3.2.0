@@ -7,9 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
-const premium = require('../index.js').autoAnswerPremium;
-const { chooseDeciderRuntime } = require('../decider/deciderRuntime.js');
-const { executionProvidersFor } = require('../decider/deciderPlatform.js');
+// The sources are TypeScript: load the esbuild output (npm run build:electron runs first).
+const built = (rel) => require(path.join(root, 'dist-electron/premium/electron/autoAnswer', rel));
+const premium = built('index.js').autoAnswerPremium;
+const { chooseDeciderRuntime } = built('decider/deciderRuntime.js');
+const { executionProvidersFor } = built('decider/deciderPlatform.js');
 
 test('recovered premium module satisfies the app loader contract', () => {
   assert.equal(premium.available, true);
