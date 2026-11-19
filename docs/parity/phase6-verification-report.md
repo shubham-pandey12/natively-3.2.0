@@ -2,20 +2,20 @@
 
 ## Answer
 
-**No.** The available evidence does not establish that every recovered 3.2.0 feature is fully implemented apart from intentional holds. The feature catalogue records 105 identified surfaces, but 96 remain `Unsure` at full-branch depth. A checked-in macOS arm64 native binary lacks `takeNativeCaptureLog`, which the recovered binary exports. Recovered Windows native binaries and effective Electron Builder configuration are unavailable. The Auto Answer extension-paired modules have not been proved equivalent.
+**No.** The available evidence does not establish that every recovered 3.2.0 feature is fully implemented apart from intentional holds. The feature catalogue records 105 identified surfaces, but 94 remain `Unsure` at full-branch depth after the Phase 1 IPC audit. A checked-in macOS arm64 native binary lacks `takeNativeCaptureLog`, which the recovered binary exports. Recovered Windows native binaries and effective Electron Builder configuration are unavailable. The Auto Answer extension-paired modules have not been proved equivalent.
 
 ## Verdict counts
 
 | Verdict | Count |
 | --- | ---: |
 | Implemented | 1 |
-| Partial | 2 |
+| Partial | 4 |
 | Missing | 0 |
 | Extra-local | 0 |
 | Leave-billing | 2 |
 | Leave-dev | 3 |
 | Leave-secret | 1 |
-| Unsure | 96 |
+| Unsure | 94 |
 
 These counts use the conservative feature-level verdicts in `phase6-feature-catalogue.md`. The independent findings files contain narrower Implemented findings for individual expressions, navigation entries, and compiled module bodies; those do not make their parent features Implemented at full-branch depth. The feature table is the 105-row catalogue, with local and recovered locations and one verdict per ID.
 
