@@ -1811,11 +1811,6 @@ export class AppState {
   constructor() {
     // 1. Load boot-critical settings first (used by WindowHelpers)
     const settingsManager = SettingsManager.getInstance();
-    const { registerAnswerLengthProvider, effectiveAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
-    registerAnswerLengthProvider(() => {
-      const { isProOrTrialActive } = require('./services/proAccess') as typeof import('./services/proAccess');
-      return effectiveAnswerLength(settingsManager.get('answerLength'), isProOrTrialActive());
-    });
     this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
     this.disguiseMode = normalizeDisguiseMode(settingsManager.get('disguiseMode'));
     // Default OFF: ON means full content capture (transcripts, questions,

@@ -1089,6 +1089,15 @@ export function initializeIpcHandlers(appState: AppState): void {
   } catch (e: any) {
     console.warn('[IPC] Pro check for modes not wired:', e?.message || e);
   }
+  // Answer length (Brief / Smart / Detailed) is Pro-gated: the stored choice
+  // applies only while Pro or the trial is active, otherwise answers stay Smart.
+  // Wired here (as 3.2.0 does) so a failure is logged instead of breaking boot.
+  try {
+    const { registerAnswerLengthProvider, effectiveAnswerLength } = require('./llm/answerLength') as typeof import('./llm/answerLength');
+    registerAnswerLengthProvider(() => effectiveAnswerLength(SettingsManager.getInstance().get('answerLength'), isProOrTrialActive()));
+  } catch (e: any) {
+    console.warn('[IPC] Answer length not wired, answers stay Smart:', e?.message || e);
+  }
   try {
     const { KnowledgeOrchestrator } = require('../premium/electron/knowledge/KnowledgeOrchestrator');
     KnowledgeOrchestrator.setProAccessCheck(isProOrTrialActive);
