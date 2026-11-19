@@ -223,7 +223,7 @@ const DATE_RANGE_RE = /\(?\s*((?:19|20)\d{2}(?:-\d{2})?|\d{1,2}\/(?:19|20)?\d{2,
 // consecutive non-bullet lines into one entry until a genuinely NEW job starts.
 const parseExperience = (sectionLines: string[]): ExperienceEntry[] => {
   const entries: ExperienceEntry[] = [];
-  let cur: ExperienceEntry | null = null;
+  let cur = null as ExperienceEntry | null; // cast: closures assign it, so TS must not narrow to null
   const push = () => { if (cur && (cur.role || cur.company)) entries.push(cur); cur = null; };
   const ensure = (): ExperienceEntry => (cur ??= { company: '', role: '', start_date: '', end_date: null, bullets: [] });
 
@@ -436,7 +436,7 @@ const HONORS_RE = /\b(with honors|with distinction|cum laude|magna cum laude|sum
 // honors" became institution="with". This groups lines into coherent entries.
 const parseEducation = (sectionLines: string[]): EducationEntry[] => {
   const entries: EducationEntry[] = [];
-  let cur: EducationEntry | null = null;
+  let cur = null as EducationEntry | null; // cast: closures assign it, so TS must not narrow to null
   const flush = () => { if (cur && (cur.degree || cur.institution)) entries.push(cur); cur = null; };
   const ensure = (): EducationEntry => (cur ??= { institution: '', degree: '', field: '', start_date: '', end_date: null });
 
