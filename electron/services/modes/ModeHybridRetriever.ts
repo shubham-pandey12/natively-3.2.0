@@ -2756,10 +2756,6 @@ export class ModeHybridRetriever {
         // own measured example (fts 0.109, floor 0.15) returned ZERO chunks on
         // the transition turn after an embedding-provider promotion, which is
         // exactly a mid-session "the résumé disappeared" symptom.
-        if (vectorStats) {
-            vectorStats.scored = candidates.length;
-            vectorStats.withVector = candidates.length - vectorless.size;
-        }
         return scored.filter(c => {
             // A chunk holding the query's rare terms is admitted on that alone:
             // the combined floor exists to drop chunks with no claim on the

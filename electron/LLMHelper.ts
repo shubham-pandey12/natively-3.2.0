@@ -6597,19 +6597,6 @@ let isMultimodal = !!(imagePaths?.length);
       }
     }
 
-    if (opts?.dataScopes?.length) {
-      const deniedStructured = getDeniedDataScopes(opts.dataScopes, this.getProviderScopePolicy());
-      if (deniedStructured.length > 0) {
-        const ollamaAvailable = this.useOllama && await this.ensureOllamaModelSelected();
-        for (const scope of deniedStructured) this.logScopeFallback(scope, ollamaAvailable ? 'routing' : 'omitting');
-        if (ollamaAvailable) return this.processResponse(await this.callOllama(message));
-        throw Object.assign(
-          new Error(`Not sent: a privacy setting keeps this data off cloud providers (Settings > AI Providers > Privacy — cloud data scopes: ${scopeLabels(deniedStructured)}).`),
-          { name: 'ProviderScopeDenied' },
-        );
-      }
-    }
-
     type ProviderAttempt = { name: string; execute: () => Promise<string> };
     const providers: ProviderAttempt[] = [];
     // A breaker may skip a rung only if another rung exists to fall to. Evaluated
