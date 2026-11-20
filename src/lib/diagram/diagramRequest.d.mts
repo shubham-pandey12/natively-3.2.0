@@ -102,7 +102,7 @@ export interface ResolveDiagramRequestInput {
   hasVisualContext?: boolean;
   /**
    * What was said in the conversation so far, when the caller can supply it. A
-   * string (even an empty one), or a function returning it, lets a calculation report inputs that were
+   * string (even an empty one) lets a calculation report inputs that were
    * stated nowhere; absent means the conversation is unknown.
    */
   material?: string | null | (() => string | null | undefined);

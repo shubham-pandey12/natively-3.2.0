@@ -525,6 +525,7 @@ export class ModesManager {
         const row = DatabaseManager.getInstance().getActiveMode();
         if (!row) return null;
         const mode = rowToMode(row);
+        // Without Pro or a trial a Pro mode answers as General (no mode).
         return modeLockedWithoutPro(mode) ? null : mode;
     }
 

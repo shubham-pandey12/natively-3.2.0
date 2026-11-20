@@ -5,7 +5,6 @@ import { generateStructured } from './generateStructured';
 import { sectionGuidance as guidanceForSection } from './sectionInstructions';
 import { anchorAtomTimes, chunkElapsedRange } from './evidenceTimes';
 import { chunkDensityTarget, headingBudgetForTranscript, renderNotesPromptContext, userNoteHeadings, type NotesPromptContext } from './meetingNotesContext';
-import { sectionGuidance as sectionGuidanceFor } from './sectionInstructions';
 
 export class ChunkSummaryGenerator {
   private readonly validator = new MeetingSummarySchemaValidator();

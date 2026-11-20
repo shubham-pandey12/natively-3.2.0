@@ -5,9 +5,3 @@ export function matchesAccelerator(
   accelerator: string,
   platform: string,
 ): boolean;
-
-export function shortcutKeysFor(
-  keybinds: Array<{ id: string; accelerator?: string }> | null | undefined,
-  id: string,
-  platform: string,
-): string[];

@@ -20209,10 +20209,10 @@ export function initializeIpcHandlers(appState: AppState): void {
         resolveCompanySearchProvider,
       } = require('./services/resolveCompanySearchProvider');
       engine.setSearchProvider(resolveCompanySearchProvider());
-      const profileData = orchestrator.getProfileData();
-      const activeJD = profileData?.activeJD;
 
       // Build full JD context so the dossier is tailored to the exact role
+      const profileData = orchestrator.getProfileData();
+      const activeJD = profileData?.activeJD;
       const jdCtx = activeJD
         ? {
             title: activeJD.title,
@@ -21296,7 +21296,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     let selectedPath: string | undefined;
     try {
       if (!isProOrTrialActive()) return proRefusal();
-      const result = await dialog.showOpenDialog({
+      const result: any = await dialog.showOpenDialog({
         properties: ['openFile'],
         filters: [
           // One source of truth with the extractor: a hand-copied list here
@@ -22318,6 +22318,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // them without duplicating logic.
   PhoneMirrorService.getInstance().onPhoneCommand(async (cmd) => {
     const win = appState.getMainWindow();
+
     if (cmd.type === 'action') {
       // Re-use the same global-shortcut dispatch path the keyboard uses.
       // This keeps phone actions identical to key-triggered stealth actions.
@@ -22348,7 +22349,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       const message = stripEmbeddedAnswerContract(cmd.message);
       const phoneMirror = PhoneMirrorService.getInstance();
       const intelligenceManager = appState.getIntelligenceManager();
-      // Stop flips the meeting state before the session reset, while audio drains.
+      // Read before the stream is awaited. Unlike desktop chat, a phone stream is
+      // not in _chatStreamsBySender, so neither the overlay's cancelChatStream()
+      // on session-reset nor modes:set-active's abort reaches it: a meeting stop
+      // or mode switch mid-answer would save this answer into the context that
+      // replaced the one it was asked in. The phone still gets the full answer.
       const myPhoneContextEpoch = intelligenceManager.getContextEpoch();
       // The conversation this question was asked in, for recording it below.
       const myPhoneConversationKey = (() => {
@@ -22422,7 +22427,11 @@ export function initializeIpcHandlers(appState: AppState): void {
         { text: message, speaker: 'user', timestamp: Date.now(), final: true, origin: 'manual_chat' },
         true,
       );
-      try { phoneMirror.publishUserMessage(String(myStreamId), message); } catch (_) {}
+
+      try {
+        phoneMirror.publishUserMessage(String(myStreamId), message);
+      } catch (_) {}
+      // Notify renderer so it can display the incoming phone message too.
       win?.webContents.send('phone-mirror:incoming-chat', {
         message,
         streamId: String(myStreamId),
@@ -22430,6 +22439,8 @@ export function initializeIpcHandlers(appState: AppState): void {
 
       try {
         const llmHelper = appState.processingHelper.getLLMHelper();
+        // AbortController so the live-deadline driver can cancel a stalled provider
+        // request (not just stop emitting) — mirrors the desktop chat path.
         const phoneController = new AbortController();
         // Compute the same routing decision the desktop gemini-chat-stream uses
         // (ipcHandlers.ts ~959) so the phone-chat path applies the active custom
@@ -22680,9 +22691,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             win?.webContents.send('gemini-stream-token', token, { streamId: myStreamId, source: 'phone' });
             full += token;
           },
-          onCleanup: () => {
-            try { phoneController.abort(); } catch { /* noop */ }
-          },
+          onCleanup: () => { try { phoneController.abort(); } catch { /* noop */ } },
         });
         if (phoneSuperseded) return;
         if (_phoneChatLatestId === myPhoneId) {
@@ -22704,11 +22713,15 @@ export function initializeIpcHandlers(appState: AppState): void {
           }
           const phoneContextChanged = intelligenceManager.getContextEpoch() !== myPhoneContextEpoch;
           if (phoneContextChanged) {
-            console.log('[PhoneMirror] session reset or mode switched during this answer \u2014 not saving it', { chars: phoneTrim.length });
+            console.log('[PhoneMirror] session reset or mode switched during this answer — not saving it', { chars: phoneTrim.length });
           }
           if (phoneTrim.length > 0 && !phoneInvalid && !phoneContextChanged) {
             intelligenceManager.addAssistantMessage(full, undefined, 'phone_mirror');
             intelligenceManager.logUsage('chat', message, full);
+            // Into the conversation with its screenshots and photos (2026-11-06),
+            // like a question typed on the desktop: the next question, on the
+            // phone (conversationHistoryBlock, above) or the desktop (typed,
+            // What to answer, a button), can then refer to it and its screen.
             try {
               intelligenceManager.recordPhoneTurn(full, String(message || ''), phoneImagePaths, myPhoneConversationKey);
             } catch (recordErr: any) {
@@ -22722,6 +22735,9 @@ export function initializeIpcHandlers(appState: AppState): void {
           try {
             phoneMirror.publishError(String(myStreamId), err?.message || 'stream error');
           } catch (_) {}
+          // Tagged so the desktop renderer can tell this is a PHONE stream's
+          // failure: untagged, it defaced whatever desktop bubble happened to
+          // be streaming ("[Error: …]" appended to an unrelated answer).
           win?.webContents.send('gemini-stream-error', err?.message || 'stream error', { streamId: null, source: 'phone-mirror' });
         }
       }

@@ -63,8 +63,6 @@ export interface PackEndedInfo {
 export interface PackMeetingClockDeps {
   /** The saved Natively API key, or null/undefined (none, or a trial sentinel). */
   getApiKey(): string | null | undefined;
-  /** Whether the currently selected AI, Fast Response and STT count pack time. */
-  counts?(): boolean;
   /** POST the tick. Throws on a network error. */
   postTick(key: string, body: TickBody): Promise<TickAnswer>;
   /** Milliseconds. Monotonic preferred; the gap cap covers either kind. */

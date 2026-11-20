@@ -1143,8 +1143,8 @@ interface ElectronAPI {
   // Global shortcut events (stealth: fired even when window is not focused)
   onGlobalShortcut: (callback: (data: { action: string }) => void) => () => void;
 
-  // Native stealth keyboard tap. Returns false when the platform-specific
-  // implementation, required permission, or native module is unavailable.
+  // CGEventTap-backed stealth keyboard tap (macOS only). Returns false on
+  // non-macOS or when the native module / Accessibility permission is missing.
   // M5 cleanup: three dead query-style IPCs were removed — they never had
   // main-side handlers; tap state arrives via onStealthTapState instead.
   stealthTapAvailable: () => Promise<boolean>;
@@ -1189,15 +1189,6 @@ interface ElectronAPI {
     name?: string;
     role?: string;
     totalExperienceYears?: number;
-    resume_structured_extraction_complete?: boolean;
-    resume_profile_facts_ready?: boolean;
-    profileFactsReady?: boolean;
-    jd_structured_extraction_complete?: boolean;
-    jdFactsReady?: boolean;
-    aot_pipeline_running?: boolean;
-    resume_indexing_in_flight?: boolean;
-    jd_indexing_in_flight?: boolean;
-    extractionMode?: 'llm' | 'heuristic' | 'none';
   }>;
   profileSetMode: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;
   profileDelete: () => Promise<{ success: boolean; error?: string }>;
@@ -1517,7 +1508,7 @@ interface ElectronAPI {
   modesDeleteReferenceFile: (id: string) => Promise<{ success: boolean; error?: string }>;
   modesGetReferenceFileStatus: (
     modeId: string,
-  ) => Promise<{ success: boolean; statuses?: Array<{ fileId: string; fileName: string; status: 'pending' | 'indexing' | 'ready' | 'failed' | 'lexical_only' | 'ocr_required'; chunkCount: number; embeddedChunkCount: number }>; error?: string }>;
+  ) => Promise<{ success: boolean; statuses?: Array<{ fileId: string; fileName: string; status: string; chunkCount: number }>; error?: string }>;
   onModeFileIndexStatus: (callback: (data: { modeId: string; fileId: string; phase: 'indexing' | 'done' }) => void) => () => void;
   onKnowledgeIndexProgress: (callback: (data: { fileId: string; status: string; startedAt?: number; finishedAt?: number; error?: string }) => void) => () => void;
   knowledgeListPacks: (modeId: string) => Promise<{ success: boolean; packs: Array<{ id: string; sourceId: string; fileName: string; cardCount: number; entityCount: number; relationCount: number; packVersion: number; updatedAt: string }>; error?: string }>;
@@ -2325,8 +2316,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('system-audio-permission-denied', subscription);
     };
   },
-  // System audio permission warning channel (see docs/UNSUPPORTED_APIs.md).
-  // Registered via registerStealthHandler in electron/main.ts.
   getSystemAudioPermissionWarning: () => ipcRenderer.invoke('get-system-audio-permission-warning'),
   onDeviceSelectionApplied: (
     callback: (payload: {
@@ -2514,8 +2503,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createAutoSendRule: (input) => ipcRenderer.invoke('connectors:autosend-create', input),
     updateAutoSendRule: (id, patch) => ipcRenderer.invoke('connectors:autosend-update', id, patch),
     deleteAutoSendRule: (id) => ipcRenderer.invoke('connectors:autosend-delete', id),
-    // Connectors API keys & Gmail integration channels (see docs/UNSUPPORTED_APIs.md).
-    // Registered modularly in electron/services/outputs/outputsIpc.ts (registerLocalApiIpc & registerGmailIpc).
     listApiKeys: () => ipcRenderer.invoke('connectors:apikeys-list'),
     createApiKey: (input) => ipcRenderer.invoke('connectors:apikey-create', input),
     revokeApiKey: (id) => ipcRenderer.invoke('connectors:apikey-revoke', id),
@@ -3464,9 +3451,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
 
-  // Stealth keyboard tap and clipboard bridge (see docs/UNSUPPORTED_APIs.md).
-  // Registered via registerStealthHandler in electron/main.ts.
-  // M5 cleanup: three dead query-style IPCs were dropped in
+  // Stealth keyboard tap bridge. Three dead query-style IPCs were dropped in
   // the M5 cleanup — they had no main-side handler and were not called from
   // src/; tap state arrives via onStealthTapState instead.
   stealthTapAvailable: () => ipcRenderer.invoke('stealth-tap:available'),
@@ -3587,7 +3572,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   licenseCheckPremium: () => ipcRenderer.invoke('license:check-premium'),
   licenseGetDetails: () => ipcRenderer.invoke('license:get-details'),
   licenseCheckPremiumAsync: () => ipcRenderer.invoke('license:check-premium-async'),
-  licenseDeactivate: (): Promise<{ success: boolean }> => ipcRenderer.invoke('license:deactivate'),
+  licenseDeactivate: () => ipcRenderer.invoke('license:deactivate'),
   licenseGetHardwareId: () => ipcRenderer.invoke('license:get-hardware-id'),
   // The opt-in diagnostic report: what would be sent, and sending it (only on a click).
   getDiagnosticReportPreview: () => ipcRenderer.invoke('diagnostic-report:preview'),

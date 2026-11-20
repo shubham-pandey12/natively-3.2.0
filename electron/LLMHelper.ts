@@ -67,6 +67,8 @@ import { applyEnvScopeDenials, sourceTypesForScopes, dataScopeForSourceType, dat
 // culture map, negotiation state, the résumé JIT request) matched nothing, so a
 // "Profile & history" denial sent them anyway. All are derived from the
 // user's profile, so all are `profile_history`.
+const PREMIUM_PROFILE_BLOCK_RE = /<(?:target_job|target_job_context|salary_intelligence|company_research|gap_pivot_scripts|mock_question_hint|culture_alignment|live_negotiation_state|profile_jit_evidence_request)\b/i;
+const PREMIUM_PROFILE_BLOCK_STRIP_RE = /<(target_job|target_job_context|salary_intelligence|company_research|gap_pivot_scripts|mock_question_hint|culture_alignment|live_negotiation_state|profile_jit_evidence_request)\b[\s\S]*?<\/\1>\s*/gi;
 // Screen-understanding enforcement (private_vision / vision_only). Lives in
 // LLMHelper so EVERY screenshot-bearing path is covered, not the one IPC
 // handler that used to read the enum.
@@ -99,8 +101,6 @@ import type {
   DirectAssistRung,
   DirectAssistSelection,
 } from './direct-assist/types';
-const PREMIUM_PROFILE_BLOCK_RE = /<(?:target_job|target_job_context|salary_intelligence|company_research|gap_pivot_scripts|mock_question_hint|culture_alignment|live_negotiation_state|profile_jit_evidence_request)\b/i;
-const PREMIUM_PROFILE_BLOCK_STRIP_RE = /<(target_job|target_job_context|salary_intelligence|company_research|gap_pivot_scripts|mock_question_hint|culture_alignment|live_negotiation_state|profile_jit_evidence_request)\b[\s\S]*?<\/\1>\s*/gi;
 const NATIVELY_API_URL = nativelyApiBase();
 
 function nowMs(): number {
@@ -11709,7 +11709,9 @@ let isMultimodal = !!(imagePaths?.length);
       //
       // It now runs through the shared fallback engine: a spare rung if the user
       // has one keyed, and a PARALLEL RETRY of the same gateway if they do not.
-      // Exhausted pre-token attempts propagate through the caller's error path.
+      // The engine still returns unconditionally afterwards, so the user-facing
+      // failure sentence below is still the last word — it just now speaks only
+      // once every rung, including the hedge, has failed.
       const commit = { emitted: false };
       try {
         yield* this.trackCommit(
@@ -11732,7 +11734,11 @@ let isMultimodal = !!(imagePaths?.length);
           yield LLMHelper.TRUNCATION_SENTINEL;
           return;
         }
-        yield typeof e?.status === 'number' ? `Error: Custom Provider returned HTTP ${e.status}` : 'Error streaming from custom provider.';
+        // Byte-identical to what streamWithCustom used to yield, so this path's
+        // UX is unchanged.
+        yield typeof e?.status === 'number'
+          ? `Error: Custom Provider returned HTTP ${e.status}`
+          : 'Error streaming from custom provider.';
       }
       return;
     }
@@ -14125,7 +14131,11 @@ let isMultimodal = !!(imagePaths?.length);
         throw e;
       }
       console.error("Custom streaming failed", e);
-      // Propagate transport failures to the fallback engine and its caller.
+      // Same rule as the HTTP branch above: a failure must reach the caller AS a
+      // failure. The user-facing sentence this used to yield now lives at the
+      // one call site that is genuinely terminal (the `2a. CustomProvider`
+      // branch of _streamChatInner), where "there is no provider after this"
+      // is actually known. Here, it is not.
       throw e instanceof Error ? e : new Error(String(e));
     } finally {
       // Always drop the listener so we don't leak a subscription on a
@@ -15976,7 +15986,7 @@ let isMultimodal = !!(imagePaths?.length);
   }
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, operationName: string): Promise<T> {
-    let timeoutHandle: NodeJS.Timeout | undefined;
+    let timeoutHandle: NodeJS.Timeout;
     const timeoutPromise = new Promise<T>((_, reject) => {
       timeoutHandle = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
     });
@@ -15985,8 +15995,8 @@ let isMultimodal = !!(imagePaths?.length);
     promise.catch(() => { });
 
     return Promise.race([
-      promise.then((result) => {
-        clearTimeout(timeoutHandle);
+      promise.then(result => {
+        clearTimeout(timeoutHandle!);
         return result;
       }),
       timeoutPromise,

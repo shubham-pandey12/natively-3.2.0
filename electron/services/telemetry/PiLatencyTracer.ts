@@ -42,7 +42,6 @@ export type PiMilestone =
   | 'validation_completed'
   | 'validation_failed'
   | 'repair_used'
-  | 'claim_verifier_skipped'
   | 'retry_used'
   | 'degraded_context'
   | 'ui_render_completed'

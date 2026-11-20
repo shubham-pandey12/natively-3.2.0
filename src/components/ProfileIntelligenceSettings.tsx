@@ -2122,19 +2122,8 @@ export function ProfileIntelligenceSettings({
 
     // Profile
     const [profileStatus, setProfileStatus] = useState<{
-        hasProfile: boolean;
-        profileMode: boolean;
-        name?: string;
-        role?: string;
-        totalExperienceYears?: number;
-        resume_structured_extraction_complete?: boolean;
-        resume_profile_facts_ready?: boolean;
-        profileFactsReady?: boolean;
-        jd_structured_extraction_complete?: boolean;
-        jdFactsReady?: boolean;
-        aot_pipeline_running?: boolean;
-        resume_indexing_in_flight?: boolean;
-        jd_indexing_in_flight?: boolean;
+        hasProfile: boolean; profileMode: boolean; name?: string; role?: string;
+        totalExperienceYears?: number; profileFactsReady?: boolean;
         extractionMode?: 'llm' | 'heuristic' | 'none';
     }>({ hasProfile: false, profileMode: false });
     const [profileUploading, setProfileUploading] = useState(false);

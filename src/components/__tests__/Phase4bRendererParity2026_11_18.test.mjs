@@ -11,24 +11,24 @@ import {
   GUIDE_DONE_HOLD_MS,
   GUIDE_STOP_LOCK_MS,
 } from '../../lib/onboarding/firstRunGuide.mjs';
-import { shortcutKeysFor } from '../../lib/onboarding/shortcutKeys.mjs';
+import { guideKeys } from '../../lib/onboarding/guideKeys.mjs';
 import { shouldApplyLiveAnswerDiscard } from '../../lib/chatStreamGuard.mjs';
 
 const read = (rel) => readFileSync(new URL(`../../../${rel}`, import.meta.url), 'utf8');
 
-test('shortcutKeysFor maps guide defaults and custom overrides across macOS and Windows', () => {
-  assert.deepEqual(shortcutKeysFor(null, 'chat:whatToAnswer', 'darwin'), ['⌘', '1']);
-  assert.deepEqual(shortcutKeysFor(null, 'chat:whatToAnswer', 'win32'), ['Ctrl', '1']);
-  assert.deepEqual(shortcutKeysFor(null, 'general:take-screenshot', 'darwin'), ['⌘', 'H']);
-  assert.deepEqual(shortcutKeysFor(null, 'general:take-screenshot', 'win32'), ['Ctrl', 'H']);
-  assert.deepEqual(shortcutKeysFor(null, 'general:selective-screenshot', 'darwin'), ['⌘', '⇧', 'H']);
-  assert.deepEqual(shortcutKeysFor(null, 'general:selective-screenshot', 'win32'), ['Ctrl', 'Shift', 'H']);
+test('guideKeys maps guide defaults and custom overrides across macOS and Windows', () => {
+  assert.deepEqual(guideKeys(null, 'chat:whatToAnswer', 'darwin'), ['⌘', '1']);
+  assert.deepEqual(guideKeys(null, 'chat:whatToAnswer', 'win32'), ['Ctrl', '1']);
+  assert.deepEqual(guideKeys(null, 'general:take-screenshot', 'darwin'), ['⌘', 'H']);
+  assert.deepEqual(guideKeys(null, 'general:take-screenshot', 'win32'), ['Ctrl', 'H']);
+  assert.deepEqual(guideKeys(null, 'general:selective-screenshot', 'darwin'), ['⌘', '⇧', 'H']);
+  assert.deepEqual(guideKeys(null, 'general:selective-screenshot', 'win32'), ['Ctrl', 'Shift', 'H']);
 
   const custom = [{ id: 'chat:whatToAnswer', accelerator: 'CommandOrControl+Alt+K' }];
-  assert.deepEqual(shortcutKeysFor(custom, 'chat:whatToAnswer', 'darwin'), ['⌘', '⌥', 'K']);
-  assert.deepEqual(shortcutKeysFor(custom, 'chat:whatToAnswer', 'win32'), ['Ctrl', 'Alt', 'K']);
-  assert.deepEqual(shortcutKeysFor(custom, 'unknown:id', 'darwin'), []);
-  assert.deepEqual(shortcutKeysFor(custom, 'unknown:id', 'win32'), []);
+  assert.deepEqual(guideKeys(custom, 'chat:whatToAnswer', 'darwin'), ['⌘', '⌥', 'K']);
+  assert.deepEqual(guideKeys(custom, 'chat:whatToAnswer', 'win32'), ['Ctrl', 'Alt', 'K']);
+  assert.deepEqual(guideKeys(custom, 'unknown:id', 'darwin'), []);
+  assert.deepEqual(guideKeys(custom, 'unknown:id', 'win32'), []);
 });
 
 test('firstRunGuide exports step numbers and timing constants', () => {

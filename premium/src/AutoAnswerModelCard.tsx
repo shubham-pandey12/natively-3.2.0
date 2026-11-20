@@ -6,7 +6,7 @@ import { Download, Loader2, Trash2 } from 'lucide-react';
 import { useT } from '../../src/i18n';
 import type { AutoAnswerModelInstall, AutoAnswerModelSavings } from '../../src/types/electron';
 
-type Status = { install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively: boolean };
+type Status = { install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively?: boolean };
 
 const BUTTON = 'shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg bg-bg-input hover:bg-bg-elevated text-text-primary border border-border-subtle transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5';
 

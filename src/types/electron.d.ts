@@ -285,7 +285,6 @@ export interface ElectronAPI {
   setOpenAtLogin: (open: boolean) => Promise<{ success: boolean; error?: string }>
   getOpenAtLogin: () => Promise<boolean>
   onSettingsVisibilityChange: (callback: (isVisible: boolean) => void) => () => void
-  onSettingsWindowShown: (callback: () => void) => () => void
   toggleSettingsWindow: (coords?: { x: number; y: number }) => Promise<void>
   closeSettingsWindow: () => Promise<void>
   closeAdvancedSettings: () => Promise<void>
@@ -541,21 +540,12 @@ export interface ElectronAPI {
   e2eInvoke: (channel: string, ...args: any[]) => Promise<any>
   modesUpdate: (id: string, updates: { name?: string; templateType?: string; customContext?: string; sourceContract?: any }) => Promise<{ success: boolean; error?: string; message?: string }>
   modesGetSourceContract: (modeId: string) => Promise<any>
-  modesBuildUserSourceContract?: (input: {
-    modeId: string;
-    templateType: string;
-    switches: string[];
-    hasLiveTranscriptCapable?: boolean;
-  }) => Promise<any>
-  answerPolicyGet?: (input: { modeId?: string; templateType?: string }) => Promise<any>
-  answerPolicySet?: (input: { modeId?: string; templateType?: string; policy?: string | null }) => Promise<{ success: boolean; error?: string }>
-  onModesActiveCleared?: (callback: () => void) => () => void
   modesDelete: (id: string) => Promise<{ success: boolean; error?: string }>
   modesSetActive: (id: string | null) => Promise<{ success: boolean; error?: string }>
   modesGetReferenceFiles: (modeId: string) => Promise<Array<{ id: string; modeId: string; fileName: string; content: string; createdAt: string }>>
   modesUploadReferenceFile: (modeId: string) => Promise<{ success: boolean; file?: any; cancelled?: boolean; error?: string }>
   modesDeleteReferenceFile: (id: string) => Promise<{ success: boolean; error?: string }>
-  modesGetReferenceFileStatus: (modeId: string) => Promise<{ success: boolean; statuses?: Array<{ fileId: string; fileName: string; status: 'pending' | 'indexing' | 'ready' | 'failed' | 'lexical_only' | 'ocr_required'; chunkCount: number; embeddedChunkCount: number }>; error?: string }>
+  modesGetReferenceFileStatus: (modeId: string) => Promise<{ success: boolean; statuses?: Array<{ fileId: string; fileName: string; status: string; chunkCount: number }>; error?: string }>
   onModeFileIndexStatus: (callback: (data: { modeId: string; fileId: string; phase: 'indexing' | 'done' }) => void) => () => void
   onKnowledgeIndexProgress: (callback: (data: { fileId: string; status: string; startedAt?: number; finishedAt?: number; error?: string }) => void) => () => void
   knowledgeListPacks: (modeId: string) => Promise<{ success: boolean; packs: Array<{ id: string; sourceId: string; fileName: string; cardCount: number; entityCount: number; relationCount: number; packVersion: number; updatedAt: string }>; error?: string }>
@@ -1245,8 +1235,6 @@ export interface ElectronAPI {
     jd_structured_extraction_complete?: boolean
     jdFactsReady?: boolean
     aot_pipeline_running?: boolean
-    resume_indexing_in_flight?: boolean
-    jd_indexing_in_flight?: boolean
     extractionMode?: 'llm' | 'heuristic' | 'none'
   }>
   profileSetMode: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
@@ -1266,44 +1254,6 @@ export interface ElectronAPI {
   profileGetProfile: () => Promise<any>
   profileGetCompanyDossier: () => Promise<any | null>
   profileSelectFile: () => Promise<{ success?: boolean; cancelled?: boolean; filePath?: string; error?: string }>
-
-  // Role Insight — mirrors the preload bridge; report/status shapes stay owned by premium.
-  roleInsightGetStatus: () => Promise<any>;
-  roleInsightGetReport: (analysisId?: string) => Promise<{ success: boolean; report?: any; error?: string }>;
-  roleInsightListHistory: () => Promise<{ success: boolean; history: any[]; error?: string }>;
-  roleInsightAnalyse: (options?: { jobUrl?: string; skipExternalVerification?: boolean }) => Promise<{
-    success: boolean;
-    report?: any;
-    error?: string;
-    cancelled?: boolean;
-    missingSources?: string[];
-    diagnosticId?: string;
-  }>;
-  roleInsightCancel: () => Promise<{ success: boolean; error?: string }>;
-  roleInsightApplyCorrection: (args: {
-    analysisId: string;
-    requirementId?: string | null;
-    kind: string;
-    detail?: string;
-    evidenceText?: string;
-    priority?: string;
-    mandatory?: boolean;
-    evidenceId?: string;
-  }) => Promise<{ success: boolean; report?: any; error?: string }>;
-  roleInsightAnswerClarification: (args: {
-    analysisId: string;
-    requirementId: string;
-    answer: string;
-    detail?: string;
-  }) => Promise<{ success: boolean; report?: any; error?: string }>;
-  roleInsightSaveToProfile: (args: {
-    analysisId: string;
-    requirementId: string;
-    claim: string;
-  }) => Promise<{ success: boolean; error?: string }>;
-  roleInsightPasteJd: (text: string) => Promise<{ success: boolean; error?: string }>;
-  roleInsightImportJdUrl: (url: string) => Promise<{ success: boolean; error?: string; sourceUrl?: string }>;
-  onRoleInsightProgress: (callback: (payload: { stage: string | null; analysing: boolean }) => void) => () => void;
 
   // JD & Research API
   profileUploadJD: (filePath: string) => Promise<{ success: boolean; error?: string }>
@@ -1340,7 +1290,7 @@ export interface ElectronAPI {
   /** A Pro pack ran out during a meeting (main: PackMeetingClock). */
   onPackEnded?: (cb: (data: { reason: string | null }) => void) => () => void
   onPackRenewed?: (cb: () => void) => () => void
-  licenseDeactivate: () => Promise<{ success: boolean }>
+  licenseDeactivate: () => Promise<void>
   licenseGetHardwareId: () => Promise<string>
 
   // Overlay Opacity (Stealth Mode)
@@ -1373,9 +1323,9 @@ export interface ElectronAPI {
   setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
   onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => () => void;
   // The on-device Auto Answer model: paid download (API keys + Pro) and its before/after card.
-  getAutoAnswerModelStatus?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively: boolean }>;
-  installAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively: boolean }>;
-  removeAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively: boolean }>;
+  getAutoAnswerModelStatus?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively?: boolean }>;
+  installAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively?: boolean }>;
+  removeAutoAnswerModel?: () => Promise<{ install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively?: boolean }>;
   onAutoAnswerModelProgress?: (callback: (install: AutoAnswerModelInstall) => void) => () => void;
   getDirectAssistEnabled: () => Promise<boolean>;
   setDirectAssistEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string }>;

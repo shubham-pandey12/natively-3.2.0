@@ -37,9 +37,7 @@ export type ModeTemplateType =
     | 'recruiting'
     | 'team-meet'
     | 'lecture'
-    | 'technical-interview'
-    | 'seminar'
-    | 'call-center';
+    | 'technical-interview';
 
 const VALID_TEMPLATE_TYPES: ReadonlySet<string> = new Set([
     'general',

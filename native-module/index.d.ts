@@ -282,6 +282,13 @@ export interface CapturedKey {
 export declare function deactivateDodoKey(licenseKey: string, instanceId: string): Promise<unknown>
 
 /**
+ * Make the BrowserWindow whose handle is passed in (getNativeWindowHandle())
+ * answer WM_MOUSEACTIVATE with MA_NOACTIVATE. Idempotent. Returns whether the
+ * window is now subclassed.
+ */
+export declare function deliverClicksWithoutActivation(handle: Buffer): boolean
+
+/**
  * The occurrences overlapping [start_ms, end_ms]; null without full access or
  * on another OS. Runs on a worker thread.
  */
@@ -375,34 +382,12 @@ export interface MicUser {
   deviceName?: string
 }
 
-export interface OutputDevicePeak {
-  id: string
-  peak: number
-}
-
-export interface OutputRouteProbe {
-  /** Live output peak (0.0–1.0) of every active render endpoint. */
-  peaks: Array<OutputDevicePeak>
-  /** eConsole default render endpoint. */
-  defaultId: string
-  /** eCommunications default render endpoint — where Teams/Zoom/Discord play. */
-  commsId: string
-}
-
 export interface OverlayBoundsInput {
   x: number
   y: number
   width: number
   height: number
 }
-
-/**
- * Windows: where audio is actually playing right now (see
- * speaker::windows::output_device_peaks) plus both role defaults. Empty
- * elsewhere — macOS has no per-device output meter, and JS treats an empty
- * probe as "no evidence".
- */
-export declare function probeOutputRoutes(): Promise<unknown>
 
 /**
  * The app's windows as flattened accessibility trees; null where this OS has
@@ -470,9 +455,6 @@ export declare function verifyDodoKey(licenseKey: string, deviceLabel: string): 
  * The HTTP call runs on a libuv worker thread to prevent blocking the Node.js event loop.
  */
 export declare function verifyGumroadKey(licenseKey: string): Promise<unknown>
-
-/** Windows no-activate windows still receive pointer clicks. */
-export declare function deliverClicksWithoutActivation(handle: Buffer): boolean
 
 export interface WindowInfo {
   pid: number

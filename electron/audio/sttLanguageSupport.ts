@@ -65,7 +65,6 @@ export function sttCandidateSupportsLanguage(providerId: string, languageKey: st
     // A few languages are verified only on the local Parakeet model; no cloud
     // provider was confirmed for them, so a non-local candidate cannot have them.
     if (PARAKEET_ONLY_LANGUAGE_KEYS.has(key)) return false;
-    if (sttProviderRejectsLanguage(providerId, key)) return false;
 
     // A cloud provider measured to refuse this language (Soniox and Nepali).
     if (sttProviderRejectsLanguage(providerId, key)) return false;
