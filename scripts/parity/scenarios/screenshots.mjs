@@ -37,6 +37,7 @@ export async function run(app) {
     try {
       await prepare();
       await delay(500, undefined, { signal });
+      await dismissPermissionsCard();
       await beforeShot?.();
       const output = path.join(app.runDir, 'screenshots', name);
       await mkdir(output, { recursive: true });
@@ -47,6 +48,22 @@ export async function run(app) {
       captures[name] = 'unavailable';
       skipped[name] = error.message;
     }
+  }
+
+  async function dismissPermissionsCard() {
+    // First-run permission checks can finish after the launcher has rendered.
+    const dismissed = await page.evaluate(() => {
+      const card = document.querySelector('[aria-labelledby="perm-toast-title"]');
+      const button = card?.querySelector('button[aria-label="Dismiss"]');
+      if (!button || !card.getClientRects().length) return false;
+      button.click();
+      return true;
+    });
+    if (!dismissed) return;
+    const closed = await waitFor(() => page.evaluate(() =>
+      !document.querySelector('[aria-labelledby="perm-toast-title"]')?.getClientRects().length),
+    signal, 5_000);
+    if (!closed) throw new Error('First-run Permissions card stayed open');
   }
 
   async function enterLauncher() {
