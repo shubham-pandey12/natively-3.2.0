@@ -222,3 +222,25 @@ f8fc2060 Improve Modes picker structure and keyboard navigation
 2852a6f7 Audit Modes style tables without executing bundle code
 b3cdbc19 Measure Modes and Settings screenshot differences
 ```
+
+## Review and fixes (Claude)
+
+Verified: public product code is now 3,749 of 3,755 files identical to official v3.2.1 and every `src/` file is identical; what remains differs only by the dev premium override (needs `!app.isPackaged` + `NODE_ENV=development` + `NATIVELY_DEV_PREMIUM=1`), a test-safety guard in `pinUserData.ts`, and dev/build tooling.
+
+**Modes Manager: Codex's own picker design replaced with 3.2.1's.** The brief asked for 3.2.1's styles; the pickers had been given new ones, and the template-type and note-template screenshots moved further from 3.2.1 (0.81% → 1.61%, 0.68% → 1.27%). Now, all read from the 3.2.1 renderer bundle:
+- The seven picker style entries (`templateTrigger`, `templateMenu`, `templateOption`, `noteTemplateMenu`, `noteTemplateGroup`, `noteTemplateRow`, `noteTemplateName`) are 3.2.1's values. `style-diff.mjs`: changed=0, only-in-reference=0, only-in-ours=0, unresolved=0.
+- The template trigger clears its inline background (`background: undefined`) so the `.mm-tp-trigger` rules supply it and its hover state, as 3.2.1 does.
+- The 13 `.mm-tp-*` / `.mm-nt-*` stylesheet rules were compared rule by rule with 3.2.1's: identical.
+- Markup: 3.2.1 has no `aria-controls`/`id` link on either picker and no `aria-label` on the template-type listbox (the note-template menu keeps its "Note templates" label, as in 3.2.1). The added ones were removed. The existing test `ModesSettingsParity2026_11_18` failed on the added label and passes again.
+
+**The ~3px offset, found and fixed.** Two values differed from 3.2.1: the prompt box's Save row padding (`12px` → `10px 12px`) and the Answer policy option text (`fontSize 12, lineHeight 1.3, colour` → `fontSize 13`, as 3.2.1).
+
+| Screen | Codex 3c | Now | What remains |
+| --- | ---: | ---: | --- |
+| modes-manager | 1.02% | 0.32% | Random built-in mode order only |
+| modes-template-type | 1.61% | 0.32% | Random built-in mode order only |
+| modes-note-template | 1.27% | 1.08% | Same menu, size and position; scrolled ~3px differently to the selected row |
+| modes-sales | 0.95% | 1.88% | Random mode order puts the selected row elsewhere (varies run to run) |
+| auto-answer-consent | 0.12% | 1.27% | The page behind the dialog (varies run to run); the dialog matches |
+
+Final: typecheck:ts7 0; oxlint clean on ModesSettings.tsx; premium + licence + Modes tests 60/60; harness tests 22/22; `npm run parity` all scenarios MATCH.
