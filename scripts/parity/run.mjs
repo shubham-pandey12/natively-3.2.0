@@ -8,11 +8,12 @@ import * as api from './scenarios/api-surface.mjs';
 import * as licence from './scenarios/licence.mjs';
 import * as modes from './scenarios/modes.mjs';
 import * as settings from './scenarios/settings-defaults.mjs';
+import * as settingsRoundtrip from './scenarios/settings-roundtrip.mjs';
 import * as screenshots from './scenarios/screenshots.mjs';
 import * as consoleErrors from './scenarios/console-errors.mjs';
 import { pageWindow } from './cdp.mjs';
 
-const scenarios = [api, licence, modes, settings, screenshots, consoleErrors];
+const scenarios = [api, licence, modes, settings, settingsRoundtrip, screenshots, consoleErrors];
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runs = path.join(root, '.parity', 'runs');
 

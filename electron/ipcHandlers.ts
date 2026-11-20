@@ -15092,8 +15092,6 @@ export function initializeIpcHandlers(appState: AppState): void {
           CredentialsManager.getInstance().emitStorageStatusDiagnostic('stt_save_failed');
           return { success: false, error: sttPersistError };
         }
-        require('./services/packs/packClockWiring').packSelectionChanged();
-        proWatch.check();
 
         // A Pro pack's Pro follows the AI and speech-to-text (packs/packProRule.ts).
         // Before the rebuild: the provider is saved, so Pro follows it even if
@@ -16748,8 +16746,6 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (!CredentialsManager.getInstance().setFastModel(modelId)) {
       return { success: false, error: 'settings_store_degraded' };
     }
-    require('./services/packs/packClockWiring').packSelectionChanged();
-    proWatch.check();
     return { success: true };
   });
 
@@ -16809,8 +16805,6 @@ export function initializeIpcHandlers(appState: AppState): void {
       const legacyProviders = cm.getCustomProviders() || [];
       const allProviders = [...curlProviders, ...legacyProviders];
       llmHelper.setModel(modelId, allProviders);
-      require('./services/packs/packClockWiring').packSelectionChanged();
-      proWatch.check();
 
       // Warm + pin a newly-selected local Ollama model off the hot path (see
       // set-model / switch-to-ollama). Fire-and-forget; no-ops for non-Ollama.

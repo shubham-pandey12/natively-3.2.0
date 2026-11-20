@@ -285,3 +285,15 @@ The first attempt timed out waiting for the local launcher while other builds we
 - **Requires physical Windows verification** for the updated Rust loopback fallback, actual STT capture and taskbar/installer behavior. The tracked 3.2.0 Windows native binary is preserved, so the harness cannot prove the newly merged Rust behavior.
 - The code-review-graph tools were unavailable. The review used the Git merge index, upstream/fork diffs and targeted source checks.
 - Phase 3a renderer parity does not execute all provider, billing, native, and premium workflows. The retained private licence logging failure and unavailable baseline fixtures limit that comparison.
+
+## Review and fixes (Claude)
+
+Checked: merge parents (713f454d + upstream v3.2.1 61385ae0); `premium/` still a tracked tree, unchanged; `.gitmodules` only lists natively-api; native binary, harness, `.agent`/`.parity` ignores intact. Every "Combined" conflict reviewed: the fork additions in proAccess.ts, proEntitlementWiring.ts and ipcHandlers.ts are the dev premium override, which needs `!app.isPackaged`, `NODE_ENV=development` and `NATIVELY_DEV_PREMIUM=1`, so it cannot reach an installed build.
+
+**Merge regression fixed.** The fork's earlier recovery commit (acbd1f2c) added `packSelectionChanged()` to `services/packs/packClockWiring.ts` and called it from the `set-stt-provider`, `set-fast-model` and `set-default-model` IPC handlers. The merge took upstream's packClockWiring.ts (which has no such function) but kept the calls. `require()` is untyped, so both typechecks passed. Result: saving the fast model threw, and saving the default model or STT provider stored the value but told the UI it failed. Removed the three call pairs; the handlers now match upstream v3.2.1 exactly. A scan of all 1,775 relative `require()` names in electron/ and premium/electron against the target files' exports found no other orphaned call (two hits are upstream code that tolerates the missing name).
+
+**Harness gap closed.** Reads alone could not see this, so a `settings-roundtrip` scenario now saves each of those settings back with its current value and compares the result. Proven both ways: with the merged handlers it reports 8 differences (`packSelectionChanged is not a function`, `success: false`); with the fix, MATCH.
+
+**Licence test failure** (`LicenseNetworkCauseLogged`): 3.2.1's LicenseManager adds `describeProbeError` / `dodoNetworkReason` and uses them in six network-error paths. That is a premium change and is carried into Phase 3b rather than ported piecemeal.
+
+Final: both typechecks exit 0; harness tests 15/15; `npm run parity` all 7 scenarios MATCH (22 expected installed-vs-dev wording differences).
