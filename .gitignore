@@ -273,6 +273,7 @@ scratch_clean2.js
 scratch_extract.js
 scratch_svg.html
 .agent
+/.parity/
 .agents
 .claude
 .codex

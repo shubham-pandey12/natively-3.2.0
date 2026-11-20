@@ -64,6 +64,7 @@ export default defineConfig({
                 // watching a locked file throws EBUSY, which kills the dev
                 // server and with it the agent app.
                 '**/.agent/**',
+                '**/.parity/**',
                 // Browser extension has its own esbuild pipeline
                 // (natively-browser/esbuild.config.mjs) — its .html is NOT a
                 // Vite entry. Without this, Vite auto-discovers
