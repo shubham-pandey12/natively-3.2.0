@@ -59,6 +59,11 @@ export default defineConfig({
                 '**/.code-review-graph/**',
                 '**/dist-electron/**',
                 '**/release/**',
+                // dev:agent keeps Electron's userData under .agent/. On Windows
+                // Electron holds files there (Network/Cookies) locked, and
+                // watching a locked file throws EBUSY, which kills the dev
+                // server and with it the agent app.
+                '**/.agent/**',
                 // Browser extension has its own esbuild pipeline
                 // (natively-browser/esbuild.config.mjs) — its .html is NOT a
                 // Vite entry. Without this, Vite auto-discovers
