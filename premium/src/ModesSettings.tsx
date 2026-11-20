@@ -11,6 +11,7 @@
 import { ThinkingOrb } from 'thinking-orbs';
 import { NOTE_TEMPLATES, NOTE_TEMPLATE_GROUPS, MODE_DEFAULT_NOTE_TEMPLATE_ID } from '../../electron/services/meeting/noteTemplates';
 import { useResolvedTheme } from '../../src/hooks/useResolvedTheme';
+import { UnlockProPlans } from '../../src/components/upgrade/UnlockProPlans';
 import { LiquidGlassButton } from '../../src/ui-components/LiquidGlassButton';
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
@@ -1924,9 +1925,28 @@ function ProGate({ onOpenNativelyAPI, onClose }: {
   onOpenNativelyAPI?: () => void;
   onClose?: () => void;
 }) {
+  const theme = useResolvedTheme();
+  const [showPlans, setShowPlans] = useState(false);
   useEffect(() => {
-    (window as any).electronAPI?.funnelTrack?.('paywall_hit', { feature: 'modes' })?.catch?.(() => {});
+    window.electronAPI?.funnelTrack?.('paywall_hit', { feature: 'modes' })?.catch(() => {});
   }, []);
+
+  if (showPlans) {
+    return (
+      <UnlockProPlans
+        surface="modes_settings"
+        theme={theme === 'light' ? 'light' : 'dark'}
+        onBack={() => setShowPlans(false)}
+        onClose={onClose}
+        onHaveLicense={onOpenNativelyAPI}
+      />
+    );
+  }
+
+  const showUpgrade = () => {
+    window.electronAPI?.funnelTrack?.('upgrade_prompt', { surface: 'modes_settings', action: 'clicked' })?.catch(() => {});
+    setShowPlans(true);
+  };
 
   return (
     <div style={{
@@ -1962,20 +1982,16 @@ function ProGate({ onOpenNativelyAPI, onClose }: {
             </div>
           ))}
         </div>
-        {onOpenNativelyAPI && (
-          <button
-            onClick={onOpenNativelyAPI}
-            className="mm-press"
-            style={{
-              marginTop: 32, padding: '0 28px', height: 44, borderRadius: 22,
-              background: 'var(--mm-active-blue)', border: 'none',
-              color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 8,
-            }}
-          >
-            Unlock Modes
-          </button>
-        )}
+        <p style={{ margin: '20px 0 12px', textAlign: 'center', color: 'var(--mm-text-secondary)' }}>
+          Currently you are restricted to General Mode.<br />
+          Unlock Pro to access 9 expert modes and unlimited custom modes.
+        </p>
+        <div style={{ display: 'flex', gap: 12 }}>
+          {onOpenNativelyAPI && (
+            <LiquidGlassButton variant="clear" onClick={onOpenNativelyAPI}>I have a license</LiquidGlassButton>
+          )}
+          <LiquidGlassButton variant={theme === 'light' ? 'neutral' : 'sky'} onClick={showUpgrade}>Unlock Pro</LiquidGlassButton>
+        </div>
       </div>
     </div>
   );
