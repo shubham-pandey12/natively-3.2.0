@@ -29,7 +29,12 @@ import { app, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { loadNativeModule } from '../../../electron/audio/nativeModuleLoader';
+import { describeProbeError, maskCredentials } from '../../../electron/rag/providers/probeError';
 import { classifyGumroadVerify, classifyProVerify } from './licenseVerifyPolicy';
+
+const DODO_NETWORK_PREFIX = 'ERR:dodo:network:';
+const dodoNetworkReason = (result: string): string =>
+    maskCredentials(result.slice(DODO_NETWORK_PREFIX.length)).slice(0, 200);
 
 // Load via the shared path-based loader (bypasses require('natively-audio') which requires an npm symlink)
 const _nativeMod = loadNativeModule();
@@ -101,7 +106,7 @@ async function gumroadStanding(key: string): Promise<{ verdict: 'active' | 'revo
             } catch {
                 data = null;
             }
-        } catch { return { verdict: 'keep', why: 'network error' }; }
+        } catch (error) { return { verdict: 'keep', why: `network error: ${describeProbeError(error)}` }; }
         const { decision, why } = classifyGumroadVerify(status, data);
         if (decision === 'active') return { verdict: 'active', why };
         if (decision === 'keep') return { verdict: 'keep', why };
@@ -355,12 +360,12 @@ export class LicenseManager {
                 }
 
                 // Network error — fall through to Gumroad, don't reject yet
-                const isDodoNetworkErr = dodoResult.startsWith('ERR:dodo:network:');
+                const isDodoNetworkErr = dodoResult.startsWith(DODO_NETWORK_PREFIX);
                 if (!isDodoNetworkErr) {
                     // Dodo gave a definitive non-network rejection — key might be a Gumroad key
                     console.log('[LicenseManager] Dodo rejected key (non-network) — trying Gumroad fallback...');
                 } else {
-                    console.log('[LicenseManager] Dodo network error — trying Gumroad fallback...');
+                    console.log(`[LicenseManager] Dodo network error (${dodoNetworkReason(dodoResult)}) — trying Gumroad fallback...`);
                 }
             }
 
@@ -509,7 +514,7 @@ export class LicenseManager {
             // path — it answers offline and skips a pointless round trip.
             return await this.storeLicense(apiKey, 'natively_api', undefined, data.plan);
         } catch (e: any) {
-            console.error('[LicenseManager] activateWithApiKey network error:', e?.message ?? e);
+            console.error('[LicenseManager] activateWithApiKey network error:', describeProbeError(e));
             return { success: false, error: 'Could not reach server. Please try again.' };
         }
     }
@@ -888,8 +893,8 @@ export class LicenseManager {
             }
             if (result === 'OK') return valid();
             if (result === 'REVOKED') return hold('Dodo: not valid');
-            if (result.startsWith('ERR:dodo:network:')) {
-                console.log('[LicenseManager] Dodo validate: network error — fail-open.');
+            if (result.startsWith(DODO_NETWORK_PREFIX)) {
+                console.log(`[LicenseManager] Dodo validate: network error (${dodoNetworkReason(result)}) — fail-open.`);
                 return unanswered();
             }
             console.warn('[LicenseManager] Dodo validate unexpected result — fail-open:', result);
@@ -909,8 +914,8 @@ export class LicenseManager {
                 } catch {
                     data = null;
                 }
-            } catch {
-                console.log('[LicenseManager] natively_api verify: network error — fail-open.');
+            } catch (error) {
+                console.log(`[LicenseManager] natively_api verify: network error (${describeProbeError(error)}) — fail-open.`);
                 return unanswered();
             }
             const decision = classifyProVerify(status, data);
@@ -1007,11 +1012,10 @@ export class LicenseManager {
                 const result = await deactivateDodoKeyNative(license.key, license.instanceId);
                 if (result === 'OK') {
                     console.log('[LicenseManager] Dodo activation slot freed on server.');
-                } else if (result.startsWith('ERR:dodo:network:')) {
+                } else if (result.startsWith(DODO_NETWORK_PREFIX)) {
                     // Network failure — still remove locally (non-fatal)
                     console.warn(
-                        '[LicenseManager] Dodo deactivate: network error (removing local file anyway).' +
-                        ' Activation slot may persist on server until next sweep.'
+                        `[LicenseManager] Dodo deactivate: network error (${dodoNetworkReason(result)}); removing local file anyway. Activation slot may persist on server until next sweep.`
                     );
                 } else {
                     console.warn('[LicenseManager] Dodo deactivate server error:', result);
