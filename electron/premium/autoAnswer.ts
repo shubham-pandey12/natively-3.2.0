@@ -89,6 +89,7 @@ export interface AutoAnswerEngine {
     onEngineIdle(): void;
     onProviderEndpoint(): void;
     onLocalSpeechEnd(): void;
+    /** A stop from a provider whose final follows it (REST, local): a hint for that final, not an endpoint (F-LAT-07). */
     onLocalSpeechEndBeforeFinal(): void;
     onLocalSpeechStart(): void;
     onManualAnswerStarted(): void;

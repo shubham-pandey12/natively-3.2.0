@@ -228,17 +228,18 @@ export function resolveLiveAnswerBatch(activeId, incomingId) {
 }
 
 /**
- * Decide whether a live-answer discard event should drop the currently open
- * `what_to_answer` scaffold row (3.2.0 `Eh`).
+ * Whether a "discard the open What-to-Answer row" message applies. The overlay
+ * clears that row by intent, so a discard from an OLDER generation than the one
+ * now painting would wipe the newer answer (pipeline forensics 2026-11-13,
+ * F-CTX-09). Id-less discards (older emitters) keep applying.
  *
- * @param {number|null|undefined} activeId
- * @param {number|null|undefined} incomingId
+ * @param {number | null | undefined} activeId generation the overlay is showing
+ * @param {number | null | undefined} incomingId generation the discard belongs to
  * @returns {boolean}
  */
-export function shouldHonorLiveAnswerDiscard(activeId, incomingId) {
-  return typeof incomingId !== 'number' || typeof activeId !== 'number'
-    ? true
-    : incomingId >= activeId;
+export function shouldApplyLiveAnswerDiscard(activeId, incomingId) {
+  if (typeof incomingId !== 'number' || typeof activeId !== 'number') return true;
+  return incomingId >= activeId;
 }
 
 /**

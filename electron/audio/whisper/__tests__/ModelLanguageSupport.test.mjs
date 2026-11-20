@@ -58,7 +58,8 @@ const OFFICIAL_WHISPER_NAMES = new Set([
   'hebrew', 'malay', 'finnish',
   'croatian', 'estonian', 'latvian', 'lithuanian', 'maltese', 'slovak', 'slovenian',
   // openai/whisper tokenizer.py: mr, ta, te, bn, gu, kn, ml, pa, ur (2026-10-16).
-  'marathi', 'tamil', 'telugu', 'bengali', 'gujarati', 'kannada', 'malayalam', 'punjabi', 'urdu', 'nepali',
+  'marathi', 'tamil', 'telugu', 'bengali', 'gujarati', 'kannada', 'malayalam', 'punjabi', 'urdu',
+  'nepali',
 ]);
 
 test('every catalog model has a language-support entry with keys drawn from RECOGNITION_LANGUAGES', () => {
@@ -147,13 +148,15 @@ test('Parakeet TDT allows exactly the 25 European languages it supports plus aut
   assert.equal(s.allowedLanguageKeys.includes('hindi'), false);
 });
 
-test('Nemotron allows exactly the keys that resolve through the transcription-ready locale table — no auto', () => {
+test('Nemotron allows Auto Detect plus exactly the keys that resolve through the transcription-ready locale table', () => {
   const s = getLocalModelLanguageSupport(NEMOTRON_ID);
   assert.equal(s.languageSelectable, true);
   assert.equal(s.accentSelectable, true, 'Nemotron is the only local model with regional-variant conditioning');
-  assert.ok(!s.allowedLanguageKeys.includes('auto'), 'Nemotron has no auto-detect mode');
+  // 2026-11-18: Auto Detect is the model's own Auto prompt (lang_id 101), not English.
+  assert.ok(s.allowedLanguageKeys.includes('auto'), 'Nemotron offers Auto Detect');
 
   const expected = [
+    'auto',
     // English variants: en-US/en-GB are table entries; en-IN/en-AU/en-CA route
     // to en-US via the documented inference in languageTable.ts.
     'english-us', 'english-uk', 'english-in', 'english-au', 'english-ca',
@@ -167,7 +170,7 @@ test('Nemotron allows exactly the keys that resolve through the transcription-re
   // Sanity anchor against the verified table itself: every non-English
   // allowed key's BCP-47 locale (or its alias) must exist in the table.
   for (const key of s.allowedLanguageKeys) {
-    if (key.startsWith('english-')) continue;
+    if (key === 'auto' || key.startsWith('english-')) continue;
     const bcp47 = RECOGNITION_LANGUAGES[key].bcp47;
     const aliased = bcp47 === 'ar-SA' ? 'ar-AR' : bcp47;
     assert.ok(

@@ -15,6 +15,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import DiagnosticReportActions from './DiagnosticReportActions';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useT } from '../../i18n';
 import { motion, AnimatePresence, LayoutGroup, useReducedMotion } from 'framer-motion';
@@ -29,8 +30,11 @@ import { trialRefusal } from '../../lib/trial/trialStart.mjs';
 import { CHECKOUT_URLS } from '../../config/urls';
 import { KeyResendHelp, KeyResendLink } from './KeyResendHelp';
 import { BillingCycleSwitch, PLANS_VIEWS, type PlansView } from '../ui/BillingCycleSwitch';
+import { StaticPrice } from '../ui/StaticPrice';
 import './apiTier.css';
 import { plansVisit } from '../../lib/funnel/plansVisit.mjs';
+import { withUpgradeLink, isCheckoutUrl, planChangeNote, carryLine, isYearlyLocked, heldPackNote, canUpgradeYearlyTo, formatCharge } from '../../lib/planChangeCopy.mjs';
+import type { NativelyPackKeyState } from '../../types/nativelyUsage';
 import { usePlansSeen } from '../../lib/funnel/usePlansSeen';
 import {
   apiPlanLabel, endedPackFromRefusal, formatMeetingTime, isPackPlan, packStatus, PRO_PACKS, YEARLY_MONTHS_FREE,
@@ -57,6 +61,8 @@ interface UsageData {
   billing_period?: NativelyUsageResponse['billing_period'];
   /** A Pro pack's hours and use-by date; null on every other plan. */
   pack?: NativelyUsageResponse['pack'];
+  /** Credit a plan change carried over (already in `limits`); null or absent when none. */
+  carry?: NativelyUsageResponse['carry'];
 }
 
 // Checkout links live in src/config/urls.ts, monthly and yearly side by side.
@@ -318,6 +324,12 @@ export function TierBand({ mesh, pattern, name, badge }: { mesh: TierMesh; patte
 // parked between digits.
 const PRICE_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 const PRICE_ROLL_EASE = 'cubic-bezier(0.23, 1, 0.32, 1)';
+/** A yearly price label as its monthly share, "$150" -> "$12.50". Null for a
+ *  label it cannot read, so the card falls back to "$150 / year". */
+function perMonthOfYearly(label: string): string | null {
+  const m = /^\$(\d+(?:\.\d+)?)$/.exec(label);
+  return m ? `$${(Number(m[1]) / 12).toFixed(2)}` : null;
+}
 const reelDollars = (label: string): number | null => {
   const m = /^\$(\d{1,3})$/.exec(label);
   return m ? Number(m[1]) : null;
@@ -332,7 +344,8 @@ function RollingPrice({ price, from }: { price: string; from: string }) {
     return () => cancelAnimationFrame(id);
   }, [value]);
 
-  if (value === null || shown === null) return <>{price}</>;
+  // A price the reels cannot show ("$12.50") keeps the reels' line height.
+  if (value === null || shown === null) return <StaticPrice price={price} />;
   const hundreds = Math.floor(shown / 100);
   const tens = Math.floor(shown / 10) % 10;
   const reel = (digit: number, delayMs: number) => (
@@ -787,6 +800,8 @@ function trialMeter(used: number, limit: number, unit: UsageMeter['unit']): Usag
 // keyboard focus inside it. It also skips turns nobody can see (window
 // hidden) and never moves under reduced motion.
 const RAIL_STEP_MS = 3500;
+/** How long each yearly price face ("/ month", "/ year") stays up. */
+const YEARLY_FACE_MS = 3000;
 const RAIL_RESUME_AFTER_MS = 6000;
 
 function PlanRail({ children }: { children: React.ReactNode }) {
@@ -927,14 +942,15 @@ const DISSOLVE = {
 // Two one-time buys beside the subscriptions, drawn as small website tiers
 // like the plan card above: Light on the Max band, Heavy on the Ultra band.
 // The allowance is the product, so it gets the two rows; the rule that makes
-// a pack a pack (hours OR days, whichever first; any live meeting counts, even
-// on your own keys) is said once, under both.
+// a pack a pack (hours OR days, whichever first; Pro only while the AI and
+// transcription both run on Natively API, 2026-11-16) is said once, under both.
+// The Pro rule: electron/services/packs/packProRule.ts.
 const PACK_LOOK: Record<string, { mesh: TierMesh; pattern: TierPattern; blurb: string }> = {
   pack_light: { mesh: 'max', pattern: 'dots', blurb: 'For an interview or two: a few hours of Pro, paid once.' },
-  pack_heavy: { mesh: 'ultra', pattern: 'grid', blurb: 'For two busy weeks of meetings, with no plan to cancel.' },
+  pack_heavy: { mesh: 'ultra', pattern: 'grid', blurb: 'For a busy week of meetings, with no plan to cancel.' },
 };
 
-function ProPacks({ currentPlan, onBuy, arrive }: { currentPlan?: string; onBuy: (url: string) => void; arrive: (i: number) => object }) {
+function ProPacks({ currentPlan, onBuy, arrive, changeNote }: { currentPlan?: string; onBuy: (url: string) => void; arrive: (i: number) => object; changeNote?: string | null }) {
   const urls: Record<string, string> = { pack_light: CHECKOUT_URLS.packLight, pack_heavy: CHECKOUT_URLS.packHeavy };
   const current = currentPlan?.toLowerCase();
   // Funnel (plans_visit): the packs were on screen during this visit.
@@ -979,9 +995,14 @@ function ProPacks({ currentPlan, onBuy, arrive }: { currentPlan?: string; onBuy:
         })}
       </div>
       <p className="text-[11px] text-text-tertiary px-1 mt-2 leading-snug">
-        Pay once, nothing renews. A pack ends when its hours or its days run out, whichever comes first. Every live meeting counts toward
-        the hours, even on your own AI keys. Buying another pack adds more hours.
+        Pay once, nothing renews. A pack ends when its hours or days run out. More packs add hours.
       </p>
+      <p data-pack-provider-rule className="text-[11px] text-text-tertiary px-1 leading-snug">
+        Pro works only while AI and transcription both use Natively API. Switch either to another provider and Pro turns off;
+        the pack still covers the part on Natively API.
+      </p>
+      {/* What buying a pack does to THIS key (natively-api lib/planChange.js). */}
+      {changeNote && <p data-plan-change-note className="text-[11px] text-text-tertiary px-1 leading-snug">{changeNote}</p>}
     </div>
   );
 }
@@ -1083,10 +1104,22 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
   // (server unwell). The main process keeps retrying; this just says so, instead
   // of showing a plan card with no Pro and no explanation (support, 2026-09-22).
   const [proNotice, setProNotice] = useState<string | null>(null);
+  // The connection check found something it could not fix: offer the opt-in report.
+  const [diagOffer, setDiagOffer] = useState(false);
   // The retry succeeded in the background — the notice has done its job.
   useEffect(() => {
-    const off = window.electronAPI?.onLicenseStatusChanged?.((d) => { if (d?.isPremium) setProNotice(null); });
-    return () => { off?.(); };
+    const off = window.electronAPI?.onLicenseStatusChanged?.((d) => { if (d?.isPremium) { setProNotice(null); setDiagOffer(false); } });
+    // The connection check (main/connectivityWatcher) found why Natively could not
+    // be reached: say it in the same place, in plain words. A healed connection
+    // needs no notice; Pro turns on by itself.
+    // A finding that arrived while this panel was closed.
+    void window.electronAPI?.getLastConnectionNotice?.().then((d) => {
+      if (d && !d.healed && d.verdict !== 'reachable') { setProNotice((cur) => cur ?? d.message); setDiagOffer(true); }
+    }).catch(() => {});
+    const offDiag = window.electronAPI?.onConnectDiagnosis?.((d) => {
+      if (d && !d.healed && d.verdict !== 'reachable') { setProNotice(d.message); setDiagOffer(true); }
+    });
+    return () => { off?.(); offDiag?.(); };
   }, []);
   const [justSaved, setJustSaved] = useState(false);
   // Distinct from justSaved: a Dodo/Gumroad license key activates Pro but
@@ -1115,6 +1148,18 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
   useEffect(() => {
     if (keyBillingPeriod === 'yearly') setBillingCycle('yearly');
   }, [keyBillingPeriod]);
+  // Yearly prices take turns, all four cards together: "$20.83 / month",
+  // then "$250 / year" (Evin, 2026-11-16). Each turn starts on the monthly
+  // share; it waits while the window is hidden.
+  const [yearlyFace, setYearlyFace] = useState<'month' | 'year'>('month');
+  useEffect(() => {
+    setYearlyFace('month');
+    if (billingCycle !== 'yearly') return;
+    const id = window.setInterval(() => {
+      if (!document.hidden) setYearlyFace((f) => (f === 'month' ? 'year' : 'month'));
+    }, YEARLY_FACE_MS);
+    return () => window.clearInterval(id);
+  }, [billingCycle]);
   // Funnel (plans_visit): the switch's value, and again at each visit's start
   // so a visit knows what it opened on. Only a press on the switch counts as
   // a switch (onChange below); the move to Yearly for a yearly key does not.
@@ -1264,7 +1309,8 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
     const { force = false, silent = false } = opts;
     if (!silent) setIsLoadingUsage(true);
     try {
-      const r = await window.electronAPI.getNativelyUsage(force);
+      // The SAVED key's plan: a pack standing in for it has its own row.
+      const r = await window.electronAPI.getNativelyUsage(force, 'main');
       // Normalized at the boundary, once, so every component below reads one
       // shape — including when the server is a build older than this one.
       const quota = r.ok ? normalizeQuota(r.quota) : null;
@@ -1525,6 +1571,31 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
   // API key misrouted to licenseActivate reproduces a known half-activation
   // bug (Pro on, no credentials stored, no usage tracking), which is worse
   // than a license key misrouted the other way.
+  // A pack key held beside the saved monthly/yearly key (2026-11-17): its own
+  // row under the saved key's, and its own usage read. Main process decides
+  // when it is in use (services/packs/nativelyPackFallback.ts).
+  const [heldPack, setHeldPack] = useState<{ state: NativelyPackKeyState; usage: any } | null>(null);
+  const fetchHeldPack = useCallback(async (force = false) => {
+    const api = window.electronAPI;
+    if (!api?.getNativelyPackKey) return;
+    const state = await api.getNativelyPackKey().catch(() => null);
+    if (!state?.held) { setHeldPack(null); return; }
+    const usage = await api.getNativelyUsage(force, 'pack').catch(() => null);
+    setHeldPack({ state, usage });
+  }, []);
+  useEffect(() => {
+    void fetchHeldPack();
+    const off = window.electronAPI?.onNativelyPackFallbackChanged?.(() => {
+      void fetchHeldPack(true);
+      void fetchUsage({ force: true, silent: true });
+    });
+    return () => { off?.(); };
+  }, [fetchHeldPack, fetchUsage]);
+  const removeHeldPack = async () => {
+    const r = await window.electronAPI?.removeNativelyPackKey?.().catch(() => null);
+    if (r?.ok) setHeldPack(null);
+  };
+
   const handleSave = async () => {
     const trimmed = apiKey.trim();
     if (!trimmed || apiKey.includes('•')) return;
@@ -1545,6 +1616,9 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
         setIsSaved(true);
         setJustSaved(true);
         setTimeout(() => setJustSaved(false), 2500);
+        // A pack key held beside the plan's key (or a plan key that now holds
+        // the pack): the row under the key shows it.
+        void fetchHeldPack(true);
         // NOTE: do NOT also call setDefaultModel('natively') / setSttProvider('natively')
         // here. The main-process `set-natively-api-key` handler already auto-promotes
         // both the default model and the STT provider server-side (see
@@ -1637,6 +1711,14 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
     setUsageCache(null);
     try {
       await window.electronAPI.setNativelyApiKey('');
+      // A held pack key becomes the saved key when the plan's key is removed
+      // (set-natively-api-key does it): show it as saved, not as no key.
+      if (heldPack?.state.held) {
+        setHeldPack(null);
+        setApiKey('•'.repeat(24));
+        setIsSaved(true);
+        void fetchUsage({ force: true });
+      }
     } catch (e: any) {
       // The entrance/exit are declarative on `isSaved`, so the rollback animates
       // back in on the same curves without any extra work.
@@ -1648,10 +1730,57 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
     }
   };
 
-  const openExternal = (url: string) => {
-    plansVisit.opened(url); // plans_visit counts it when it is a checkout link
-    (window.electronAPI as any)?.openExternal?.(url, { surface: 'api_settings' });
+  // Set when a checkout was opened from here: the next time this window gets
+  // focus back the plan is re-read, so a finished purchase shows at once (the
+  // key does not change, so nothing else would prompt a refresh).
+  const checkoutOpenedRef = useRef(false);
+  // Set while a checkout link is being signed (up to 2.5 s). A second click in
+  // that time is ignored: two checkout tabs paid twice are two charges.
+  const checkoutPendingRef = useRef(false);
+  // A yearly plan moving up a yearly tier in place: first click asks what it
+  // costs (nothing charged), second click pays exactly that.
+  const [yearlyUp, setYearlyUp] = useState<{ plan: string; amount?: number; currency?: string; busy?: boolean; done?: boolean; error?: string } | null>(null);
+  const yearlyUpgrade = async (planId: string) => {
+    const api = window.electronAPI?.nativelyYearlyUpgrade;
+    if (!api || yearlyUp?.busy) return;
+    const confirming = yearlyUp?.plan === planId && typeof yearlyUp.amount === 'number' && !yearlyUp.error;
+    setYearlyUp({ ...(yearlyUp?.plan === planId ? yearlyUp : {}), plan: planId, busy: true, error: undefined });
+    const r = await api(planId, confirming ? yearlyUp!.amount : undefined).catch(() => ({ ok: false, error: 'network_error' } as const));
+    const preview = 'preview' in r ? r.preview : null;
+    if (r.ok && 'changed' in r && r.changed) {
+      setYearlyUp({ plan: planId, done: true });
+      // The key moves when Dodo's plan_changed webhook reaches the server.
+      setTimeout(() => { void fetchUsage({ force: true, silent: true }); }, 4_000);
+      return;
+    }
+    if (r.ok && preview) { setYearlyUp({ plan: planId, amount: preview.amount, currency: preview.currency }); return; }
+    // amount_changed answers the new amount: show it, ask again.
+    setYearlyUp({ plan: planId, amount: preview?.amount, currency: preview?.currency, error: r.error || 'failed' });
   };
+  const openExternal = (url: string, family: 'pack' | 'plan' = 'plan') => {
+    const open = (target: string) => (window.electronAPI as any)?.openExternal?.(target, { surface: 'api_settings' });
+    if (!isCheckoutUrl(url) || !isSaved || !window.electronAPI?.getNativelyUpgradeLink) { plansVisit.opened(url); open(url); return; }
+    if (checkoutPendingRef.current) return;
+    checkoutPendingRef.current = true;
+    plansVisit.opened(url); // plans_visit counts it when it is a checkout link
+    checkoutOpenedRef.current = true;
+    // The signed token puts the purchase on THIS key even with another email.
+    // Any failure (offline, older server) opens the plain link; the server then
+    // matches the purchase by email.
+    window.electronAPI.getNativelyUpgradeLink(family)
+      .then((link) => open(withUpgradeLink(url, link)))
+      .catch(() => open(url))
+      .finally(() => { checkoutPendingRef.current = false; });
+  };
+  useEffect(() => {
+    const onFocus = () => {
+      if (!checkoutOpenedRef.current) return;
+      checkoutOpenedRef.current = false;
+      void fetchUsage({ force: true, silent: true });
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [fetchUsage]);
 
   const isDirty = apiKey.length > 0 && !apiKey.includes('•') && !isSaved;
   // "Pro", "Light pack" (pack_light), and "Pro · yearly" for a yearly key.
@@ -1751,7 +1880,7 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
       <AnimatePresence mode="popLayout" initial={false}>
       {packsView ? (
         <motion.div key="packs" exit={prefersReducedMotion ? { opacity: 0, transition: { duration: 0.15 } } : DISSOLVE.leave}>
-          <ProPacks currentPlan={usageData?.plan} onBuy={openExternal} arrive={arrive} />
+          <ProPacks currentPlan={usageData?.plan} onBuy={(url: string) => openExternal(url, 'pack')} arrive={arrive} changeNote={isSaved && usageData ? planChangeNote(usageData, 'packs') : null} />
         </motion.div>
       ) : (
       <motion.div key="plans" className="space-y-3" exit={prefersReducedMotion ? { opacity: 0, transition: { duration: 0.15 } } : DISSOLVE.leave}>
@@ -1764,6 +1893,7 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
         {PLANS.map((plan) => {
           const yearly = billingCycle === 'yearly';
           const price = yearly ? plan.yearlyPrice : plan.price;
+          const yearlyPerMonth = yearly ? perMonthOfYearly(plan.yearlyPrice) : null;
           // A verified-live Dodo link (all four checked 2026-09-08); changing
           // one is an app release. Yearly links are the 2026-11-06 products
           // (src/config/urls.ts).
@@ -1799,18 +1929,72 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
               />
               <div className="api-tier-well">
                 <p className="api-tier-blurb">{plan.description}</p>
-                <p className="api-tier-price">
-                  <span className="api-tier-amount">
-                    <RollingPrice price={price} from={price} />
-                  </span>
-                  <span className="api-tier-per">{yearly ? '/ year' : '/ month'}</span>
-                </p>
-                {/* "/ month" already says it; only Yearly has news to add. */}
-                {yearly && (
-                  <p className="api-tier-save" data-on="true">{`${YEARLY_MONTHS_FREE} months free`}</p>
+                {/* Yearly: "$12.50 / month" and "$150 / year" take turns in
+                    one cell (yearlyFace), so the price card keeps the packs'
+                    exact layout and height (Evin, 2026-11-16). The faces
+                    swap like the section title: 4px rise, 2px blur clearing;
+                    reduced motion keeps only the fade. */}
+                {yearlyPerMonth ? (
+                  <p className="api-tier-price" style={{ display: 'grid', position: 'relative' }}>
+                    <span className="sr-only">{`${yearlyPerMonth} a month, billed ${plan.yearlyPrice} a year, ${YEARLY_MONTHS_FREE} months free`}</span>
+                    {([['month', yearlyPerMonth, '/ month'], ['year', plan.yearlyPrice, '/ year']] as const).map(([face, amount, per]) => {
+                      const on = yearlyFace === face;
+                      return (
+                        <span
+                          key={face}
+                          aria-hidden="true"
+                          data-face={face}
+                          className="col-start-1 row-start-1 flex items-baseline gap-1 min-w-0"
+                          style={{
+                            opacity: on ? 1 : 0,
+                            transform: on || prefersReducedMotion ? 'none' : 'translateY(4px)',
+                            filter: on || prefersReducedMotion ? 'none' : 'blur(2px)',
+                            transition: `opacity ${on ? 250 : 150}ms ease-in-out, transform ${on ? 250 : 150}ms ease-in-out, filter ${on ? 250 : 150}ms ease-in-out`,
+                          }}
+                        >
+                          <span className="api-tier-amount"><StaticPrice price={amount} /></span>
+                          <span className="api-tier-per">{per}</span>
+                        </span>
+                      );
+                    })}
+                    {/* Stays put while the two faces swap under it. */}
+                    <span className="api-tier-yearly-save" aria-hidden="true">{`${YEARLY_MONTHS_FREE} months free`}</span>
+                  </p>
+                ) : (
+                  <p className="api-tier-price">
+                    <span className="api-tier-amount">
+                      <RollingPrice price={price} from={price} />
+                    </span>
+                    <span className="api-tier-per">{yearly ? '/ year' : '/ month'}</span>
+                  </p>
                 )}
                 {isActive ? (
                   <div className="api-tier-cta" data-state="active">Your current plan</div>
+                ) : isSaved && canUpgradeYearlyTo(usageData, plan.planKey, billingCycle) ? (
+                  // Up a yearly tier on the same subscription: the first press
+                  // shows the charge (nothing billed), the second pays it.
+                  <button
+                    type="button"
+                    className="api-tier-cta"
+                    data-yearly-upgrade={plan.planKey}
+                    disabled={yearlyUp?.plan === plan.planKey && (yearlyUp.busy || yearlyUp.done)}
+                    onClick={() => { void yearlyUpgrade(plan.planKey); }}
+                  >
+                    {(() => {
+                      const s = yearlyUp?.plan === plan.planKey ? yearlyUp : null;
+                      if (s?.done) return 'Upgrading…';
+                      if (s?.busy) return '…';
+                      if (s && typeof s.amount === 'number' && s.currency) {
+                        return s.error === 'amount_changed' ? `Now ${formatCharge(s.amount, s.currency)} · Pay` : `Pay ${formatCharge(s.amount, s.currency)} now`;
+                      }
+                      if (s?.error) return 'Try again';
+                      return `Upgrade to ${plan.name}`;
+                    })()}
+                  </button>
+                ) : isSaved && isYearlyLocked(usageData) ? (
+                  // A yearly plan is not changed before its year is up (the
+                  // note under the row says how to move).
+                  <div className="api-tier-cta" data-state="locked">When your year ends</div>
                 ) : (
                   <button
                     type="button"
@@ -1852,6 +2036,12 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
         month{billingCycle === 'yearly' ? ', even when billed yearly' : ''}. Pro, Max and Ultra include Natively Pro.
         Cancel anytime.
       </p>
+      {/* What changing plan does to THIS key (natively-api lib/planChange.js). */}
+      {isSaved && usageData && (
+        <p data-plan-change-note className="text-[11px] text-text-tertiary px-1 leading-snug">
+          {planChangeNote(usageData, 'plans', billingCycle)}
+        </p>
+      )}
       </motion.div>
       )}
       </AnimatePresence>
@@ -2099,6 +2289,36 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
               </div>
           </div>
         )}
+        {/* The pack key held beside the plan's key: the same row, its own
+            label and Remove, and one line on when it is used. */}
+        {!isLoading && isSaved && heldPack?.state.held && (() => {
+          const usage = heldPack.usage;
+          const status = usage?.ok ? packStatus(usage.pack) : null;
+          const ended = !usage?.ok || !!status?.ended;
+          const name = (usage?.ok && apiPlanLabel(usage.plan)) || 'Pack';
+          const label = ended
+            ? `${name} ended`
+            : status?.secondsLeft != null ? `${name} · ${formatMeetingTime(status.secondsLeft)} left` : name;
+          const note = ended ? null : heldPackNote(heldPack.state, { formatDate: fmtDate });
+          return (
+            <div data-held-pack className="px-1 mb-2 -mt-1">
+              <div className="flex items-center justify-end gap-3">
+                <span className={`flex items-center gap-1.5 text-[11px] font-medium ${ended ? 'text-amber-500' : heldPack.state.inUse ? 'text-emerald-500' : 'text-text-secondary'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${ended ? 'bg-amber-500' : heldPack.state.inUse ? 'bg-emerald-500' : 'bg-text-tertiary'}`} />
+                  {label}
+                </span>
+                <button
+                  onClick={removeHeldPack}
+                  className="flex items-center gap-1 text-[11px] text-text-tertiary hover:text-[var(--text-danger)] transition-colors duration-150 cursor-pointer motion-reduce:transition-none"
+                >
+                  <Trash2 size={11} strokeWidth={2} />
+                  Remove
+                </button>
+              </div>
+              {note && <p className="text-[11px] text-text-tertiary leading-snug text-right mt-0.5">{note}</p>}
+            </div>
+          );
+        })()}
 
         {/* `natively-key-card` gives the flat box the same MATERIAL as the
             rest of this tab — layered fill, specular top hairline, raised
@@ -2196,6 +2416,7 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
                 {proNotice}
               </motion.div>
             )}
+            {!error && proNotice && diagOffer && <DiagnosticReportActions />}
 
             {/* Save / Activate button. The disabled state used to be a
                 full-width saturated slab (`bg-legacy-action-disabled-bg`),
@@ -2401,6 +2622,11 @@ export const NativelyApiSettings: React.FC<NativelyApiSettingsProps> = ({ initia
               <ResourceMeter label="Research" icon={Search} meter={usageData.quota.research} percentOnly />
             </div>
           </Card>
+          {/* Credit a plan change carried over, already inside the meters above. */}
+          {(() => {
+            const line = carryLine(usageData.carry, { formatNumber: formatCompact, formatDate: fmtDate });
+            return line ? <p data-carry-line className="text-[11px] text-text-tertiary px-1 mt-2 leading-snug">{line}</p> : null;
+          })()}
         </motion.div>
       )}
       </AnimatePresence>

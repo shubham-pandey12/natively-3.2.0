@@ -200,25 +200,6 @@ export const USER_ENDPOINT_LATENCY_MARGIN_MS = 5000;
  */
 export const USER_ENDPOINT_MIN_SAMPLES_TO_NARROW = 5;
 
-/**
- * Lone-provider hedge (3.2.0, F-LAT-03). With no spare rung, the parallel
- * second call is the turn's only failover, so it fires at a first-useful
- * point: 4 s while the endpoint is unmeasured, otherwise just above its
- * slowest observed first token, never below 2.5 s and never past 85% of the
- * budget.
- */
-export const LONE_PROVIDER_UNMEASURED_HEDGE_MS = 4_000;
-export const LONE_PROVIDER_MIN_HEDGE_MS = 2_500;
-export const LONE_PROVIDER_HEDGE_MARGIN_MS = 1_500;
-
-export function loneProviderHedgeDelayMs(budgetMs: number, observed?: ObservedLatency | null): number {
-  const ceil = Math.round(budgetMs * 0.85);
-  if (!observed || observed.count <= 0 || !Number.isFinite(observed.maxMs)) {
-    return Math.min(ceil, LONE_PROVIDER_UNMEASURED_HEDGE_MS);
-  }
-  return Math.min(ceil, Math.max(LONE_PROVIDER_MIN_HEDGE_MS, Math.round(observed.maxMs) + LONE_PROVIDER_HEDGE_MARGIN_MS));
-}
-
 /** What the caller has actually measured from one endpoint this session. */
 export interface ObservedLatency {
   /** Slowest first token seen, decayed — see LLMHelper.recordAnswerFirstToken. */
@@ -262,6 +243,34 @@ export function userEndpointBudgetMs(observed?: ObservedLatency | null): number 
     return LIVE_USER_ENDPOINT_TOTAL_HARD_TIMEOUT_MS;
   }
   return Math.max(want, LIVE_USER_ENDPOINT_MIN_TOTAL_HARD_TIMEOUT_MS);
+}
+/**
+ * When to launch the PARALLEL RETRY for a provider with no spare rung behind it
+ * (the "hedge" in LLMHelper.streamSelectedProviderWithFailover).
+ *
+ * Forensics 2026-11-13 (F-LAT-03, P2-s16b): with nothing measured the hedge
+ * fired at 0.6 x the 15 s user-endpoint budget = 9 s, so a provider whose
+ * socket hung showed nothing for 9.4 s although the retry answered in 0.5 s.
+ * A hedge is the lone provider's only failover, so it belongs at a first-useful
+ * point, not near the ceiling:
+ *   • unmeasured: LONE_PROVIDER_UNMEASURED_HEDGE_MS — about two healthy first
+ *     tokens. A slow-but-healthy gateway pays one duplicate request on its
+ *     first turn; after that it is measured.
+ *   • measured: just above the slowest first token this endpoint has shown
+ *     (+1500 ms, the margin LLMHelper.hedgeDelayForBudget uses), so a healthy
+ *     slow turn is never billed twice — but no longer floored at half the
+ *     budget, which kept a 1 s endpoint waiting 7.5 s.
+ *   • always at most 85% of the budget, so the retry has room to land.
+ */
+export const LONE_PROVIDER_UNMEASURED_HEDGE_MS = 4000;
+export const LONE_PROVIDER_MIN_HEDGE_MS = 2500;
+export const LONE_PROVIDER_HEDGE_MARGIN_MS = 1500;
+export function loneProviderHedgeDelayMs(budgetMs: number, observed?: ObservedLatency | null): number {
+  const ceil = Math.round(budgetMs * 0.85);
+  if (!observed || observed.count <= 0 || !Number.isFinite(observed.maxMs)) {
+    return Math.min(ceil, LONE_PROVIDER_UNMEASURED_HEDGE_MS);
+  }
+  return Math.min(ceil, Math.max(LONE_PROVIDER_MIN_HEDGE_MS, Math.round(observed.maxMs) + LONE_PROVIDER_HEDGE_MARGIN_MS));
 }
 /**
  * Ceiling for a shipped provider-list entry called directly — Gemini, Groq,

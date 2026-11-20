@@ -440,25 +440,24 @@ const StatusBadge: React.FC<{ status: ConnStatus; testing: boolean }> = ({ statu
   );
 };
 
-export interface IntelligenceSettingsProps {
-  /** 3.2.0: the Auto Answer block (model card + transcript sharing), rendered by Settings. */
-  autoAnswer?: React.ReactNode;
-  /** Bumped to scroll the Auto Answer section into view. */
-  autoAnswerFocus?: number;
-  onAutoAnswerFocused?: () => void;
-}
-
-export const IntelligenceSettings: React.FC<IntelligenceSettingsProps> = ({ autoAnswer, autoAnswerFocus = 0, onAutoAnswerFocused }) => {
+/** `autoAnswer`: Settings' Auto Answer rows (on-device model + transcript sharing),
+ *  built by SettingsOverlay, which owns their state and consent dialog. Null when
+ *  Auto Answer is absent or not open to this user. `autoAnswerFocus` bumps when
+ *  the first Auto Answer turn-on opens this tab; the section is scrolled into view once and `onAutoAnswerFocused` resets the request. */
+export const IntelligenceSettings: React.FC<{ autoAnswer?: React.ReactNode; autoAnswerFocus?: number; onAutoAnswerFocused?: () => void }> = ({ autoAnswer, autoAnswerFocus = 0, onAutoAnswerFocused }) => {
   const t = useT();
   const autoAnswerRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
+    // Waits for the section too: after "Share and turn on" the access state arrives a beat
+    // after the tab opens. The request is consumed once, so later visits open at the top.
     if (!autoAnswerFocus || !autoAnswerRef.current) return;
-    const timer = setTimeout(() => {
+    // After the tab's entrance has laid the page out.
+    const id = setTimeout(() => {
       autoAnswerRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
       onAutoAnswerFocused?.();
     }, 120);
-    return () => clearTimeout(timer);
-  }, [autoAnswerFocus, autoAnswer != null]);
+    return () => clearTimeout(id);
+  }, [autoAnswerFocus, autoAnswer != null]); // eslint-disable-line react-hooks/exhaustive-deps
   const tones = useSettingsTones();
   const [flags, setFlags] = useState<FlagRow[]>([]);
   const [cfg, setCfg] = useState<HindsightCfg | null>(null);
@@ -818,6 +817,8 @@ export const IntelligenceSettings: React.FC<IntelligenceSettingsProps> = ({ auto
         {flagRows('notes')}
       </section>
 
+      {/* ── Auto Answer: the on-device model and transcript sharing (moved from
+          under General's Auto Answer switch, Evin 2026-11-15). The switch stays in General. ── */}
       {autoAnswer ? (
         <section ref={autoAnswerRef} className="scroll-mt-4">
           <SettingsSectionHeading

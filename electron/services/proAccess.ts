@@ -10,19 +10,10 @@
  * research, Cue Cards, "About you").
  */
 export function isProOrTrialActive(): boolean {
-  // Dev override: simulate active pro/ultra subscription in development.
-  try {
-    const { isDevPremiumOverrideEnabled } = require('./devPremiumOverride');
-    if (isDevPremiumOverrideEnabled()) return true;
-  } catch { /* devPremiumOverride unavailable */ }
-
-  // 1. Full premium license (Dodo / Gumroad / Natively API subscription)
-  try {
-    const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
-    if (isLicencePremium()) return true;
-  } catch {
-    /* premium module not available */
-  }
+  // 1. Full premium license (Dodo / Gumroad / Natively API subscription). A
+  //    Pro pack's licence counts only while the AI and speech-to-text both run
+  //    on Natively API (packs/packProRule.ts).
+  if (isLicencePremium()) return true;
 
   // 2. Active free trial (token present, not ended, not past its expiry by
   //    the trial clock, which winding the computer's clock back does not move)
@@ -33,30 +24,133 @@ export function isProOrTrialActive(): boolean {
   }
 }
 
-/** A pack retains its licence while Pro stands down on non-Natively providers. */
-export function isLicencePremium(): boolean {
-  try {
-    const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
-    const lm = LicenseManager.getInstance();
-    if (!lm.isPremium()) return false;
-    const details = lm.getLicenseDetails();
-    const { packProBlock } = require('./packs/packProRule') as typeof import('./packs/packProRule');
-    const { CredentialsManager } = require('./CredentialsManager');
-    const cm = CredentialsManager.getInstance();
-    const { currentPackProviders } = require('./packs/packClockWiring') as typeof import('./packs/packClockWiring');
-    const { model, fastFamily } = currentPackProviders();
-    return packProBlock({ licenceProvider: details?.provider, licencePlan: details?.plan,
-      defaultModel: model || cm.getDefaultModel(), fastFamily, sttProvider: cm.getSttProvider() }) === null;
-  } catch { return false; }
+/**
+ * The AI model answering right now. The overlay's model picker (set-model)
+ * changes only this session's model, not the saved default, so the live one is
+ * what counts; ipcHandlers registers it. Before that, the saved default.
+ */
+let liveAiModel: (() => string | null | undefined) | null = null;
+let liveFastFamily: (() => string | null | undefined) | null = null;
+export function setLiveAiModelReader(
+  read: (() => string | null | undefined) | null,
+  fastFamily: (() => string | null | undefined) | null = null,
+): void {
+  liveAiModel = read;
+  liveFastFamily = fastFamily;
+}
+function currentFastFamily(): string | null {
+  if (!liveFastFamily) return null;
+  try { return liveFastFamily() ?? null; } catch { return null; }
 }
 
+/**
+ * The stored licence's provider and plan, kept 10 s. getLicenseDetails reads
+ * and decrypts the licence file (Keychain on macOS, DPAPI on Windows), and
+ * isProOrTrialActive runs on every answer. Stale for a few seconds at worst,
+ * and the pack rule only ever takes Pro away, so a just-bought pack can show
+ * Pro on its own keys for that long, never the reverse.
+ */
+const LICENCE_FACTS_MS = 10_000;
+let licenceFacts: { at: number; provider?: string; plan?: string; isPremium: boolean } | null = null;
+function readLicenceFacts(): { provider?: string; plan?: string; isPremium: boolean } {
+  const now = Date.now();
+  if (licenceFacts && now - licenceFacts.at < LICENCE_FACTS_MS && now >= licenceFacts.at) return licenceFacts;
+  const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
+  const d = LicenseManager.getInstance().getLicenseDetails();
+  licenceFacts = { at: now, provider: d?.provider, plan: d?.plan, isPremium: Boolean(d?.isPremium) };
+  return licenceFacts;
+}
+/**
+ * The stored licence as stored (the pack rule not applied), kept 10 s. null
+ * when it cannot be read, which is not the same as no licence.
+ */
+export function storedLicenceFacts(): { provider?: string; plan?: string; isPremium: boolean } | null {
+  try {
+    return readLicenceFacts();
+  } catch {
+    return null;
+  }
+}
+/** Activation, deactivation, a re-check: read the licence afresh next time. */
+export function forgetLicenceFacts(): void {
+  licenceFacts = null;
+}
+function currentAiModel(cm: any): string | null | undefined {
+  if (liveAiModel) {
+    try {
+      const id = liveAiModel();
+      if (typeof id === 'string' && id) return id;
+    } catch { /* fall back to the saved default */ }
+  }
+  return cm.getDefaultModel();
+}
+
+/** Should the Pro pack meeting clock count this minute? (packs/packProRule.ts) */
+export function packHoursCountNow(): boolean {
+  try {
+    const { packHoursCount } = require('./packs/packProRule') as typeof import('./packs/packProRule');
+    const cm = credentials();
+    return packHoursCount(currentAiModel(cm), cm.getSttProvider(), currentFastFamily());
+  } catch {
+    // Unknown state: count, as before the rule. Hours are what a pack sells.
+    return true;
+  }
+}
+
+/**
+ * Which provider stops a Pro pack's Pro right now, or null when nothing does
+ * (both on Natively API, or the licence is not a pack). Any failure reads as
+ * null: the rule never takes Pro from a licence it cannot read.
+ */
+export function currentPackProBlock(): import('./packs/packProRule').PackProBlock {
+  try {
+    const details = readLicenceFacts();
+    if (!details.isPremium) return null;
+    const { packProBlock, isPackLicence } = require('./packs/packProRule') as typeof import('./packs/packProRule');
+    // Only a pack licence is ever blocked: anything else stops here, with no
+    // settings read.
+    if (!isPackLicence(details.provider, details.plan)) return null;
+    const cm = credentials();
+    return packProBlock({
+      licenceProvider: details.provider,
+      licencePlan: details.plan,
+      defaultModel: currentAiModel(cm),
+      fastFamily: currentFastFamily(),
+      sttProvider: cm.getSttProvider(),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Is the stored licence a Pro pack's? Any failure reads as no. */
 export function licenceIsPack(): boolean {
   try {
-    const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
-    const d = LicenseManager.getInstance().getLicenseDetails();
+    const d = readLicenceFacts();
     const { isPackLicence } = require('./packs/packProRule') as typeof import('./packs/packProRule');
-    return Boolean(d?.isPremium) && isPackLicence(d?.provider, d?.plan);
-  } catch { return false; }
+    return d.isPremium && isPackLicence(d.provider, d.plan);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The stored licence, with the Pro pack rule applied. What every window is
+ * told as `isPremium`. LicenseManager.isPremium() stays the raw answer for the
+ * licence-keeping code (re-checks, the reconciler, deactivation).
+ */
+export function isLicencePremium(): boolean {
+  try {
+    const { isDevPremiumOverrideEnabled } = require('./devPremiumOverride') as typeof import('./devPremiumOverride');
+    if (isDevPremiumOverrideEnabled()) return true;
+  } catch { /* dev override unavailable */ }
+  try {
+    const { LicenseManager } = require('../../premium/electron/services/LicenseManager');
+    if (!LicenseManager.getInstance().isPremium()) return false;
+  } catch {
+    return false; // premium module not available
+  }
+  return currentPackProBlock() === null;
 }
 
 let trialClock: import('./trialClock').TrialClock | null = null;
@@ -144,7 +238,7 @@ export function userBioForAnswers(): string {
  */
 export async function recheckLicence(
   license: { isPremium(): boolean; isPremiumAsync(): Promise<boolean> },
-  deps: { stillAllowed(): boolean; onLost(): void; onRestored?(): void },
+  deps: { stillAllowed(): boolean; onLost(): void | Promise<void>; onRestored?(): void },
 ): Promise<boolean> {
   let wasPremium = false;
   try { wasPremium = license.isPremium() === true; } catch { wasPremium = false; }
@@ -154,7 +248,8 @@ export async function recheckLicence(
     let allowed = false;
     try { allowed = deps.stillAllowed() === true; } catch { allowed = false; }
     if (!allowed) {
-      try { deps.onLost(); } catch { /* standing down is best effort */ }
+      // Awaited: onLost may first let a pack in use take Pro over (ipcHandlers.ts).
+      try { await deps.onLost(); } catch { /* standing down is best effort */ }
     }
   }
   if (!wasPremium && active) {

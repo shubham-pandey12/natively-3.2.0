@@ -18,16 +18,14 @@ import type {
   RetrievalPlan, ClaimRequirement, SourceType, Answerability, ClaimType,
 } from '../contracts/types';
 import { freezeTurnDecision } from '../contracts/types';
-import { resolveModePolicy, generalKnowledgeAllowed, applyModeSourceContract, type ModePolicy } from '../policies/mode-policy-registry';
+import { resolveModePolicy, generalKnowledgeAllowed, applyModeSourceContract, type ModePolicy, type ModeSourceContractInput } from '../policies/mode-policy-registry';
 import { resolveAnswerPolicy, type AnswerPolicy } from '../policies/answer-policy';
 import { CLAIM_AUTHORITY, claimAuthority } from '../policies/source-authority-policy';
 import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
 import { classifyTurn, isBareFollowUp, stripSttFillers, isProspectiveJobQuestion } from '../question/turn-classifier';
 import type { AnswerTrace, RetrievalAttemptTrace } from '../observability/answer-trace';
 import { mergeRewrittenEvidence, type QueryRewriter, type QueryRewriteOutcome } from '../retrieval/llm-query-rewrite';
-import {
-  LARGE_PACK_ACCEPTED_EVIDENCE, LARGE_PACK_EVIDENCE_TOKENS, SMALL_CORPUS_MAX_TOKENS, WHOLE_PACK_MAX_TOKENS,
-} from '../retrieval/mode-retrieval-port';
+import { SMALL_CORPUS_MAX_TOKENS, WHOLE_PACK_MAX_TOKENS, LARGE_PACK_EVIDENCE_TOKENS, LARGE_PACK_ACCEPTED_EVIDENCE } from '../retrieval/mode-retrieval-port';
 import { PROFILE_WHOLE_MAX_TOKENS } from '../retrieval/profile-retrieval-port';
 
 export interface AnswerRequest {
@@ -35,7 +33,6 @@ export interface AnswerRequest {
   requestSequence: number;
   surface: AnswerSurface;
   modeId: string;
-  modeSourceContract?: { origin: string; sourceAuthority: string } | null;
   scope: EvidenceScope;
   sessionId: string;
 
@@ -109,6 +106,13 @@ export interface AnswerRequest {
    * mode's files, so source isolation is unchanged.
    */
   extraAllowedSourceTypes?: SourceType[];
+
+  /**
+   * The mode's source contract (F-ACC-05): a DELIBERATE reference-files-first
+   * choice promotes the reference files above the mode's own first source. See
+   * applyModeSourceContract. Absent → the mode policy alone, as before.
+   */
+  modeSourceContract?: ModeSourceContractInput | null;
 
   /**
    * The caller wants this turn's evidence for a prompt of its own and is not a
@@ -266,9 +270,6 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   if (extra.length) {
     policy = { ...policy, allowedSourceTypes: [...policy.allowedSourceTypes, ...extra] };
   }
-  // The mode's source contract runs AFTER the attachment extras, as in 3.2.0:
-  // it sees the final allowlist, so an extra REFERENCE_FILE is not appended twice
-  // and an already-top reference priority leaves the policy unchanged.
   policy = applyModeSourceContract(policy, req.modeSourceContract);
 
   const q = resolveQuestion(req);
@@ -405,8 +406,10 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
     && typeof req.attachedCorpusTokens === 'number'
     && req.attachedCorpusTokens > SMALL_CORPUS_MAX_TOKENS && req.attachedCorpusTokens <= WHOLE_PACK_MAX_TOKENS;
   const packFiles = wholePack ? Math.max(1, req.attachedSourceCount ?? 1) : 0;
-  // A pack too large to hand over whole is retrieved, with a wider evidence
-  // budget than an ordinary turn so its chunks are not starved.
+  // A pack LARGER than the whole-pack size is retrieved with the larger
+  // LARGE_PACK_EVIDENCE_TOKENS budget (F-LAT-09, measured 2026-11-14: more of
+  // the needed passages than the policy's 1,600-2,400 tokens); the accepted-item
+  // floor rises with it or the budget could not be filled.
   const largePack = retrieves && req.hasAttachedDocuments === true && req.profileOnlyDocuments !== true
     && typeof req.attachedCorpusTokens === 'number' && req.attachedCorpusTokens > WHOLE_PACK_MAX_TOKENS;
   // The résumé and the job description, each handed over whole by the profile
@@ -417,7 +420,9 @@ export function decide(req: AnswerRequest): Readonly<TurnDecision> {
   const wholeAnswers = retrieves && answersFit;
   const wholeAnswersTokens = wholeAnswers ? ownAnswersTokens : 0;
   const profileDocs = (wholeProfile ? (req.profileWhole as { docs: number }).docs : 0) + (wholeAnswers ? 1 : 0);
-  const acceptedBase = Math.max(multiFile ? Math.max(policy.retrievalPolicy.maximumAcceptedEvidence, MULTI_FILE_EVIDENCE.accepted) : policy.retrievalPolicy.maximumAcceptedEvidence, largePack ? LARGE_PACK_ACCEPTED_EVIDENCE : 0) + packFiles + profileDocs;
+  const acceptedBase = Math.max(multiFile
+    ? Math.max(policy.retrievalPolicy.maximumAcceptedEvidence, MULTI_FILE_EVIDENCE.accepted)
+    : policy.retrievalPolicy.maximumAcceptedEvidence, largePack ? LARGE_PACK_ACCEPTED_EVIDENCE : 0) + packFiles + profileDocs;
 
   // A source-primary turn reads the reference files, plus the meeting when one
   // is live (the meeting rule above would otherwise have been the whole plan).
@@ -941,6 +946,14 @@ export function evaluateAnswerability(
     (req.authoritativeSources ?? []).some((s) => plannedTypes.has(s));
   const family = (req: ClaimRequirement): string =>
     plannable(req) && String(req.claimType).startsWith('JOB_') ? 'job' : 'user';
+  // ONE clause, ONE key (F-ACC-03, 2026-11-13). The classifier records a
+  // claim's clause from its LOWER-CASED question, while a claim without a
+  // clause falls back to the resolved question as asked — so one clause was
+  // two subjects that differed only in case. In a live meeting the reference
+  // file satisfied the document claim and the meeting claim sat alone in the
+  // other group: a fact in the pack read PARTIAL (P2-s16b, "What is the
+  // retention window for raw spans in Orion?"). Case, spacing and the closing
+  // punctuation never make a different subject.
   const subjectKey = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').replace(/[\s?!.]+$/, '').trim();
   const bySubject = new Map<string, typeof required>();
   for (const req of required) {

@@ -215,28 +215,33 @@ export function computeEngineSourceLabel(input: {
   }
 }
 /**
- * Derive the badge from the evidence actually rendered into a V3-composed
- * prompt (3.2.0). Counts `<evidence source_type="...">` tags and reports the
- * one or two dominant sources.
+ * The label for a V3-composed answer, read off the evidence the prompt
+ * actually carried (pipeline forensics 2026-11-13, F-ACC-04).
+ *
+ * Before this, the normal final emit passed no label (main defaulted it to
+ * 'General knowledge', even over a resume-grounded answer) and the only
+ * computed label, on the provider-error branch, said 'Reference material' —
+ * a string outside SourceLabel — for ANY evidence, transcript included.
+ *
+ * Only document sources count. Meeting transcript, conversation state and
+ * screen text are context, not a source the badge names. When all three
+ * document kinds are present, the two with the most items are named.
  */
 export function sourceLabelFromEvidenceBlock(evidenceBlock: string | null | undefined): SourceLabel {
   if (!evidenceBlock) return 'General knowledge';
-  const counts: Record<'resume' | 'jd' | 'ref', number> = { resume: 0, jd: 0, ref: 0 };
+  const counts = { resume: 0, jd: 0, ref: 0 };
   for (const m of evidenceBlock.matchAll(/<evidence\b[^>]*\bsource_type="([A-Za-z_]+)"/g)) {
     switch (m[1]) {
       case 'RESUME':
       case 'PROFILE_FACT':
-        counts.resume += 1;
-        break;
+        counts.resume += 1; break;
       case 'JOB_DESCRIPTION':
-        counts.jd += 1;
-        break;
+        counts.jd += 1; break;
       case 'REFERENCE_FILE':
       case 'PROJECT_FILE':
       case 'CODING_SAMPLE':
       case 'CANDIDATE_FILE':
-        counts.ref += 1;
-        break;
+        counts.ref += 1; break;
       default:
         break;
     }
@@ -258,11 +263,11 @@ export function sourceLabelFromEvidenceBlock(evidenceBlock: string | null | unde
 }
 
 /**
- * Answer-path badge (3.2.0): V3-composed turns label from the rendered
- * evidence; legacy turns fall back to the TurnPlan matrix. Never throws.
+ * The one label rule every What-to-Answer final uses: V3's evidence when V3
+ * composed the prompt, the legacy TurnPlan otherwise. Never throws.
  */
 export function computeAnswerSourceLabel(input: {
-  v3Prompt?: { evidenceBlock?: string | null } | null;
+  v3Prompt?: { evidenceBlock?: string } | null;
   turnPlan?: Partial<TurnPlan> | null;
 }): SourceLabel {
   try {

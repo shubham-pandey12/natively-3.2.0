@@ -329,7 +329,7 @@ import {
   pinnedViewportBudget,
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
-import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, shouldHonorLiveAnswerDiscard, resolveChatStreamSurfaceError, isStaleDesktopChatEvent } from '../lib/chatStreamGuard.mjs';
+import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent, shouldApplyLiveAnswerDiscard } from '../lib/chatStreamGuard.mjs';
 import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
 import { resolveScreenshotPromptText, getScreenshotPresetPrompt } from '../lib/screenshotPrompt';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
@@ -430,6 +430,7 @@ import { interfaceThemeSurface, isCssOwnedInterfaceTheme, type MeetingInterfaceT
 import { isBuiltinOverlayButtonId, overlayRowOf, useOverlayButtonOrder, type BuiltinOverlayButtonId, type OverlayButtonId } from '../lib/overlayButtonOrder';
 import { getOverlayCustomButton, overlayCustomReadMinutes, useOverlayCustomButtons, type OverlayCustomButtonId } from '../lib/overlayCustomButtons';
 import { OVERLAY_BUTTONS, overlayButtonFace } from './overlay/overlayButtons';
+import { useOverlayGuide } from './guide/OverlayGuide';
 import {
   getGlassOverlayAppearance,
   getOverlayAppearance,
@@ -460,7 +461,6 @@ import { useAmbientChatMeeting } from './overlay/AmbientChatNotice';
 import { LastTimeRecapBanner, useLastTimeRecap } from './overlay/LastTimeRecapNotice';
 import type { LiveHelperAction } from '../types/assist';
 import { useMeetingMute } from './overlay/useMeetingMute';
-import { useOverlayFirstRunGuide } from './overlay/useOverlayFirstRunGuide';
 import { HeroGlassButton } from './overlay/heroGlass/HeroGlassButton';
 
 // PERF: hoisted plugin arrays. ReactMarkdown receives `remarkPlugins` and
@@ -1477,6 +1477,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const shellRef = React.useRef<HTMLDivElement>(null);
   const t = useT();
   const [isExpanded, setIsExpanded] = useState(true);
+  // The first-run guide's overlay steps (guide/OverlayGuide.tsx): a banner fold below.
+  // Its step 3 presses What to answer itself once the demo film's question is
+  // complete; the same handler as the chip and the shortcut (handlersRef, below).
+  const overlayGuide = useOverlayGuide({ whatToAnswer: () => handlersRef.current.handleWhatToSay() });
   // The free trial that starts by itself with a meeting: what to say about it.
   const trial = useOverlayTrial();
   // The automatic stop's "stops in 1 minute" notice, and typing reported to main.
@@ -2972,7 +2976,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     // Load the persisted default model (not the runtime model)
     // Each new meeting starts with the default from settings.
-    // StrictMode-safe: dev-mode mount→unmount→remount would otherwise set the runtime model twice.
+    // StrictMode-safe: dev-mode mount→unmount→remount would otherwise set the
+    // runtime model twice, clobbering any session-only pick from `handleModelSelect`.
     let cancelled = false;
     if (window.electronAPI?.getDefaultModel) {
       window.electronAPI
@@ -2989,6 +2994,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     }
     return () => { cancelled = true; };
   }, []);
+
+  const handleModelSelect = (modelId: string) => {
+    setCurrentModel(modelId);
+    // Session-only: update runtime but don't persist as default
+    window.electronAPI
+      .setModel(modelId)
+      .catch((err: any) => console.error('Failed to set model:', err));
+  };
 
   // Global State Sync
   useEffect(() => {
@@ -7955,6 +7968,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // An answer Natively stopped itself says so under the text (2026-10-04),
         // like a typed one. Attached to the live row before the finalize, which
         // keeps the row's other fields.
+        // Since 2026-11-13 also a provider that broke off mid-answer (F-ACC-01).
         const ownStop = liveAnswerStopFailure((data as { stopReason?: string }).stopReason);
         const liveRowId = streamingIntentRef.current === 'what_to_answer' ? streamingMsgIdRef.current : null;
         if (ownStop && liveRowId != null) {
@@ -7974,7 +7988,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       window.electronAPI.onIntelligenceSuggestedAnswerDiscard?.((data) => {
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
-        if (!shouldHonorLiveAnswerDiscard(liveAnswerGenIdRef.current, data?.generationId)) return;
+        // A late discard from a replaced run must not clear the newer answer's
+        // row: the row is found by intent, not by generation (F-CTX-09).
+        if (!shouldApplyLiveAnswerDiscard(liveAnswerGenIdRef.current, data?.generationId)) return;
         setIsProcessing(false);
         if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
         streamingNodeRef.current = null;
@@ -8404,14 +8420,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     if (currentAttachments.length > 0) {
       setAttachedContext([]);
-      const screenshotPromptText = resolveScreenshotPromptText();
-      // Show the attached image in chat FIRST — question card must appear before AI response
+      const promptText = resolveScreenshotPromptText();
+      // Show the attached image in chat FIRST: question card must appear before AI response
       setMessages((prev) => [
         ...prev,
         {
           id: questionCardId,
           role: 'user',
-          text: screenshotPromptText,
+          text: promptText,
           hasScreenshot: true,
           screenshotPreview: currentAttachments[0].preview,
           screenshotPreviews: currentAttachments.map((a) => a.preview).filter(Boolean),
@@ -9143,7 +9159,22 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     cleanups.push(
       window.electronAPI.onGeminiStreamError((error, meta?: { streamId?: number | null; source?: string }) => {
         if (activeDirectAssistRef.current) return;
+        // Guard (2026-07-31): a tagged error belonging to another stream must
+        // not tear down the one we're rendering. A phone-mirror failure carries
+        // source:'phone-mirror' and no streamId; a desktop failure carries the
+        // originating streamId — drop it unless it matches the adopted stream.
+        // Untagged errors keep the legacy behavior exactly.
         if (meta?.source === 'phone-mirror') {
+          // R-02: this branch deliberately keeps a phone failure out of the
+          // desktop UI, but it must still RELEASE the stream guard. Phone
+          // tokens are tagged source:'phone' (ipcHandlers.ts:12814) while this
+          // error is tagged 'phone-mirror' (:12851), and a provider that throws
+          // AFTER committing tokens never sends a `done` — so a phone turn that
+          // failed mid-answer left the guard pinned to the phone surface
+          // forever. Every later DESKTOP stream was then rejected as a
+          // cross-surface supersession (accept:false / honor:false): no text at
+          // all and a spinner that never stopped, until the user hit Escape.
+          // Releasing is safe here because this phone stream is definitively over.
           if (resolveChatStreamSurfaceError(chatStreamSourceRef.current, meta.source).release) {
             chatStreamIdRef.current = null;
             chatStreamSourceRef.current = null;
@@ -10683,8 +10714,6 @@ Provide only the answer, nothing else.`;
     handleBrainstorm,
   };
 
-  const guide = useOverlayFirstRunGuide({ whatToAnswer: () => handlersRef.current.handleWhatToSay() });
-
   useEffect(() => {
     // ── Continuous, frame-rate-independent scroll with momentum ──
     // Velocity is integrated against real elapsed time so 60Hz, 120Hz, and
@@ -11745,7 +11774,7 @@ Provide only the answer, nothing else.`;
     'stt-not-configured': sttNotConfigured && !trialExplainsNoStt,
     'stt-warning': sttStatusBannerOpen && sttStatusBanner?.tone === 'warning',
     'ambient-mic': showAmbientMicNotice,
-    guide: guide.wants,
+    guide: overlayGuide.wants,
     trial: !!trial.banner,
     'auto-answer-access': autoAnswerAccessNotice,
     'auto-stop': autoStop.stopsAt !== null,
@@ -11791,6 +11820,47 @@ Provide only the answer, nothing else.`;
   const markExpandedRendered = useCallback(() => {
     hasRenderedExpandedRef.current = true;
   }, []);
+
+  const copyDiagnostics = async () => {
+    const version = import.meta.env.VITE_APP_VERSION || 'unknown';
+    const [arch, osVersion] = await Promise.all([
+      window.electronAPI?.getArch?.().catch(() => 'unknown'),
+      window.electronAPI?.getOsVersion?.().catch(() => 'unknown'),
+    ]);
+    const userCat = sttUserError ? categorizeSttError(sttUserError) : null;
+    const interviewerCat = sttInterviewerError ? categorizeSttError(sttInterviewerError) : null;
+    const report = [
+      '## STT Diagnostic Report',
+      `App Version: ${version}`,
+      `Build Commit: ${import.meta.env.VITE_BUILD_COMMIT || 'unknown'}`,
+      `Platform: ${osVersion} (${arch})`,
+      `---`,
+      `Microphone Provider: ${sttUserProvider}`,
+      `Microphone Status: ${sttUserStatus}`,
+      userCat ? `Microphone Category: ${userCat.title} [${userCat.category}]` : '',
+      `Microphone Error: ${sttUserError || 'N/A'}`,
+      `---`,
+      `System Audio Provider: ${sttInterviewerProvider}`,
+      `System Audio Status: ${sttInterviewerStatus}`,
+      interviewerCat
+        ? `System Audio Category: ${interviewerCat.title} [${interviewerCat.category}]`
+        : '',
+      `System Audio Error: ${sttInterviewerError || 'N/A'}`,
+      `Timestamp: ${new Date().toISOString()}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    try {
+      await copyText(report);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = report;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+  };
 
   // Skill picker: derived from inputValue — open when the user types / or $ followed
   // only by word chars (no space yet). Closes automatically once a space is typed.
@@ -12186,8 +12256,10 @@ Provide only the answer, nothing else.`;
               {lastTime.recap && <LastTimeRecapBanner state={lastTime} />}
               </ChromeFold>
 
-              <ChromeFold show={guide.wants && bannerSlots.has('guide')} overlayVisible={isExpanded} requestHeightMotion={requestChromeHeightMotion} innerClassName="pt-3 pb-1" testId="fold-guide">
-                {guide.wants && guide.node}
+              {/* The first-run guide: What to answer, screenshots, the notepad
+                  hand-off and the stop prompt (guide/OverlayGuide.tsx). */}
+              <ChromeFold show={overlayGuide.wants && bannerSlots.has('guide')} overlayVisible={isExpanded} requestHeightMotion={requestChromeHeightMotion} innerClassName="pt-3 pb-1" testId="fold-guide">
+              {overlayGuide.wants && overlayGuide.node}
               </ChromeFold>
 
               {/* The free trial that starts by itself with a meeting: it began,
@@ -13016,14 +13088,7 @@ Provide only the answer, nothing else.`;
                       }
                       const { Icon, label } = overlayButtonFace(id, t, overlayCustomButtons);
                       return (
-                        <HeroGlassButton
-                          key={id}
-                          variant="lavender"
-                          onClick={onChip(id)}
-                          className={heroChipClass}
-                          icon={heroIcon(Icon)}
-                          data-guide={id === 'what_to_answer' ? 'what-to-answer' : undefined}
-                        >
+                        <HeroGlassButton key={id} variant="lavender" onClick={onChip(id)} className={heroChipClass} icon={heroIcon(Icon)} data-guide={id === 'what_to_answer' ? 'what-to-answer' : undefined}>
                           {label}
                         </HeroGlassButton>
                       );
@@ -13049,13 +13114,7 @@ Provide only the answer, nothing else.`;
                     }
                     const { Icon, label } = overlayButtonFace(id, t, overlayCustomButtons);
                     return (
-                      <button
-                        key={id}
-                        onClick={onChip(id)}
-                        className={chipClass}
-                        style={appearance.chipStyle}
-                        data-guide={id === 'what_to_answer' ? 'what-to-answer' : undefined}
-                      >
+                      <button key={id} onClick={onChip(id)} className={chipClass} style={appearance.chipStyle} data-guide={id === 'what_to_answer' ? 'what-to-answer' : undefined}>
                         <Icon className="w-3 h-3 opacity-70" /> {label}
                       </button>
                     );

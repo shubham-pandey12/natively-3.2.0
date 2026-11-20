@@ -11,15 +11,25 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-// Background LLM work (section-prompt compiles and the like) runs in its own
-// lane: it never takes the last LIVE_RESERVE_FRACTION of the bucket, and waits
-// until live answers have been quiet for a while, so it cannot delay one (3.2.0).
+/**
+ * Live vs background lanes (pipeline forensics 2026-11-13, F-LAT-06).
+ *
+ * One bucket per provider is shared by the live meeting (Auto Answer judge,
+ * answer, repair) and background work (note-section prompt compiles). In
+ * dev-s09c a new mode's ~112 compile calls drained the bucket and the first
+ * judge of the meeting waited 2.6 s in acquire(), then timed out. Background
+ * work is marked by running it inside runAsBackgroundLlmWork(); its acquires:
+ *   • never take the last LIVE_RESERVE_FRACTION of the bucket,
+ *   • are served only after every queued live waiter, and
+ *   • hold off while a live acquire happened within `liveQuietMs` (a meeting
+ *     that is answering), resuming once it goes quiet.
+ * Everything not marked is live, so existing callers are unchanged.
+ * AsyncLocalStorage is plain Node and behaves the same on macOS and Windows.
+ */
 const llmWorkLane = new AsyncLocalStorage<'background'>();
-const LIVE_RESERVE_FRACTION = 0.25;
-const DEFAULT_LIVE_QUIET_MS = 10_000;
 
-/** Run `fn` (and every LLM call it makes) in the background lane. */
-export function runAsBackgroundLlmWork<T>(fn: () => T): T {
+/** Run `fn` (and every await inside it) as background LLM work. */
+export function runAsBackgroundLlmWork<T>(fn: () => Promise<T>): Promise<T> {
     return llmWorkLane.run('background', fn);
 }
 
@@ -27,13 +37,23 @@ export function isBackgroundLlmWork(): boolean {
     return llmWorkLane.getStore() === 'background';
 }
 
+const LIVE_RESERVE_FRACTION = 0.25;
+const DEFAULT_LIVE_QUIET_MS = 10_000;
+
+export interface RateLimiterOptions {
+    /** How long after the last live acquire background work keeps waiting. */
+    liveQuietMs?: number;
+}
+
+type Waiter = { resolve: () => void; reject: (err: Error) => void };
+
 export class RateLimiter {
     private tokens: number;
     private readonly maxTokens: number;
     private readonly refillRatePerSecond: number;
     private lastRefillTime: number;
-    private waitQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
-    private backgroundQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+    private waitQueue: Waiter[] = [];
+    private backgroundQueue: Waiter[] = [];
     private readonly liveReserve: number;
     private readonly liveQuietMs: number;
     private lastLiveAcquireAt = Number.NEGATIVE_INFINITY;
@@ -49,7 +69,7 @@ export class RateLimiter {
      * @param maxTokens - Maximum burst capacity (e.g. 30 for Groq free tier)
      * @param refillRatePerSecond - Tokens added per second (e.g. 0.5 = 30/min)
      */
-    constructor(maxTokens: number, refillRatePerSecond: number, opts: { liveQuietMs?: number } = {}) {
+    constructor(maxTokens: number, refillRatePerSecond: number, opts: RateLimiterOptions = {}) {
         this.maxTokens = maxTokens;
         this.tokens = maxTokens;
         this.refillRatePerSecond = refillRatePerSecond;
@@ -94,7 +114,7 @@ export class RateLimiter {
         });
     }
 
-    /** May a background acquire take a token right now? */
+    /** A background acquire: may it take a token right now? */
     private backgroundMayTake(): boolean {
         return this.waitQueue.length === 0
             && this.tokens >= 1 + this.liveReserve
@@ -126,13 +146,15 @@ export class RateLimiter {
             this.tokens = Math.min(this.maxTokens, this.tokens + Math.floor(newTokens));
             this.lastRefillTime = now;
 
-            // Wake up waiting requests
+            // Wake up waiting requests — live first, always.
             while (this.waitQueue.length > 0 && this.tokens >= 1) {
                 this.tokens -= 1;
                 const waiter = this.waitQueue.shift()!;
                 waiter.resolve();
             }
         }
+        // Background waiters, only from what live does not need. Checked on every
+        // tick, not only on a refill, so they resume when live work goes quiet.
         while (this.backgroundQueue.length > 0 && this.backgroundMayTake()) {
             this.tokens -= 1;
             this.backgroundQueue.shift()!.resolve();

@@ -129,8 +129,7 @@ const ALLOWED_KEYS = new Set<string>([
   'sanitizerApplied', 'repaired', 'needsFallback', 'markerCount', 'violationCode',
   // speakability markers (coarse class only — never raw answer text). answerLength
   // is the Shorter / Smart / Longer setting, a fixed enum.
-  'speakabilityClass',
-  'answerLength',
+  'speakabilityClass', 'answerLength',
   // silence-outcome marker (Phase 1b): boolean only. The mechanism travels
   // on the existing 'reason' key, the surface on 'surface', the mode on 'mode'.
   'silenced',

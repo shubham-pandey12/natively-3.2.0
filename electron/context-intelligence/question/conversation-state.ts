@@ -836,49 +836,46 @@ export interface ResolvedReference {
     // 2026-09-11: "repeat the number" resolved to the most recent answer in the
     // ring that actually carries one, not to the immediately previous answer.
     | 'VALUE_RECALL_FROM_HISTORY'
-    // The previous question named nothing, so the referent is the subject the
-    // previous ANSWER named.
+    // F-CTX-05 (2026-11-13): the previous question named nothing ("the second
+    // one on your resume", "a project you're proud of"); its ANSWER did.
     | 'RESOLVED_FROM_PREVIOUS_ANSWER';
 }
 
-// "can you repeat the number" / "what was the percentage again" / "remind me
-// of the date" ask for a VALUE the assistant already gave. Measured in a
-// looking-for-work chain (2026-09-11): after "explain the second point again"
-// (a fencing-token answer with no number in it), "can you repeat the number"
-// anchored to that answer and the model repeated it, number-less — while the
-// 0.8% / 24-hour answers sat two turns back in the same ring. The referent of
-// a value-recall is the most recent answer that HOLDS such a value.
-// Openers that start an answer sentence but never name its subject ("Sure, ...",
-// "The ...", "When I ..."). Skipped when picking the referent named in the
-// previous answer.
-const ANSWER_OPENERS = new Set([
-  'the', 'a', 'an', 'sure', 'yes', 'yeah', 'no', 'well', 'okay', 'ok', 'right', 'honestly',
-  'absolutely', 'great', 'good', 'we', 'it', 'its', 'my', 'our', 'at', 'in', 'on', 'for', 'when',
-  'while', 'after', 'before', 'during', 'there', 'here', 'one', 'first', 'second', 'third',
-  'both', 'each', 'every', 'they', 'he', 'she', 'you', 'i', "i'd", "i'm", 'that', 'this', 'these',
-  'those', 'definitely', 'certainly', 'actually', 'basically', 'mostly', 'mainly', 'primarily',
-  'thanks', 'thank', 'hi', 'hello', 'over', 'from', 'with', 'by', 'as', 'to', 'if',
-]);
+/** Words an answer commonly opens with that are capitalised only because they start it. */
+const ANSWER_OPENERS = new Set(['the', 'a', 'an', 'sure', 'yes', 'yeah', 'no', 'well', 'okay', 'ok', 'right', 'honestly',
+  'absolutely', 'great', 'good', 'we', 'it', 'its', 'my', 'our', 'at', 'in', 'on', 'for', 'when', 'while', 'after',
+  'before', 'during', 'there', 'here', 'one', 'first', 'second', 'third', 'both', 'each', 'every', 'they', 'he', 'she',
+  'you', 'i', 'i\'d', 'i\'m', 'that', 'this', 'these', 'those', 'definitely', 'certainly', 'actually', 'basically',
+  'mostly', 'mainly', 'primarily', 'thanks', 'thank', 'hi', 'hello', 'over', 'from', 'with', 'by', 'as', 'to', 'if']);
 
 /**
- * The subject named in the first sentence of the previous answer, used when the
- * previous QUESTION named nothing ("What's your favourite tool?" -> "Kafka ...",
- * then "Why that?"). Returns undefined when the previous question already
- * carried an entity or no matching answer is in the ring.
+ * The entity the previous ANSWER named first, when the previous QUESTION named
+ * none of its own (F-CTX-05, 2026-11-13).
+ *
+ * P2-s05: "Okay. What about the second one on your resume?" → "The second is
+ * Atlas Search, a Python relevance pipeline." → "And how did you test it?" went
+ * out as a follow-up to the QUESTION, which names nothing; only the answer says
+ * which project "the second one" is, and the evidence held both. The answer is
+ * still never evidence: this is a POINTER, used to say what the follow-up is
+ * about and to steer retrieval at it; facts about it come from the evidence.
+ *
+ * Conservative on purpose — a wrong referent redirects retrieval:
+ *  - only when the previous question had no entity of its own (a question that
+ *    named "Kafka" keeps Kafka, whatever the answer mentioned first);
+ *  - only the answer recorded for THAT question (the ring entry whose question
+ *    matches previousQuestion), never an older or a mis-paired one;
+ *  - only the first sentence, and only a capitalised name or identifier.
  */
-export function previousAnswerReferent(state: ConversationState | null | undefined): string | undefined {
+export function previousAnswerReferent(state: ConversationState | null): string | undefined {
   const pq = state?.previousQuestion?.trim();
   if (!state || !pq) return undefined;
   if (extractEntities(pq).length > 0) return undefined;
-  const norm = (t: string): string => t.replace(/…$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const norm = (t: string) => t.replace(/…$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
   const want = norm(pq);
   let answer: string | undefined;
   for (let i = (state.turns?.length ?? 0) - 1; i >= 0; i--) {
     const tq = norm(state.turns[i].q);
-    if (tq && (tq === want || (state.turns[i].q.endsWith('…') && want.startsWith(tq)))) {
-      answer = state.turns[i].a;
-      break;
-    }
+    if (tq && (tq === want || (state.turns[i].q.endsWith('…') && want.startsWith(tq)))) { answer = state.turns[i].a; break; }
   }
   if (!answer?.trim()) return undefined;
   const first = answer.trim().split(/(?<=[.!?;])\s+/)[0] ?? '';
@@ -891,6 +888,13 @@ export function previousAnswerReferent(state: ConversationState | null | undefin
   return undefined;
 }
 
+// "can you repeat the number" / "what was the percentage again" / "remind me
+// of the date" ask for a VALUE the assistant already gave. Measured in a
+// looking-for-work chain (2026-09-11): after "explain the second point again"
+// (a fencing-token answer with no number in it), "can you repeat the number"
+// anchored to that answer and the model repeated it, number-less — while the
+// 0.8% / 24-hour answers sat two turns back in the same ring. The referent of
+// a value-recall is the most recent answer that HOLDS such a value.
 const VALUE_RECALL_RE = /\b(?:repeat|say (?:that )?again|remind me(?: of)?|what was|what were|recall|give me|tell me)\b[\s\S]{0,40}?\b(?:number|numbers|figure|figures|percentage|percent|amount|date|dates|value|rate|count|ttl|timeline|cost|price|salary|range|total|deadline|year|years|version)\b/i;
 const VALUE_RECALL_MAX_WORDS = 9;
 const CARRIES_VALUE_RE = /\d/;
@@ -1043,14 +1047,16 @@ export function resolveReference(
     return { resolved: q, usedState: false, reason: 'CURRENT_QUESTION_CONTAINS_EXPLICIT_ENTITY' };
   }
 
+  // The previous ANSWER named what this follow-up is about when the previous
+  // question named nothing (F-CTX-05). Not for a personal pronoun (people bind
+  // to the person slot only) and not for a rephrase request, which is about
+  // how to say the previous answer, not about a thing it named.
   if (!personal && !rephrase && (pronoun || bare || fragment)) {
     const fromAnswer = previousAnswerReferent(state);
     if (fromAnswer) {
       return {
         resolved: `${q} (referring to: ${fromAnswer}, named in the previous answer)`,
-        usedState: true,
-        referent: fromAnswer,
-        reason: 'RESOLVED_FROM_PREVIOUS_ANSWER',
+        usedState: true, referent: fromAnswer, reason: 'RESOLVED_FROM_PREVIOUS_ANSWER',
       };
     }
   }

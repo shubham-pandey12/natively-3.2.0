@@ -30,6 +30,7 @@ import {
 import { CARDS, DAY_MS } from '../../lib/cards/cardPolicy.mjs';
 import { createShowingRecorder } from '../../lib/cards/outcomeLatch.mjs';
 import { createOrchestratorEventChannel } from '../../lib/onboarding/orchestratorEventChannel.mjs';
+import { dispatchGuide } from '../guide/useGuide';
 
 /** Why a card closed, as the card reports it: its primary action, an explicit "never", or a plain close. */
 // 'after_error': the trial promo closed after our own error (network, server);
@@ -131,16 +132,21 @@ export const OrchestratedToasterHost: React.FC<HostProps> = ({ onOpenSettings, o
     else recorder.outcome(reason ?? 'later');
     orch.markDismissed(id);
   };
-  // 3.2.0: closing the first-run Plans card is what starts the first-run
-  // guide. Main decides eligibility from these facts (own key, plan, launch).
+  /** The Plans card closed, however: the first-run guide starts here for a
+   *  brand-new user (src/lib/onboarding/firstRunGuide.mjs decides who). */
   const closePlans = (reason?: CloseReason) => {
     closeWith('plans')(reason);
     if (forced) return;
-    const user = orch.getUserState();
-    void window.electronAPI?.guideDispatch?.({
+    const us = orch.getUserState();
+    dispatchGuide({
       type: 'plans_closed',
-      facts: { hasOwnAiKey: user.hasOwnAiKey, hasNativelyKey: user.hasNativelyKey, isPremium: user.isPremium, launchCount: user.cardLedger?.launchCount ?? 1 },
-    })?.catch?.(() => {});
+      facts: {
+        hasOwnAiKey: us.hasOwnAiKey,
+        hasNativelyKey: us.hasNativelyKey,
+        isPremium: us.isPremium,
+        launchCount: us.cardLedger?.launchCount ?? 1,
+      },
+    });
   };
   const openSettings = (tab: string) => {
     if (onOpenSettings) onOpenSettings(tab);

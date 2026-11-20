@@ -1,10 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SkillUploadPayload } from './services/skills/SkillValidator';
-import type { NativelyUsageResponse, NativelyPlansResponse } from '../src/types/nativelyUsage';
+import type { NativelyUsageResponse, NativelyPlansResponse, NativelyPackKeyState } from '../src/types/nativelyUsage';
 import type { MeetingOutputsApi } from '../src/types/meetingOutputs';
 import type { ConnectorsApi } from '../src/types/connectors';
 import type { AutoAnswerModelInstall, AutoAnswerModelSavings } from './premium/autoAnswer';
-type AutoAnswerModelState = { install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings };
+type AutoAnswerModelState = { install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively?: boolean };
 import { PAGE_CAPTURE_FALLBACK_CHANNEL, PAGE_CAPTURE_STARTED_CHANNEL, type PageCaptureFallbackNotice } from './services/pageCaptureFallback';
 import type { CalendarSourceId as CalendarSourceIdInfo, CalendarSourceStatus as CalendarSourceStatusInfo } from './services/calendar/providers/types';
 
@@ -249,7 +249,7 @@ interface ElectronAPI {
   getDisabledProviders: () => Promise<string[]>;
   setDisabledProviders: (providers: string[]) => Promise<{ success: boolean; error?: string }>;
   setCloudEnabledModels: (provider: string, models: string[]) => Promise<{ success: boolean; error?: string }>;
-  setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string; proPending?: boolean; proError?: string }>;
+  setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string; proPending?: boolean; proError?: string; storedAs?: 'pack' }>;
   // ── In-app review / testimonial prompt ─────────────────────────────────
   reviewGetPromptState: () => Promise<{
     ok: boolean;
@@ -283,7 +283,12 @@ interface ElectronAPI {
   // Shape imported, not restated. This used to be written out here AND in
   // src/types/electron.d.ts, so the resource model would have had to be
   // remembered in three places.
-  getNativelyUsage: (force?: boolean) => Promise<NativelyUsageResponse>;
+  getNativelyUsage: (force?: boolean, which?: 'active' | 'main' | 'pack') => Promise<NativelyUsageResponse>;
+  getNativelyUpgradeLink: (family?: 'pack' | 'plan') => Promise<{ ok: boolean; token?: string | null; email?: string | null; error?: string }>;
+  nativelyYearlyUpgrade: (plan: string, expectedAmount?: number) => Promise<{ ok: boolean; changed?: boolean; error?: string; preview?: { plan: string; amount: number; currency: string } | null }>;
+  getNativelyPackKey: () => Promise<NativelyPackKeyState>;
+  removeNativelyPackKey: () => Promise<{ ok: boolean; error?: string }>;
+  onNativelyPackFallbackChanged: (cb: (state: { held: boolean; inUse: boolean; until: string | null; reason: string }) => void) => () => void;
   /** The plan catalog — allowances and prices, straight from the server, so the
    *  plan table never carries its own copy of numbers the server enforces. */
   getNativelyPlans: () => Promise<NativelyPlansResponse>;
@@ -722,7 +727,7 @@ interface ElectronAPI {
     callback: (data: { answer: string; question: string; confidence: number; sourceLabel?: string; generationId?: number; stopReason?: string }) => void,
   ) => () => void;
   onIntelligenceSuggestedAnswerDiscard: (
-    callback: (data: { reason: string }) => void,
+    callback: (data: { reason: string; generationId?: number }) => void,
   ) => () => void;
   onIntelligenceCodeVerified: (
     callback: (data: { question: string; passed: number; total: number; language: string }) => void,
@@ -1312,8 +1317,6 @@ interface ElectronAPI {
   getMeetingAudioCapture: () => Promise<{ withoutAudio: boolean }>;
   onMeetingAudioCapture: (callback: (data: { withoutAudio: boolean }) => void) => () => void;
   getAutoAnswerEnabled: () => Promise<boolean>;
-  getAnswerLength: () => Promise<{ value: 'shorter' | 'smart' | 'longer' }>;
-  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => Promise<{ success: boolean; error?: string }>;
   setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; message?: string }>;
   getAutoAnswerAccess: () => Promise<{ available: boolean; allowed: boolean; basis: 'pro' | 'sharing' | 'none'; uploads: boolean; consent: { version: number; grantedAt: string } | null; enabled: boolean }>;
   setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
@@ -1365,6 +1368,9 @@ interface ElectronAPI {
     displays: Array<{ id: number; number: number; name: string; width: number; height: number; primary: boolean }>;
   }>;
   setScreenshotDisplay: (preference: string) => Promise<{ success: boolean; error?: string }>;
+  /** Settings › Overlay › Answer length. get: what answers use now (Smart without Pro). */
+  getAnswerLength: () => Promise<{ value: 'shorter' | 'smart' | 'longer' }>;
+  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => Promise<{ success: boolean; error?: string; message?: string }>;
   cropperPickDisplay: () => void;
   cropperDrag: (active: boolean) => void;
   getScreenUnderstandingMode: () => Promise<'vision_first' | 'vision_only' | 'private_vision'>;
@@ -1404,9 +1410,10 @@ interface ElectronAPI {
   /** The permissions card's closes while a permission is missing (src/lib/permissionsCardPolicy.mjs). */
   permissionsCardGet: () => Promise<{ dismissals: number; lastDismissedAt: number | null }>;
   permissionsCardRecord: (event: 'dismissed' | 'granted') => Promise<{ success: boolean; error?: string; record?: { dismissals: number; lastDismissedAt: number | null } }>;
-  guideGet: () => Promise<any>;
-  guideDispatch: (event: { type: string; [key: string]: unknown }) => Promise<any>;
-  onGuideChanged: (callback: (state: any) => void) => () => void;
+  /** First-run guide (src/lib/onboarding/firstRunGuide.mjs): state lives in main, every window follows it. */
+  guideGet: () => Promise<import('../src/lib/onboarding/firstRunGuide.mjs').GuideState>;
+  guideDispatch: (event: import('../src/lib/onboarding/firstRunGuide.mjs').GuideEvent) => Promise<import('../src/lib/onboarding/firstRunGuide.mjs').GuideState>;
+  onGuideChanged: (cb: (state: import('../src/lib/onboarding/firstRunGuide.mjs').GuideState) => void) => () => void;
   /** First-launch shortcut tour: taught shortcuts become practice presses. */
   onboardingSetShortcutTour: (active: boolean) => Promise<{ success: boolean }>;
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => () => void;
@@ -2019,7 +2026,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     can_use_publicly: boolean;
     display_name_publicly: boolean;
   }) => ipcRenderer.invoke('review:update-testimonial', payload),
-  getNativelyUsage: (force?: boolean) => ipcRenderer.invoke('get-natively-usage', force ? { force: true } : undefined),
+  getNativelyUsage: (force?: boolean, which?: 'active' | 'main' | 'pack') =>
+    ipcRenderer.invoke('get-natively-usage', force || which ? { ...(force ? { force: true } : {}), ...(which ? { which } : {}) } : undefined),
+  getNativelyUpgradeLink: (family?: 'pack' | 'plan') => ipcRenderer.invoke('get-natively-upgrade-link', family),
+  nativelyYearlyUpgrade: (plan: string, expectedAmount?: number) => ipcRenderer.invoke('natively-yearly-upgrade', plan, expectedAmount),
+  getNativelyPackKey: () => ipcRenderer.invoke('get-natively-pack-key'),
+  removeNativelyPackKey: () => ipcRenderer.invoke('remove-natively-pack-key'),
+  onNativelyPackFallbackChanged: (cb: (state: { held: boolean; inUse: boolean; until: string | null; reason: string }) => void) => {
+    const handler = (_: unknown, state: { held: boolean; inUse: boolean; until: string | null; reason: string }) => cb(state);
+    ipcRenderer.on('natively-pack-fallback-changed', handler);
+    return () => { ipcRenderer.removeListener('natively-pack-fallback-changed', handler); };
+  },
   getNativelyPlans: () => ipcRenderer.invoke('get-natively-plans'),
   resendNativelyKey: (email: string) => ipcRenderer.invoke('resend-natively-key', email),
   getStoredCredentials: () => ipcRenderer.invoke('get-stored-credentials'),
@@ -2685,7 +2702,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Orphaned-scaffold fix: drop the open what-to-answer scaffold row when a
   // stream ends with no final answer (superseded / declined / errored).
   onIntelligenceSuggestedAnswerDiscard: (
-    callback: (data: { reason: string }) => void,
+    callback: (data: { reason: string; generationId?: number }) => void,
   ) => {
     const subscription = (_: any, data: any) => callback(data);
     ipcRenderer.on('intelligence-suggested-answer-discard', subscription);
@@ -3572,6 +3589,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   licenseCheckPremiumAsync: () => ipcRenderer.invoke('license:check-premium-async'),
   licenseDeactivate: (): Promise<{ success: boolean }> => ipcRenderer.invoke('license:deactivate'),
   licenseGetHardwareId: () => ipcRenderer.invoke('license:get-hardware-id'),
+  // The opt-in diagnostic report: what would be sent, and sending it (only on a click).
+  getDiagnosticReportPreview: () => ipcRenderer.invoke('diagnostic-report:preview'),
+  sendDiagnosticReport: () => ipcRenderer.invoke('diagnostic-report:send'),
+  getLastConnectionNotice: () => ipcRenderer.invoke('connect-diagnosis:last'),
+  // The connection check found why Natively cannot be reached (connectivityWatcher).
+  onConnectDiagnosis: (callback: (data: { verdict: string; message: string; healed: boolean }) => void) => {
+    const subscription = (_: unknown, data: { verdict: string; message: string; healed: boolean }) => callback(data)
+    ipcRenderer.on('connect-diagnosis', subscription)
+    return () => {
+      ipcRenderer.removeListener('connect-diagnosis', subscription)
+    }
+  },
   onLicenseStatusChanged: (callback: (data: { isPremium: boolean; plan?: string }) => void) => {
     const subscription = (_: any, data: { isPremium: boolean; plan?: string }) => callback(data);
     ipcRenderer.on('license-status-changed', subscription);
@@ -3622,8 +3651,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
   getAutoAnswerEnabled: () => ipcRenderer.invoke('get-auto-answer-enabled'),
-  getAnswerLength: () => ipcRenderer.invoke('answer-length:get'),
-  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => ipcRenderer.invoke('answer-length:set', value),
   setAutoAnswerEnabled: (enabled: boolean) => ipcRenderer.invoke('set-auto-answer-enabled', enabled),
   getAutoAnswerAccess: () => ipcRenderer.invoke('auto-answer:get-access'),
   setAutoAnswerTrainingConsent: (granted: boolean) => ipcRenderer.invoke('auto-answer:set-training-consent', granted),
@@ -3675,6 +3702,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getScreenshotDisplay: () => ipcRenderer.invoke('get-screenshot-display'),
   setScreenshotDisplay: (preference: string) => ipcRenderer.invoke('set-screenshot-display', preference),
+  getAnswerLength: () => ipcRenderer.invoke('answer-length:get'),
+  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => ipcRenderer.invoke('answer-length:set', value),
   getScreenUnderstandingMode: () => ipcRenderer.invoke('get-screen-understanding-mode'),
   setScreenUnderstandingMode: (mode: 'vision_first' | 'vision_only' | 'private_vision') =>
     ipcRenderer.invoke('set-screen-understanding-mode', mode),
@@ -3723,9 +3752,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   permissionsCardGet: () => ipcRenderer.invoke('permissions-card:get'),
   permissionsCardRecord: (event: 'dismissed' | 'granted') => ipcRenderer.invoke('permissions-card:record', event),
   guideGet: () => ipcRenderer.invoke('guide:get'),
-  guideDispatch: (event: unknown) => ipcRenderer.invoke('guide:dispatch', event),
-  onGuideChanged: (cb: (state: any) => void) => {
-    const sub = (_: unknown, state: any) => cb(state);
+  guideDispatch: (event: import('../src/lib/onboarding/firstRunGuide.mjs').GuideEvent) => ipcRenderer.invoke('guide:dispatch', event),
+  onGuideChanged: (cb: (state: import('../src/lib/onboarding/firstRunGuide.mjs').GuideState) => void) => {
+    const sub = (_: unknown, state: import('../src/lib/onboarding/firstRunGuide.mjs').GuideState) => cb(state);
     ipcRenderer.on('guide:changed', sub);
     return () => ipcRenderer.removeListener('guide:changed', sub);
   },

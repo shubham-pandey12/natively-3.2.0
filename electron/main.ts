@@ -7,6 +7,7 @@
 // init_DatabaseManager() (which is what loads better-sqlite3).
 // ============================================================================
 import './nativeArchGate';
+import { summarizeRunEnd } from '../src/lib/funnel/runEnd.mjs';
 // Dev-only prompt recorder: must wrap fetch before any SDK client exists (inert unless NATIVELY_PROMPT_DEBUG=1, never when packaged).
 import './llm/promptDebug';
 // Pin the packaged userData to the historical "Natively" folder BEFORE any
@@ -64,6 +65,11 @@ trustSystemCertificates();
 if (!app.isPackaged) {
   require('dotenv').config();
 }
+
+// Any failed call to the Natively API starts the connection check
+// (connectivityWiring), not only the Pro check. After .env: the API origin
+// can come from it in development.
+try { (require('./services/connectivityWiring') as typeof import('./services/connectivityWiring')).installApiFailureHook(); } catch { /* the app works without it */ }
 
 // ============================================================================
 // FONTATIONS RENDERER-CRASH MITIGATION (2026-07-10) — user crash report on
@@ -247,7 +253,7 @@ process.on('uncaughtException', (err) => {
   // alive here is the worst outcome: the window keeps working, the user keeps
   // holding meetings, and every one of them is silently discarded. End the
   // process so the next launch comes back with a working database.
-  terminateAfterFatalError('uncaughtException', 1);
+  terminateAfterFatalError('uncaughtException', 1, err);
 });
 
 // Crash-loop guard for unhandledRejection, mirroring the render-process-gone
@@ -301,7 +307,7 @@ process.on('unhandledRejection', (reason, promise) => {
       rejectionsInWindow: unhandledRejectionHistory.length,
       windowMs: UNHANDLED_REJECTION_WINDOW_MS,
     });
-    terminateAfterFatalError('unhandledRejection-loop-giveup', 1);
+    terminateAfterFatalError('unhandledRejection-loop-giveup', 1, reason);
   }
 });
 
@@ -572,14 +578,14 @@ function emergencyCloseDatabase(reason: string): void {
 // — fatal signals routinely arrive in pairs (e.g. the mic and system STT
 // sockets failing in the same tick) and only the first may act.
 let _fatalMainProcess: FatalMainProcessCoordinator | null = null;
-function terminateAfterFatalError(reason: string, exitCode: number): void {
+function terminateAfterFatalError(reason: string, exitCode: number, error?: unknown): void {
   // 2026-11-14: every fatal exit tells the next launch it was one (app_run_ended
   // 'crash'). The give-ups (renderer crash loop, rejection loop, a failed
   // startup) exit through app.exit(), which skips before-quit, and used to
   // leave no reason at all.
   try {
     const { LifecycleTracker } = require('./utils/lifecycleTracker');
-    LifecycleTracker.getInstance().markFatal(reason);
+    LifecycleTracker.getInstance().markFatal(reason, error);
   } catch { /* best-effort */ }
   if (!_fatalMainProcess) {
     _fatalMainProcess = new FatalMainProcessCoordinator({
@@ -646,6 +652,8 @@ function writeProcessReport(label: string): string | null {
 
 function logStartupPhase(phase: string, meta: Record<string, unknown> = {}): void {
   logToFile(`[STARTUP:${phase}] ${safeJsonForLog(getCrashDiagnostics(meta))}`);
+  // The crash report says how far startup got (app_run_ended startup_phase).
+  try { require('./utils/lifecycleTracker').LifecycleTracker.getInstance().noteStartupPhase(phase); } catch { /* best-effort */ }
 }
 
 // Lazy redactor import — pulled at first call so this file can boot even if
@@ -1370,7 +1378,7 @@ import { isSpokenSavedLine } from "./intelligence/savedTranscriptOrigin"
 import { buildSummaryTextForSearch } from "./rag/summaryTextForSearch"
 
 /** Unified type for all STT providers with optional extended capabilities */
-type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | QwenRealtimeSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT | NvidiaNimStreamingSTT | AppleSpeechSTT | MissingKeySTT) & {
+type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | QwenRealtimeSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT | NvidiaNimStreamingSTT | AppleSpeechSTT) & {
   /** Local models return whether a trailing final is now in flight; cloud providers return void. */
   finalize?: () => void | boolean;
   setAudioChannelCount?: (count: number) => void;
@@ -1452,7 +1460,7 @@ try {
     textHasCompEvidence = require('../premium/electron/knowledge/NegotiationConversationTracker').textHasCompEvidence;
 } catch {
     console.log('[Main] Knowledge modules not available — profile intelligence disabled.');
-    // Tell the feature gate once, at startup, so every later check agrees (3.2.0).
+    // F-ACC-14: tell the answer path this build has no Profile Intelligence.
     try { require('./premium/featureGate').markPremiumAbsent(); } catch { /* gate unavailable */ }
 }
 
@@ -1521,7 +1529,7 @@ import { decideOpenAtLoginDefault } from './utils/openAtLoginDefault'
 import { shouldOpenExternally } from './utils/windowOpenPolicy'
 import { ensureNativeModuleAbi } from './utils/nativeModuleGuard'
 import { getPackMeetingClock } from './services/packs/packClockWiring'
-import { applyGuideEvent, guideScreenshotTaken } from './services/firstRunGuideStore';
+import { applyGuideEvent, guideScreenshotTaken } from './services/firstRunGuideStore'
 
 // Opt-in only: this trace writes allowlisted process metadata and IPC byte estimates
 // for a copied-profile native OOM investigation. It is inert unless explicitly enabled.
@@ -2806,7 +2814,6 @@ export class AppState {
    * renderer re-render twice for one change.
    */
   public sendModelChanged(modelId: string): void {
-    try { require('./services/packs/packClockWiring').packSelectionChanged(); } catch { /* no pack clock */ }
     const targets = [
       this.getWindowHelper().getOverlayWindow(),
       this.modelSelectorWindowHelper.getWindow(),
@@ -3822,6 +3829,9 @@ export class AppState {
     restartStt: (source) => {
       const stt = source === 'system' ? this.googleSTT : this.googleSTT_User;
       if (!stt || !this.isMeetingActive) return;
+      // A stand-in carries the channel (sttFailover.ts): stt.stop() would end
+      // it too, silently, and the failover probe already restarts the
+      // primary (F-ACC-09 D2).
       if (this._sttFailover[source]?.active) return;
       stt.stop();
       stt.start();
@@ -3831,7 +3841,13 @@ export class AppState {
     watchdogEnabled: (source) => this._sttGapProvider[source].streaming && !this._sttFailover[source]?.active,
   });
 
-  /** A recovered line goes into the session at the time it was said. */
+  /**
+   * A recovered line goes into the session at the time it was said. A recent
+   * one from the other side also goes to Auto Answer, whose judge decides
+   * whether it is a question (F-ACC-09 D5: a question asked during an outage
+   * was never answered). Only when inserted: one the live transcript already
+   * has is not judged twice.
+   */
   private insertRecoveredTranscript(seg: RecoveredSegment): void {
     if (!this.isMeetingActive && !this._isDraining) return;
     const speaker = seg.source === 'system' ? 'interviewer' : 'user';
@@ -3851,10 +3867,15 @@ export class AppState {
     }
     if (this.isAutoAnswerActive() && recoveredLineMayBeAnswered(seg, Date.now())) {
       this.simpleAutoAnswer.ingest({
-        speaker: 'interviewer', text: seg.text, timestamp: seg.timestamp,
-        final: true, confidence: 1, origin: 'stt', sttProvider: seg.transcriberId,
+        speaker: 'interviewer',
+        text: seg.text,
+        timestamp: seg.timestamp,
+        final: true,
+        confidence: 1,
+        origin: 'stt',
+        sttProvider: seg.transcriberId,
         punctuationSource: punctuationSourceFor(seg.transcriberId, true),
-      });
+      } as any);
     }
   }
   // ── AUTO ANSWER (Settings > General, default OFF) ────────────────────────
@@ -3940,8 +3961,10 @@ export class AppState {
       } catch { /* speculative */ }
     },
     ...((process.env.NATIVELY_AUTO_ANSWER_JUDGE || '').toLowerCase() === 'off' ? {} : {
-      // The decision cascade defaults to on in the recovered 3.2.0 premium module;
-      // without an installed local model it escalates to the LLM judge.
+      // The decision cascade (premium/electron/autoAnswer/decider) wraps the LLM judge. Packaged
+      // builds default to NATIVELY_AUTO_ANSWER_DECIDER=off, which calls the judge exactly as
+      // before; shadow (the dev default) keeps the judge authoritative and only records the
+      // decider beside it.
       judgeCandidate: async (req, signal) => await this.autoAnswerDecider().judgeCandidate(req, signal),
     }),
     modeName: () => {
@@ -4128,10 +4151,8 @@ export class AppState {
 
   /** The surface the running meeting started on (startMeeting). */
   private meetingSurface: MeetingSurface = DEFAULT_MEETING_SURFACE;
-  /** The surface the running (or last) meeting started on. */
-  public getMeetingSurface(): MeetingSurface {
-    return this.meetingSurface;
-  }
+  /** Where the running meeting opened (the first-run guide draws its steps there). */
+  public getMeetingSurface(): MeetingSurface { return this.meetingSurface; }
 
   /**
    * The launcher's "Meeting ongoing" (set-window-mode 'overlay' mid-meeting):
@@ -4309,9 +4330,10 @@ export class AppState {
     if (sttProvider === 'natively') {
       const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
       if (!nativelyKey) {
-        // No key means transcription must report the missing credential.
+        // No key: nothing is transcribed and the overlay says which key is
+        // missing. Never Google unless Google is the choice (F-PRV-01).
         console.warn(`[Main] No Natively API Key configured for ${speaker}; transcription is off until one is saved`);
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       } else {
         // 'system' for interviewer (system audio), 'mic' for user (microphone).
         // The server uses ${key}:${channel} as the session key so both streams
@@ -4342,7 +4364,7 @@ export class AppState {
         stt = new DeepgramStreamingSTT(apiKey, CredentialsManager.getInstance().getSttModel('deepgram'));
       } else {
         console.warn(`[Main] No API key for Deepgram STT; transcription is off until one is saved`);
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       }
     } else if (sttProvider === 'soniox') {
       const apiKey = CredentialsManager.getInstance().getSonioxApiKey();
@@ -4351,7 +4373,7 @@ export class AppState {
         stt = new SonioxStreamingSTT(apiKey);
       } else {
         console.warn(`[Main] No API key for Soniox STT; transcription is off until one is saved`);
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       }
     } else if (sttProvider === 'qwen') {
       const apiKey = CredentialsManager.getInstance().getQwenAsrApiKey();
@@ -4360,7 +4382,7 @@ export class AppState {
         stt = new QwenRealtimeSTT(apiKey);
       } else {
         console.warn('[Main] No Qwen ASR API key; transcription is off until one is saved');
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       }
     } else if (sttProvider === 'elevenlabs') {
       const apiKey = CredentialsManager.getInstance().getElevenLabsApiKey();
@@ -4369,7 +4391,7 @@ export class AppState {
         stt = new ElevenLabsStreamingSTT(apiKey);
       } else {
         console.warn(`[Main] No API key for ElevenLabs STT; transcription is off until one is saved`);
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       }
     } else if (sttProvider === 'openai') {
       // OpenAI: WebSocket Realtime (gpt-live-transcribe → gpt-4o-transcribe → gpt-4o-mini-transcribe) with whisper-1 REST fallback.
@@ -4382,7 +4404,7 @@ export class AppState {
         stt = new OpenAIStreamingSTT(apiKey, baseUrl, CredentialsManager.getInstance().getSttModel('openai'));
       } else {
         console.warn(`[Main] No API key for OpenAI STT; transcription is off until one is saved`);
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       }
     } else if (sttProvider === 'nvidia_nim') {
       const key = CredentialsManager.getInstance().getNvidiaNimApiKey();
@@ -4392,7 +4414,7 @@ export class AppState {
         stt = new NvidiaNimStreamingSTT(key, model);
       } else {
         console.warn(`[Main] No NVIDIA NIM API key for ${speaker}; transcription is off until one is saved`);
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       }
     } else if (sttProvider === 'groq' || sttProvider === 'azure' || sttProvider === 'ibmwatson') {
       let apiKey: string | undefined;
@@ -4420,10 +4442,9 @@ export class AppState {
         stt = rest;
       } else {
         console.warn(`[Main] No API key for ${sttProvider} STT; transcription is off until one is saved`);
-        stt = new MissingKeySTT(sttProvider);
+        stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
       }
     } else if (sttProvider === 'apple-speech') {
-      // A carried-over on-device selection must never send audio to a cloud provider.
       stt = new AppleSpeechSTT();
     } else if (sttProvider === 'local-whisper') {
       const { LocalWhisperSTT } = require('./audio/LocalWhisperSTT');
@@ -4448,16 +4469,17 @@ export class AppState {
     } else if (sttProvider === 'google') {
       stt = new GoogleSTT(speaker);
     } else {
+      // An id this build does not know (a damaged settings file): not Google.
       console.warn(`[Main] Unknown STT provider '${sttProvider}' for ${speaker}; transcription is off`);
-      stt = new MissingKeySTT(sttProvider);
+      stt = new MissingKeySTT(sttProvider) as unknown as STTProvider;
     }
 
     stt.setRecognitionLanguage(sttLanguage);
 
     // WTA audit F9 (2026-08-18): effective provider id for punctuation
     // provenance — derived from the CONSTRUCTED instance, not the settings
-    // value, because missing-key and unknown selections use MissingKeySTT.
-    // RestSTT keeps the settings
+    // value, because several ladder branches above silently fall back to
+    // GoogleSTT (missing key, unknown provider). RestSTT keeps the settings
     // id (groq/azure/ibmwatson — all map to 'unavailable' anyway); the
     // local-whisper branch falls through to its settings id.
     const effectiveSttId: string =
@@ -4468,6 +4490,7 @@ export class AppState {
       : stt instanceof ElevenLabsStreamingSTT ? 'elevenlabs'
       : stt instanceof NativelyProSTT ? 'natively'
       : stt instanceof GoogleSTT ? 'google'
+      // No key saved: no connection to watch, nothing to recover (F-PRV-01).
       : stt instanceof MissingKeySTT ? 'none'
       : sttProvider;
 
@@ -4512,6 +4535,7 @@ export class AppState {
       if (!this.isMeetingActive && !this._isDraining) {
         return;
       }
+
       // Mic voice ids carry the provider connection they came from: voice
       // numbers restart on a reconnect (sttDiarization.withVoiceEpoch). The
       // meeting-audio channel keeps the plain id its consumers read.
@@ -4522,27 +4546,34 @@ export class AppState {
       if (this.isMeetingActive) this.meetingAutoStop.noteTranscript(speaker, segment.text, segment.isFinal);
       // Any text proves the connection works: closes an open outage (sttGapRecovery.ts).
       this.sttGap.onTranscript(gapSource, segment.text, segment.isFinal);
+
+      // Speaker bleed (audio/micEchoGuard.ts, F-CTX-12): a mic final that
+      // repeats what the interviewer just said is their voice through the
+      // user's speakers, not the user. It stays out of the session ([ME]
+      // context, refinement follow-ups) and retrieval; the display still gets it.
       if (speaker === 'interviewer') this._micEcho.noteInterviewer(segment.text, segment.isFinal, Date.now());
       const micEcho = speaker === 'user' && segment.isFinal && this._micEcho.isEcho(segment.text, Date.now());
       if (micEcho) console.log(`[STT] mic final repeats the interviewer (${segment.text.length} chars): not counted as the user`);
 
-      if (!micEcho) { this.intelligenceManager.handleTranscript({
-        speaker: speaker,
-        ...(speakerId ? { speakerId } : {}),
-        text: segment.text,
-        timestamp: Date.now(),
-        final: segment.isFinal,
-        confidence: segment.confidence,
-        // Defect B (2026-08-01): this is the ONLY real spoken-audio seam —
-        // provenance 'stt' makes these segments memory-eligible; typed chat
-        // and assistant answers (other origins) are excluded from extraction.
-        origin: 'stt',
-        // WTA audit F9: provider identity + punctuation provenance, so
-        // downstream question scoring can treat a missing '?' as NEUTRAL
-        // when this provider never guaranteed punctuation.
-        sttProvider: sttId,
-        punctuationSource: punctuationSourceFor(sttId, segment.isFinal),
-      }); }
+      if (!micEcho) {
+        this.intelligenceManager.handleTranscript({
+          speaker: speaker,
+          ...(speakerId ? { speakerId } : {}),
+          text: segment.text,
+          timestamp: Date.now(),
+          final: segment.isFinal,
+          confidence: segment.confidence,
+          // Defect B (2026-08-01): this is the ONLY real spoken-audio seam —
+          // provenance 'stt' makes these segments memory-eligible; typed chat
+          // and assistant answers (other origins) are excluded from extraction.
+          origin: 'stt',
+          // WTA audit F9: provider identity + punctuation provenance, so
+          // downstream question scoring can treat a missing '?' as NEUTRAL
+          // when this provider never guaranteed punctuation.
+          sttProvider: sttId,
+          punctuationSource: punctuationSourceFor(sttId, segment.isFinal),
+        });
+      }
 
       // Auto Answer (Settings > General, default OFF). Engine per the A/B
       // switch: legacy = the PR #497 debounce on interviewer finals only;
@@ -5236,7 +5267,9 @@ export class AppState {
         // (its whisper-1 REST fallback; its Realtime mode emits its own
         // endpoint anyway) and the local models (their own VAD closes the
         // segment, then inference runs). For those the stop always precedes
-        // the text, so it would judge the turn without its last words.
+        // the text, so it would judge the turn without its last words: they
+        // get the stop as a hint for the final that FOLLOWS it instead
+        // (F-LAT-07; the engine ignores it once the interviewer speaks again).
         if (this.isAutoAnswerActive() && this.isMeetingActive) {
           try {
             const { CredentialsManager } = require('./services/CredentialsManager');
@@ -8750,7 +8783,8 @@ export class AppState {
         const meetingId = stopResult?.meetingId ?? null;
         // The notes window says its notes are going into the meeting notes.
         try { this.liveNotes.meetingEnded(meetingId); } catch { /* the window keeps its text */ }
-        try { applyGuideEvent({ type: 'meeting_saved', meetingId }); } catch (e: any) { console.warn('[Main] guide not told about the saved meeting:', e?.message); }
+        // The first-run guide's step 5 opens exactly this meeting (services/firstRunGuideStore.ts).
+        try { applyGuideEvent({ type: 'meeting_saved', meetingId }); } catch (e) { console.warn('[Main] guide not told about the saved meeting:', (e as Error)?.message); }
 
         // 5. RAG cleanup — same logic as before, just inside the BG IIFE.
         if (meetingId) {
@@ -8996,6 +9030,8 @@ export class AppState {
     // coding scaffold ended with no final answer (superseded/declined/errored).
     // Tell the renderer to drop the open scaffold row. Flush pending token
     // batches first so a late scaffold batch can't re-mount the row afterwards.
+    // The generation id rides along so the overlay ignores a late discard from
+    // a replaced run instead of clearing the newer answer (F-CTX-09, 2026-11-13).
     this.intelligenceManager.on('suggested_answer_discard', (reason: string, generationId?: number) => {
       this.autoAnswerUsage.stopAwaitingAnswer();
       flushBatchesBeforeFinal();
@@ -9220,8 +9256,8 @@ export class AppState {
     //   ElevenLabsStreaming  language_code omitted
     //   NvidiaNimStreaming   null → the model's own multi default
     //   SonioxStreaming      no hint + enable_language_identification
-    //   LocalWhisperSTT      auto-detect (and self-normalises for Nemotron,
-    //                        which has no auto mode — see modelLanguageSupport)
+    //   LocalWhisperSTT      auto-detect (Nemotron: its own Auto prompt,
+    //                        NEMOTRON_AUTO_LANG_ID — see languageTable.ts)
     //   RestSTT              language form-field omitted
     // Collapsing here silently answered "Auto Detect" with English on all of
     // them, and — now that getSttLanguage() defaults to 'auto' — would have
@@ -10683,6 +10719,12 @@ export class AppState {
     this._applyDisguise(this.disguiseMode);
   }
 
+  /** Windows: the taskbar ID (and so icon and grouping) of one window. */
+  public applyTaskbarIdentity(win: BrowserWindow, mode = this.disguiseMode): void {
+    if (process.platform !== 'win32' || win.isDestroyed()) return;
+    win.setAppDetails({ appId: appUserModelIdForDisguise(mode, app.isPackaged) });
+  }
+
   // Attach (idempotently) a page-title-updated guard to a window: while
   // undetectable, the renderer's <title> ("Natively") must not override the
   // disguise window title. The page loads async (after createWindow), and
@@ -10779,8 +10821,16 @@ export class AppState {
     // is the installer shortcut's ID so the running window groups with a
     // pinned Natively instead of adding a second button; each disguise keeps
     // its own ID so it never groups with the real app. See windowsTaskbarPolicy.
+    //
+    // The disguise ID goes on each window (setAppDetails), never on the app:
+    // Electron stamps the APP's ID onto "<exe product name>.lnk" whenever a
+    // notification shows — the installer's own Natively.lnk — so a reminder
+    // while disguised would re-point the real shortcut at the disguise. And
+    // app.setAppUserModelId never reaches a window already on the taskbar,
+    // which kept its old icon after a live switch.
     if (isWin) {
-      app.setAppUserModelId(appUserModelIdForDisguise(mode));
+      app.setAppUserModelId(appUserModelIdForDisguise('none', app.isPackaged));
+      for (const win of BrowserWindow.getAllWindows()) this.applyTaskbarIdentity(win, mode);
     }
 
     // 4. Update Icons
@@ -11050,6 +11100,7 @@ async function initializeApp() {
       const appState = AppState.peekInstance();
       appState?.guardWindowTitle(win);
       appState?.guardWindowProtection(win);
+      appState?.applyTaskbarIdentity(win);
     } catch (err) {
       console.error('[Main] browser-window-created title guard failed:', err);
     }
@@ -11083,7 +11134,9 @@ async function initializeApp() {
         `[Lifecycle] previous session ended unexpectedly: ` +
         `pid=${prev.pid} lastEvent=${prev.lastEvent} reason=${prev.quitReason ?? 'unknown'} ` +
         `startedAt=${prev.startedAt} lastEventAt=${prev.lastEventAt}` +
-        (prev.lastIncident ? ` lastIncident=${prev.lastIncident.event}@${prev.lastIncident.at}` : '')
+        (prev.lastIncident ? ` lastIncident=${prev.lastIncident.event}@${prev.lastIncident.at}` : '') +
+        // 2026-11-16: what the crash report sends about it, so the log and the report agree.
+        ` report=${JSON.stringify(summarizeRunEnd(prev, app.getVersion())?.props ?? null)}`
       );
     }
   } catch (err) {
@@ -12276,6 +12329,7 @@ if (process.env.THINKING_MATRIX === '1') {
   });
 
   logStartupPhase('initializeApp:complete');
+  try { require('./utils/lifecycleTracker').LifecycleTracker.getInstance().markStartedUp(); } catch { /* best-effort */ }
 
   // Refresh each keyed provider's model catalogue once it is older than its TTL
   // (LiveModelCatalogService.ttlFor), off the launch path, then re-check hourly:
@@ -12850,6 +12904,6 @@ initializeApp().catch((err) => {
   // gate renders its own dialog and exits from its dedicated handler, so skip
   // it here and let that path own the user-facing message.
   if (!isNativeArchGateCrash(err)) {
-    terminateAfterFatalError('initializeApp-failed', 1);
+    terminateAfterFatalError('initializeApp-failed', 1, err);
   }
 })

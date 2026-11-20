@@ -1,5 +1,97 @@
 # Changelog
 
+## [3.2.1] - Unreleased
+
+One Natively key runs everything: AI, speech, reranker, embeddings and search move to Natively API, plus a diagnostic report option, cleaner local speech, a trial that starts on more machines, and Pro on Windows. Draft notes: [v3.2.1](docs/releases/v3.2.1.md).
+
+### Changed
+
+- **One Natively key** — entering a Natively key, for a pack or a monthly, yearly or Standard plan, moves the AI model, speech-to-text, the reranker, pinned embeddings and web search to Natively API (#767). A pack gives Pro only while the AI and speech use Natively API, so this is what makes a pack work on a setup with its own keys.
+- **Existing customers are switched on update** — anyone who already has a Natively key and uses their own AI, speech, reranker or embedding provider is switched to Natively API the first time 3.2.1 starts, once per key. Their own keys stay saved. Clearing the Natively key, or the server refusing it, puts their settings back, and a pack that ends puts back what it moved. A plan key is checked with the server first, an allowance already used up stays where it is, and the switch waits for a running meeting to end.
+- **What this costs** — someone who pinned an embedding provider has their notes re-indexed once on Natively, and again if their settings are put back. The reranker and embeddings stay on the device when Settings keep reference files local.
+- **Web search** — with a Natively key, searches use Natively API first and your own Tavily key answers once the plan's research runs out. Without a key, Tavily still comes first.
+
+### Added
+
+- **Send diagnostic report** — when Natively can't reach its servers it says why and offers an opt-in report with a masked log tail, in Settings → Natively API (#763).
+- **Connection help** — the app works out the likely cause of a failed connection and tells you what to try.
+
+### Improved
+
+- **Held pack keys** — a pack key you already hold is used first and your plan carries on afterwards (#761). A pack's Pro goes with its key, and yearly plans move up in place.
+- **Pro licence box** — a pack key pasted there is saved as your Natively key so the AI uses it too. A second, different pack key while one is in use is refused with a message and your current licence stays.
+- **Trial start** — when the native module can't give a device ID, it is read from the system (macOS ioreg, Windows registry MachineGuid, Linux machine-id) and gives the same ID, so the free trial starts on machines where it was refused (#768).
+- **Crash details** — the report says where a run crashed, how far startup got and what it last did.
+- **Yearly prices** — the yearly price on plan cards takes turns with the monthly one, and every plan card is as tall as the packs (#756).
+- **Auto Answer sharing** — the consent text says typed chat and AI answers are shared along with transcripts.
+
+### Fixed
+
+- **Windows Pro** — Pro activates on Windows: the app trusts only usable roots from the system certificate store (#759, #760).
+- **Local speech** — Auto Detect no longer returns empty or gibberish text in Spanish, French, German or Hindi, invented phrases such as "Thanks for watching!" and sound labels are dropped, and Whisper's silence checks now run (#764).
+- **Windows taskbar** — shows the Natively or disguise icon, not Electron's default (#762).
+- **Network errors** — a failed Pro or licence request says why, instead of only "fetch failed".
+- **Search embedder** — picks up a new Natively key as soon as you change it (#757).
+- **Launcher** — the search box no longer opens by itself when ⌘B brings the window back.
+- **Funnel counts** — answer-button presses are counted by what came back, so silent answers show up in the funnel report.
+
+## [3.2.0] - 2026-11-15
+
+Eleven days of work since v3.1.0: a guided first run, a smarter Auto Answer, faster screenshot answers, Answer length, every answer on your phone, and Natively plans by the month, the year or the hour. Full notes: [v3.2.0](docs/releases/v3.2.0.md).
+
+### Added
+
+- **First-run guide** — new users walk through two short meetings (overlay, then notepad), their notes, and plans or keys, in five languages. The first meeting plays a demo film and Stop waits 30 s. Shown only to first users; Settings → Setup & Help → Show the guide again runs it for anyone.
+- **Smarter Auto Answer** — an on-device model decides which questions are meant for you. Its settings are in Settings → Intelligence (the switch stays in General), with a card the first time you turn it on and one when you stop sharing.
+- **Answer length** — Shorter, Smart or Longer answers, one setting in Settings → Overlay for every mode. Shorter and Longer are Pro.
+- **Every answer on your phone** — each overlay answer (buttons, Auto Answer, Direct Assist, spoken follow-ups) streams word by word to the paired phone.
+- **Screenshot question** — choose what a screenshot asks when you type nothing, in Settings → Overlay (#726).
+- **Newer speech models** — BYOK Soniox stt-rt-v6 and ElevenLabs Scribe v3, and Nepali in the language picker where the provider supports it (#736).
+- **Yearly plans and packs** — Natively plans can be paid yearly (two months free). One-time Light ($5, 2 hours within 2 days) and Heavy ($10, 5 hours within 5 days) packs include Pro while AI and transcription both use Natively API, with a meeting clock. Plans & Billing has an Hourly, Monthly and Yearly switch, and Unlock Pro opens a plans page inside the panel.
+- **Lost your key** — "Bought a key but no email?" sends the key again, from the activation card in Plans & Billing, in English, Russian, Chinese, Japanese and Spanish.
+- **Keep overlay size** — Settings → General → Advanced, on by default: the overlay keeps its size between answers.
+
+### Changed
+
+- **Auto Answer** is part of Natively Pro, or free when you share the transcripts of the meetings where it runs (scrubbed on your device). It now lives in the premium module.
+- **Connectors** are part of Natively Pro (the free trial includes them), and Pro locks when a licence or trial ends.
+- **Pro Yearly** is $30 against a struck $39 during the seasonal sale.
+- **Open at login** is on by default for fresh installs.
+
+### Improved
+
+- **Screenshot answers** — the first word arrives in about 4 s instead of about 10 s, and screenshots are remembered in typed chat, What to answer, Code hint, Brainstorm, your own buttons and phone questions.
+- **Auto Answer** — waits for announced lists and scenarios, answers back-to-back questions in one answer, never answers a bare transition, and spends fewer judge calls.
+- **Live answers** — follow the Real-time prompt, skills and Cue Cards on every path, carry the source badge their evidence earns, and resolve a follow-up against the previous answer.
+- **Speed** — the answer path warms up at meeting start, small talk gets no speculative answer, the claim verifier runs only with documents attached, and the question goes last so the prompt cache reuses the rest.
+- **Search** — heard questions also search files with the on-device embedder.
+- **Banners and cards** — one full-window card per launch, calmer meeting banners, the auto-stop warning above every other banner, and notices that wait their turn.
+- **Calendar** — reminders refresh themselves and fire only when right, one offer per call.
+- **Packs** — a pack that has ended says so, and the meeting resumes after a top-up.
+- **Look** — lavender accent with periwinkle switches, every Settings title in Inter Semibold, darker Settings cards in dark mode, Liquid Glass Unlock Pro.
+
+### Fixed
+
+- **Overlay** keeps your place when an answer you didn't ask for arrives (#723).
+- **Coding questions** — "show it in python" keeps the right problem (#737, #738, #739), and "Java 3" is no longer read as a language rule (#740).
+- **System audio** restarts after a failed init (#729); on Windows, capture falls back to the communications output when loopback can't use the console default.
+- **Speech** — speaker bleed on the mic no longer counts as the user, no silent Google fallback when the chosen provider has no key, Natively speech keeps the sentence spoken just before Stop, and questions heard around an STT outage reach Auto Answer once.
+- **Local speech models** switch without a restart, and rewritten partials no longer stay on the transcript bar.
+- **Timeouts** — long Natively answers get 30 s instead of 8 s; an exhausted provider chain says the providers failed, not "none set up".
+- **Chat** — a question typed while an answer streams is sent, and the replaced stream's late tokens are dropped.
+- **Screenshot question** field keeps spaces and reaches the overlay.
+- **Interview answers** — a design problem stated over several sentences routes to a design answer (#741); an image promotes a question to code only when its words allow code (#742); a cut-off answer stays out of the conversation ring (#743); "40M deliveries" is a count, while pay sentences are still withheld (#744).
+- **Privacy** — question and answer text leave the trace logs, and premium generation honours the Profile & history scope.
+
+### Technical
+
+- Auto Answer's on-device decider is a paid download (Natively API key or Pro), not in the repo or installer: int8 on onnxruntime 1.24.3 in a utility process (Windows x64/arm64, Apple Silicon on macOS 14+), 4-bit on onnxruntime 1.22 in a worker thread (Intel Macs, macOS 13).
+- The core/premium boundary is typed and tested for drift; the source-available build knows it has no profile feature.
+- Per-turn LLM call budget and per-provider circuit breaker; live judge and answer calls get priority over background compiles.
+- app_run_ended telemetry records how the previous run ended.
+- Native fault-injection code stays out of the shipped .node.
+- Electron 43.7.7 and Node 22.13 or later, unchanged.
+
 ## [3.1.0] - 2026-11-04
 
 Includes 3.0.0 (2026-11-01). Five weeks of work since v2.9.2: a meeting notepad, your own overlay buttons, Connectors, notes you can share as a link, follow-ups in your style, and Resume for a meeting that has ended. Full notes: [v3.1.0](docs/releases/v3.1.0.md) · [v3.0.0](docs/releases/v3.0.0.md).
@@ -83,6 +175,8 @@ Includes 3.0.0 (2026-11-01). Five weeks of work since v2.9.2: a meeting notepad,
 - **Revert "fix(provider-state): senior-review follow-ups" (commit `a524329`, reverted in `9b7f84d`)**: The senior-review-fix commit landed with a commit message and changelog entry that described fixes it did the opposite of — the diff was a silent, near-total revert of the entire `context-os-evidence-execution-repair` series (typed EvidencePack prompt governance, EvidenceResolver single-canonical retrieval, explicit source-switch handling, clarification short-circuit, producer-metadata embedding plumbing, Groq/OpenAI model-id ordering, IPv6 / numeric SSRF guards, FK cascade test coverage). It also deleted a previously-passing regression test (`KnowledgeIngestSpaceMetadata.test.mjs`) and rewrote a surviving test (`EmbeddingFallbackSinglePath.test.mjs`) to assert the regressed behavior, while claiming "71/71 focused tests pass". A post-merge `code-reviewer` pass caught the contradiction (7 CRITICAL, 2 HIGH) and recommended **BLOCK**. Reverting restores the parent `97daeba` state where every claimed-but-not-shipped feature already lives: `EmbeddingPipeline.getEmbeddingWithFallback()` returns producer metadata; `main.ts` wires the orchestrator through the metadata-returning path; `PRAGMA foreign_keys = ON` is enabled unconditionally on the shared connection; the FK cascade suite covers the full `mode_reference_files → knowledge_sources → knowledge_packs → knowledge_cards + entities/relations/index_versions` chain and bare `deleteMode`; `ipcHandlers.modelAvailable` matches Groq (`llama-`/`mixtral-`/`gemma-`/`meta-llama/`/`qwen/` + Groq-hosted `openai/gpt-oss-`) before the broad `includes('openai')` catch-all; `validateUrlForSsrf` blocks `::1`, `fc00::/7`, `fe80::/10`, and pure-numeric / `0x`-prefixed hostnames that some stacks silently re-interpret as `127.0.0.1` after DNS canonicalization; the Context OS H1 typed-EvidencePack path, EvidenceResolver single-canonical retrieval, explicit-source-switch resolution (`resolveExplicitSourceRequest` / `toLegacyUserExplicitSource`), and the `sourceOwner='clarify'` short-circuit that logs the exact `finalAction` (not a hardcoded `'answer'`) are all present. This revert commit has no other intent.
 
 ### What's New
+
+- **Local speech models stop inventing words, and Nemotron Auto Detect works** (PR #764 by @Brosski224, with review follow-ups): Local models gave gibberish or made-up text ("You're", "Oh Whoa", "[?", "(upbeat music)") on clicks, coughs, noise and quiet voices. The Whisper-family worker now computes the silence checks transformers.js 3.8.1 ignores (no-speech probability, a repetition check, and, on Windows, a mean log-probability floor of −4 that drops a final the model itself scored as invented), decodes finals in timestamp mode, caps the token budget by audio length, and raises quiet segments to a normal level. On Windows the voice detector follows the room's noise floor instead of a fixed 0.008, keeps 300 ms before each phrase and waits 600 ms (1.2 s for a phrase under 1.5 s) before closing it. macOS keeps its previous voice-detector settings and has no confidence floor: they are per-platform (`localSttTuning.ts`) and the new values were not tuned on a Mac, where a live run dropped one-word answers ("Yes", "No") and delayed short phrases by about 4 s. Nemotron's **Auto Detect**, the default, was sent as English and returned empty text or romanised gibberish for Spanish, French, German and Hindi; it now uses the model's own Auto prompt and is offered in Settings. Slow models show a final before the next partial instead of 12–25 s late, glossary-prompt echoes are dropped, and the hallucination filter also drops punctuated outros ("Thanks for watching!"), letterless output, parenthesised sound labels and interjection-only lines; "uh-huh" and "mm-hmm" are now dropped too. One log line per final shows its audio length, inference time, no-speech probability and log-probability.
 
 - **Google Calendar: a failed sign-in says why, in the browser and in Settings** (PR #639 by @markdudov, with review follow-ups): When the token exchange failed, the page in the browser always said "Google didn’t accept the sign-in code. It may have expired.", whatever had gone wrong, while Settings showed something else. For a failed exchange both now give the same reason: Natively's own sentence when event access was left unticked on Google's screen, Google's own sentence when Google sent one, "Google couldn’t finish the sign-in. Try again in a minute." when it sent none, and "Natively couldn’t finish signing in. Check your connection and try again." when Google could not be reached. Broader calendar permissions (`calendar.readonly`, `calendar.events`, `calendar`) now count as event access. Review follow-ups: a Google error reply in an unexpected shape left the browser page blank and Connect spinning for five minutes; Settings showed raw text such as "fetch failed", "access_denied", "invalid_client: … (HTTP 400)" or "Calendar auth timed out — port released."; a 200 reply with no token in it connected a calendar that never synced; and a token file that could not be saved turned a working sign-in into a reported failure, where the calendar now stays connected and the tokens are saved at the next refresh.
 

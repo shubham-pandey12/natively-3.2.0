@@ -1,46 +1,83 @@
-export declare const GUIDE_STEP_NUMBER: Readonly<Record<string, number>>;
-export declare const GUIDE_STEP_TOTAL: number;
-export declare const GUIDE_DONE_HOLD_MS: number;
+export type GuideStepId =
+  | 'start' | 'overlay' | 'answer' | 'screenshot' | 'stop' | 'notes'
+  | 'surface'
+  | 'start2' | 'notepad' | 'ask' | 'recipe' | 'stop2' | 'notes2'
+  | 'plans' | 'keys';
+export type GuideStatus = 'idle' | 'active' | 'skipped' | 'finished' | 'expired';
+export type GuideVariant = 'normal' | 'trial_out' | 'no_trial';
+export type GuideWindow = 'launcher' | 'overlay' | 'notes' | 'settings';
+
+export interface GuideState {
+  status: GuideStatus;
+  step: GuideStepId;
+  variant: GuideVariant;
+  outcome: 'bought' | 'own_keys' | null;
+  startedAt: number | null;
+  updatedAt: number | null;
+  /** The meeting main saved when a guide meeting ended (its notes step opens it). */
+  endedMeetingId: string | null;
+  /** Until when the first guide meeting's Stop is locked (epoch ms; guideStopLockLeft). */
+  stopLockUntil: number | null;
+}
+
 export declare const GUIDE_STOP_LOCK_MS: number;
-export declare function guideStopLockLeft(state: any, now: number): number;
-export declare const GUIDE_EVENT_TYPES: readonly string[];
-export declare function emptyGuideState(): {
-    status: string;
-    step: string;
-    variant: string;
-    outcome: any;
-    startedAt: any;
-    updatedAt: any;
-    endedMeetingId: any;
-    stopLockUntil: any;
-};
-export declare function normalizeGuideState(raw: any, now: number): {
-    status: any;
-    step: any;
-    variant: any;
-    outcome: any;
-    startedAt: any;
-    updatedAt: any;
-    endedMeetingId: any;
-    stopLockUntil: any;
-};
-export declare function reduceGuide(state: any, event: any, now: number): any;
-export declare function reconcileGuide(state: any, { meetingActive, atLaunch, surface }: any, now: number): any;
-/**
- * The guide's account facts from their raw sources (3.2.0). The trial sentinel
- * is a placeholder key, not a purchased one, so it never counts as a Natively key.
- */
-export declare function guideFactsFromSources({ nativelyKey, trialSentinel, licensed, hasOwnAiKey, hasMeetings, launchCount, }?: {
-    nativelyKey?: unknown;
-    trialSentinel?: string;
-    licensed?: unknown;
-    hasOwnAiKey?: unknown;
-    hasMeetings?: unknown;
-    launchCount?: unknown;
-}): {
-    hasOwnAiKey: boolean;
-    hasMeetings: boolean;
-    hasNativelyKey: boolean;
-    isPremium: boolean;
-    launchCount: number;
-};
+export declare function guideStopLockLeft(state: GuideState | null | undefined, now: number): number;
+
+export interface GuideFacts {
+  hasOwnAiKey: boolean;
+  hasNativelyKey: boolean;
+  isPremium: boolean;
+  launchCount: number;
+  /** A meeting of the user's own is saved (not the seeded demo): not a new user. Main's to say. */
+  hasMeetings?: boolean;
+}
+
+export declare const GUIDE_DONE_HOLD_MS: number;
+
+export type GuideEvent =
+  | { type: 'plans_closed'; facts: GuideFacts }
+  /** surface: where the meeting opened; main attaches it (firstRunGuideStore). */
+  | { type: 'meeting_started'; surface?: 'overlay' | 'notepad' }
+  | { type: 'answer_shown' }
+  | { type: 'screenshot_taken' }
+  | { type: 'note_typed' }
+  | { type: 'meeting_stopped' }
+  | { type: 'overlay_next' }
+  | { type: 'notes_next' }
+  | { type: 'ask_opened' }
+  | { type: 'recipe_run' }
+  /** Main's own: the meeting surface was set to the notepad (step 7). */
+  | { type: 'surface_notepad' }
+  | { type: 'trial_out'; facts?: GuideFacts }
+  | { type: 'trial_unavailable'; facts?: GuideFacts }
+  /** Main replaces the facts with its own (services/firstRunGuideStore.ts). */
+  | { type: 'plan_changed'; facts?: GuideFacts }
+  | { type: 'own_keys' }
+  | { type: 'keys_done' }
+  | { type: 'skip' }
+  | { type: 'restart' }
+  /** meetingActive: a meeting runs as the save lands (so the save is a late one). */
+  | { type: 'meeting_saved'; meetingId: string | null; meetingActive?: boolean };
+
+export const GUIDE_EVENT_TYPES: readonly GuideEvent['type'][];
+export const GUIDE_RESUME_MS: number;
+export const GUIDE_MAX_LAUNCH: number;
+export const GUIDE_STEP_COUNT: number;
+export const GUIDE_STEP_NUMBER: Readonly<Record<GuideStepId, number>>;
+export function emptyGuideState(): GuideState;
+export function normalizeGuideState(raw: unknown, now: number): GuideState;
+export function isGuideEligible(facts: GuideFacts): boolean;
+export function reduceGuide(state: GuideState, event: GuideEvent, now: number): GuideState;
+export function windowForStep(step: GuideStepId): GuideWindow;
+export function guideFactsFromSources(sources: {
+  nativelyKey?: string | null;
+  trialSentinel: string;
+  licensed?: boolean;
+  hasOwnAiKey?: boolean;
+  hasMeetings?: boolean;
+  launchCount?: number;
+}): GuideFacts;
+export function reconcileGuide(state: GuideState, ctx: { meetingActive: boolean; atLaunch: boolean; surface?: 'overlay' | 'notepad' }, now: number): GuideState;
+export function planStepTitle(input: { variant: GuideVariant; remainingMs: number | null; expired: boolean }): string;
+export function trialEventFromLocal(local: { hasToken?: boolean; trialClaimed?: boolean; expired?: boolean } | null | undefined): 'trial_out' | 'trial_unavailable' | null;
+export function startCoverage(input?: { trial?: { hasToken?: boolean; expired?: boolean; trialClaimed?: boolean } | null; hasNativelyKey?: boolean }): 'trial' | 'plan';

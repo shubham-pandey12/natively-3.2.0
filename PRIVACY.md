@@ -1,6 +1,6 @@
 # Privacy Policy
 
-_Last updated: November 13th 2026_
+_Last updated: November 17th 2026_
 
 This policy describes how **Natively** — the desktop application, the **Natively Pro** licensed features, and the **Natively API** managed service — handles your data. We've tried to write it like a person, not a lawyer.
 
@@ -73,7 +73,7 @@ For Natively Pro, the Natively API, and the Free Trial we maintain a small opera
 | Anti-abuse signals (rate-limited IP, multi-account heuristics) | Prevent trial farming, refund-rebuy abuse, license sharing | Up to 12 months from last signal |
 | Support correspondence | Answer your questions and keep a record of what we agreed | Up to 3 years from the last message in the thread |
 
-We do **not** store the audio you capture, the screen content you capture, your transcripts, your prompts, or your generated outputs on our servers.
+We do **not** store the audio you capture, the screen content you capture, your transcripts, your prompts, or your generated outputs on our servers, except the meeting transcripts you choose to share to improve Auto Answer (§3.7).
 
 This applies to the usage ledger too. The ledger records **that** something happened — when,
 through which endpoint, on which model, whether it succeeded, and how much of your quota it
@@ -110,6 +110,7 @@ have a trial or an account, to that trial or account.
 | Usage events — the app was opened for the first time; the app was used on a given day; a getting-started step was shown or completed; a meeting started or ended (including one cut short because the app was closed), how many whole minutes it lasted and how many answers it produced; an answer could not be given, and the kind of reason, chosen from a fixed list (for example: no AI is set up, a key was refused, the request timed out) and never the provider's message; which features you used that day; a card or a locked feature was shown, and what you chose; a free trial was started, or could not be and why; a checkout page was opened, and from which screen; a licence key or API key was entered, and whether it was accepted | Understand how the product is used, where people give up, and what leads to a purchase | 13 months |
 | The state of the installation at that moment, as yes/no values — whether it is on a trial, has a plan, has a Pro licence, or uses its own AI keys — with the application version and operating system | Compare those groups | 13 months |
 | Country — a two-letter country code that our server works out from the network address the request arrives from | See roughly where in the world the app is in use, and show it per country on our website (see below) | 13 months |
+| Connection check (Usage statistics on) — only when a request to our servers (a key you saved, the Pro check, transcription or another call) cannot reach them: the error code of each step (name lookup, secure handshake with and without your computer's own certificates, our server's answer), whether two public connectivity-check sites loaded, whether a proxy is set (never its address), how many minutes your computer's clock differs from the internet's, how many system certificates were read and added, and, if something re-signed the connection, which security product it is — from a fixed list such as Kaspersky, ESET, Zscaler, or "other" | Tell a blocked connection from a broken one, fix it for you where we can, and count how many people are affected | Same as the events above; at most one report every 30 minutes |
 
 Every event is a fixed name with fixed choices, whole numbers, or yes/no values. No field in it
 can hold text, so an event cannot contain anything you say, see, type or paste, a file name, a
@@ -120,6 +121,33 @@ never sent. We do not store your IP address with these events.
 a database it keeps on its own disk (IP geolocation by [DB-IP](https://db-ip.com)), and stores the
 two-letter country code with the event. The address is not stored and is not sent to anyone for
 this lookup. Nothing finer than the country is kept: no region, city or network.
+
+**Connection check.** When a Natively key, the Pro check or any other request to our servers fails because they cannot be reached,
+the app runs a short check to find out why and tells you the result on your own screen. If the cause is
+a stale certificate stored on your computer, it also undoes that for the session and tries again, and takes the undo back if that did not help. With
+Usage statistics on, the check also asks two public connectivity-check addresses (Cloudflare and Google)
+for nothing but their response, to tell "our servers are blocked" from "your internet is down", with no
+key, no header and no body, and sends the result to us as one more of these fixed events. With Usage
+statistics off, the check makes no request to anyone but Natively and sends us nothing. The report holds
+names from fixed lists and whole numbers only: no address, no host name, no certificate text, no key and
+nothing you typed. The name of a security product is looked up from a fixed list in the app; anything not
+on the list is reported as "other".
+
+**Diagnostic report (only if you click it).** When the connection check finds something it could not fix,
+Settings › Plans & Billing offers **Send diagnostic report to Natively**. Nothing is sent unless you click
+it. **What's sent** shows the exact text first, and **Copy report** lets you e-mail it to us instead. The
+report is the connection check's result (the same fixed-list names and numbers as above) and the last 400
+lines (at most 60,000 characters) of the app's own log file, `natively_debug.log`. If you have switched on
+detailed logging (Settings › General › Advanced), which can put meeting text in that log, the log is left
+out and only the connection check's result is sent. The app already hides
+keys and tokens when it writes that log; before sending it hides them again, and also e-mail addresses,
+identifiers, network addresses, and your user name in file paths. The log can still contain other text the
+app wrote, such as error messages, feature names and the host names it contacted; read the preview. It is
+stored with your installation identifier, app version, operating system, a country code and a one-way hash
+of your network address (never the address), is used only to work out why the connection failed, and is
+deleted after 30 days. At most five reports a day per installation. You can ask us to delete one earlier,
+quoting the reference shown after sending, at **privacy@heynatively.com**. This works whether or not
+Usage statistics is on, because it is your decision each time.
 
 **Shown on our website.** Our website shows where the app was open in the last 24 hours. For each
 country it shows a whole percentage and a shade of colour, and never a number of people. Nothing
@@ -192,13 +220,14 @@ You can disconnect at any time in Settings › Calendar, which deletes the store
 
 Auto Answer is part of Natively Pro. You can also use it **without Pro** if you agree to share the transcripts of the meetings where it runs, so we can teach it when to answer and when to wait. Pro and Free Trial users can choose to share too; for them it is optional. Nothing is shared until you agree in the app, and the app shows you this list before you do.
 
-- **What is sent:** the full transcript of each meeting in which Auto Answer was on, **including what the other people in the meeting said**. Each line carries only whether it was you or someone else speaking and how far into the meeting it was said. With it: the meeting mode, its length, the day (not the time), the app version, your operating system, your installation identifier, your licence or trial (if you have one), and the consent version and time you agreed.
-- **Removed on your device before sending:** e-mail addresses, phone numbers, web links and long numbers, and the names the app knows for that meeting (yours, your calendar invitees' and the names shown in the call), which become "[name]". Other names said aloud, and everything else that was said, are **not** removed, so the transcripts can still identify you or others.
-- **Never sent:** audio, screenshots, your notes, AI answers, meeting titles and calendar events.
+- **What is sent:** the full transcript of each meeting in which Auto Answer was on, **including what the other people in the meeting said, what you typed to Natively during the meeting (your questions and anything you pasted), and Natively's AI answers**. Each line carries only whether it is marked as yours (what you said or typed) or as someone else's (what others said, and the AI's answers), and how far into the meeting it came. With it: the meeting mode, its length, the day (not the time), the app version, your operating system, your installation identifier, your licence or trial (if you have one), and the consent version and time you agreed.
+- **Removed on your device before sending:** e-mail addresses, phone numbers, web links and long numbers, and the names the app knows for that meeting (yours, your calendar invitees' and the names shown in the call), which become "[name]". Other names, and everything else that was said or typed, are **not** removed, so the transcripts can still identify you or others.
+- **Never sent:** audio, screenshot images, your notes, meeting titles and calendar events.
+- **If you agreed before 17 November 2026:** the earlier version of this list said AI answers were never sent, but they and your typed questions were sent with the transcript. From Natively 3.2.1 the app asks you again with this list, and shares nothing more until you agree.
 - **What we use it for:** only to train and test the models behind Auto Answer. We do not sell it, use it for advertising, or publish it. To label and train, we may process it with the service providers we use for that: Anthropic (Claude) to label examples and Modal to run training. Storage is in our database at Supabase (Tokyo region).
 - **Legal basis:** your consent for your own data. For the other people in the meeting, our legitimate interest in improving Auto Answer, with the safeguards above; you must tell them where the law requires it (Terms §10.1).
-- **How long we keep it:** until you delete it, and at most **2 years** from when we received it.
-- **Stopping and deleting:** turn off **Share transcripts to improve Auto Answer** in Settings › General. Nothing more is sent, and anything not yet sent is deleted from your device. **Delete shared transcripts** in the same place deletes everything already received from your installation. If you use Auto Answer without Pro, it stops when you stop sharing. You can also email us (§9).
+- **How long we keep it:** at most **2 years** from when we received it.
+- **Stopping and deleting:** turn off **Share transcripts to improve Auto Answer** in Settings › Intelligence. Nothing more is sent, and anything not yet sent is deleted from your device. If you use Auto Answer without Pro, it stops when you stop sharing. To have transcripts we already received deleted, email us (§9) with your licence key or the email you bought with, and we delete what we can match to you.
 
 ---
 

@@ -225,6 +225,10 @@ export class SonioxStreamingSTT extends EventEmitter {
                 return;
             }
             if (sttProviderRejectsLanguage('soniox', key)) {
+                // Soniox answers this hint with a 400 that ends the session
+                // (Nepali, 2026-11-15). Settings hides it under Soniox; this
+                // covers a language stored earlier, so the meeting still
+                // transcribes on auto-detect.
                 this.languageCode = undefined;
                 console.warn(`[SonioxStreaming] Soniox has no ${config.iso639} — using auto-detect`);
             } else {

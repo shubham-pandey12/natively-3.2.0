@@ -241,21 +241,21 @@ function isLanguageRequest(question: string): boolean {
 const DIRECT_ACTION_RE =
   /^(?:(?:ok(?:ay)?|so|now|and|please)[,.!]?\s+)*(?:(?:can|could)\s+you\s+)?(?:implement|write|code|solve)\s+(?:this|it|that|the\s+(?:solution|same|above))(?:\s+(?:now|please|again))?\s*[?.!]*$/i;
 
-/** Regex that matches the annotation appended by withActiveCodingProblem. */
+// The note What to Answer appends when a coding continuation is resolved
+// against the session's active coding problem (issue #539). The planner reads
+// the note as the routing decision it is (issues #737, #739): the problem text
+// is the subject, not the question, so its words ("Have you used …", a spec with
+// no coding verbs) must not pick the answer type.
+// `saidAfter` is what the interviewer said after the problem was stated. It is
+// quoted, not judged, and it comes FIRST: live, gemini-3.1-flash-lite given the
+// older problem as "the coding problem" with the later lines after it answered
+// the older one (the count_ways(n) of #539 and #738). The latest statement leads, and
+// the older problem is offered only for when the latest is talk about it.
 const ACTIVE_CODING_PROBLEM_NOTE_RE = / \(follow-up to the coding problem[\s\S]*\)$/;
-
-/**
- * Annotates a follow-up ask with the active coding problem context so the
- * model answers the PROBLEM rather than treating the ask as a fresh question.
- * When the interviewer has spoken since the problem was set, their latest
- * statement(s) are injected so the model can resolve it over the problem.
- */
-export function withActiveCodingProblem(ask: string, problem: string, saidAfter: string[] = []): string {
+export function withActiveCodingProblem(ask: string, problem: string, saidAfter: readonly string[] = []): string {
   if (saidAfter.length === 0) return `${ask} (follow-up to the coding problem: "${problem}")`;
   return `${ask} (follow-up to the coding problem the interviewer is on now. Their latest statement before this ask: "${saidAfter.join(' ')}". Earlier problem: "${problem}". If the latest statement describes a task or problem, solve that task instead of the earlier problem. Only if it just talks about the earlier problem, solve the earlier problem.)`;
 }
-
-/** True when the question already carries the active-coding-problem annotation. */
 export function isActiveCodingProblemFollowUp(question: string | null | undefined): boolean {
   return ACTIVE_CODING_PROBLEM_NOTE_RE.test(question || '');
 }

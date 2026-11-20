@@ -46,7 +46,7 @@ import {
   type TextStreamProvider,
 } from "./llm/textStreamFallback"
 import { isPermanentKeyError, PROVIDERS_EXHAUSTED_CODE } from "./llm/providerErrorClassifier"
-import { TurnCallBudget, ProviderCircuitBreaker, guardProviderOpen, sdkRetryOptions } from './llm/providerCallBudget';
+import { guardProviderOpen, ProviderCircuitBreaker, sdkRetryOptions, TurnCallBudget } from "./llm/providerCallBudget"
 import { telemetryService } from "./services/telemetry/TelemetryService"
 import {
   ollamaVisionFromShow,
@@ -59,7 +59,14 @@ import { assertProviderDataScopes, getDeniedDataScopes, routeWithScopeFallback, 
 // Outbound-scope vocabulary shared with Context Intelligence V3. ONE mapping of
 // SourceType → privacy toggle: a second copy here is how the two layers would
 // drift into disagreeing about what a `<evidence source_type="RESUME">` block is.
+import type { PromptAssemblyResult } from "./premium/contracts"
 import { applyEnvScopeDenials, sourceTypesForScopes, dataScopeForSourceType, dataScopesForEvidenceMarkup, scopeLabels, DENY_PROVIDER_SCOPES_ENV } from "./context-intelligence/policies/provider-scope-policy"
+// Premium Profile Intelligence blocks (F-BND-04 / A5 D7, 2026-11-13). The
+// legacy scope regexes key on `<candidate_` / `<user_context`; these premium
+// blocks (the target job, salary estimate, company dossier, pivots, mock hints,
+// culture map, negotiation state, the résumé JIT request) matched nothing, so a
+// "Profile & history" denial sent them anyway. All are derived from the
+// user's profile, so all are `profile_history`.
 // Screen-understanding enforcement (private_vision / vision_only). Lives in
 // LLMHelper so EVERY screenshot-bearing path is covered, not the one IPC
 // handler that used to read the enum.
@@ -1152,6 +1159,7 @@ export class LLMHelper {
     if (!args) return null;
     const retried = [...args] as Parameters<LLMHelper['streamChat']>;
     retried[7] = signal;
+    // The regeneration is the same turn: it spends that turn's call budget (F-LAT-10).
     if (signal) this.callBudget().alias(signal, key);
     return retried;
   }
@@ -3150,6 +3158,7 @@ export class LLMHelper {
     if (!this._providerBreaker) this._providerBreaker = new ProviderCircuitBreaker();
     return this._providerBreaker;
   }
+
   private hedgeDelayForBudget(budgetMs: number): number {
     // The Active Model's own measurement: this runs inside its rung, which is
     // reached only when no Background Model answered the turn.
@@ -3240,21 +3249,28 @@ export class LLMHelper {
     // of two unrelated constants, not a guarantee, and it would break silently
     // the day either one moves. Decide from what actually survived.
     if (fittedSpares.length === 0) primaryTtftMs = budgetMs;
-    const turnKey = opts.abortSignal ?? {};
+    // Per-turn call budget + per-family breaker (forensics 2026-11-13, F-LAT-10;
+    // ADR-003). Keyed on the turn's own abort signal: speculation, prefetch and
+    // the answer each carry one, and a regeneration shares its turn's (replayed
+    // with the same signal, or aliased in retryAnswerCall). Every call below is
+    // charged to it and gets no SDK-internal retries.
+    const turnKey: object = opts.abortSignal ?? {};
     const budget = this.callBudget();
     const breaker = this.providerBreakerFor();
-    const guard = (family: string, name: string, open: (signal: AbortSignal) => AsyncGenerator<string, void, unknown>) =>
+    const guard = (family: string, name: string, open: (sig: AbortSignal) => AsyncGenerator<string, void, unknown>) =>
       guardProviderOpen({ family, name, turnKey, budget, breaker, outerSignal: opts.abortSignal, open });
     for (let i = 0; i < fittedSpares.length; i++) {
       const spare = fittedSpares[i];
       const spareOpen = spare.open;
-      fittedSpares[i] = { ...spare, open: (sig, attempt) => guard(spare.id, spare.name, s => spareOpen(s, attempt))(sig) };
+      fittedSpares[i] = { ...spare, open: (sig, attempt) => guard(spare.id, spare.name, (s) => spareOpen(s, attempt))(sig) };
     }
+    // A hedge is the turn's second call; with fewer than two left it would only
+    // be refused, so it is not armed at all.
     const hedging = fittedSpares.length === 0 && budget.remaining(turnKey) >= 2;
     const primary: TextStreamProvider = {
       id: opts.id, name: opts.name, isLocal: false, priority: 0,
       ttftTimeoutMs: primaryTtftMs,
-      open: guard(opts.id, opts.name, sig => opts.open(sig)),
+      open: guard(opts.id, opts.name, (sig) => opts.open(sig)),
     };
     if (hedging) {
       // A distinct id so the primary's own breaker does not suppress its hedge.
@@ -3265,7 +3281,7 @@ export class LLMHelper {
       primary.hedgeWith = {
         id: `${opts.id}#hedge`,
         name: `${opts.name} (parallel retry)`,
-        open: guard(opts.id, `${opts.name} (parallel retry)`, sig => opts.open(sig)),
+        open: guard(opts.id, `${opts.name} (parallel retry)`, (sig) => opts.open(sig)),
       };
     }
 
@@ -4013,6 +4029,16 @@ export class LLMHelper {
 
   /** Records a plan-limit 429 from the Natively API. Returns true when it was one. */
   private noteNativelyPlanLimit(status: number, headers: { get(name: string): string | null } | null | undefined, errData: any, onTrial = false): boolean {
+    // The key in use refused outright (a pack ended or refunded, a plan
+    // cancelled): the pack switch looks again now, not at its next half-hourly
+    // look (services/packs/nativelyPackFallback.ts; throttled there, and a
+    // no-op without a pack key).
+    if ((status === 401 || status === 403) && !onTrial) {
+      try {
+        (require('./services/packs/nativelyPackFallback') as typeof import('./services/packs/nativelyPackFallback'))
+          .nudgeNativelyPackFallback(String(errData?.error ?? 'key_refused'));
+      } catch { /* not wired */ }
+    }
     if (status !== 429) return false;
     const code = String(errData?.error ?? errData?.code ?? '');
     if (!LLMHelper.PLAN_LIMIT_RE.test(code)) return false;
@@ -4040,7 +4066,7 @@ export class LLMHelper {
       return new Error(nativelyLimitErrorMessage(this.nativelyLimit));
     }
     if (lastProviderError != null) {
-      const err = new Error('All configured AI providers failed to answer.') as Error & { code?: string; cause?: unknown; firstProviderError?: unknown };
+      const err: any = new Error('All configured AI providers failed to answer.');
       err.code = PROVIDERS_EXHAUSTED_CODE;
       err.cause = lastProviderError;
       err.firstProviderError = lastProviderError;
@@ -4927,7 +4953,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           // Recruiter utterances reach the tracker exclusively via the STT path in main.ts.
           this.knowledgeOrchestrator.feedForDepthScoring(message);
 
-          const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
+          const knowledgeResult: PromptAssemblyResult | null = await this.knowledgeOrchestrator.processQuestion(message);
 
           // Identity recall (intro/name questions) passes through regardless of mode
           // compatibility — factual retrieval, not persona injection, so mode gating is
@@ -5790,12 +5816,9 @@ let isMultimodal = !!(imagePaths?.length);
    * rule asks it (services/packs/packProRule.ts).
    */
   public fastResponseFamilyNow(): string | null {
-    try {
-      return this.resolveFastPick()?.family ?? null;
-    } catch {
-      return null;
-    }
+    try { return this.resolveFastPick()?.family ?? null; } catch { return null; }
   }
+
   private fastPickForTextTurn(): FastPick | null {
     const turn = this._fastTurn;
     if (!turn) return this.resolveFastPick();
@@ -6549,12 +6572,30 @@ let isMultimodal = !!(imagePaths?.length);
     // its controller's). Only the Natively rung and the preferFast pick take it
     // mid-call; the others finish their in-flight request, then the ladder stops
     // instead of trying the next rung or rotation. An aborted call never resolves.
+    //
+    // `opts.dataScopes` (F-BND-04, 2026-11-13): the cloud data scopes the
+    // MESSAGE carries. Premium generation (JIT intro, salary, coaching, company
+    // research, résumé/JD extraction) declares `profile_history`; a denied scope
+    // routes to the local model or the call fails — the message IS the profile,
+    // so there is nothing to strip and still send.
     opts?: { preferFast?: boolean; signal?: AbortSignal; dataScopes?: ProviderDataScope[] },
   ): Promise<string> {
     const signal = opts?.signal;
     const aborted = () => signal?.aborted === true;
     const abortError = () => Object.assign(new Error('structured generation aborted: superseded or cancelled'), { name: 'AbortError' });
     if (aborted()) throw abortError();
+    if (opts?.dataScopes?.length) {
+      const deniedStructured = getDeniedDataScopes(opts.dataScopes, this.getProviderScopePolicy());
+      if (deniedStructured.length > 0) {
+        const ollamaAvailable = this.useOllama && await this.ensureOllamaModelSelected();
+        for (const scope of deniedStructured) this.logScopeFallback(scope, ollamaAvailable ? 'routing' : 'omitting');
+        if (ollamaAvailable) return this.processResponse(await this.callOllama(message));
+        throw Object.assign(
+          new Error(`Not sent: a privacy setting keeps this data off cloud providers (Settings > AI Providers > Privacy — cloud data scopes: ${scopeLabels(deniedStructured)}).`),
+          { name: 'ProviderScopeDenied' },
+        );
+      }
+    }
 
     if (opts?.dataScopes?.length) {
       const deniedStructured = getDeniedDataScopes(opts.dataScopes, this.getProviderScopePolicy());
@@ -10325,7 +10366,7 @@ let isMultimodal = !!(imagePaths?.length);
         this.knowledgeOrchestrator.feedForDepthScoring(message);
 
         _stage('processQuestion START');
-        const knowledgeResult = await this.knowledgeOrchestrator.processQuestion(message);
+        const knowledgeResult: PromptAssemblyResult | null = await this.knowledgeOrchestrator.processQuestion(message);
         _stage('processQuestion DONE');
         // Issue #272: gate ALL premium-intercept side-effects (coaching, intro
         // shortcut, prompt/context injection) by active mode. The depth scorer
@@ -10340,7 +10381,7 @@ let isMultimodal = !!(imagePaths?.length);
           const { isJitFinalAnswerEnforced } = require('./intelligence/intelligenceFlags');
           // A bare social greeting ("hi") is not a factual answer — keep its
           // instant canned reply even under the full-JIT law.
-          if (isJitFinalAnswerEnforced() && !(knowledgeResult as any)?.isBareGreeting) {
+          if (isJitFinalAnswerEnforced() && !knowledgeResult?.isBareGreeting) {
             // FULL-JIT LAW: do not emit the AOT-precomputed intro/identity as the
             // final answer. Demote it to EVIDENCE (a candidate_identity_fact
             // block) and fall through so the provider writes the answer just-in-
@@ -11150,15 +11191,15 @@ let isMultimodal = !!(imagePaths?.length);
         // universe. Dispatch for either attached pixels or request-scoped
         // browser DOM/screen OCR; the WTA govern block draws the same line.
         const { declineYieldsToAttachedImages: _declineYieldsLLM } = require('./intelligence/context-os') as typeof import('./intelligence/context-os');
-        // A refusal pack the refusal policy says does not govern (e.g. the mode's
-        // source authority lets the model answer from general knowledge) goes to
-        // the model instead of the canned decline.
+        // F-ACC-13 (2026-11-13): the same refusal policy the coordinator sites
+        // apply. A refusal pack that does not govern dispatches to the model.
         const { packGovernsGeneration } = require('./intelligence/context-os/refusalPolicy') as typeof import('./intelligence/context-os/refusalPolicy');
-        const _refusalYieldsLLM = pack.answerPolicy === 'refuse_insufficient_evidence' && !packGovernsGeneration({
-          answerPolicy: pack.answerPolicy,
-          sourceAuthority: _cog.modeSnapshot?.sourceAuthority ?? null,
-          hasReferenceFiles: true,
-        });
+        const _refusalYieldsLLM = pack.answerPolicy === 'refuse_insufficient_evidence'
+          && !packGovernsGeneration({
+            answerPolicy: pack.answerPolicy,
+            sourceAuthority: _cog.modeSnapshot?.sourceAuthority ?? null,
+            hasReferenceFiles: true,
+          });
         if (_declineYieldsLLM({
           answerPolicy: pack.answerPolicy,
           hasAttachedImages: Boolean(imagePaths?.length),
@@ -11954,6 +11995,8 @@ let isMultimodal = !!(imagePaths?.length);
     // winner does not change answer STYLE — only who serves it. Multimodal with
     // images keeps the dedicated Groq-multimodal path (vision is handled by the
     // separate vision fallback when a vision model is selected).
+    // The last provider error seen on the way down, so an exhausted chain can say
+    // "the providers failed" rather than "none is configured" (F-ACC-10).
     let lastProviderError: unknown = null;
     if (this.currentModelId === 'natively') {
       // Bug found during Phase 2 harness investigation (2026-07-27): this gate
@@ -12917,6 +12960,7 @@ let isMultimodal = !!(imagePaths?.length);
     require('./llm/providerPayloadCapture').captureProviderPayload({
       provider: 'claude', classification: 'sdk_request_object_before_serialization', payload: request,
     });
+    // No SDK-internal retries when the fallback engine owns this call (F-LAT-10).
     const stream = this.claudeClient.messages.stream(request, sdkRetryOptions(abortSignal));
     const onAbort = () => { try { stream.abort(); } catch {} };
     abortSignal?.addEventListener('abort', onAbort, { once: true });
@@ -14194,6 +14238,8 @@ let isMultimodal = !!(imagePaths?.length);
    */
   public judgeRunsOnNatively(): boolean {
     if (!this.nativelyKey || this.isLocalOnlyMode) return false;
+    // A pick only takes the judge when its provider can run now (callFastModel
+    // otherwise falls through to the ladder below; review 2026-11-15).
     const pick = this.fastModelId;
     const family = pick ? this.resolveFastModelFamily(pick) : null;
     if (pick && family && this.fastFamilyReady(family)) return false;
@@ -16205,11 +16251,12 @@ let isMultimodal = !!(imagePaths?.length);
       }
     }
 
+    // A dead Gemini key (invalid/expired/billing) fails every model on it: one such
+    // failure ends the whole Gemini cascade. Retrying it was 11 requests per call.
+    let geminiKeyDead = false;
+
     // ATTEMPT 3: Gemini Flash-Lite (cheapest/fastest — leads the Gemini cascade).
     // 3 attempts with linear backoff before dropping to full Flash.
-    // A permanently rejected key (invalid, expired, billing) fails every rung
-    // the same way: stop the Gemini cascade instead of retrying it 11 times.
-    let geminiKeyDead = false;
     if (this.client) {
       console.log(`[LLMHelper] Attempting Gemini Flash-Lite for summary...`);
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -16225,10 +16272,7 @@ let isMultimodal = !!(imagePaths?.length);
           }
         } catch (e: any) {
           console.warn(`[LLMHelper] ⚠️ Gemini Flash-Lite attempt ${attempt}/3 failed: ${e.message}`);
-          if (isPermanentKeyError(e)) {
-            geminiKeyDead = true;
-            break;
-          }
+          if (isPermanentKeyError(e)) { geminiKeyDead = true; break; }
           if (attempt < 3) {
             await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
           }
@@ -16250,10 +16294,7 @@ let isMultimodal = !!(imagePaths?.length);
           }
         } catch (e: any) {
           console.warn(`[LLMHelper] ⚠️ Gemini Flash attempt ${attempt}/3 failed: ${e.message}`);
-          if (isPermanentKeyError(e)) {
-            geminiKeyDead = true;
-            break;
-          }
+          if (isPermanentKeyError(e)) { geminiKeyDead = true; break; }
           if (attempt < 3) {
             await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
           }

@@ -172,10 +172,9 @@ const DESIRE_RE = /^(?:i|we)\s+(?:want|need|prefer|expect|would\s+like|'d\s+like
 // give the code in Java." and "Coding format: restate ..." read as imperatives.
 const LEAD_IN_RE = /^(?:(?:first\s+of\s+all|first(?:ly)?|second(?:ly)?|third(?:ly)?|then|next|after\s+that|finally|lastly|also|and|so|hence|therefore|please|pls|just)\b[\s,]*|[A-Za-z][\w /-]{0,40}:\s*)+/i;
 const IMPERATIVE_OPEN_RE = /^(?:answer|ans|respond|reply|use|write|code|solve|keep|prefer|avoid|give|explain|speak|output|format|show|provide|start|begin|end|list|state|restate|name|walk|skip|omit|add|put|limit|structure|organi[sz]e|break|summari[sz]e|be|talk|sound|act|behave|translate|tag|stick|focus|make|ensure|return|print|do|don'?t|dont|never|always|no|follow|think|include|mention|highlight|call\s+out|note|cover|describe|conclude|finish|open|close|generate|produce|present|elaborate|expand|pick|choose|select|trace|test|check|handle|consider|optimi[sz]e|compare|discuss|analy[sz]e|identify|clarify|ask|assume|declare|define|implement|run|treat|imagine|pretend|teach|guide|help|go|dig|dive|lead|max|min|you\s+(?:must|should|are|will))\b/i;
-
-// "Go" at the start of an instruction is usually the programming language ("Go only",
-// "Go for backend"), not the imperative verb "go". Suppress imperative promotion when
-// "Go" is followed by a navigation/action word that makes it clearly NOT the language.
+// "Go" is also the language: "Stories: Go rewrite vs N+1 queries" is a note
+// about a Go rewrite, not an order to go (#744). Capitalised "Go" reads as the
+// verb only before the words that follow the verb ("Go through", "Go deeper").
 const GO_LANGUAGE_OPEN_RE = /^Go\b(?!\s+(?:through|over|deeper|deep|into|in|ahead|back|beyond|easy|light|slow|slowly|step|on|with|for|straight|further|to|and|by|from|the|a|an|it|this|that|me|us|one|each|line|top|down|up)\b)/;
 const opensImperative = (t: string): boolean => IMPERATIVE_OPEN_RE.test(t) && !GO_LANGUAGE_OPEN_RE.test(t);
 
@@ -489,13 +488,14 @@ const NEGATOR_SPLIT_RE = /\b(?:never|not|don'?t|dont|do\s+not|avoid|no|stop|with
 // "unless they ask for Python" / "for frontend questions".
 const LANGUAGE_CONDITION_RE = /\b(?:unless|except|otherwise|else|only\s+if|if|when\s+(?:asked|they|the)|for\s+[\w/+#-]+(?:\s+[\w/+#-]+)?\s+(?:questions?|problems?|rounds?|tasks?|stuff))\b/i;
 
-// A clause that is only a language name ("Python 3", "**Go**") is a list item
-// or a restatement. When another clause of the same sentence already names a
-// language (in its positive part), the bare name is skipped so it cannot add a
-// second binding; alone, it is treated like any other clause (3.2.0).
+// A clause that is ONLY a name, optionally versioned: "Java 3", "python3", "Go.".
+// Alone it is a setting ("Java 8" on its own line); next to other languages it is
+// an item of a list ("Python 7 years (main), Java 3, some Go" — issue #740: the
+// clause "Java 3" bound and every coding turn was told "Write ALL code in Java").
 const BARE_NAME_CLAUSE_RE = /^[\s"'`*_(]*[A-Za-z][A-Za-z+#]*(?:\s?\d+(?:\.\d+)?)?[\s"'`*_)]*[.!]?\s*$/;
 const LANGUAGE_MENTION_RE = new RegExp(String.raw`(?<![A-Za-z0-9_])(?:${LANGUAGES.map(([, src]) => src).join('|')})(?![A-Za-z_+#])`, 'i');
 const namesLanguage = (text: string): boolean => LANGUAGE_MENTION_RE.test(text) || /(?<![A-Za-z0-9_])(?:Go|C)(?![A-Za-z0-9_+#-])/.test(text);
+/** "Java 3", "golang" — a clause that names a language and says nothing else. */
 export const isBareLanguageName = (text: string): boolean => BARE_NAME_CLAUSE_RE.test(asText(text)) && namesLanguage(asText(text));
 
 const detectProgrammingLanguages = (sentences: string[]): { found: string[]; conditional: boolean } => {
@@ -512,6 +512,8 @@ const detectProgrammingLanguages = (sentences: string[]): { found: string[]; con
     const head = s.split(EXCLUSION_SPLIT_RE)[0] || '';
     const clauses = splitInstructionClauses(head);
     for (const c of clauses) {
+      // A bare name beside another clause that names a language (not one it
+      // forbids: "TypeScript, not JavaScript") is an item of a list.
       if (isBareLanguageName(c) && clauses.some(o => o !== c && namesLanguage(o.split(NEGATOR_SPLIT_RE)[0] || ''))) continue;
       // "if the question is about databases use SQL ..." is an instruction whose
       // imperative is not at the front.
@@ -1041,9 +1043,19 @@ export const getRegisteredUserInstructions = (pinnedModeId?: string): string | n
   }
 };
 
+/**
+ * Does the Real-time prompt of the pinned (or active) mode set the answer's
+ * length ("answer in 500 words", "be thorough")? Then every length the app
+ * states itself stands down: the per-turn LENGTH line, Settings › Overlay's
+ * Answer length, and the profile answer's word target (Evin 2026-11-15:
+ * "follow real time prompt"). Never throws; unknown reads as no.
+ */
 export const registeredInstructionsSetLength = (pinnedModeId?: string | null): boolean => {
-  try { return userInstructionsOverrideAppLength(analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined))); }
-  catch { return false; }
+  try {
+    return userInstructionsOverrideAppLength(analyzeUserInstructions(getRegisteredUserInstructions(pinnedModeId ?? undefined)));
+  } catch {
+    return false;
+  }
 };
 
 // ── observability ──────────────────────────────────────────────────────────

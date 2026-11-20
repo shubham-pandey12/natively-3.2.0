@@ -327,9 +327,10 @@ Time O(n), Space O(1).`;
 
     const answer = await engine.runWhatShouldISay(undefined, 0.9, undefined, { skipCooldown: true });
 
-    // 3.2.0: a superseded run yields to the run that superseded it (returns
-    // null, stores nothing) instead of finishing with its own pre-repair text.
+    // A newer generation started during the repair, so this run yields to it
+    // (null, like every superseded What to answer run) — never the stale repair.
     assert.equal(answer, null);
+    assert.ok(!finals.some(f => String(f).includes('tail-aggregation for high-cardinality')), 'the stale repair is never emitted');
     assert.equal(
       session.getFullTranscript().some(segment => segment.text.includes('tail-aggregation for high-cardinality')),
       false,

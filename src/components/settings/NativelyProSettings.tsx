@@ -12,6 +12,7 @@ import { AccordionPanel } from '../ui/AccordionSection';
 import { getLicenseSnapshot, setLicenseSnapshot } from '../../lib/licenseCache';
 import { BEAT, EASE_ENTER, EASE_LEAVE, INK, SETTLE } from '../../lib/plansMotion';
 import { SwapLabel } from './SettingsRow';
+import { StaticPrice } from '../ui/StaticPrice';
 import { LIFETIME_LIST, LIFETIME_SALE, YEARLY_LIST, YEARLY_SALE, lifetimeSaleLabel, yearlySaleLabel } from '../../lib/lifetimeSale.mjs';
 import { CHECKOUT_URLS } from '../../config/urls';
 
@@ -472,6 +473,9 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
     // latter. Undefined (unknown / still loading) deliberately falls through
     // to the device-license wording rather than under-warning.
     const [licenseProvider, setLicenseProvider] = useState<string | undefined>(getLicenseSnapshot()?.provider);
+    // A Pro pack whose AI or speech-to-text is off Natively API: its Pro is
+    // paused, not missing (electron/services/packs/packProRule.ts).
+    const [packProPaused, setPackProPaused] = useState<string | null>(null);
 
     // 'pending' spans the licence-server round trip; 'exiting' spans the card's
     // departure animation, after which the parent unmounts this whole subtree.
@@ -519,6 +523,7 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
             if (details) {
                 setIsPremium(details.isPremium ?? false);
                 setLicenseProvider((details as any).provider);
+                setPackProPaused((details as any).packProPaused ?? null);
                 setLicenseSnapshot({
                     isPremium: details.isPremium ?? false,
                     provider: (details as any).provider,
@@ -663,7 +668,7 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
     // Parse numeric prices once. Used both for the "Save N%" chip on the
     // toggle and for the live "Save $X over 3 years" copy under the
     // lifetime CTA — concrete anchoring is more persuasive than a percent.
-    const { yearlyPrice, lifetimePrice, lifetimeSavingsPct, lifetimeSavingsAbs, yearlyDiscountAbs, yearlyOriginalText } = useMemo(() => {
+    const { yearlyPrice, lifetimePrice, lifetimeSavingsPct, yearlyDiscountAbs, yearlyOriginalText } = useMemo(() => {
         const parsePrice = (s?: string | null): number | null => {
             if (!s) return null;
             const m = s.match(/([0-9]+(?:\.[0-9]+)?)/);
@@ -782,6 +787,16 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
     // owner who does.
     if (isPremium && licenseProvider === 'natively_api') {
         return null;
+    }
+
+    // The pack holds Pro but its AI or speech-to-text is on another provider:
+    // say why, instead of offering Pro for sale to someone who bought it.
+    if (packProPaused) {
+        return (
+            <p data-pack-pro-paused={packProPaused} className="text-[12px] text-text-secondary px-1 leading-snug">
+                {t('Your pack includes Natively Pro, paused while AI or transcription uses another provider. Switch both back to Natively API to turn Pro on again.')}
+            </p>
+        );
     }
 
     return (
@@ -992,8 +1007,6 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
                                     list: yearlySale !== null ? yearlyListText : null,
                                     price: yearlyPriceText,
                                     per: '/ year',
-                                    save: 'Renews yearly',
-                                    saveOn: false,
                                     cta: 'Get Pro',
                                     url: yearlyUrl,
                                 },
@@ -1007,8 +1020,6 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
                                     list: lifetimeSale !== null ? lifetimeListText : null,
                                     price: lifetimePriceText,
                                     per: 'once',
-                                    save: lifetimeSavingsAbs !== null ? `Save $${lifetimeSavingsAbs} vs 3 years of yearly` : 'Pay once, never renew',
-                                    saveOn: lifetimeSavingsAbs !== null,
                                     cta: 'Lock in lifetime',
                                     url: lifetimeUrl,
                                 },
@@ -1019,11 +1030,12 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
                                         <p className="api-tier-blurb">{c.blurb}</p>
                                         <p className="api-tier-price">
                                             {c.list && <s className="api-tier-was">{c.list}</s>}
-                                            <span className="api-tier-amount">{c.price}</span>
+                                            <span className="api-tier-amount"><StaticPrice price={c.price} /></span>
                                             <span className="api-tier-per">{c.per}</span>
                                         </p>
-                                        {/* One line on both cards, so the two wells and lists line up. */}
-                                        <p className="api-tier-save" data-on={c.saveOn ? 'true' : 'false'}>{c.save}</p>
+                                        {/* No line under the price (Evin, 2026-11-16): the
+                                            well is the plans' and packs' layout, so all
+                                            the cards in Plans & Billing stand as tall. */}
                                         <button
                                             type="button"
                                             onClick={() => openExternal(c.url)}
@@ -1033,9 +1045,11 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
                                             {c.cta} <ArrowUpRight size={14} strokeWidth={1.75} aria-hidden="true" />
                                         </button>
                                     </div>
-                                    {/* Both plans ship the same Pro features, named as the app names them. */}
+                                    {/* Both plans ship the same Pro features, named as the app names them.
+                                        Auto Answer, with its fine-tuned decision model (Evin, 2026-11-16): a Pro
+                                        licence downloads the model (deciderModelInstaller.ts). */}
                                     <ul className="api-tier-tray">
-                                        {['Persona Modes Manager', 'Connectors', 'Profile Intelligence'].map((f) => (
+                                        {['Persona Modes Manager', 'Connectors', 'Profile Intelligence', 'Auto Answer'].map((f) => (
                                             <li key={f}><Check size={14} strokeWidth={2} aria-hidden="true" /><span>{t(f)}</span></li>
                                         ))}
                                     </ul>
@@ -1043,7 +1057,8 @@ export const NativelyProSettings: React.FC<NativelyProSettingsProps> = ({
                             ))}
                         </div>
                         <p className="text-[11px] text-text-tertiary px-1 mt-2 leading-snug">
-                            {t('Pro runs on your own keys (BYOK) with any provider. Set up an AI model, speech-to-text and retrieval, and the whole app works as expected.')}
+                            {t('Pro runs on your own keys (BYOK) with any provider. Set up an AI model, speech-to-text and retrieval, and the whole app works as expected.')}{' '}
+                            {t('Auto Answer comes with our fine-tuned decision model, which decides when a question needs an answer.')}
                         </p>
                     </div>
 

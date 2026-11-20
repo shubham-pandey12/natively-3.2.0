@@ -95,11 +95,43 @@ const EMPTY: CollectedProfileSources = {
   resolved: [],
 };
 
+/** The globalThis key premium KnowledgeOrchestrator.setProAccessCheck writes
+ *  (ipcHandlers wires proAccess.isProOrTrialActive into it). Read here so the
+ *  Cue Cards are held to the same read-time Pro check as the résumé. */
+const KNOWLEDGE_PRO_ACCESS_KEY = '__nativelyKnowledgeProAccessV1__';
+
+/** Same rule as premium isKnowledgeMode's first step: wired and not Pro → false;
+ *  unwired (tests, OSS) → nothing withheld. */
+function proAccessAllows(): boolean {
+  const check = (globalThis as unknown as Record<string, unknown>)[KNOWLEDGE_PRO_ACCESS_KEY];
+  if (typeof check !== 'function') return true;
+  try { return (check as () => unknown)() === true; } catch { return false; }
+}
+
+/**
+ * May an ANSWER read the résumé / JD / Cue Cards? Pro (or trial) at read time
+ * (F-BND-05, 2026-11-13): after a licence or trial ends mid-session the
+ * orchestrator still holds the résumé in memory, and without this the mode
+ * template was the only gate left.
+ *
+ * The Profile Intelligence switch ("Persona Engine") is deliberately NOT read
+ * (owner decision 2026-11-14, revising F-BND-01): the mode already decides —
+ * only Looking-for-work and Technical Interview hydrate the profile
+ * (`profileSources` in mode-policy-registry) — and the switch is hidden in
+ * Settings whenever V3 is on, so a stale OFF would silently drop the résumé
+ * with no control to turn it back on.
+ */
+export function profileReadableForAnswers(): boolean {
+  return proAccessAllows();
+}
+
 /**
  * Collect the ACTIVE profile documents (+ their OKF verified cards, when packs
- * exist) as plain values. Read per turn — no caching here — so a profile
- * re-upload is visible on the very next answer; versionId is the content hash
- * of the structured extraction, which is what invalidates stale evidence.
+ * exist) as plain values, for an ANSWER: gated on Pro at read time (see
+ * profileReadableForAnswers); the mode decides eligibility upstream. Read per
+ * turn — no caching here — so a profile re-upload is visible on the very next
+ * answer; versionId is the content hash of the structured extraction, which is
+ * what invalidates stale evidence.
  *
  * Never throws: profile hydration is additive, and a defect here must degrade
  * to "mode attachments only", never break a live answer.
@@ -113,34 +145,15 @@ export function collectV3ProfileSources(orchestrator: unknown): CollectedProfile
 }
 
 /**
- * The raw-text index reads every profile document regardless of plan: it is
- * local storage, not an answer. Answers are gated by collectV3ProfileSources.
+ * Every active profile document, ungated: for the raw-text INDEX only, which
+ * must keep tracking the active documents (and pruning superseded ones)
+ * whatever the switch says. An upload indexes before it switches Profile
+ * Intelligence on, and switching off must not delete or re-embed the index.
+ * Never hand this to an answer.
  */
 export function collectProfileSourcesForIndex(orchestrator: unknown): CollectedProfileSources {
   if (!orchestrator) return EMPTY;
   return collectProfileSources(orchestrator, { docs: true, ownAnswers: true });
-}
-
-/** Same global the KnowledgeOrchestrator's setProAccessCheck installs. */
-const KNOWLEDGE_PRO_ACCESS_KEY = '__nativelyKnowledgeProAccessV1__';
-
-function proAccessAllows(): boolean {
-  const check = (globalThis as Record<string, unknown>)[KNOWLEDGE_PRO_ACCESS_KEY];
-  if (typeof check !== 'function') return true;
-  try {
-    return (check as () => unknown)() === true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Whether profile documents (resume, JD, own answers) may ground an answer
- * this turn (3.2.0). No access check installed means the engine runs outside
- * the app (tests, harness) and is allowed.
- */
-export function profileReadableForAnswers(): boolean {
-  return proAccessAllows();
 }
 
 function collectProfileSources(orchestrator: unknown, allow: { docs: boolean; ownAnswers: boolean }): CollectedProfileSources {

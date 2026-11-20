@@ -147,6 +147,27 @@ const BOOL = 'bool'
 /** What ended a free trial, or is about to: its 30 minutes, or its AI allowance. */
 export const TRIAL_END_REASONS = Object.freeze(['clock', 'allowance'])
 
+/**
+ * Why this install cannot reach Natively (added 2026-11-18, #759). The app runs
+ * a short connection check when a key or the Pro check fails with a network
+ * error (electron/services/connectivityDiagnosis.ts) and reports the result.
+ * Every value is a name from these lists: error codes, a verdict, and one of a
+ * fixed set of security products. Nothing the user typed, no address, no host.
+ */
+export const CONNECT_CODES = Object.freeze([
+  'ok', 'cert_has_expired', 'cert_not_yet_valid', 'self_signed_cert_in_chain', 'depth_zero_self_signed_cert',
+  'unable_to_verify_leaf_signature', 'unable_to_get_issuer_cert', 'unable_to_get_issuer_cert_locally',
+  'err_tls_cert_altname_invalid', 'econnrefused', 'econnreset', 'etimedout', 'enotfound', 'eai_again', 'eproto',
+  'other',
+])
+export const CONNECT_VERDICTS = Object.freeze([
+  'reachable', 'stale_store', 'interception', 'clock', 'proxy', 'dns', 'blocked', 'offline',
+])
+export const CONNECT_INTERCEPTORS = Object.freeze([
+  'none', 'kaspersky', 'eset', 'avast', 'avg', 'bitdefender', 'norton', 'mcafee', 'sophos', 'trend_micro',
+  'zscaler', 'netskope', 'fortinet', 'palo_alto', 'cisco_umbrella', 'other',
+])
+
 export const FUNNEL_CATALOG = Object.freeze({
   // ── The install ──────────────────────────────────────────────────────────
   app_first_run: {},
@@ -188,6 +209,19 @@ export const FUNNEL_CATALOG = Object.freeze({
     recipes: INT,
     // The resumed part of a meeting (meeting_started.resumed); `minutes` is that part's.
     resumed: BOOL,
+    // What to answer presses in this meeting, by what each gave (added
+    // 2026-11-19; src/lib/funnel/answerPress.mjs). Sent only when there was a
+    // press. answered: an answer was recorded; message: text that is not an
+    // answer ("configure your API keys"); empty: nothing (the "no answer yet"
+    // note); failed: an error; waiting: still running when the meeting ended,
+    // and wait_secs how long the oldest of those had waited. Counts only.
+    presses: INT,
+    presses_answered: INT,
+    presses_message: INT,
+    presses_empty: INT,
+    presses_failed: INT,
+    presses_waiting: INT,
+    wait_secs: INT,
   },
 
   // A meeting the app never saw end: it was closed or it crashed while one was
@@ -224,6 +258,42 @@ export const FUNNEL_CATALOG = Object.freeze({
     out_of_memory: BOOL,    // one of those ran out of memory
     updated: BOOL,          // that run was another version than the one reporting it
     computer_restarted: BOOL, // the computer has started since its last sign of life
+    // A 'crash' says where and what (2026-11-16): fixed lists, never a message
+    // or path. src/lib/funnel/runEnd.mjs keeps the same lists.
+    fatal_source: ['uncaught_exception', 'rejection_loop', 'window_crash_loop', 'startup_failed', 'native_arch', 'other'],
+    error_name: [
+      'error', 'type_error', 'reference_error', 'range_error', 'syntax_error', 'uri_error', 'eval_error',
+      'aggregate_error', 'sqlite_error', 'abort_error', 'system_error', 'not_an_error', 'other',
+    ],
+    error_code: [
+      'enoent', 'eacces', 'eperm', 'enospc', 'emfile', 'enfile', 'ebusy', 'eexist', 'eisdir', 'enotdir',
+      'eio', 'erofs', 'enomem', 'eagain', 'epipe', 'econnreset', 'econnrefused', 'etimedout', 'eaddrinuse',
+      'err_dlopen_failed', 'module_not_found', 'err_module_not_found', 'err_require_esm',
+      'err_invalid_arg_type', 'err_invalid_arg_value', 'err_stream_destroyed', 'err_stream_write_after_end',
+      'err_ipc_channel_closed', 'err_socket_closed', 'sqlite_corrupt', 'sqlite_notadb', 'sqlite_busy',
+      'sqlite_locked', 'sqlite_cantopen', 'sqlite_full', 'sqlite_ioerr', 'sqlite_readonly', 'sqlite_error',
+      'sqlite_misuse', 'sqlite_constraint', 'other',
+    ],
+    started_up: BOOL,       // startup had finished (initializeApp) before it died
+    crash_where: ['app', 'dependency', 'node_internal', 'electron_internal', 'unknown'],  // the first stack frame
+    crash_file: ['main', 'preload', 'premium', 'app_other'],
+    crash_line: INT,        // with crash_file and the version: one line of the released bundle
+    crash_col: INT,
+    last_event: [
+      'app_start', 'before_quit', 'will_quit', 'window_all_closed', 'clean_exit', 'quit_reason_set',
+      'render_process_gone', 'child_process_gone', 'gpu_process_crashed', 'query_session_end', 'session_end',
+      'power_shutdown', 'session_end_cancelled', 'session_end_cancelled_by_quit', 'uncaught_exception',
+      'unhandled_rejection', 'sigterm', 'sigint', 'sighup', 'other',
+    ],
+    startup_phase: [
+      'single_instance_lock', 'initialize_app_start', 'before_app_when_ready', 'after_app_when_ready',
+      'telemetry_configure_start', 'telemetry_configure_complete', 'credentials_init_start',
+      'credentials_init_complete', 'app_state_get_instance_start', 'app_state_get_instance_complete',
+      'create_window_start', 'create_window_complete', 'initialize_app_complete', 'other',
+    ],
+    arch: ['arm64', 'x64', 'ia32', 'other'],
+    translated: BOOL,       // an Intel build running under Rosetta (or x64 emulation on Windows Arm)
+    os_version: INT,        // macOS: Darwin major (25 = macOS 26). Windows: build (26100)
   },
   // An answer was asked for and did not come. At most once per cause per local
   // day per install: which kinds of failure someone met that day, not how often.
@@ -267,6 +337,12 @@ export const FUNNEL_CATALOG = Object.freeze({
       'ok', 'already_used', 'already_used_expired', 'ip_limit', 'daily_limit', 'rate_limited',
       'hwid_unavailable', 'network', 'server_error',
     ],
+    // Where the hardware id came from when LicenseManager's native module gave
+    // none (added 2026-11-19): this bundle's own load of the module, the
+    // machine id read without it (macOS ioreg, the Windows registry, Linux's
+    // machine-id file), or nowhere ('none', the trial refused). Absent when the
+    // native module answered, as before.
+    hwid_from: ['native_reload', 'ioreg', 'registry', 'machine_id_file', 'none'],
   },
   // What ended it (added 2026-11-03): its 30 minutes, or its AI allowance
   // before them. Absent from builds before 2026-11-03.
@@ -303,6 +379,25 @@ export const FUNNEL_CATALOG = Object.freeze({
     // pasted a paid key" countable.
     mins_since_trial_start: INT,
     mins_since_byok_exit: INT,
+  },
+  // Why a key or the Pro check could not reach Natively (added 2026-11-18, #759).
+  // One report per failed attempt, at most once every 30 minutes per install.
+  connect_diag: {
+    reason: ['key_saved', 'pro_check', 'api_call'],
+    verdict: CONNECT_VERDICTS,
+    // The TLS handshake with the certificate list Node ships, and with the list
+    // plus what Windows or macOS trust. 'ok' or the error code.
+    tls_builtin: CONNECT_CODES,
+    tls_merged: CONNECT_CODES,
+    dns: CONNECT_CODES,
+    http: ['none', '2xx', '401', '403', '429', '5xx', 'other'],
+    interceptor: CONNECT_INTERCEPTORS,
+    proxy: ['none', 'system', 'env'],
+    control_ok: BOOL,        // two unrelated sites loaded
+    clock_skew_min: INT,     // |this PC's clock - the internet's|, in minutes
+    certs_merged: INT,
+    certs_dropped: INT,
+    healed: BOOL,            // the app switched the certificate merge off and it worked
   },
   upgrade_prompt: {
     surface: SURFACES,

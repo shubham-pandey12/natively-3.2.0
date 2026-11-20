@@ -11,21 +11,17 @@ interface TopPillProps {
     onLogoClick?: () => void;
     /** Lavender draws the website hero's pill (NativelyInterfaceCard) instead. */
     interfaceTheme?: string;
+    /** The first-run guide's first meeting: Stop is locked this many more
+     *  seconds (main refuses it too). The count shows in place of the square. */
     stopLockSeconds?: number;
     stopLockLabel?: string;
 }
 
-function StopGlyph({ seconds, square }: { seconds: number; square: string }) {
-    return seconds > 0 ? (
-        <span
-            key={seconds}
-            className="guide-stop-count text-[11px] font-semibold tabular-nums leading-none"
-        >
-            {seconds}
-        </span>
-    ) : (
-        <div className={square} />
-    );
+/** Stop's face: the square, or the seconds until it unlocks. */
+function StopFace({ seconds, square }: { seconds: number; square: string }) {
+    return seconds > 0
+        ? <span key={seconds} className="guide-stop-count text-[11px] font-semibold tabular-nums leading-none">{seconds}</span>
+        : <div className={square} />;
 }
 
 const MARK_MASK = {
@@ -49,12 +45,12 @@ export default function TopPill({
     stopLockSeconds = 0,
     stopLockLabel,
 }: TopPillProps) {
-    const stopLocked = stopLockSeconds > 0;
+    const locked = stopLockSeconds > 0;
     const stopProps = {
-        onClick: stopLocked ? undefined : onQuit,
-        "aria-disabled": stopLocked || undefined,
-        title: stopLocked ? stopLockLabel : undefined,
-        "data-stop-locked": stopLocked ? "true" : undefined,
+        onClick: locked ? undefined : onQuit,
+        'aria-disabled': locked || undefined,
+        title: locked ? stopLockLabel : undefined,
+        'data-stop-locked': locked ? 'true' : undefined,
     };
     if (interfaceTheme === "lavender") {
         // The hero card's pill markup, as the website draws it, with the
@@ -85,13 +81,10 @@ export default function TopPill({
                     <button
                         {...stopProps}
                         data-guide="overlay-stop"
-                        aria-label={stopLocked ? stopLockLabel : "Stop"}
+                        aria-label={locked ? stopLockLabel : "Stop"}
                         className="overlay-icon-surface overlay-icon-surface-hover interaction-base interaction-press overlay-text-muted w-8 h-8 rounded-full flex items-center justify-center"
                     >
-                        <StopGlyph
-                            seconds={stopLockSeconds}
-                            square="w-3 h-3 rounded-[2px] bg-current opacity-90 relative"
-                        />
+                        <StopFace seconds={stopLockSeconds} square="w-3 h-3 rounded-[2px] bg-current opacity-90 relative" />
                     </button>
                 </div>
             </div>
@@ -167,7 +160,7 @@ export default function TopPill({
                 <button
                     {...stopProps}
                     data-guide="overlay-stop"
-                    aria-label={stopLocked ? stopLockLabel : "Stop"}
+                    aria-label={locked ? stopLockLabel : "Stop"}
                     className={`
             w-7 h-7
             rounded-full
@@ -175,14 +168,11 @@ export default function TopPill({
             overlay-text-primary
             flex items-center justify-center
             interaction-base interaction-press
-            ${stopLocked ? "" : "hover:bg-red-500/10 hover:text-red-400"}
+            ${locked ? '' : 'hover:bg-red-500/10 hover:text-red-400'}
           `}
                     style={appearance.iconStyle}
                 >
-                    <StopGlyph
-                        seconds={stopLockSeconds}
-                        square="w-3.5 h-3.5 rounded-[3px] bg-current opacity-80"
-                    />
+                    <StopFace seconds={stopLockSeconds} square="w-3.5 h-3.5 rounded-[3px] bg-current opacity-80" />
                 </button>
             </div>
         </div>

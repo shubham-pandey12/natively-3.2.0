@@ -18,8 +18,10 @@
  *     (sttReconnectPolicy.mjs) keeps trying; every `probeMs` the primary is
  *     also restarted, for providers that latch off. Its first final with text
  *     means it is back: the stand-in is stopped and the primary leads again.
- *     That first line is dropped when the stand-in already said it (the
- *     primary flushes the audio it buffered while down).
+ *     That first line, and for a few seconds the ones after it, are dropped
+ *     when the stand-in already said every word of them (the primary flushes
+ *     the audio it buffered while down); a new question that only shares
+ *     its frame with a stand-in line goes through (F-ACC-09).
  *   - A stand-in that fails too (repeated errors, or a key that is refused)
  *     hands over to the next one; with none left the channel is reported
  *     failed as before.
@@ -100,6 +102,11 @@ export interface SttFailoverOptions {
     recentFinalsMs?: number;
     /** After every stand-in failed (or none is set up), wait this long before trying again. */
     retryAfterMs?: number;
+    /**
+     * After the hand-back, the primary's finals are still checked against the
+     * stand-in's for this long: its flush of the audio it buffered while down
+     * can hold several lines the stand-in already said.
+     */
     handbackDedupeMs?: number;
 }
 
@@ -238,6 +245,9 @@ export class SttFailover {
     acceptPrimary(seg: LiveSegment): boolean {
         const text = (seg.text ?? '').trim();
         if (this.phase !== 'fallback') {
+            // Just handed back: the rest of the primary's flush may repeat the
+            // stand-in too (F-ACC-09 D8). Only a line whose every word the
+            // stand-in already said is dropped, so a new question goes through.
             if (!seg.isFinal || !text || this.handbackUntil === 0) return true;
             if (this.now() > this.handbackUntil) {
                 this.handbackUntil = 0;
@@ -249,8 +259,11 @@ export class SttFailover {
         if (!seg.isFinal || !text) return false;
         const recent = this.recentTexts();
         this.disengage('recovered');
+        // Kept for the flush that follows (above).
         this.recentFinals = recent.map((t) => ({ text: t, at: this.now() }));
         this.handbackUntil = this.now() + this.handbackDedupeMs;
+        // F-ACC-09 D1: half the word pairs in common is not a repeat: "…with
+        // Kafka?" after "…with Redis?" is a new question.
         return !repeatsLiveText(text, recent);
     }
 

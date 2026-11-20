@@ -3,8 +3,10 @@ import fs from 'fs';
 import path from 'path';
 
 export interface AppSettings {
-    firstRunGuide?: unknown;
-    guideSurfaceBefore?: 'overlay' | 'notepad' | null;
+    /** The Pro mode a Pro pack's provider rule switched off (2026-11-16): put
+     *  back when the AI and speech-to-text are both on Natively API again.
+     *  Cleared once used (ipcHandlers restorePackStandDown). */
+    packProStandDownModeId?: string | null;
     /** The Calendar account name whose full-name mentions in saved notes were carried
      *  to the first name (calendarNameMigration); set once per name. */
     calendarFirstNameMigratedFor?: string;
@@ -53,7 +55,6 @@ export interface AppSettings {
     // produced only by the What-to-Answer hotkey, exactly as before. The
     // trigger itself lives in AppState.scheduleAutoAnswer().
     autoAnswerEnabled?: boolean;
-    answerLength?: 'shorter' | 'smart' | 'longer';
     // Agreement to share the transcripts of meetings where Auto Answer runs, for
     // training the Auto Answer decider (autoAnswerAccess.ts; Evin 2026-11-13).
     // Free users need it to run Auto Answer; for Pro/trial it is an opt-in.
@@ -105,6 +106,8 @@ export interface AppSettings {
     notesWindowState?: { x: number; y: number; width: number; height: number; open: boolean; layout?: number };
     /** What a meeting opens: the overlay or the notepad (utils/meetingSurface.ts). */
     meetingSurface?: 'overlay' | 'notepad';
+    /** The meeting surface the user had when the first-run guide started; put back when it ends. */
+    guideSurfaceBefore?: 'overlay' | 'notepad' | null;
     // Direct Assist is the opt-in, single-provider answer path. It deliberately
     // bypasses meeting retrieval and the legacy answer-orchestration pipeline.
     // Keep the persisted default OFF during rollout; the operator kill switch
@@ -322,6 +325,9 @@ export interface AppSettings {
     /** Which screen the full-screenshot shortcut captures: 'overlay' (default),
      *  'cursor', or 'display:<id>' (electron/screenshotDisplay.ts). */
     screenshotDisplay?: string;
+    /** Settings › Overlay › Answer length (llm/answerLength.ts). Absent = Smart.
+     *  Shorter and Longer apply only with Pro or a trial. */
+    answerLength?: 'shorter' | 'smart' | 'longer';
     // When true (default) and the active mode is a technical / coding interview, prefer
     // direct vision LLM over structured-extract-then-answer for lowest latency.
     technicalInterviewVisionFirst?: boolean;
@@ -334,6 +340,9 @@ export interface AppSettings {
     // still missing, and when last; it stops returning at launch after that
     // (src/lib/permissionsCardPolicy.mjs). Cleared once everything is granted.
     permissionsCard?: { dismissals: number; lastDismissedAt: number | null };
+    // The first-run guide (src/lib/onboarding/firstRunGuide.mjs): which step a
+    // new user is on, across the launcher, overlay, notes window and Settings.
+    firstRunGuide?: import('../../src/lib/onboarding/firstRunGuide.mjs').GuideState;
     // The trialStartedAt of the free trial whose profile data the expiry wipe
     // already removed, so the wipe runs once per trial however many windows or
     // launches notice the expiry (ipcHandlers.ts settleExpiredTrial).

@@ -2,9 +2,15 @@
  * The Pro pack meeting clock: reports live meeting time to natively-api so a
  * Pro pack ends when its hours are used.
  *
- * WHY (2026-11-06, Evin). A Pro pack (Light $5 = 2 h within 7 days, Heavy $10
- * = 5 h within 14 days) counts only while Natively AI, Fast Response and STT
- * are selected, matching the recovered 3.2.0 client policy.
+ * WHY (2026-11-06, Evin). A Pro pack (Light $5 = 2 h within 2 days, Heavy $10
+ * = 5 h within 5 days, since 2026-11-16) is sold as MEETING hours, and it
+ * unlocks Pro as well as the API.
+ *
+ * 2026-11-16 (Evin): the hours count only while the AI and speech-to-text both
+ * run on Natively API (`counts`). With either on the customer's own provider,
+ * Pro is off (packProRule.ts), so the pack cannot become a cheap Pro licence,
+ * and only the Natively part's own allowance is used: AI tokens for Natively
+ * AI, voice minutes for Natively speech-to-text.
  *
  * HOW. While a meeting is live and a Natively API key is saved, the clock
  * ticks once a minute and POSTs the seconds since the last tick to
@@ -79,6 +85,17 @@ export interface PackMeetingClockDeps {
   onPackRenewed?(): void;
   /** Latest pack view the server sent with a counted tick. */
   onPackState?(pack: any): void;
+  /**
+   * Do the pack's meeting hours count right now? (2026-11-16) Only while the AI
+   * and speech-to-text both run on Natively API (packProRule.ts): with either on
+   * another provider the pack gives no Pro, and only the Natively part's own
+   * allowance (AI tokens or voice minutes) is used. Asked once per tick; time
+   * that does not count is dropped, never billed later. Absent → always counts.
+   * The time since the last tick goes by the state it RAN under (read at that
+   * tick, or at the last countsChanged()), so a switch mid-minute bills the
+   * seconds before it by the old providers and the rest by the new ones.
+   */
+  counts?(): boolean;
   log?: { log(...a: unknown[]): void; warn(...a: unknown[]): void };
 }
 
@@ -99,6 +116,7 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
     since: number | null;
     /** Sub-second remainder carried to the next tick. */
     carryMs: number;
+    /** Whether the time accruing since `since` counts (read when it started). */
     counting: boolean;
     /**
      * The pack ended mid-meeting. Nothing accrues (since is null) and the timer
@@ -108,6 +126,9 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
     cancelTimer: () => void;
   } | null = null;
   let probing = false;
+  // A meeting is running, metered or not. `meeting` is null for a meeting on a
+  // key that is not a pack; keyChanged still has to know the meeting is live.
+  let meetingLive = false;
 
   // Ticks not yet confirmed by the server, oldest first. They outlive their
   // meeting: a tick that failed at the end of one meeting is sent during the next.
@@ -124,9 +145,15 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
   /** Move time accrued since `since` (capped) into whole seconds on a new tick. */
   function accrue(at: number): void {
     if (!meeting || meeting.since === null) return;
+    // The interval just ended ran under `meeting.counting`; the next one runs
+    // under whatever holds now.
     const counted = meeting.counting;
     meeting.counting = countsNow();
-    if (!counted) { meeting.since = at; meeting.carryMs = 0; return; }
+    if (!counted) {
+      meeting.since = at;
+      meeting.carryMs = 0;
+      return;
+    }
     const gap = Math.max(0, at - meeting.since);
     meeting.since = at;
     const ms = meeting.carryMs + Math.min(gap, MAX_GAP_MS);
@@ -244,32 +271,54 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
     void flush();
   }
 
+  /** A meeting went live (or its key changed). No key (or a trial) → nothing to meter. */
+  function startMeeting(): void {
+    if (meeting) { accrue(deps.now()); stopTimer(); meeting = null; }
+    const key = deps.getApiKey();
+    if (!key) return;
+    if (notPackKey !== null && notPackKey !== key) notPackKey = null;
+    if (notPackKey === key) return;
+    endedReported = false;
+    meeting = {
+      id: deps.newMeetingId(),
+      key,
+      seq: 0,
+      since: deps.now(),
+      carryMs: 0,
+      counting: countsNow(),
+      paused: false,
+      cancelTimer: () => {},
+    };
+    meeting.cancelTimer = deps.every(onTimer, TICK_INTERVAL_MS);
+    // Leftovers from an earlier meeting go out now, not a minute from now.
+    if (pending.length > 0) void flush();
+  }
+
   return {
     /** A meeting went live. No key (or a trial) → nothing to meter. */
     meetingStarted(): void {
-      if (meeting) { accrue(deps.now()); stopTimer(); meeting = null; }
-      const key = deps.getApiKey();
-      if (!key) return;
-      if (notPackKey !== null && notPackKey !== key) notPackKey = null;
-      if (notPackKey === key) return;
-      endedReported = false;
-      meeting = {
-        id: deps.newMeetingId(),
-        key,
-        seq: 0,
-        since: deps.now(),
-        carryMs: 0,
-        counting: countsNow(),
-        paused: false,
-        cancelTimer: () => {},
-      };
-      meeting.cancelTimer = deps.every(onTimer, TICK_INTERVAL_MS);
-      // Leftovers from an earlier meeting go out now, not a minute from now.
-      if (pending.length > 0) void flush();
+      meetingLive = true;
+      startMeeting();
+    },
+
+    /**
+     * The key in use changed mid-meeting (a held pack key took over from a
+     * used-up plan, or the plan's key came back; nativelyPackFallback.ts). The
+     * time so far is billed to the key it ran on, and the rest of the meeting
+     * is a new meeting on the new key, metered only if that key is a pack.
+     */
+    keyChanged(): void {
+      if (!meetingLive) return;
+      if (meeting && deps.getApiKey() === meeting.key) return;
+      // Bills the old key's time so far and sends it (startMeeting flushes
+      // whatever is queued); an empty flush here would only hold the queue
+      // shut for the next tick.
+      startMeeting();
     },
 
     /** The meeting stopped: bill the last partial minute and send. */
     meetingEnded(): Promise<void> {
+      meetingLive = false;
       if (!meeting) return pending.length > 0 ? flush() : Promise.resolve();
       accrue(deps.now());
       stopTimer();
@@ -292,7 +341,11 @@ export function createPackMeetingClock(deps: PackMeetingClockDeps) {
       meeting.counting = countsNow();
     },
 
-    /** Close the previous provider interval before starting the new one. */
+    /**
+     * The AI or speech-to-text provider just changed. Close the interval so far
+     * under the providers it ran on; what follows goes by the new ones. Queued,
+     * not sent: the next tick sends it.
+     */
     countsChanged(): void {
       if (!meeting || meeting.paused || meeting.since === null) return;
       accrue(deps.now());

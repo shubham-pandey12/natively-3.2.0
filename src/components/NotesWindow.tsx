@@ -2,15 +2,14 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import { ArrowDown, Check, ChevronDown, ChevronUp, Copy, FileText, ImagePlus, LayoutGrid, Minus, MoreHorizontal, Paperclip, Pause, Play, RotateCcw, Scissors, Search, X } from 'lucide-react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { useT } from '../i18n';
-import { GUIDE_STEP_NUMBER, GUIDE_STEP_TOTAL, useGuideHighlight, useGuideStopLock, useRecoveredGuide } from './onboarding/useRecoveredGuide';
-import './onboarding/RecoveredGuide.css';
 import { applyTypedKeyAtEnd, plainAnswerText } from './meeting/notesView';
 import { NotepadAnswer } from './notes/NotepadAnswer';
 import { useLastTimeRecap } from './assist/useLastTimeRecap';
 import { shouldBlockFocus, shouldFireStealthTapStart } from '../lib/overlayStealthFocusGuards.mjs';
 import { editCommand, editShortcutLetter, paste } from '../lib/stealthEdit.mjs';
 import { NotesEditor, type NotesEditorHandle } from './notes/NotesEditor';
+import { useNotesGuide } from './guide/NotesGuide';
+import { useGuideStopLock } from './guide/useGuide';
 import { NotesHeading, type HeadingInfo } from './notes/NotesHeading';
 import { NotesEnhanced, type NotesEnhancedHandle } from './notes/NotesEnhanced';
 import { NoteTemplateGallery } from './notes/NoteTemplateGallery';
@@ -139,56 +138,12 @@ const RecipeIcon: React.FC = () => (
 
 const ink = (v: string): React.CSSProperties => ({ color: `var(${v})` });
 
-const NOTES_GUIDE_ANCHORS: Record<'notepad' | 'ask' | 'recipe' | 'stop2', string | null> = {
-    notepad: null,
-    ask: '[data-guide="notes-ask"]',
-    recipe: '[data-guide="notes-recipes"]',
-    stop2: '[data-guide="notes-stop"]',
-};
-
-function useNotesGuide({ off = false }: { off?: boolean } = {}) {
-    const t = useT();
-    const { state, justDone, dispatch } = useRecoveredGuide();
-    const step = off
-        ? null
-        : (['notepad', 'ask', 'recipe', 'stop2'] as const).find(value => state?.status === 'active' && state.step === value) ?? null;
-    const live = step && !justDone ? step : null;
-    const liveRef = useRef(live);
-    liveRef.current = live;
-    useGuideHighlight(live ? NOTES_GUIDE_ANCHORS[live] : null);
-    const onTyped = useCallback((value: string) => { if (liveRef.current === 'notepad' && value.trim()) { liveRef.current = null; dispatch({ type: 'note_typed' }); } }, [dispatch]);
-    const onAskOpened = useCallback(() => { if (liveRef.current === 'ask') { liveRef.current = null; dispatch({ type: 'ask_opened' }); } }, [dispatch]);
-    const onRecipeRun = useCallback(() => { if (liveRef.current === 'recipe') { liveRef.current = null; dispatch({ type: 'recipe_run' }); } }, [dispatch]);
-    const copy: Record<string, [string, string]> = {
-        notepad: ['Write while you talk.', 'Click “Write notes” at the top of the page and type a line.'],
-        ask: ['Ask about the meeting.', 'Click Ask anything. It knows everything said so far.'],
-        recipe: ['Try a recipe.', 'Recipes are ready-made asks. Pick one, or type / to see them all.'],
-        stop2: ['Stop the meeting when you’re ready.', 'Press the stop button ■ in the bar at the bottom. Natively writes up your notes.'],
-    };
-    const node = step && <div className="guide-enter guide-notes-pill np-elevated rounded-[20px] pl-4 pr-1.5 py-1.5 flex items-center gap-3" role="status" data-guide-strip={step}>
-        <div className="guide-notes-swap min-w-0 flex-1 py-0.5" key={step}>
-            <p className="text-[13px] leading-[18px] font-medium flex items-center gap-1.5" style={ink('--np-ink')}>
-                {justDone && <Check className="guide-done-check w-3.5 h-3.5 shrink-0" strokeWidth={2.4} style={ink('--np-accent')} aria-label={t('Done')} />}
-                <span className="min-w-0">{t(copy[step][0])}</span>
-            </p>
-            <p className="text-[12px] leading-4" style={ink('--np-ink-secondary')}>{t(copy[step][1])}</p>
-        </div>
-        <span className="shrink-0 text-[12px] tabular-nums" style={ink('--np-ink-tertiary')}>{t('{n} of {total}').replace('{n}', String(GUIDE_STEP_NUMBER[step])).replace('{total}', String(GUIDE_STEP_TOTAL))}</span>
-        {!justDone && <button type="button" aria-label={t('Skip guide')} title={t('Skip guide')} onClick={() => dispatch({ type: 'skip' })} className="w-7 h-7 shrink-0 rounded-full flex items-center justify-center np-wash" style={ink('--np-ink-secondary')}><X className="w-3.5 h-3.5" strokeWidth={1.75} /></button>}
-    </div>;
-    return { node, live, onTyped, onAskOpened, onRecipeRun };
-}
-
 const EMPTY_INFO: HeadingInfo & { speakers: { me: string; them: string } } = {
     title: null, people: 0, event: null, attendees: [], selfEmail: null, speakers: { me: 'You', them: 'Them' },
 };
 
 const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) => {
     const isLight = useResolvedTheme() === 'light';
-    const notesGuide = useNotesGuide({ off: !!preview });
-    const stopLock = useGuideStopLock();
-    const onRecipeRunRef = useRef(notesGuide.onRecipeRun);
-    onRecipeRunRef.current = notesGuide.onRecipeRun;
     const [text, setText] = useState(preview?.text ?? '');
     const [phase, setPhase] = useState<Phase>(preview ? 'live' : 'idle');
     // The notepad's demand (2026-11-01, FunnelTelemetry.notepadUsed): which parts of it are used,
@@ -271,6 +226,12 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     const enhancedRef = useRef<NotesEnhancedHandle>(null);
     const answerScrollRef = useRef<HTMLDivElement>(null);
     const editorRef = useRef<NotesEditorHandle>(null);
+    // The first-run guide's notepad step (guide/NotesGuide.tsx).
+    const notesGuide = useNotesGuide({ off: !!preview });
+    const stopLock = useGuideStopLock();
+    // runRecipe is declared before the guide's callbacks settle; read the latest.
+    const guideRecipeRunRef = useRef(notesGuide.onRecipeRun);
+    guideRecipeRunRef.current = notesGuide.onRecipeRun;
     const askRef = useRef<HTMLInputElement>(null);
     const menuRef = useRef<HTMLDivElement>(null);
     const transcriptRef = useRef<HTMLDivElement>(null);
@@ -618,7 +579,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     const runRecipe = useCallback((recipe: NoteRecipe, extra = '') => {
         if (turnsRef.current.some((t) => t.status === 'streaming')) return;
         npTrack('recipe', recipe.id);
-        onRecipeRunRef.current();
+        guideRecipeRunRef.current();
         setAllRecipes(false);
         setAsk('');
         setRecentRecipes(rememberRecipe(recipe.id));
@@ -995,10 +956,12 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
     // After Stop the notepad keeps Ask (Granola's chat on a finished note), without the listening pill.
     const askBar = phase === 'live' || (phase === 'ended' && !!meetingId && !preview);
     const askOpen = askBar && askEngaged;
+    // The listening pill (with Stop) folds away while Ask is open, except on the
+    // guide's stop step, which points at Stop.
     const foldListening = askOpen && notesGuide.live !== 'stop2';
-    useEffect(() => {
-        if (askOpen && phase === 'live') notesGuide.onAskOpened();
-    }, [askOpen, phase, notesGuide.live, notesGuide.onAskOpened]);
+    // First-run guide step 10: Ask opened. Also when the step arrives with Ask
+    // already open (opened early, or during step 9's done hold).
+    useEffect(() => { if (askOpen && phase === 'live') notesGuide.onAskOpened(); }, [askOpen, phase, notesGuide.live, notesGuide.onAskOpened]);
     const bars = useMemo(() => (level === null || paused ? null : listeningBarHeights(level * 3.2)), [level, paused]);
     // The floating panel: what fills it, kept on through the closing spring, and how tall.
     const panelKind: 'transcript' | 'ask' | null = phase === 'live' ? (showTranscript ? 'transcript' : askOpen ? 'ask' : null) : askOpen ? 'ask' : null;
@@ -1109,15 +1072,12 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
             )}
             <button
                 type="button"
-                data-guide="notes-stop"
                 aria-label={stopLock.seconds > 0 ? stopLock.label : 'Stop transcript'}
                 title={stopLock.seconds > 0 ? stopLock.label : 'Stop transcript'}
                 aria-disabled={stopLock.seconds > 0 || undefined}
-                onClick={() => {
-                    if (stopLock.seconds > 0) return;
-                    npTrack('stopped');
-                    void window.electronAPI?.endMeeting?.();
-                }}
+                data-guide="notes-stop"
+                // The guide's first meeting holds Stop 30 s (useGuideStopLock; main refuses it too).
+                onClick={() => { if (stopLock.seconds > 0) return; npTrack('stopped'); void window.electronAPI?.endMeeting?.(); }}
                 // The mic's mirror: a 24px round end (concentric with the pill's 28px end). At
                 // 34.5px wide that curve took most of the button and hovered as a lopsided blob,
                 // so Stop takes 2.5px from the mic's right padding (37px): the pill keeps its
@@ -1128,13 +1088,9 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
                 style={ink('--np-stop')}
             >
                 <span className="w-4 h-4 flex items-center justify-center">
-                    {stopLock.seconds > 0 ? (
-                        <span key={stopLock.seconds} className="guide-stop-count text-[11px] font-semibold tabular-nums leading-none">
-                            {stopLock.seconds}
-                        </span>
-                    ) : (
-                        <span className="w-3 h-3 rounded-[2.6px] bg-current" />
-                    )}
+                    {stopLock.seconds > 0
+                        ? <span key={stopLock.seconds} className="guide-stop-count text-[11px] font-semibold tabular-nums leading-none">{stopLock.seconds}</span>
+                        : <span className="w-3 h-3 rounded-[2.6px] bg-current" />}
                 </span>
             </button>
         </>
@@ -1410,6 +1366,7 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
                         hookTyping={typingHere('notes')}
                         onEngage={engage('notes')}
                         onTemplate={phase !== 'ended' && !preview ? onSlashTemplate : undefined}
+                        // Step 9 (guide): the empty page's "Write notes" glows, so where to jot is plain (guide.css).
                         className={`min-h-full px-8 pt-[19px] pb-36${notesGuide.live === 'notepad' ? ' guide-write' : ''}`}
                     />
                     </>
@@ -1435,6 +1392,8 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
                                 </button>
                             </div>
                         )}
+                        {/* The first-run guide's notepad steps, 9 to 12 (guide/NotesGuide.tsx),
+                            just above the Stop button; the auto-stop notice wins. */}
                         {phase === 'live' && stopsAt === null && notesGuide.node}
                         {phase === 'live' && problem && stopsAt === null && (
                             <p className="px-2 text-center text-balance text-[12px] leading-4" style={ink('--np-ink-secondary')} role="status">{problem}</p>
@@ -1702,6 +1661,9 @@ const NotesWindow: React.FC<{ preview?: NotesWindowPreview }> = ({ preview }) =>
                                     <div className="flex w-full items-end gap-2">
                                         {/* The listening pill folds away to the left as Ask opens, so Ask
                                             widens instead of jumping; clipped only while folded or folding. */}
+                                        {/* Step 12 of the first-run guide keeps it: the recipe that step 11
+                                            ran left Ask open, and the step points at Stop (Evin, 2026-11-15:
+                                            "where to close the notepad meeting isnt shown"). */}
                                         {phase === 'live' && <motion.div
                                             className="shrink-0 rounded-[28px]"
                                             inert={foldListening}

@@ -801,6 +801,9 @@ export class ModesManager {
                 sortOrder: i,
             });
         });
+        // No AI compile for seeded sections (2026-11-16): they are built-in text, and their
+        // instructions ship with the app (meeting/sectionInstructions.ts). Compiling them here
+        // was 56 calls at first launch, before the user had started anything.
         return {
             id,
             name: params.name,
@@ -1455,7 +1458,8 @@ export class ModesManager {
         // If the section's meaning changed (title/description), recompile its instruction.
         // Skip when we are only writing the compiledPrompt itself (avoids a loop).
         if ((updates.title !== undefined || updates.description !== undefined) && updates.compiledPrompt === undefined) {
-            // The old instruction describes the old section: clear it until the recompile lands.
+            // The stored instruction was written for the old text: clear it, so a failed or
+            // skipped recompile falls back to the new description, not the old instruction.
             DatabaseManager.getInstance().updateNoteSection(id, { compiledPrompt: '' });
             const owner = DatabaseManager.getInstance().getNoteSectionOwnerMode(id);
             if (owner) {
@@ -1476,7 +1480,8 @@ export class ModesManager {
     private compileSectionPromptAsync(sectionId: string, modeId: string, title: string, description: string): void {
         void (async () => {
             try {
-                // A built-in section ships with its instruction; nothing to compile.
+                // Built-in text (a default section re-added, an edit undone) has a shipped
+                // instruction that wins at read time: an AI compile would be wasted.
                 const { builtinSectionInstruction } = require('./meeting/sectionInstructions');
                 if (builtinSectionInstruction(title, description)) return;
                 const llmHelper = ModesManager.llmHelperForCompiler;
@@ -1490,6 +1495,8 @@ export class ModesManager {
                 } catch { /* default allow */ }
                 const mode = this.getModes().find(m => m.id === modeId);
                 const { SectionPromptCompiler } = require('./meeting/SectionPromptCompiler');
+                // Background lane: a compile never makes the live judge or answer
+                // wait on the provider's rate limiter (F-LAT-06).
                 const { runAsBackgroundLlmWork } = require('./RateLimiter');
                 const { instruction, compiled } = await runAsBackgroundLlmWork(() => new SectionPromptCompiler(llmHelper).compile({
                     sectionTitle: title,
@@ -1526,7 +1533,8 @@ export class ModesManager {
      * The mode's notes sections become a note template's (2026-10-21, "Use a
      * template" in the Modes Manager): the mode's default notes layout, which
      * a template picked in the notepad still overrides for one meeting. The
-     * sections compile like a new mode's. Null when the write failed.
+     * sections are built-in text, so their instructions ship with the app
+     * (meeting/sectionInstructions.ts): no AI compile. Null when the write failed.
      */
     public replaceNoteSectionsWith(modeId: string, sections: ReadonlyArray<{ title: string; description: string }>): ModeNoteSection[] | null {
         const rows = sections.map(s => ({ id: `ns_${crypto.randomUUID()}`, title: s.title, description: s.description }));
@@ -1854,7 +1862,9 @@ export class ModesManager {
                 if (hybridResult && !hybridResult.usedFallback && hybridResult.formattedContext) {
                     return hybridResult.formattedContext;
                 }
-                // Hybrid unavailable — fall back to lexical + identity block.
+                // Hybrid unavailable — fall back to the legacy lexical scorer
+                // (identity block included). Said plainly (F-ACC-06, 2026-11-13):
+                // this block is the legacy scorer's, not a hybrid one.
                 console.info(`[ModesManager] document-grounded retrieval is lexical-only this turn (${hybridResult?.degradedReason ?? 'no semantic arm'}); using the legacy lexical block`);
                 return this.buildRetrievedActiveModeContextBlock(
                     query, transcript, tokenBudget, answerType, excludeCustomContext, pinnedModeId, retrievalOptions,

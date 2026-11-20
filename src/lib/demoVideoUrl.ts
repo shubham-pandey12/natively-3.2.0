@@ -1,15 +1,18 @@
-// The full setup & demo film on the Natively YouTube channel (8:57). Kept free
-// of renderer globals so the main process can open it for the first-run guide.
+// The demo film's address, alone so main can read it too (the first-run guide
+// opens it at its first meeting: electron/ipcHandlers.ts) without pulling in
+// the renderer's openDemoVideo (src/lib/demoVideo.ts).
 export const DEMO_VIDEO_URL = 'https://youtu.be/Ha_ZiwG5Kwc';
-export const GUIDE_SILENT_DEMO_DELAY_MS = 8_000;
-export const GUIDE_AUTO_ANSWER_DELAY_MS = 15_000;
 
 /**
- * shell.openExternal options for the first-run guide's demo film. On macOS the
- * browser opens behind the app (activate: false) so the overlay stays in view;
- * Windows has no such option.
+ * How the guide opens the film without the user asking (shell.openExternal's
+ * options). The user's call and the overlay stay in front: the film is heard,
+ * not watched (Evin, 2026-11-15: "play ... in background").
+ *  - macOS: the browser opens it without coming to the front (activate: false).
+ *  - Windows: openExternal has no such option; the browser comes forward, and
+ *    the overlay, always on top, stays above it.
+ * Anything else opens it plainly.
  */
-export function demoFilmOpenOptions(platform: NodeJS.Platform): { activate?: boolean } {
+export function demoFilmOpenOptions(platform: string): { activate?: boolean } {
   switch (platform) {
     case 'darwin':
       return { activate: false };
@@ -19,3 +22,12 @@ export function demoFilmOpenOptions(platform: NodeJS.Platform): { activate?: boo
       return {};
   }
 }
+
+/** How long the first guide meeting may stay silent before the overlay asks
+ *  the user to press play (a browser that blocked the film's autoplay). */
+export const DEMO_FILM_QUIET_MS = 8_000;
+
+/** How long the demo film plays (from the first words heard) before the guide
+ *  presses What to answer itself, so the film's question is complete when the
+ *  answer is written (Evin, 2026-11-15). */
+export const DEMO_FILM_ANSWER_AFTER_MS = 15_000;

@@ -132,6 +132,8 @@ export const OverlayBannerButton: React.FC<OverlayBannerButtonProps> = ({
 
 // `title` is the banner HEADING, not the native tooltip attribute — hence the
 // Omit. The root div has no tooltip; the clamped body has one (messageTooltip).
+// 'guide': the first-run guide's steps (components/guide/OverlayGuide.tsx),
+// lavender; its tokens live in components/guide/guide.css.
 export type OverlayBannerTone = 'warning' | 'error' | 'ok' | 'guide';
 
 export interface OverlayBannerProps

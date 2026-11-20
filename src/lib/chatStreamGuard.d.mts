@@ -52,3 +52,5 @@ export function resolveChatStreamSurfaceError(
   activeSource: string | null | undefined,
   incomingSource: string | null | undefined,
 ): { release: boolean };
+
+export function shouldApplyLiveAnswerDiscard(activeId: number | null | undefined, incomingId: number | null | undefined): boolean;

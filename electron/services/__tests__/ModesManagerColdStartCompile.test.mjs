@@ -13,6 +13,11 @@ const compilerMod = await import(pathToFileURL(compilerPath).href);
 const { ModesManager } = modesMod;
 const { SectionPromptCompiler, deterministicSectionInstruction } = compilerMod;
 
+// compileAllSectionsAsync was removed (2026-11-16): seeded sections are built-in text and
+// their instructions ship with the app (meeting/sectionInstructions.ts). Its two tests here
+// (no-provider gate, keys loading after seeding) went with it; seeding making no calls is
+// pinned in BuiltinSectionInstructions2026_11_16.test.mjs.
+
 test('ModesManager.addNoteSection short-circuits compilation when no provider is configured', async () => {
   let generateMeetingSummaryCalls = 0;
 

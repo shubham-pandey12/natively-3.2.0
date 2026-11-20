@@ -3,9 +3,16 @@
 // meeting mode) into a precise, self-contained, anti-hallucination EXTRACTION INSTRUCTION
 // that the chunk extractor later uses to fill that section faithfully from a transcript.
 //
-// Compiled once when a user adds/edits a section or creates a custom mode (fire-and-forget,
-// never blocks the UI), cached in mode_note_sections.compiled_prompt. Empty/failed → the
-// extractor falls back to title+description.
+// Compiled when a user adds or edits a section (fire-and-forget, never blocks the UI), cached
+// in mode_note_sections.compiled_prompt. Built-in sections are not compiled: their
+// instructions ship with the app (sectionInstructions.ts). Empty/failed → the extractor
+// falls back to title+description.
+//
+// Absence (2026-11-16): the chunk prompt says to leave a section with nothing in it out and
+// never to write "Not discussed". The instruction used to demand exactly that sentinel, so
+// the two prompts disagreed and a "Not discussed." bullet could reach the notes. A compiled
+// instruction now says to leave the section out, and one that asks for a placeholder is
+// rejected.
 //
 // Routed through generateStructured so the output is validated and repaired; a deterministic
 // template is the guaranteed fallback so a section ALWAYS has a usable instruction.
@@ -22,8 +29,7 @@ export interface CompileSectionParams {
   meetingMode?: string;
 }
 
-// A compiled instruction must never ask for placeholder text: an absent section
-// is left out, matching the chunk extractor's contract (3.2.0).
+// A compiled instruction that tells the model to write a placeholder for an empty section.
 const PLACEHOLDER_ASK_RE = /\b(?:output|write|return|say|respond with|answer)\b[^.]{0,30}?["“']?(?:not discussed|not mentioned|none|n\/a|na)\b/i;
 
 // The meta-prompt that writes the per-section extraction instruction. Derived from the
@@ -77,8 +83,9 @@ export function deterministicSectionInstruction(params: CompileSectionParams): s
 
 function isUsableInstruction(text: string): boolean {
   if (!text || text.trim().length < 40) return false;
-  // Guardrail: a usable compiled instruction must carry the empty-if-absent contract and a
-  // source-only/no-outside-knowledge clause; otherwise reject and fall back.
+  // Guardrail: a usable compiled instruction must carry the leave-it-out-when-absent contract
+  // and a source-only/no-outside-knowledge clause, and must not ask for a placeholder;
+  // otherwise reject and fall back.
   if (PLACEHOLDER_ASK_RE.test(text)) return false;
   const hasEmpty = /left out|leave (?:it|this section|the section) out|\bomit|output nothing|write nothing|nothing fits/i.test(text);
   const hasSourceOnly = /only the transcript|only use the transcript|do not use outside|no outside knowledge/i.test(text);

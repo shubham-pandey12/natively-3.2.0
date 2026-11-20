@@ -189,7 +189,7 @@ describe('when Pro ends', () => {
     assert.match(ipc, /proWatch\.check\(\);\s*if \(standDownIfNoPro\('licence check'\)\)/);
     const watchStart = ipc.indexOf('const proWatch = createProWatch(');
     const watch = ipc.slice(watchStart, ipc.indexOf('  proWatch.check();', watchStart));
-    assert.match(watch, /if \(!allowed\) \{[\s\S]*standDownIfNoPro\('Pro gone'\)/);
+    assert.match(watch, /if \(!allowed\)\s*(?:\{\s*)?standDownIfNoPro\('Pro gone'\)/);
     assert.match(watch, /syncConnectorServersWithPro\(\)/);
   });
 
@@ -277,7 +277,7 @@ describe('LicenseManager: offline limit and legacy licences', { skip: !hasPremiu
       if (typeof request === 'string' && request.endsWith('.node')) return nativeStub;
       return originalResolve.call(this, request, ...rest);
     };
-    mod = await import(PREMIUM);
+    mod = await import(pathToFileURL(PREMIUM).href);
     ({ LicenseManager } = mod);
   });
   after(() => {

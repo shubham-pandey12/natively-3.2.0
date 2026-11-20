@@ -18,6 +18,7 @@ module.exports = {
           component: 'var(--bg-component)',
           'toggle-switch': 'var(--bg-toggle-switch)',
           'item-surface': 'var(--bg-item-surface)',
+          // Settings row icon tiles (falls back to item-surface outside Settings).
           'settings-tile': 'var(--bg-settings-tile, var(--bg-item-surface))',
           'item-active': 'var(--bg-item-active)',
         },

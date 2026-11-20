@@ -138,9 +138,6 @@ export interface VisionModelState {
 }
 
 export interface ElectronAPI {
-  guideGet?: () => Promise<{ status: string; step: string; stopLockUntil?: number | null }>;
-  guideDispatch?: (event: { type: string; [key: string]: unknown }) => Promise<{ status: string; step: string; stopLockUntil?: number | null }>;
-  onGuideChanged?: (callback: (state: { status: string; step: string; stopLockUntil?: number | null }) => void) => () => void;
   updateContentDimensions: (dimensions: {
     width: number
     height: number
@@ -337,7 +334,7 @@ export interface ElectronAPI {
   getDisabledProviders: () => Promise<string[]>
   setDisabledProviders: (providers: string[]) => Promise<{ success: boolean; error?: string }>
   setCloudEnabledModels: (provider: string, models: string[]) => Promise<{ success: boolean; error?: string }>
-  setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string; proPending?: boolean; proError?: string }>
+  setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string; proPending?: boolean; proError?: string; storedAs?: 'pack' }>
   setNvidiaNimSttModel: (model: string) => Promise<{ success: boolean; error?: string }>
   setSttModel: (provider: 'deepgram' | 'openai', model: string) => Promise<{ success: boolean; error?: string }>
   // ── In-app review / testimonial prompt ─────────────────────────────────
@@ -372,7 +369,13 @@ export interface ElectronAPI {
   }) => Promise<{ ok: boolean; error?: string; status?: number }>
   // See src/types/nativelyUsage.ts — one definition, shared with the preload
   // bridge. Four user-facing categories over five server-side meters.
-  getNativelyUsage: (force?: boolean) => Promise<import('./nativelyUsage').NativelyUsageResponse>
+  getNativelyUsage: (force?: boolean, which?: 'active' | 'main' | 'pack') => Promise<import('./nativelyUsage').NativelyUsageResponse>
+  getNativelyUpgradeLink?: (family?: 'pack' | 'plan') => Promise<{ ok: boolean; token?: string | null; email?: string | null; error?: string }>
+  /** Move a live yearly plan up a yearly tier in place. No expectedAmount = preview only, nothing charged. */
+  nativelyYearlyUpgrade?: (plan: string, expectedAmount?: number) => Promise<{ ok: boolean; changed?: boolean; error?: string; preview?: { plan: string; amount: number; currency: string } | null }>
+  getNativelyPackKey?: () => Promise<import('./nativelyUsage').NativelyPackKeyState>
+  removeNativelyPackKey?: () => Promise<{ ok: boolean; error?: string }>
+  onNativelyPackFallbackChanged?: (cb: (state: { held: boolean; inUse: boolean; until: string | null; reason: string }) => void) => () => void
   getNativelyPlans: () => Promise<import('./nativelyUsage').NativelyPlansResponse>
   resendNativelyKey: (email: string) => Promise<{ ok: boolean; message?: string; error?: string }>
   getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasOwnAiKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasDeepseekKey: boolean; hasNvidiaNimKey?: boolean; hasOpenrouterKey?: boolean; hasFluxionKey?: boolean; fluxionProtocol?: 'openai' | 'anthropic'; hasAgentRouterKey?: boolean; hasLitellmBaseURL?: boolean; litellmBaseURL?: string | null; litellmMaxTokens?: number | null; hasNinerouterBaseURL?: boolean; hasNinerouterKey?: boolean; ninerouterBaseURL?: string | null; ninerouterMaxTokens?: number | null; ninerouterThinking?: string | null; ninerouterModelMeta?: Record<string, { reasoning?: boolean; thinkingCanDisable?: boolean; thinkingFormat?: string }>; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'qwen' | 'nvidia_nim' | 'natively' | 'local-whisper' | 'apple-speech'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; nvidiaNimSttModel?: string; sttModels?: { deepgram?: string; openai?: string }; hasSonioxKey?: boolean; hasQwenAsrKey?: boolean; hasTavilyKey?: boolean; geminiPreferredModel?: string; groqPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; deepseekPreferredModel?: string; nvidia_nimPreferredModel?: string; openrouterPreferredModel?: string; fluxionPreferredModel?: string; agentrouterPreferredModel?: string; litellmPreferredModel?: string; ninerouterPreferredModel?: string; disabledProviders?: string[]; cloudEnabledModels?: Record<string, string[]>; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string; sttQwenAsrKey?: string; openAiSttBaseUrl?: string }>
@@ -536,7 +539,7 @@ export interface ElectronAPI {
   modesCreate: (params: { name: string; templateType: string }) => Promise<{ success: boolean; mode?: any; error?: string }>
   modesGenerateFromBrief: (params: { brief: string; requiresGrounding?: boolean; templateHint?: string; key?: string; persist?: boolean }) => Promise<{ success: boolean; mode?: any; draft?: any; attempts?: number; issues?: any[]; persisted?: boolean; error?: string }>
   e2eInvoke: (channel: string, ...args: any[]) => Promise<any>
-  modesUpdate: (id: string, updates: { name?: string; templateType?: string; customContext?: string; sourceContract?: any }) => Promise<{ success: boolean; error?: string }>
+  modesUpdate: (id: string, updates: { name?: string; templateType?: string; customContext?: string; sourceContract?: any }) => Promise<{ success: boolean; error?: string; message?: string }>
   modesGetSourceContract: (modeId: string) => Promise<any>
   modesBuildUserSourceContract?: (input: {
     modeId: string;
@@ -1329,6 +1332,10 @@ export interface ElectronAPI {
   licenseGetDetails: () => Promise<{ isPremium: boolean; plan?: string; provider?: string }>
   /** Async startup check — calls Dodo validate endpoint to detect server-side revocations. */
   licenseCheckPremiumAsync: () => Promise<boolean>
+  getDiagnosticReportPreview: () => Promise<{ preview: string }>
+  sendDiagnosticReport: () => Promise<{ ok: true; ref: string } | { ok: false; error: 'network' | 'unavailable' | 'rate_limited' | 'rejected' }>
+  getLastConnectionNotice: () => Promise<{ verdict: string; message: string; healed: boolean; at: number } | null>
+  onConnectDiagnosis: (callback: (data: { verdict: string; message: string; healed: boolean }) => void) => () => void
   onLicenseStatusChanged: (callback: (data: { isPremium: boolean, plan?: string }) => void) => () => void
   /** A Pro pack ran out during a meeting (main: PackMeetingClock). */
   onPackEnded?: (cb: (data: { reason: string | null }) => void) => () => void
@@ -1361,8 +1368,6 @@ export interface ElectronAPI {
   getMeetingAudioCapture?: () => Promise<{ withoutAudio: boolean }>;
   onMeetingAudioCapture?: (callback: (data: { withoutAudio: boolean }) => void) => () => void;
   getAutoAnswerEnabled: () => Promise<boolean>;
-  getAnswerLength: () => Promise<{ value: 'shorter' | 'smart' | 'longer' }>;
-  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => Promise<{ success: boolean; error?: string }>;
   setAutoAnswerEnabled: (enabled: boolean) => Promise<{ success: boolean; error?: string; message?: string }>;
   getAutoAnswerAccess: () => Promise<{ available?: boolean; allowed: boolean; basis: 'pro' | 'sharing' | 'none'; uploads: boolean; consent: { version: number; grantedAt: string } | null; enabled: boolean }>;
   setAutoAnswerTrainingConsent: (granted: boolean) => Promise<{ success: boolean; error?: string }>;
@@ -1389,6 +1394,9 @@ export interface ElectronAPI {
     displays: Array<{ id: number; number: number; name: string; width: number; height: number; primary: boolean }>;
   }>;
   setScreenshotDisplay: (preference: string) => Promise<{ success: boolean; error?: string }>;
+  /** Settings › Overlay › Answer length. get: what answers use now (Smart without Pro). */
+  getAnswerLength: () => Promise<{ value: 'shorter' | 'smart' | 'longer' }>;
+  setAnswerLength: (value: 'shorter' | 'smart' | 'longer') => Promise<{ success: boolean; error?: string; message?: string }>;
   cropperPickDisplay: () => void;
   cropperDrag: (active: boolean) => void;
   getScreenUnderstandingMode: () => Promise<'vision_first' | 'vision_only' | 'private_vision'>;
@@ -1420,6 +1428,10 @@ export interface ElectronAPI {
   /** The permissions card's closes while a permission is missing (src/lib/permissionsCardPolicy.mjs). */
   permissionsCardGet: () => Promise<{ dismissals: number; lastDismissedAt: number | null }>;
   permissionsCardRecord: (event: 'dismissed' | 'granted') => Promise<{ success: boolean; error?: string; record?: { dismissals: number; lastDismissedAt: number | null } }>;
+  /** First-run guide (src/lib/onboarding/firstRunGuide.mjs): state lives in main, every window follows it. */
+  guideGet: () => Promise<import('../lib/onboarding/firstRunGuide.mjs').GuideState>;
+  guideDispatch: (event: import('../lib/onboarding/firstRunGuide.mjs').GuideEvent) => Promise<import('../lib/onboarding/firstRunGuide.mjs').GuideState>;
+  onGuideChanged: (cb: (state: import('../lib/onboarding/firstRunGuide.mjs').GuideState) => void) => () => void;
   /** First-launch shortcut tour: taught shortcuts become practice presses. */
   onboardingSetShortcutTour: (active: boolean) => Promise<{ success: boolean }>;
   onOnboardingTourShortcut: (callback: (actionId: string) => void) => () => void;

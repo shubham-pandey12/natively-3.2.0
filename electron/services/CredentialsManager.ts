@@ -142,6 +142,23 @@ export interface StoredCredentials {
     fastModel?: string;
     nativelyApiKey?: string;
     /**
+     * A PACK key held beside a monthly/yearly key in nativelyApiKey (2026-11-17).
+     * The server keeps packs and subscriptions on separate keys; the app holds
+     * both and uses this one FIRST: from when it is held until the pack's own
+     * time is over, or it runs out of something the plan still has
+     * (nativelyPackInUseUntil; services/packs/nativelyPackFallback.ts). Never
+     * set alone: a lone pack key lives in nativelyApiKey like any key.
+     */
+    nativelyPackApiKey?: string;
+    /** ISO time until which the pack key is the one in use: the pack's use-by date, or a shorter hold when the server did not name it. */
+    nativelyPackInUseUntil?: string;
+    /**
+     * The pack moved the AI / speech-to-text / Fast Response to Natively API
+     * for this key (fingerprint) and what they were before
+     * (services/packs/packNativelySwitch.ts, 2026-11-19).
+     */
+    nativelyPackSwitch?: NativelySwitchMemory;
+    /**
      * Optional bearer token for a user-hosted OpenAI-compatible embedding
      * endpoint. Lives here rather than in settings.json because that file is
      * plaintext on disk; LM Studio and llama.cpp need no token at all, but a
@@ -367,6 +384,24 @@ export interface StoredCredentials {
         projectId: string;
     };
 }
+
+/**
+ * What the Natively switch remembers (services/packs/packNativelySwitch.ts
+ * PackSwitchMemory): the key it ran for, by fingerprint, and the settings it
+ * moved. Mirrored here so this file needs no import from there.
+ */
+type NativelySwitchMemory = {
+    keyId: string;
+    prev: {
+        defaultModel?: string;
+        sttProvider?: string;
+        fastMode?: boolean;
+        rerankerProvider?: string;
+        embedding?: { mode?: string; provider?: string; model?: string; dimensions?: number };
+    };
+    pack?: boolean;
+    ended?: boolean;
+};
 
 export class CredentialsManager {
     private static instance: CredentialsManager;
@@ -1339,8 +1374,74 @@ export class CredentialsManager {
         return true;
     }
 
-    public getNativelyApiKey(): string | undefined {
+    /**
+     * The Natively key IN USE: the saved key, or the pack key held beside it
+     * while it is in use: a live pack is used first (see nativelyPackFallback.ts).
+     * Every request, the voice pipeline, retrieval and the pack clock read this.
+     */
+    public getNativelyApiKey(now: number = Date.now()): string | undefined {
+        return this.isNativelyPackInUse(now) ? this.credentials.nativelyPackApiKey : this.credentials.nativelyApiKey;
+    }
+
+    /** The saved (main) Natively key, whatever is in use right now. */
+    public getMainNativelyApiKey(): string | undefined {
         return this.credentials.nativelyApiKey;
+    }
+
+    public getNativelyPackApiKey(): string | undefined {
+        return this.credentials.nativelyPackApiKey;
+    }
+
+    public getNativelyPackInUseUntil(): string | undefined {
+        return this.credentials.nativelyPackInUseUntil;
+    }
+
+    public isNativelyPackInUse(now: number = Date.now()): boolean {
+        const until = Date.parse(this.credentials.nativelyPackInUseUntil || '');
+        return !!this.credentials.nativelyPackApiKey && Number.isFinite(until) && until > now;
+    }
+
+    public getNativelyPackSwitch(): NativelySwitchMemory | undefined {
+        return this.credentials.nativelyPackSwitch;
+    }
+
+    /**
+     * The pack switch to or from Natively API (services/packs/packNativelySwitch.ts):
+     * the settings named and what to remember, in ONE save, so a refused or
+     * failed write never leaves the settings moved with nothing to put them back
+     * from. False: nothing was saved.
+     */
+    public applyNativelyPackSwitch(
+        change: { defaultModel?: string; sttProvider?: string },
+        memory: NativelySwitchMemory | null,
+    ): boolean {
+        if (this.refuseWriteWhileDegraded('natively pack switch')) return false;
+        const before = { ...this.credentials };
+        if (change.defaultModel !== undefined) this.credentials.defaultModel = change.defaultModel;
+        if (change.sttProvider !== undefined) this.credentials.sttProvider = change.sttProvider as StoredCredentials['sttProvider'];
+        this.credentials.nativelyPackSwitch = memory ?? undefined;
+        if (this.saveCredentials()) return true;
+        this.credentials = before;
+        return false;
+    }
+
+    /** Hold (or drop, with null) a pack key beside the saved key. Dropping or replacing it ends its use. */
+    public setNativelyPackApiKey(key: string | null): boolean {
+        if (this.refuseWriteWhileDegraded('set natively pack key')) return false;
+        const trimmed = (key || '').trim();
+        // Another key never inherits the old one's in-use time.
+        if ((trimmed || undefined) !== this.credentials.nativelyPackApiKey) this.credentials.nativelyPackInUseUntil = undefined;
+        this.credentials.nativelyPackApiKey = trimmed || undefined;
+        this.saveCredentials();
+        return true;
+    }
+
+    /** Use the pack key until `iso` (the pack's use-by date, or a hold), or stop using it with null. */
+    public setNativelyPackInUseUntil(iso: string | null): boolean {
+        if (this.refuseWriteWhileDegraded('set natively pack in use')) return false;
+        this.credentials.nativelyPackInUseUntil = iso && this.credentials.nativelyPackApiKey ? iso : undefined;
+        this.saveCredentials();
+        return true;
     }
 
     public getDisabledProviders(): string[] {
@@ -1836,6 +1937,70 @@ export class CredentialsManager {
     }
 
     /**
+     * The settings a pack moved to Natively API (services/packs/packNativelySwitch.ts)
+     * go back to what they were, where they are still on Natively API. Mutates
+     * only; the caller saves.
+     */
+    private packFastModeListener: ((on: boolean) => void) | null = null;
+    private packEmbeddingListener: ((choice: NonNullable<NativelySwitchMemory['prev']['embedding']>) => void) | null = null;
+
+    /** Applies a Fast Response Mode the pack put-back turned on again to the running AI and the windows. */
+    public setPackFastModeListener(fn: ((on: boolean) => void) | null): void {
+        this.packFastModeListener = fn;
+    }
+
+    /** Puts back the embedding choice the switch replaced (re-indexing runs there, after this save). */
+    public setPackEmbeddingListener(fn: ((choice: NonNullable<NativelySwitchMemory['prev']['embedding']>) => void) | null): void {
+        this.packEmbeddingListener = fn;
+    }
+
+    private putBackPackSwitch(reason: string, changed: { defaultModel?: string; sttProvider?: string; rerankerProvider?: string }): void {
+        const packSwitch = this.credentials.nativelyPackSwitch;
+        if (!packSwitch) return;
+        this.credentials.nativelyPackSwitch = undefined;
+        const prev = packSwitch.prev || {};
+        if (prev.defaultModel && this.credentials.defaultModel === 'natively') {
+            this.credentials.defaultModel = prev.defaultModel;
+            changed.defaultModel = prev.defaultModel;
+        }
+        if (prev.sttProvider && this.credentials.sttProvider === 'natively') {
+            this.credentials.sttProvider = prev.sttProvider as StoredCredentials['sttProvider'];
+            changed.sttProvider = prev.sttProvider;
+        }
+        // Fast Response Mode lives in SettingsManager (like the reranker above).
+        // Saved here; the running AI and the windows follow through the
+        // listener ipcHandlers registers (setPackFastModeListener).
+        if (prev.fastMode) {
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { SettingsManager } = require('./SettingsManager');
+                const settings = SettingsManager.getInstance();
+                if (!settings.get('groqFastTextMode') && settings.set('groqFastTextMode', true)) {
+                    try { this.packFastModeListener?.(true); } catch { /* the next launch or toggle applies it */ }
+                }
+            } catch { /* the user turns it on again */ }
+        }
+        // The reranker, back to the user's own while it is still on Natively API.
+        if (prev.rerankerProvider) {
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { SettingsManager } = require('./SettingsManager');
+                const settings = SettingsManager.getInstance();
+                const current = (settings.get('reranker') as { provider?: string } | undefined) ?? {};
+                if (current.provider === 'natively' && settings.set('reranker', { ...current, provider: prev.rerankerProvider })) {
+                    changed.rerankerProvider = prev.rerankerProvider;
+                }
+            } catch { /* the reranker revert below still lands on local */ }
+        }
+        // Embeddings: put back through the Retrieval settings path (it checks the
+        // provider and re-indexes), which runs after this save.
+        if (prev.embedding) {
+            try { this.packEmbeddingListener?.(prev.embedding); } catch { /* the user picks it again */ }
+        }
+        console.log(`[CredentialsManager] ${reason} — put back the settings from before the Natively switch`);
+    }
+
+    /**
      * Undo the auto-promotions setNativelyApiKey() performs when a key is stored.
      * Mutates only; the caller saves.
      *
@@ -1844,6 +2009,9 @@ export class CredentialsManager {
      */
     private applyNativelyAutoDefaultRevert(reason: string): { defaultModel?: string; sttProvider?: string; rerankerProvider?: string } {
         const changed: { defaultModel?: string; sttProvider?: string; rerankerProvider?: string } = {};
+        // A pack moved these to Natively API: what was there before goes back
+        // first, not the fallbacks below.
+        this.putBackPackSwitch(reason, changed);
         if (this.credentials.defaultModel === 'natively') {
             this.credentials.defaultModel = 'gemini-3.1-flash-lite';
             changed.defaultModel = this.credentials.defaultModel;
@@ -1938,17 +2106,21 @@ export class CredentialsManager {
      */
     public revertNativelyAutoDefaults(reason: string): { defaultModel?: string; sttProvider?: string; rerankerProvider?: string } {
         if (this.refuseWriteWhileDegraded('revert natively auto defaults')) return {};
+        const hadPackSwitch = !!this.credentials.nativelyPackSwitch;
         const changed = this.applyNativelyAutoDefaultRevert(reason);
         // rerankerProvider is deliberately NOT part of this condition: it lives
         // in SettingsManager and has already persisted itself. Adding it here
         // would write the credentials file for a change that is not in it.
-        if (changed.defaultModel || changed.sttProvider) this.saveCredentials();
+        if (changed.defaultModel || changed.sttProvider || hadPackSwitch) this.saveCredentials();
         return changed;
     }
 
     public setNativelyApiKey(key: string): void {
         if (this.refuseWriteWhileDegraded('set natively api key')) return;
         const trimmed = key.trim();
+        // A different saved key starts fresh: whatever ran the old one out does
+        // not apply to it, so the held pack key goes back to standing by.
+        if ((trimmed || undefined) !== this.credentials.nativelyApiKey) this.credentials.nativelyPackInUseUntil = undefined;
         this.credentials.nativelyApiKey = trimmed || undefined;
 
         if (trimmed) {

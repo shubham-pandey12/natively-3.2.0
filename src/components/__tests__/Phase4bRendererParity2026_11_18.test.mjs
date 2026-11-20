@@ -1,4 +1,4 @@
-// Phase 4b full renderer parity tests against recovered Natively 3.2.0.
+// Renderer parity checks carried forward from Phase 4b.
 // Exercises pure helper branches on both macOS ('darwin') and Windows ('win32')
 // plus source-level parity invariants across Settings, Overlay, Notes, App,
 // MeetingDetails, ProfileIntelligence, AIProviders, Help, and ModesSettings.
@@ -7,12 +7,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   GUIDE_STEP_NUMBER,
-  GUIDE_STEP_TOTAL,
+  GUIDE_STEP_COUNT,
   GUIDE_DONE_HOLD_MS,
   GUIDE_STOP_LOCK_MS,
 } from '../../lib/onboarding/firstRunGuide.mjs';
 import { shortcutKeysFor } from '../../lib/onboarding/shortcutKeys.mjs';
-import { shouldHonorLiveAnswerDiscard } from '../../lib/chatStreamGuard.mjs';
+import { shouldApplyLiveAnswerDiscard } from '../../lib/chatStreamGuard.mjs';
 
 const read = (rel) => readFileSync(new URL(`../../../${rel}`, import.meta.url), 'utf8');
 
@@ -31,8 +31,8 @@ test('shortcutKeysFor maps guide defaults and custom overrides across macOS and 
   assert.deepEqual(shortcutKeysFor(custom, 'unknown:id', 'win32'), []);
 });
 
-test('firstRunGuide exports 3.2.0 step numbers and timing constants', () => {
-  assert.equal(GUIDE_STEP_TOTAL, 14);
+test('firstRunGuide exports step numbers and timing constants', () => {
+  assert.equal(GUIDE_STEP_COUNT, 14);
   assert.equal(GUIDE_DONE_HOLD_MS, 1000);
   assert.equal(GUIDE_STOP_LOCK_MS, 30_000);
   assert.equal(GUIDE_STEP_NUMBER.overlay, 2);
@@ -43,13 +43,13 @@ test('firstRunGuide exports 3.2.0 step numbers and timing constants', () => {
   assert.equal(GUIDE_STEP_NUMBER.keys, 14);
 });
 
-test('shouldHonorLiveAnswerDiscard guards stale generation discards while staying backward-compatible', () => {
-  assert.equal(shouldHonorLiveAnswerDiscard(null, undefined), true);
-  assert.equal(shouldHonorLiveAnswerDiscard(5, undefined), true);
-  assert.equal(shouldHonorLiveAnswerDiscard(null, 5), true);
-  assert.equal(shouldHonorLiveAnswerDiscard(5, 5), true);
-  assert.equal(shouldHonorLiveAnswerDiscard(5, 6), true);
-  assert.equal(shouldHonorLiveAnswerDiscard(5, 4), false);
+test('shouldApplyLiveAnswerDiscard guards stale generation discards while staying backward-compatible', () => {
+  assert.equal(shouldApplyLiveAnswerDiscard(null, undefined), true);
+  assert.equal(shouldApplyLiveAnswerDiscard(5, undefined), true);
+  assert.equal(shouldApplyLiveAnswerDiscard(null, 5), true);
+  assert.equal(shouldApplyLiveAnswerDiscard(5, 5), true);
+  assert.equal(shouldApplyLiveAnswerDiscard(5, 6), true);
+  assert.equal(shouldApplyLiveAnswerDiscard(5, 4), false);
 });
 
 test('AnswerLengthRow lives in OverlaySettings on both meeting surfaces and not in SettingsOverlay', () => {
@@ -73,7 +73,7 @@ test('SettingsOverlay, SettingsRow, PhoneMirror, HelpGraphics and index.css matc
   const helpSettings = read('src/components/settings/HelpSettings.tsx');
 
   assert.match(settingsOverlay, /sttProviderRejectsLanguage\(sttProvider, recognitionLanguage\)/);
-  assert.match(settingsOverlay, /\{confirmDialog\}\s*\{isOpen && <LauncherSettingsGuide \/>\}/);
+  assert.match(settingsOverlay, /\{isOpen && <SettingsGuide \/>\}/);
   assert.doesNotMatch(settingsOverlay, /isLavender \? 'bg-bg-item-surface' : 'bg-bg-card'/);
   assert.match(settingsRow, /bg-bg-settings-tile/);
   assert.match(phoneMirror, /bg-bg-settings-tile/);
@@ -92,16 +92,16 @@ test('NativelyInterface, TopPill, OverlayAuxWindows, NotesWindow, App and Meetin
   const meeting = read('src/components/MeetingDetails.tsx');
 
   assert.doesNotMatch(iface, /releasePhoneOverlayAnswer/);
-  assert.match(iface, /shouldHonorLiveAnswerDiscard\(liveAnswerGenIdRef\.current, data\?\.generationId\)/);
+  assert.match(iface, /shouldApplyLiveAnswerDiscard\(liveAnswerGenIdRef\.current, data\?\.generationId\)/);
   assert.equal((iface.match(/data-guide=\{id === 'what_to_answer' \? 'what-to-answer' : undefined\}/g) || []).length, 2);
   assert.match(topPill, /guide-stop-count/);
   assert.match(topPill, /data-guide="overlay-stop"/);
   assert.match(aux, /useGuideStopLock/);
-  assert.match(aux, /useGuideHighlight\([\s\S]{0,80}'\[data-guide="overlay-stop"\]'/);
+  assert.match(aux, /useGuideLit\([\s\S]{0,100}'\[data-guide="overlay-stop"\]'/);
   assert.match(notes, /useGuideStopLock/);
   assert.match(notes, /notesGuide\.live === 'notepad' \? ' guide-write' : ''/);
   assert.match(notes, /const foldListening = askOpen && notesGuide\.live !== 'stop2'/);
-  assert.match(app, /const showLauncherHome = useCallback\(\(\) =>/);
+  assert.match(app, /<LauncherGuide[^>]*onShowHome=\{openLauncherHome\}/);
   assert.match(app, /dispatchGuide\(\{ type: 'trial_out' \}\)/);
   assert.match(app, /!isolateOnboarding && showWelcome === false && \(isLauncherWindow \|\| isDefault\) && \(/);
   assert.match(meeting, /data-guide="meeting-tabs"/);

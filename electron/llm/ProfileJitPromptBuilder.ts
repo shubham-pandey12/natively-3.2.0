@@ -30,6 +30,10 @@ export interface BuildProfileJitPromptInput {
   styleInstructions?: string | null;
   personaInstructions?: string | null;
   customContextInstructions?: string | null;
+  /**
+   * The word target the rules state. null: the user's Real-time prompt sets
+   * the length, so the rules state none and defer to it (2026-11-15).
+   */
   maxAnswerWords?: number | null;
   /**
    * Campaign-3 (fix/answer-policy-engine, 2026-07-19, founder §2.5):
@@ -83,7 +87,7 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
   const evidenceItems = (input.evidence?.items ?? [])
     .filter((item) => sourceKindAllowed(item.sourceKind, allowed, forbidden));
   const checkedSources = input.evidence?.checkedSources ?? [];
-  const maxWords = input.maxAnswerWords === null ? null : input.maxAnswerWords ?? DEFAULT_MAX_WORDS;
+  const maxWords = input.maxAnswerWords === null ? null : (input.maxAnswerWords ?? DEFAULT_MAX_WORDS);
 
   const systemPrompt = [
     'You generate the final answer just-in-time from the exact user question and allowed evidence.',
@@ -197,8 +201,8 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
     'Answer only from allowed_evidence.',
     'Do not add facts, numbers, employers, projects, schools, salary, location, or personal details unless present above.',
     maxWords === null
-      ? "Keep the answer natural. Take its length from the user's own instructions."
-      : `Keep the answer natural and concise (target <= ${maxWords} words unless the question explicitly asks for detail).`,
+        ? "Keep the answer natural. Take its length from the user's own instructions."
+        : `Keep the answer natural and concise (target <= ${maxWords} words unless the question explicitly asks for detail).`,
     'Previous assistant responses, if any, are for conversational continuity only and are not source evidence.',
     '</rules>',
     '</profile_jit_final_answer_request>',

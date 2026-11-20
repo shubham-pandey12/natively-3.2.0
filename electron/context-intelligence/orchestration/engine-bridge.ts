@@ -47,20 +47,6 @@ function redactTracePayload<T>(payload: T): unknown {
   try { return require('../../utils/redactForLog').redactSecretsOnly(payload); } catch { return payload; }
 }
 
-/**
- * Whether this build has Profile Intelligence at all (F-ACC-14). The
- * source-available build has no premium modules, so no profile can exist and
- * the no-evidence notice must not send the user to it.
- */
-function profileFeatureAvailable(): boolean {
-  try {
-    const { isPremiumAvailable } = require('../../premium/featureGate') as typeof import('../../premium/featureGate');
-    return isPremiumAvailable() !== false;
-  } catch {
-    return true;
-  }
-}
-
 
 /**
  * A rendered COMPLETED exchange — an answer, in one of the two shapes this
@@ -297,6 +283,14 @@ export interface BridgeResult {
  * Never throws. A defect in the new path must degrade to legacy, never break a
  * live answer — the same contract the wired manual-chat surface uses.
  */
+/** Profile Intelligence ships in this build (premium present). Never throws; unknown = available. */
+function profileFeatureAvailable(): boolean {
+  try {
+    const { isPremiumAvailable } = require('../../premium/featureGate');
+    return isPremiumAvailable() !== false;
+  } catch { return true; }
+}
+
 export async function buildV3Prompt(input: BridgeInput): Promise<BridgeResult | null> {
   try {
     if (!isContextIntelligenceV3Enabled()) return null;
@@ -314,17 +308,19 @@ export async function buildV3Prompt(input: BridgeInput): Promise<BridgeResult | 
       userAnswerPolicy = getStoredAnswerPolicy(input.modeUniqueId ?? modeId);
     } catch { /* store unavailable — mode default applies */ }
     const policy = resolveModePolicy(modeId);
+
+    // The mode's source contract (F-ACC-05), read per turn like the Answer
+    // policy above, read-only (no migration write on the answer path).
     let modeSourceContract: { sourceAuthority: string; origin: string } | null = null;
     if (input.modeUniqueId) {
       try {
         const { ModesManager } = require('../../services/ModesManager');
-        const mode = ModesManager.getInstance().getModes().find((m: { id: string; sourceContract?: { sourceAuthority?: unknown; origin?: unknown } }) => m.id === input.modeUniqueId);
+        const mode = ModesManager.getInstance().getModes().find((m: { id: string }) => m.id === input.modeUniqueId);
         const c = mode?.sourceContract;
         if (c && typeof c.sourceAuthority === 'string' && typeof c.origin === 'string') {
           modeSourceContract = { sourceAuthority: c.sourceAuthority, origin: c.origin };
         }
-      } catch {
-      }
+      } catch { /* modes store unavailable — mode policy alone */ }
     }
 
     const req: AnswerRequest = {

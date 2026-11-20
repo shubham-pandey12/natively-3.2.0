@@ -7,17 +7,22 @@
 
 import type { ScoredCard } from './OkfRetriever';
 
+// DOCUMENT TEXT IS DATA (F-CTX-13, 2026-11-13). Card titles, bodies and
+// quotes are generated from an uploaded file and were inserted raw under an
+// authoritative preamble, so a file could forge a "### [n]" card, a "---"
+// card boundary, or a closing tag for the block the caller wraps this in.
+// Neutralised with the fewest characters that work: a markdown escape before
+// a structural line, and `&lt;` before anything shaped like a tag. Ordinary
+// text ("p99 < 200 ms", "a -> b") is left exactly as written.
 const TAG_LIKE_RE = /<(?=\/?[A-Za-z!?])/g;
 const STRUCTURAL_LINE_RE = /^(\s{0,3})(#{1,6}(?=\s|$)|-{3,}\s*$|={3,}\s*$|\*{3,}\s*$)/gm;
 
-/**
- * Card text is document data: defuse tag-like `<` and escape lines that would
- * read as prompt structure (markdown headings, `---` / `===` / `***` rules).
- */
+/** Multi-line document text: keep its lines, but none may act as prompt structure. */
 export function neutralizeDocumentText(text: unknown): string {
   return String(text ?? '').replace(TAG_LIKE_RE, '&lt;').replace(STRUCTURAL_LINE_RE, '$1\\$2');
 }
 
+/** A one-line field (title, type, section, quote): newlines collapse so it cannot start a line of its own. */
 function oneLine(text: unknown): string {
   return neutralizeDocumentText(String(text ?? '').replace(/\s+/g, ' ').trim());
 }

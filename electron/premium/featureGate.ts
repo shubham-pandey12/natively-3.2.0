@@ -1,38 +1,33 @@
 /**
  * Centralized Feature Gate for Premium Features.
  *
- * Determines at runtime whether premium modules (LicenseManager,
- * KnowledgeOrchestrator, etc.) are available. This allows the
- * source-available version to compile and run without premium code.
+ * Whether this build ships the premium modules (KnowledgeOrchestrator,
+ * LicenseManager, ...). The source-available build compiles and runs without
+ * them.
  *
- * Two signals, either of which marks premium absent:
- *  - main's startup load of the knowledge modules failed and called
- *    markPremiumAbsent() (3.2.0). The flag lives on globalThis so every
- *    bundled copy of this module agrees.
- *  - the module probe below fails (source-available builds without premium/).
+ * Rewritten 2026-11-13 (F-ACC-14). The old version PROBED by requiring the
+ * premium files relative to its own location, which esbuild bundling breaks
+ * (the bundle's location is not this file's), and it had no callers. main.ts
+ * is the one place that knows: its guarded premium require either succeeds or
+ * lands in a catch, and that catch marks the build. The flag lives on
+ * globalThis because main and the answer path may be separate bundles, each
+ * with its own copy of this module. Unmarked = available, so tests and a
+ * premium build are unaffected.
  */
 
 const PREMIUM_ABSENT_KEY = '__nativelyPremiumAbsentV1__';
-type GateGlobal = typeof globalThis & { [PREMIUM_ABSENT_KEY]?: boolean };
 
-
-/** Record that the premium modules failed to load at startup. */
+/** main.ts: the premium modules failed to load; this is the source-available build. */
 export function markPremiumAbsent(): void {
-    (globalThis as GateGlobal)[PREMIUM_ABSENT_KEY] = true;
+    (globalThis as Record<string, unknown>)[PREMIUM_ABSENT_KEY] = true;
 }
 
-/**
- * Check if premium modules are available in this build.
- * The probe result is cached after the first call.
- */
+/** True unless main.ts marked the premium modules absent. Never throws. */
 export function isPremiumAvailable(): boolean {
-    return (globalThis as GateGlobal)[PREMIUM_ABSENT_KEY] !== true;
+    return (globalThis as Record<string, unknown>)[PREMIUM_ABSENT_KEY] !== true;
 }
 
-/**
- * Reset the cached premium availability check and the absent flag.
- * Useful for testing.
- */
+/** Clear the mark (tests). */
 export function resetFeatureGate(): void {
-    delete (globalThis as GateGlobal)[PREMIUM_ABSENT_KEY];
+    delete (globalThis as Record<string, unknown>)[PREMIUM_ABSENT_KEY];
 }

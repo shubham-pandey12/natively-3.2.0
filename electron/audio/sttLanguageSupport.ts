@@ -67,6 +67,9 @@ export function sttCandidateSupportsLanguage(providerId: string, languageKey: st
     if (PARAKEET_ONLY_LANGUAGE_KEYS.has(key)) return false;
     if (sttProviderRejectsLanguage(providerId, key)) return false;
 
+    // A cloud provider measured to refuse this language (Soniox and Nepali).
+    if (sttProviderRejectsLanguage(providerId, key)) return false;
+
     // Otherwise the provider is unrestricted for this language as far as we know.
     return true;
 }

@@ -1981,9 +1981,10 @@ function detectBasis(q) {
  *   forceDesign?: boolean,
  *   hasVisualContext?: boolean,
  *   mode?: string | null,
- *   material?: string | null | (() => string | null),
+ *   material?: string | null | (() => string | null | undefined),
  * }} input  `material` is what was said in the conversation so far, when the
- *   caller can supply it (see visualInputStatus). `mode` is the resolved built-in template ('sales', 'call-center', …),
+ *   caller can supply it (see visualInputStatus). A function is read only when a
+ *   chart needs it: the whole meeting is not joined on every turn (F-LAT-02). `mode` is the resolved built-in template ('sales', 'call-center', …),
  *   'custom', or absent/unknown. Unknown keeps the pre-catalog behaviour: only
  *   an explicit request draws.
  * @returns {DiagramRequest}

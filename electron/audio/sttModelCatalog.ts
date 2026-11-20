@@ -45,7 +45,8 @@ export interface SttModelOption {
     englishOnly?: boolean;
     /** ISO-639-1 codes the model refuses with HTTP 400 on connect. Measured
      *  live against wss://api.deepgram.com/v1/listen on 2026-10-16: Nova-3 has
-     *  no Malayalam; Nova-2 has none of the Indian languages but Hindi. */
+     *  no Malayalam; Nova-2 has none of the Indian languages but Hindi.
+     *  Nepali: Nova-3 accepts `ne`, Nova-2 refuses it (measured 2026-11-15). */
     unsupportedLanguages?: readonly string[];
 }
 

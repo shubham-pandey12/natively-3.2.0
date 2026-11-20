@@ -351,7 +351,9 @@ ${promptInstruction.trim()}
             // "Explain this" / "what's the complexity" over a screenshot is
             // promoted too, and this directive used to override their shape
             // with the full solution.
-            if (promotedScreenCodingTurn && isRepeatPressAsk(answerPlan?.question, codingSignals.codingShape!)) {
+            // The shape alone is not enough: `solve` is also the default for a
+            // real question that matched no narrower shape (#742).
+            if (promotedScreenCodingTurn && isRepeatPressAsk(answerPlan?.question, codingSignals.codingShape)) {
                 intentContextParts.push(`<repeat_press_directive>
 The user triggered this action with a coding problem on screen and NO new question. That is a request for the COMPLETE solution to the on-screen problem, in the shape the coding contract asks for, even if a previous answer in this conversation already covered it, and even if this looks like a follow-up. Never respond with commentary on, agreement with, or a summary of an earlier answer. Produce the answer as if asked for the first time.
 </repeat_press_directive>`);
@@ -582,6 +584,12 @@ The user triggered this action with a coding problem on screen and NO new questi
                             (_cog as any).resolutionStrategy = resolution.strategy;
                             modeContextBlock = resolution.pack.items.map((item) => `[Section: ${item.pointer?.section || item.sourceId}]\n${item.text}`).join('\n\n');
                         } else {
+                        // F-LAT-05 (2026-11-13): a V3-composed turn sends `_v3p.user`
+                        // INSTEAD of the legacy packet (see _wtaUserBase below), so the
+                        // block retrieved here is discarded unread — yet it was awaited
+                        // first (prefetch race ≤1.5 s, inline hybrid ≤1.5 s / doc-grounded
+                        // longer). Retrieve nothing on that turn; legacy turns are unchanged.
+                        const v3ComposedTurn = Boolean((requestSnapshot as any)?.v3Prompt);
                         // PI v3 (W5): prefer the caller's PREFETCHED retrieval
                         // (kicked in parallel with intent classification +
                         // grounding) — by the time we get here it has usually
@@ -589,11 +597,8 @@ The user triggered this action with a coding problem on screen and NO new questi
                         // race as the inline path so a cold embedder still can't
                         // stall first-token. Falls through to inline retrieval
                         // when no prefetch was supplied (manual path, tests).
-                        // A V3-composed turn carries its own evidence: the
-                        // mode-context block would be a second, unused copy.
-                        const v3ComposedTurn = Boolean(requestSnapshot?.v3Prompt);
                         if (v3ComposedTurn) {
-                            // nothing to retrieve here
+                            // nothing to retrieve: the V3 prompt carries its own evidence
                         } else if (preFetchedModeContext && !forceDocumentGrounding) {
                             const { value, timedOut } = await raceWithBudget(
                                 preFetchedModeContext, HYBRID_RETRIEVAL_BUDGET_MS, '',
@@ -894,12 +899,19 @@ The user triggered this action with a coding problem on screen and NO new questi
                         hasAttachedImages,
                         hasScreenText,
                     });
+                    // F-ACC-13 (2026-11-13): this is the null-V3 fallback's decline
+                    // site, and the engine marks its doc-grounded context
+                    // `govern: true` without asking the refusal policy. Ask it here,
+                    // as the coordinator and manual chat do: a refusal pack that
+                    // does not govern falls through to the model exactly like the
+                    // visual-context yield (no canned line, no pack rendering).
                     const { packGovernsGeneration } = require('../intelligence/context-os/refusalPolicy') as typeof import('../intelligence/context-os/refusalPolicy');
-                    const _refusalYields = pack.answerPolicy === 'refuse_insufficient_evidence' && !packGovernsGeneration({
-                        answerPolicy: pack.answerPolicy,
-                        sourceAuthority: _cog.modeSnapshot?.sourceAuthority ?? null,
-                        hasReferenceFiles: true,
-                    });
+                    const _refusalYields = pack.answerPolicy === 'refuse_insufficient_evidence'
+                        && !packGovernsGeneration({
+                            answerPolicy: pack.answerPolicy,
+                            sourceAuthority: _cog.modeSnapshot?.sourceAuthority ?? null,
+                            hasReferenceFiles: true,
+                        });
                     if (_declineYields) {
                         console.log('[CONTEXT-OS] text-evidence decline yields to current-screen context — answering from visual evidence');
                     } else if (_refusalYields) {
@@ -1354,7 +1366,9 @@ The user triggered this action with a coding problem on screen and NO new questi
             // below would name the wrong cause. Checked first: "quota" and
             // "API key" in these would otherwise match the provider test.
             const ownLine = accountOrSetupUserMessage(error);
-            // Every provider in the chain failed: say what the last one said.
+            // Every configured provider was tried and failed (F-ACC-10): say so,
+            // and do not hand the engine an empty stream to regenerate against
+            // a chain that has just failed end to end.
             const exhaustedLine = isProvidersExhaustedError(error) ? providerFailureUserMessage(error) : null;
             const isProviderFailure = /\b(401|403|429)\b|api key|unauthor|forbidden|quota|rate.?limit|billing|exhausted|permission/.test(msg);
             // A permanent rejection ("The '<model>' model is not supported when

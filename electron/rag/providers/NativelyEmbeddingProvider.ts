@@ -154,6 +154,9 @@ export class NativelyEmbeddingProvider implements IEmbeddingProvider {
       const err: any = new Error(e?.name === 'TimeoutError' || e?.name === 'AbortError'
         ? 'Natively embedding request timed out'
         : 'Natively embedding request failed');
+      // fetch puts the TLS/DNS/reset code on its own `cause`; describeProbeError logs it (#759).
+      // A timeout has none (its DOMException `code` is a number, not a reason).
+      if (e?.cause) err.cause = e.cause;
       err.retryable = true;
       throw err;
     }
@@ -176,6 +179,15 @@ export class NativelyEmbeddingProvider implements IEmbeddingProvider {
       // 401/403 are structural (revoked/absent key): let the resolver demote
       // immediately instead of retrying a key that will never work.
       err.permanentAuthFailure = res.status === 401 || res.status === 403;
+      // The plan's knowledge allowance may be used up: a held pack can take
+      // over (nativelyPackFallback.ts decides from /v1/usage, so a provider
+      // rate limit only costs one look). A trial has no pack.
+      if (res.status === 429 && this.apiKey !== TRIAL_SENTINEL_KEY) {
+        try {
+          (require('../../services/packs/nativelyPackFallback') as typeof import('../../services/packs/nativelyPackFallback'))
+            .nudgeNativelyPackFallback(err.serverError || 'embedding_quota_exceeded');
+        } catch { /* not wired (tests, worker) */ }
+      }
       // Prefer the header, fall back to the body. EmbeddingPipeline.retryAfterMs()
       // honours whichever is present rather than guessing a backoff.
       const retryAfter = res.headers.get('retry-after')

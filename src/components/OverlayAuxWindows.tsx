@@ -3,8 +3,8 @@ import TopPill from './ui/TopPill';
 import ResizeToggle from './ui/ResizeToggle';
 import { getGlassOverlayAppearance, getOverlayAppearance } from '../lib/overlayAppearance';
 import { isCssOwnedInterfaceTheme, type MeetingInterfaceTheme } from '../lib/meetingInterfaceTheme';
-import { isGuideStep, useGuideHighlight, useGuideStopLock, useRecoveredGuide } from './onboarding/useRecoveredGuide';
-import './onboarding/RecoveredGuide.css';
+import { guideOn, useGuide, useGuideLit, useGuideStopLock } from './guide/useGuide';
+import './guide/guide.css';
 
 // ── Overlay auxiliary window roots ──────────────────────────────────────────
 // The TopPill and the resize toggle each live in their OWN tiny BrowserWindow
@@ -252,9 +252,11 @@ function useManagedGroupDrag(rootRef: React.RefObject<HTMLDivElement | null>): b
 
 export function OverlayPillWindow() {
   const { state, synced } = useOverlayUiState();
-  const guide = useRecoveredGuide();
+  // First-run guide step 5: the Stop button lives in this window, so this
+  // window lights it (the overlay's banner says where it is).
+  const guide = useGuide();
   const stopLock = useGuideStopLock();
-  useGuideHighlight(isGuideStep(guide.state, 'stop') && !guide.justDone ? '[data-guide="overlay-stop"]' : null);
+  useGuideLit(guideOn(guide.state, 'stop') && !guide.justDone ? '[data-guide="overlay-stop"]' : null);
   const appearance = useOverlayAuxAppearance(state);
   const rootRef = useRef<HTMLDivElement>(null);
   const dragManaged = useManagedGroupDrag(rootRef);

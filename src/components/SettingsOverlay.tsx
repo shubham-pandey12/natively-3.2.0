@@ -11,12 +11,9 @@ import {
     ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Download, Settings, Activity, ExternalLink, Trash2,
     Sparkles, Pencil, Briefcase, Building2, Search, MapPin, CheckCircle, HelpCircle, Zap, SlidersHorizontal, PointerOff,
     Star, AlertCircle, Gift, Smartphone, Cpu, Shield, Code2, Boxes, Languages, Volume2, KeyRound, Loader2, CornerDownRight, PanelBottomClose, Maximize2, TriangleAlert, MicOff,
-    Plug, AppWindow,
-  HardDriveDownload, Share2,
+    Plug, AppWindow, HardDriveDownload, Share2
 } from 'lucide-react';
 import { AutoAnswerIcon } from './AutoAnswerIcon';
-import { LauncherSettingsGuide } from './onboarding/LauncherGuide';
-import { dispatchGuide } from './onboarding/useRecoveredGuide';
 import { HiCreditCard } from 'react-icons/hi2';
 import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
@@ -113,6 +110,8 @@ import { NVIDIA_NIM_STT_MODELS, DEFAULT_NVIDIA_NIM_STT_MODEL, allowedLanguageKey
 import { STT_MODEL_CATALOG, isEnglishOnlySttModel, sttModelRejectsLanguage, type SttModelProvider } from '../../electron/audio/sttModelCatalog';
 import { isDefaultOpenAiSttBase } from '../../electron/audio/openaiSttBaseUrl';
 import { isRecognitionLanguageOffered, PARAKEET_ONLY_LANGUAGE_KEYS, sttProviderRejectsLanguage } from '../../electron/config/languages';
+import { SettingsGuide } from './guide/SettingsGuide';
+import { dispatchGuide } from './guide/useGuide';
 
 // ---------------------------------------------------------------------------
 // StarRating — renders filled/empty stars for culture ratings
@@ -792,20 +791,23 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [autoAnswerAccess, setAutoAnswerAccess] = useState<{ basis: 'pro' | 'sharing' | 'none'; uploads: boolean } | null>(null);
     // False in builds without the premium submodule: the Auto Answer rows are hidden.
     const [autoAnswerAvailable, setAutoAnswerAvailable] = useState(true);
-    // 3.2.0: 'intro' is the first-run explainer shown before Auto Answer is first turned on.
-    const [autoAnswerDialog, setAutoAnswerDialog] = useState<null | 'free' | 'pro' | 'intro'>(null);
-    const [autoAnswerDialogBusy, setAutoAnswerDialogBusy] = useState(false);
+    /** Bumped by the first turn-on: Intelligence scrolls to its Auto Answer section once, then resets it. */
     const [autoAnswerFocus, setAutoAnswerFocus] = useState(0);
+    const [autoAnswerDialog, setAutoAnswerDialog] = useState<null | 'free' | 'pro' | 'intro'>(null);
+    /** The first turn-on shows the conditions, then opens Intelligence › Auto Answer (Evin 2026-11-15).
+     *  A per-install flag in this renderer's storage: losing it only shows the card again. */
     const AUTO_ANSWER_INTRO_KEY = 'natively.autoAnswer.introSeen.v1';
     const autoAnswerIntroSeen = () => { try { return localStorage.getItem(AUTO_ANSWER_INTRO_KEY) === '1'; } catch { return false; } };
-    const markAutoAnswerIntroSeen = () => { try { localStorage.setItem(AUTO_ANSWER_INTRO_KEY, '1'); } catch { } };
-    const focusAutoAnswerSettings = () => { setActiveTab('intelligence'); setAutoAnswerFocus((n) => n + 1); };
+    const markAutoAnswerIntroSeen = () => { try { localStorage.setItem(AUTO_ANSWER_INTRO_KEY, '1'); } catch { /* shows again next time */ } };
+    const openAutoAnswerSection = () => { setActiveTab('intelligence'); setAutoAnswerFocus((n) => n + 1); };
+    const [autoAnswerDialogBusy, setAutoAnswerDialogBusy] = useState(false);
     const refreshAutoAnswerAccess = useCallback(() => {
         window.electronAPI?.getAutoAnswerAccess?.().then((a) => { if (a) { setAutoAnswerAvailable(a.available !== false); setAutoAnswerAccess({ basis: a.basis, uploads: a.uploads }); setAutoAnswerEnabled(a.enabled); } }).catch(() => { });
     }, []);
+    /** The sharing switch: off → ask (consent dialog); on → the stop card (AutoAnswerStopSharingDialog),
+     *  "Keep sharing" by default, for Pro and free alike (Evin 2026-11-15). */
     const [stopSharingOpen, setStopSharingOpen] = useState(false);
     const [stopSharingBusy, setStopSharingBusy] = useState(false);
-    /** The sharing switch: off → ask (consent dialog); on → confirm in the stop-sharing dialog. */
     const toggleAutoAnswerSharing = () => {
         if (!autoAnswerAccess) return;
         if (!autoAnswerAccess.uploads) { setAutoAnswerDialog('pro'); return; }
@@ -816,8 +818,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
         try {
             const r = await window.electronAPI?.setAutoAnswerTrainingConsent?.(false);
             if (r && !r.success) console.error('[Settings] Sharing not stopped:', r.error);
-        } catch (e) {
-            console.error('[Settings] Exception stopping sharing:', e);
+        } catch (err) {
+            console.error('[Settings] Exception stopping sharing:', err);
         } finally {
             setStopSharingBusy(false);
             setStopSharingOpen(false);
@@ -1518,11 +1520,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     // checkpoints) — while an unsupported pick on a selectable model keeps
     // showing the stored value alongside the warning hint below.
     const languageLocked = localLanguageCapability ? !localLanguageCapability.languageSelectable : false;
-    // 'auto' is its own case, NOT an unsupported language. No local model has a
-    // real auto-detect mode with locale conditioning, but LocalWhisperSTT
-    // normalizes 'auto' to English rather than failing (see
-    // resolveAndApplyNemotronLanguage), so the honest message is "auto-detect
+    // 'auto' is its own case, NOT an unsupported language. It only applies to a
+    // model whose allowed keys leave 'auto' out (the English-only ones, which
+    // transcribe English regardless), so the honest message is "auto-detect
     // is unavailable, English is used" — not "your language isn't supported".
+    // Nemotron lists 'auto' (its own Auto prompt, NEMOTRON_AUTO_LANG_ID).
     const autoDetectUnavailable =
         recognitionLanguage === 'auto' && !!allowedLanguageKeySet && !allowedLanguageKeySet.has('auto');
     const storedLanguageUnsupported =
@@ -1541,6 +1543,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     // A multilingual Deepgram model sends `multi` for a stored language it has
     // no model for (DeepgramStreamingSTT.connectLanguage), so that is shown as
     // the Auto Detect it gets rather than a value missing from the list.
+    // Soniox does the same for a language it refuses (Nepali), and the Natively
+    // API relay turns that refusal into auto-detect.
     const showsAutoFallback = !showsEnglishFallback && (
         (sttProvider === 'deepgram' && storedLanguageUnsupported)
         || sttProviderRejectsLanguage(sttProvider, recognitionLanguage)
@@ -2377,7 +2381,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     return (
         <>
             {confirmDialog}
-            {isOpen && <LauncherSettingsGuide />}
+            {/* The first-run guide's Settings steps (7, and 14), while Settings is open. */}
+            {isOpen && <SettingsGuide />}
             <AutoAnswerStopSharingDialog
                 open={stopSharingOpen}
                 busy={stopSharingBusy}
@@ -2396,21 +2401,23 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                 sharingOn={autoAnswerAccess?.uploads === true}
                 onTurnOn={async () => {
                     setAutoAnswerDialogBusy(true);
-                    let turnedOn = false;
-                    let accessRequired = false;
+                    let on = false;
+                    let lostAccess = false;
                     try {
                         const r = await window.electronAPI?.setAutoAnswerEnabled?.(true);
-                        turnedOn = r?.success === true;
-                        accessRequired = r?.error === 'auto_answer_access_required';
-                        if (!turnedOn) console.error('[Settings] Auto Answer not turned on:', r?.error ?? 'unavailable');
-                    } catch (e) {
-                        console.error('[Settings] Exception turning Auto Answer on:', e);
+                        on = r?.success === true;
+                        // Access changed since Settings opened (trial ended, licence lapsed): the
+                        // share-or-upgrade card, as the switch does.
+                        lostAccess = r?.error === 'auto_answer_access_required';
+                        if (!on) console.error('[Settings] Auto Answer not turned on:', r?.error ?? 'unavailable');
+                    } catch (err) {
+                        console.error('[Settings] Exception turning Auto Answer on:', err);
                     } finally {
                         setAutoAnswerDialogBusy(false);
-                        setAutoAnswerDialog(accessRequired ? 'free' : null);
+                        setAutoAnswerDialog(lostAccess ? 'free' : null);
                         refreshAutoAnswerAccess();
                     }
-                    if (turnedOn) { setAutoAnswerEnabled(true); markAutoAnswerIntroSeen(); focusAutoAnswerSettings(); }
+                    if (on) { setAutoAnswerEnabled(true); markAutoAnswerIntroSeen(); openAutoAnswerSection(); }
                 }}
                 onShare={async () => {
                     setAutoAnswerDialogBusy(true);
@@ -2419,7 +2426,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                         if (c?.success && autoAnswerDialog === 'free') {
                             const r = await window.electronAPI?.setAutoAnswerEnabled?.(true);
                             if (r && !r.success) console.error('[Settings] Auto Answer not turned on:', r.error);
-                            else if (!autoAnswerIntroSeen()) { markAutoAnswerIntroSeen(); focusAutoAnswerSettings(); }
+                            // The sharing card carried the conditions: first time on, show its section.
+                            else if (!autoAnswerIntroSeen()) { markAutoAnswerIntroSeen(); openAutoAnswerSection(); }
                         }
                     } finally {
                         setAutoAnswerDialogBusy(false);
@@ -2488,8 +2496,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         <Monitor size={16} /> {t('General')}
                                     </button>
                                     <button
-                                        onClick={() => { plansFromSidebarRef.current = true; setActiveTab('plans'); }}
                                         data-guide="nav-plans"
+                                        onClick={() => { plansFromSidebarRef.current = true; setActiveTab('plans'); }}
                                         className={navItemClass(activeTab === 'plans' || activeTab === 'natively-api' || activeTab === 'natively-pro')}
                                     >
                                         {(activeTab === 'plans' || activeTab === 'natively-api' || activeTab === 'natively-pro') && navActivePill}
@@ -2497,8 +2505,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         <span>{t('Plans & Billing')}</span>
                                     </button>
                                     <button
-                                        onClick={() => setActiveTab('ai-providers')}
                                         data-guide="nav-ai-providers"
+                                        onClick={() => setActiveTab('ai-providers')}
                                         className={navItemClass(activeTab === 'ai-providers')}
                                     >
                                         {activeTab === 'ai-providers' && navActivePill}
@@ -2786,6 +2794,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <LiquidGlassBadge variant="sky">{t('Beta')}</LiquidGlassBadge>
                                                             </div>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t('Answers appear as soon as the interviewer finishes a question')}</p>
+                                                            {/* No Pro-or-share line here: the access card says it when the switch is pressed (Evin 2026-11-15). */}
+                                                            {/* The model and sharing rows live in Intelligence, with no link here (Evin 2026-11-15);
+                                                                the first turn-on opens that section once. */}
+                                                            {/* Stopping sharing lives only in Intelligence › Auto Answer (its switch,
+                                                                which opens the stop-sharing card); no shortcut here (Evin 2026-11-15). */}
                                                         </div>
                                                     </div>
                                                     <SettingsToggle
@@ -2796,7 +2809,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             const newState = !previous;
                                                             // Free and not sharing: ask first (share or upgrade), never flip.
                                                             if (newState && autoAnswerAccess?.basis === 'none') { setAutoAnswerDialog('free'); return; }
-                                                            // First turn-on: the 3.2.0 intro explains it before it starts.
+                                                            // First turn-on: the conditions card, which turns it on itself.
                                                             if (newState && !autoAnswerIntroSeen()) { setAutoAnswerDialog('intro'); return; }
                                                             setAutoAnswerEnabled(newState); // Optimistic update
                                                             try {
@@ -4680,13 +4693,21 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                     autoAnswer={autoAnswerAvailable && autoAnswerAccess && autoAnswerAccess.basis !== 'none' ? (
                                         <>
                                             <AutoAnswerModelCard icon={<HardDriveDownload size={20} />} />
+                                            {/* Transcript sharing (autoAnswerAccess.ts): opt-in with Pro,
+                                                what keeps Auto Answer free for a free user. */}
                                             <SettingsRow
                                                 icon={<Share2 size={20} />}
                                                 title={t('Share transcripts to improve Auto Answer')}
                                                 description={autoAnswerAccess.basis === 'sharing'
                                                     ? t('Auto Answer is free while this is on. Turning it off stops Auto Answer unless you have Pro.')
                                                     : t('Optional with Pro. Only meetings where Auto Answer runs.')}
-                                                control={<SettingsSwitch checked={autoAnswerAccess.uploads} label={t('Share transcripts to improve Auto Answer')} onChange={toggleAutoAnswerSharing} />}
+                                                control={
+                                                    <SettingsSwitch
+                                                        checked={autoAnswerAccess.uploads}
+                                                        label={t('Share transcripts to improve Auto Answer')}
+                                                        onChange={toggleAutoAnswerSharing}
+                                                    />
+                                                }
                                             />
                                         </>
                                     ) : null}
