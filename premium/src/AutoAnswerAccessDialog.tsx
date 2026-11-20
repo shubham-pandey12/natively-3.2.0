@@ -1,5 +1,4 @@
 // Auto Answer access dialog: Natively Pro, or free with transcript sharing.
-// Ported 1:1 from recovered Natively 3.2.0 (premium/src/AutoAnswerAccessDialog.tsx).
 import React, { useEffect, useState } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import { ArrowUpRight } from 'lucide-react';
@@ -50,9 +49,9 @@ export const AutoAnswerAccessDialog: React.FC<AutoAnswerAccessDialogProps> = ({ 
       : 'Off. Sharing transcripts to improve Auto Answer is a separate choice in Settings › Intelligence.') },
   ];
   const sharingFacts = [
-    { label: t('Sent'), text: t('The full transcript of each meeting where Auto Answer was on, including what other people said, with the meeting mode and length.') },
-    { label: t('Removed first'), text: t('On your computer: e-mail addresses, phone numbers, links, long numbers, and the names Natively knows (yours, your calendar invitees\', the call\'s). Other names said aloud stay, so do not share meetings you are not allowed to share.') },
-    { label: t('Never sent'), text: t('Audio, screenshots, your notes, AI answers, meeting titles and calendar events.') },
+    { label: t('Sent'), text: t("Each meeting where Auto Answer was on, in full: what others said, what you said or typed, Natively's answers, the mode and length.") },
+    { label: t('Removed first'), text: t("On your computer: e-mail addresses, phone numbers, links, long numbers, and the names Natively knows (yours, your calendar invitees', the call's). Other names and anything else said or typed stay, so do not share meetings you are not allowed to share.") },
+    { label: t('Never sent'), text: t('Audio, screenshot images, your notes, meeting titles and calendar events.') },
     { label: t('Used for'), text: t('Only training and testing Natively\'s Auto Answer models, with the services we use for that (Anthropic to label, Modal to train). Not sold, not used for ads. Kept at most 2 years.') },
     { label: t('Your part'), text: t('Telling the other people in the meeting, where the law requires it.') },
   ];
@@ -81,7 +80,7 @@ export const AutoAnswerAccessDialog: React.FC<AutoAnswerAccessDialogProps> = ({ 
             <FactRow key={label} ink={ink} label={label} reduced={reduced} lit={leaning && label === sentLabel}>{text}</FactRow>
           ))}
         </FactList>
-        <div style={{ marginTop: 'auto', paddingTop: '28px' }}>
+        <div style={{ flexShrink: 0, marginTop: 'auto', paddingTop: '28px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '22px', flexWrap: 'nowrap' }}>
             <CtaButton ink={ink} isLight={isLight} reduced={reduced} busy={busy} onClick={intro ? onTurnOn : onShare} onLean={setLeaning}>
               {t(intro ? 'Turn on Auto Answer' : proOptIn ? 'Share transcripts' : 'Share and turn on')}

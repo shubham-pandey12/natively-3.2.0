@@ -21,7 +21,9 @@
  * already hide the macOS Keychain / Windows DPAPI differences.
  */
 
-export const TRAINING_CONSENT_VERSION = 1;
+// Version 2 discloses that the full meeting transcript includes typed chat
+// and Natively's answers. Earlier consent does not cover that content.
+export const TRAINING_CONSENT_VERSION = 2;
 
 export const AUTO_ANSWER_ACCESS_REQUIRED = 'auto_answer_access_required' as const;
 

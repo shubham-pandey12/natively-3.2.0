@@ -67,7 +67,7 @@ export const AutoAnswerStopSharingDialog: React.FC<AutoAnswerStopSharingDialogPr
           <FactRow ink={ink} label={t('If you stop')} reduced={reduced} lit={leaning || busy} litColor={danger.hot}>{ifYouStop}</FactRow>
           <FactRow ink={ink} label={second.label} reduced={reduced}>{second.text}</FactRow>
         </FactList>
-        <div style={{ marginTop: 'auto', paddingTop: '28px' }}>
+        <div style={{ flexShrink: 0, marginTop: 'auto', paddingTop: '28px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '22px' }}>
             <CtaButton ref={keepRef} ink={ink} isLight={isLight} reduced={reduced} disabled={busy} arrow={false} onClick={close}>{t('Keep sharing')}</CtaButton>
             {freeBySharing && onUpgrade && <TextButton ink={ink} reduced={reduced} disabled={busy} onClick={onUpgrade}>{t('See Pro plans')}</TextButton>}

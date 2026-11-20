@@ -1,7 +1,5 @@
 // Shared parts of the Auto Answer access and stop-sharing dialogs.
-// Ported 1:1 from recovered Natively 3.2.0 (App renderer chunk): same inline
-// styles, timings, colors and aria attributes.
-import React, { useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ArrowRight, Loader2, X } from 'lucide-react';
 
@@ -40,7 +38,8 @@ export function genieDialogProps(isLight: boolean) {
 }
 
 export const bodyStyle: React.CSSProperties = {
-  position: 'relative', minHeight: '420px', maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
+  position: 'relative', minHeight: 'min(420px, calc(100vh - 48px))',
+  maxHeight: 'min(500px, calc(100vh - 48px))', overflowY: 'auto',
   padding: '40px 40px 34px 40px', display: 'flex', flexDirection: 'column',
 };
 export const bodyMotion = (reduced: boolean) => ({
@@ -76,9 +75,33 @@ export const FactRow: React.FC<{ ink: Ink; label: string; lit?: boolean; litColo
   </div>
 );
 
-export const FactList: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <dl style={{ margin: '22px 0 0', display: 'flex', flexDirection: 'column', gap: '9px' }}>{children}</dl>
-);
+export const FactList: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const list = useRef<HTMLDListElement>(null);
+  const [scrollable, setScrollable] = useState(false);
+  useLayoutEffect(() => {
+    const element = list.current;
+    if (!element) return;
+    const measure = () => setScrollable(element.scrollHeight > element.clientHeight + 1);
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(element);
+    return () => observer?.disconnect();
+  }, [children]);
+
+  return (
+    <dl
+      ref={list}
+      tabIndex={scrollable ? 0 : undefined}
+      role={scrollable ? 'region' : undefined}
+      aria-label={scrollable ? 'Terms' : undefined}
+      style={{
+        margin: '22px 0 0', paddingRight: 6, minHeight: 0, flex: '1 1 auto',
+        overflowY: 'auto', overscrollBehavior: 'contain',
+        display: 'flex', flexDirection: 'column', gap: '9px',
+      }}
+    >{children}</dl>
+  );
+};
 
 export const SwapLabel: React.FC<{ id: string; reduced: boolean; children: React.ReactNode }> = ({ id, reduced, children }) => (
   <AnimatePresence mode="popLayout" initial={false}>
