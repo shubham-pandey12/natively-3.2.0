@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isolatedPaths, platformPaths } from '../launch.mjs';
+import { dotenvKeys, isolatedPaths, platformPaths } from '../launch.mjs';
+
+test('reads .env key names only, across CRLF, export and comment lines', () => {
+  const text = '# comment\r\nOPENAI_API_KEY=sk-x\r\nexport GROQ_KEY = "y"\r\n\r\n  SPACED=1\nnot a line\n=novalue\n';
+  assert.deepEqual(dotenvKeys(text), ['OPENAI_API_KEY', 'GROQ_KEY', 'SPACED']);
+});
 
 test('resolves installed Windows path with spaces and the roaming licence source', () => {
   assert.deepEqual(platformPaths('win32', {

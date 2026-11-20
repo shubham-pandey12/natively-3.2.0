@@ -56,9 +56,13 @@ export function normalize(id, result, paths = []) {
       return [modeId, occurrence === 1 ? label : `${label} (#${occurrence})`];
     }));
     const { all, sections, ...rest } = result;
+    const order = all.map((mode) => modeIds.get(mode.id));
     return normalizeValue({
       ...rest,
-      order: all.map((mode) => modeIds.get(mode.id)),
+      // Both apps (3.2.1 included) return the seeded modes in a different order
+      // on every launch; only General staying first is stable. Compare the
+      // first entry exactly and the rest as a set, or every run reports noise.
+      order: { first: order[0] ?? null, rest: order.slice(1).sort() },
       all: Object.fromEntries(all.map((mode) => [modeIds.get(mode.id), mode])),
       sections: Object.fromEntries(sections.map((section) => [modeIds.get(section.modeId), section])),
     }, { paths, modeIds });

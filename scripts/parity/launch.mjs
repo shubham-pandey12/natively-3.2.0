@@ -84,6 +84,20 @@ function portOpen(port) {
   });
 }
 
+export function dotenvKeys(text) {
+  const keys = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
+    if (match) keys.push(match[1]);
+  }
+  return keys;
+}
+
+async function dotenvBlanks() {
+  const text = await readFile(path.join(root, '.env'), 'utf8').catch(() => '');
+  return Object.fromEntries(dotenvKeys(text).map((key) => [key, '']));
+}
+
 function pidExists(pid) {
   try {
     process.kill(pid, 0);
@@ -232,6 +246,12 @@ export function createLauncher(runDir, signal) {
     const launched = await Promise.allSettled(apps.map(async (app) => {
       const { env } = app;
       if (app.name === 'local') {
+        // main.ts loads .env only when unpackaged, so the local app would see
+        // provider keys the installed app never does (an embedding provider
+        // shows as available, for one). dotenv never overrides a variable that
+        // is already set, so blanking every .env key here makes the two start
+        // from the same environment. Key names only; values are never read.
+        Object.assign(env, await dotenvBlanks());
         Object.assign(env, {
           NODE_ENV: 'development',
           NATIVELY_RENDERER_PORT: String(rendererPort),

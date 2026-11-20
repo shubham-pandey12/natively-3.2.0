@@ -41,6 +41,17 @@ async function report(dir, raw, normalized, diagnostics, failure) {
       lines.push(block({ path: pointer, installed: textValue(installed), local: textValue(local) }), '');
     }
   }
+  const expected = rows.flatMap(({ id, expected: list = [] }) => list.map((item) => ({ id, ...item })));
+  if (expected.length) {
+    lines.push('## Expected differences (installed vs dev)', '',
+      'Caused by comparing a packaged install with a source run, not product gaps. Rules: EXPECTED_DIFFERENCES in scripts/parity/compare.mjs.', '');
+    const byReason = Map.groupBy(expected, ({ reason }) => reason);
+    for (const [reason, items] of byReason) {
+      lines.push(`- ${reason} (${items.length})`);
+      for (const { id, path: pointer } of items) lines.push(`  - ${id} \`${pointer}\``);
+    }
+    lines.push('');
+  }
   for (const [name, result] of Object.entries(raw)) {
     lines.push(`## ${name} console errors`, '', block(result['console-errors'] ?? {}), '',
       `## ${name} skipped or unavailable`, '', block({

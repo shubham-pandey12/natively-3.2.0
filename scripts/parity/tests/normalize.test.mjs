@@ -34,7 +34,18 @@ test('normalizes renderer origins and owned paths while retaining meaningful val
   });
 });
 
-test('compares mode content independently of generated IDs and retains displayed and note order', () => {
+test('mode order: the first mode must match, the rest compare as a set', () => {
+  const m = (id, templateType, name) => ({ id, templateType, name });
+  const g = m('g', 'general', 'General'); const s = m('s', 'sales', 'Sales'); const l = m('l', 'lecture', 'Lecture');
+  const one = normalize('modes', { all: [g, s, l], active: g, sections: [] });
+  const shuffled = normalize('modes', { all: [g, l, s], active: g, sections: [] });
+  assert.deepEqual(one.order, shuffled.order);
+  const generalMoved = normalize('modes', { all: [s, g, l], active: g, sections: [] });
+  assert.notDeepEqual(one.order, generalMoved.order);
+  assert.equal(one.order.first, 'general: General');
+});
+
+test('compares mode content independently of generated IDs and retains note order', () => {
   const a = { id: 'mode_a', name: 'A', templateType: 'general', createdAt: 'today', isActive: true };
   const b = { id: 'mode_b', name: 'B', templateType: 'lecture', createdAt: 'yesterday' };
   const sections = [{ modeId: a.id, notes: [
@@ -42,9 +53,7 @@ test('compares mode content independently of generated IDs and retains displayed
     { id: 'ns_other', modeId: a.id, title: 'A', sortOrder: 1 },
   ] }];
   const expected = normalize('modes', { all: [a, b], active: a, sections });
-  const reordered = normalize('modes', { all: [b, a], active: a, sections });
-  assert.deepEqual(expected.all, reordered.all);
-  assert.deepEqual(reordered.order, [...expected.order].reverse());
+  assert.deepEqual(expected.all, normalize('modes', { all: [b, a], active: a, sections }).all);
   assert.deepEqual(expected.active, expected.all['general: A']);
   assert.deepEqual(expected.sections['general: A'].notes.map(({ title }) => title), ['Z', 'A']);
   assert.equal(expected.sections['general: A'].notes[0].id, undefined);

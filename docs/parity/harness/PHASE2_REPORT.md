@@ -115,3 +115,15 @@ Preliminary Windows runs exposed a packaged-app override of `--user-data-dir`. T
 - The harness handles SIGINT and SIGTERM. Physical Ctrl+C delivery was outside the validation runs. The renderer capture can miss events emitted before CDP enables a domain. Main-process and native behavior were outside scope.
 - The screenshots result measures whether each capture succeeded. The PNGs are for visual comparison. Host device and remote catalogue results may vary. Seeded mode order can change between runs because the product breaks timestamp ties with generated IDs.
 - The repository's code-review graph tools were unavailable in this session. I reviewed the relevant source paths directly.
+
+## Review and fixes (Claude, after Codex's runs)
+
+Verified: launcher isolation (APPDATA redirect, pre-launch probe, in-app profile check), PID-tracked teardown, 11/11 original tests, two consecutive `npm run parity` runs exiting 0 with no harness process left. The real profile's recent writes (20:11 onward) all postdate the last harness run (19:35) and match normal use; `license.enc` and `settings.json` are intact.
+
+Fixed:
+- **Mode order** was compared exactly, but it is random on every launch in both apps (11 runs: a different order each time, General always first). Now the first mode is compared exactly and the rest as a set.
+- **`.env` leaked into the local app.** `main.ts` loads `.env` when unpackaged, so the local app saw provider keys the installed app never does (an embedding provider showed as available). The harness now blanks every `.env` key for the local launch; dotenv never overrides a set variable. Key names only are read.
+- **Installed-vs-dev noise** (`canAutoUpdate`, "Found …" vs "Dev mode: … skipped" wording) is listed separately as *expected*, each with its reason (`EXPECTED_DIFFERENCES` in `compare.mjs`). The rules are narrow: the same checks' `ok`/`health` flags, and any "Missing …" message, still count as differences.
+- **Local setup, outside the repo:** the offline embedding (`multilingual-e5-small`), reranker (`ms-marco-MiniLM-L-6-v2`) and end-of-turn (`smart-turn-v3`) models had never been downloaded; `node scripts/download-models.js` fetched them with SHA-256 checks.
+
+Result after fixes: licence, modes, screenshots and console errors MATCH. The remaining 64 differences are all 3.2.1 additions present in upstream's public v3.2.1 source (9 preload functions × 7 windows, plus `getLastConnectionNotice`), so Phase 3's merge is what closes them. 15/15 harness tests pass; oxlint is clean on the harness.

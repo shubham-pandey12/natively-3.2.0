@@ -21,17 +21,50 @@ export function diff(installed, local, path = '') {
   return [difference(path, installed, local)];
 }
 
-export function compare(ids, installed, local) {
+// Differences that exist only because the reference is a packaged install and
+// the candidate runs from source. They stay in the report under "expected" with
+// their reason; they never count as a product gap. Keep every rule narrow: a
+// rule that matches a real regression hides it.
+export const EXPECTED_DIFFERENCES = [
+  {
+    scenario: 'settings-defaults',
+    path: /^\/values\/getCanAutoUpdate\/canAutoUpdate$/,
+    reason: 'The updater only installs into a packaged app; it is off when running from source.',
+  },
+  {
+    scenario: 'settings-defaults',
+    path: /^\/values\/(?:getLocalFallbackPreflight\/checks|getProviderStatuses\/\d+\/details\/checks)\/\d+\/message$/,
+    // Only the wording: the same checks' ok/health/recoverable flags are still compared.
+    when: ({ installed, local }) => typeof installed === 'string' && typeof local === 'string'
+      && /^(?:Found |Native audio module loaded)/.test(installed)
+      && /^(?:Found <workspace>\/|Dev mode: )/.test(local),
+    reason: 'Packaged builds report the unpacked file they found; dev builds report the source path or skip the unpacked check.',
+  },
+];
+
+export function classify(id, difference, rules = EXPECTED_DIFFERENCES) {
+  return rules.find((rule) => rule.scenario === id && rule.path.test(difference.path)
+    && (!rule.when || rule.when(difference)));
+}
+
+export function compare(ids, installed, local, rules = EXPECTED_DIFFERENCES) {
   return ids.map((id) => {
-    const differences = diff(installed[id], local[id]);
-    return { id, status: differences.length ? 'DIFF' : 'MATCH', differences };
+    const differences = [];
+    const expected = [];
+    for (const difference of diff(installed[id], local[id])) {
+      const rule = classify(id, difference, rules);
+      if (rule) expected.push({ ...difference, reason: rule.reason });
+      else differences.push(difference);
+    }
+    return { id, status: differences.length ? 'DIFF' : 'MATCH', differences, expected };
   });
 }
 
 export function summary(rows) {
   return [
-    '| Scenario | Result | Differences |',
-    '| --- | --- | ---: |',
-    ...rows.map(({ id, status, differences }) => `| ${id} | ${status} | ${differences.length} |`),
+    '| Scenario | Result | Differences | Expected (installed vs dev) |',
+    '| --- | --- | ---: | ---: |',
+    ...rows.map(({ id, status, differences, expected = [] }) =>
+      `| ${id} | ${status} | ${differences.length} | ${expected.length} |`),
   ].join('\n');
 }
