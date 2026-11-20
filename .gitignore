@@ -220,6 +220,9 @@ release/
 target/
 native-module/target/
 native-module/*.node
+# Tracked so a fresh clone or worktree on Windows loads the native module without
+# a Rust toolchain. `npm run build:native` overwrites it.
+!native-module/index.win32-x64-msvc.node
 # Windows locks a loaded .node against overwrite, so build-native.js moves the
 # previous artifact aside before rebuilding (see the win32 branch there). The
 # leftover is deleted once nothing holds it — usually on the next build.
