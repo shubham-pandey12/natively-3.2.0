@@ -10,10 +10,11 @@ import * as modes from './scenarios/modes.mjs';
 import * as settings from './scenarios/settings-defaults.mjs';
 import * as settingsRoundtrip from './scenarios/settings-roundtrip.mjs';
 import * as screenshots from './scenarios/screenshots.mjs';
+import * as premiumAutoAnswer from './scenarios/premium-auto-answer.mjs';
 import * as consoleErrors from './scenarios/console-errors.mjs';
 import { pageWindow } from './cdp.mjs';
 
-const scenarios = [api, licence, modes, settings, settingsRoundtrip, screenshots, consoleErrors];
+const scenarios = [api, licence, modes, settings, settingsRoundtrip, screenshots, premiumAutoAnswer, consoleErrors];
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const runs = path.join(root, '.parity', 'runs');
 
@@ -62,11 +63,14 @@ async function report(dir, raw, normalized, diagnostics, failure) {
           .map(([id, value]) => [id, value.skipped])),
       }), '');
   }
-  const shots = new Set(Object.values(raw).flatMap((result) => Object.keys(result.screenshots?.captures ?? {})));
+  const captures = Object.fromEntries(Object.entries(raw).map(([name, results]) => [
+    name, Object.assign({}, ...Object.values(results).map((result) => result.captures)),
+  ]));
+  const shots = new Set(Object.values(captures).flatMap((result) => Object.keys(result)));
   if (shots.size) {
     lines.push('## Screenshot pairs', '', '| View | Installed | Local |', '| --- | --- | --- |');
     for (const shot of shots) {
-      const cell = (app) => raw[app].screenshots?.captures?.[shot] === 'captured'
+      const cell = (app) => captures[app][shot] === 'captured'
         ? `![${app} ${shot}](screenshots/${shot}/${app}.png)` : 'Unavailable';
       lines.push(`| ${shot} | ${cell('installed')} | ${cell('local')} |`);
     }

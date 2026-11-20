@@ -26,6 +26,16 @@ test('compares object order without suppressing array order', () => {
   assert.deepEqual(diff({ a: ['x', 'y'] }, { a: ['y', 'x'] }).map(({ path }) => path), ['/a/0', '/a/1']);
 });
 
+test('reports contention only for the exact shared default launcher accelerators', () => {
+  const at = (failures) => ({ 'settings-defaults': { values: { getKeybindRegistrationFailures: failures } } });
+  const visibility = { id: 'general:toggle-visibility', accelerator: 'CommandOrControl+B' };
+  const rebinding = { ...visibility, accelerator: 'CommandOrControl+K' };
+  const [row] = compare(['settings-defaults'], at([]), at([visibility, rebinding]));
+  assert.deepEqual(row.expected.map(({ path }) => path), ['/values/getKeybindRegistrationFailures/0']);
+  assert.deepEqual(row.differences.map(({ path }) => path), ['/values/getKeybindRegistrationFailures/1']);
+  assert.equal(compare(['settings-defaults'], at([visibility]), at([rebinding]))[0].status, 'DIFF');
+});
+
 test('reports exact escaped paths and distinguishes null from a missing key', () => {
   assert.deepEqual(diff({ 'a/b~': { value: null } }, { 'a/b~': {} }), [{
     path: '/a~1b~0/value', installed: null, local: undefined, installedPresent: true, localPresent: false,

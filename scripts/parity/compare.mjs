@@ -28,6 +28,18 @@ export function diff(installed, local, path = '') {
 export const EXPECTED_DIFFERENCES = [
   {
     scenario: 'settings-defaults',
+    path: /^\/values\/getKeybindRegistrationFailures\/\d+$/,
+    when: ({ installed, local, installedPresent, localPresent }) => {
+      if (installedPresent === localPresent) return false;
+      const failure = installed ?? local;
+      if (!failure || Object.keys(failure).length !== 2) return false;
+      return (failure.id === 'general:toggle-visibility' && failure.accelerator === 'CommandOrControl+B')
+        || (failure.id === 'general:toggle-mouse-passthrough' && failure.accelerator === 'CommandOrControl+Shift+B');
+    },
+    reason: 'The two app processes compete for the same OS-wide launcher shortcuts. The configured bindings are compared separately.',
+  },
+  {
+    scenario: 'settings-defaults',
     path: /^\/values\/getCanAutoUpdate\/canAutoUpdate$/,
     reason: 'The updater only installs into a packaged app; it is off when running from source.',
   },
