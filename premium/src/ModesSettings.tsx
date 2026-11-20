@@ -13,7 +13,7 @@ import { NOTE_TEMPLATES, NOTE_TEMPLATE_GROUPS, MODE_DEFAULT_NOTE_TEMPLATE_ID } f
 import { useResolvedTheme } from '../../src/hooks/useResolvedTheme';
 import { UnlockProPlans } from '../../src/components/upgrade/UnlockProPlans';
 import { LiquidGlassButton } from '../../src/ui-components/LiquidGlassButton';
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   Briefcase,
@@ -841,7 +841,35 @@ function SavedCheck() {
 }
 
 // ─── Styles object (Is from 3.2.0 bundle) ───────────────────────────────────
+const pickerRow: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 10px',
+  border: 'none', borderRadius: 6, color: 'var(--mm-text-primary)', fontSize: 12,
+  fontWeight: 500, cursor: 'pointer', textAlign: 'left', position: 'relative',
+};
+const pickerSurface: React.CSSProperties = {
+  position: 'absolute', background: 'var(--mm-bg)', border: '1px solid var(--mm-border)',
+  borderRadius: 10, padding: 5, maxHeight: 'min(280px, 45vh)', overflowY: 'auto',
+  overscrollBehavior: 'contain', boxShadow: '0 8px 24px rgba(0,0,0,0.22)', zIndex: 100,
+};
+
 const S: Record<string, React.CSSProperties> = {
+  templateTrigger: {
+    display: 'inline-flex', alignItems: 'center', gap: 5, padding: '3px 8px',
+    color: 'var(--mm-text-secondary)', border: '1px solid var(--mm-border)',
+    fontSize: 12, borderRadius: 6, cursor: 'pointer',
+  },
+  templateMenu: {
+    ...pickerSurface, display: 'block', insetBlockStart: 'calc(100% + 8px)',
+    insetInlineStart: 0, minWidth: 192, transformOrigin: 'top left',
+  },
+  templateOption: { ...pickerRow, whiteSpace: 'nowrap' },
+  noteTemplateMenu: {
+    ...pickerSurface, insetBlockEnd: 'calc(100% + 8px)', insetInlineEnd: 0,
+    width: 232, transformOrigin: 'bottom right',
+  },
+  noteTemplateRow: pickerRow,
+  noteTemplateGroup: { padding: '8px 10px 4px', color: 'var(--mm-text-tertiary)', fontSize: 11, fontWeight: 600 },
+  noteTemplateName: { flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   root: {
     display: 'flex', height: '100%',
     background: 'var(--mm-bg)',
@@ -1598,6 +1626,7 @@ function MorphLabel({ labels, shown, align = 'center' }: { labels: Record<string
 }
 
 function TemplateTypeSelect({ value, options, onChange }: { value: string; options: { value: string; label: string }[]; onChange: (value: string) => void }) {
+  const menuId = useId();
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLSpanElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -1631,7 +1660,7 @@ function TemplateTypeSelect({ value, options, onChange }: { value: string; optio
     else if (event.key === 'Home') next = 0;
     else if (event.key === 'End') next = rows.length - 1;
     else if (event.key === 'Tab') { setOpen(false); return; }
-    if (next >= 0) { event.preventDefault(); rows[next].focus({ preventScroll: true }); }
+    if (next >= 0) { event.preventDefault(); rows[next].focus({ preventScroll: true }); rows[next].scrollIntoView({ block: 'nearest' }); }
   };
   const focusRow = (row: HTMLButtonElement) => {
     const selected = row.getAttribute('aria-selected') === 'true';
@@ -1651,10 +1680,10 @@ function TemplateTypeSelect({ value, options, onChange }: { value: string; optio
   };
   const labels = Object.fromEntries(options.map(option => [option.value, option.label]));
   return <span ref={root} style={{ position: 'relative', display: 'inline-flex' }}>
-    <button ref={trigger} type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(current => !current)} onKeyDown={event => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); setOpen(true); } }} className="mm-press-soft mm-tp-trigger" data-open={open ? 'true' : undefined} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, color: 'var(--mm-text-secondary)', background: undefined, border: '1px solid var(--mm-border, rgba(255,255,255,0.08))', borderRadius: 6, padding: '2px 5px 2px 6px', cursor: 'pointer', outline: 'none' }}><MorphLabel labels={labels} shown={value} align="start" /><span className="mm-nt-chevron" aria-hidden="true"><ChevronDown size={11} /></span></button>
-    {mounted && <span ref={menu} role="listbox" className="mm-tp-menu" data-closing={open ? undefined : 'true'} style={{ display: 'block', position: 'absolute', top: 'calc(100% + 6px)', left: 0, transformOrigin: 'top left', background: 'var(--mm-bg)', border: '1px solid var(--mm-border)', borderRadius: 12, padding: 4, minWidth: 180, boxShadow: '0 12px 32px rgba(0,0,0,0.15)', zIndex: 100 }} onKeyDown={keys} onMouseLeave={() => setHighlight(old => ({ ...old, shown: false }))}>
+    <button ref={trigger} type="button" aria-haspopup="listbox" aria-expanded={open} aria-controls={mounted ? menuId : undefined} onClick={() => setOpen(current => !current)} onKeyDown={event => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); setOpen(true); } }} className="mm-press-soft mm-tp-trigger" data-open={open ? 'true' : undefined} style={S.templateTrigger}><MorphLabel labels={labels} shown={value} align="start" /><span className="mm-nt-chevron" aria-hidden="true"><ChevronDown size={11} /></span></button>
+    {mounted && <span ref={menu} id={menuId} role="listbox" aria-label="Template type" className="mm-tp-menu" data-closing={open ? undefined : 'true'} style={S.templateMenu} onKeyDown={keys} onMouseLeave={() => setHighlight(old => ({ ...old, shown: false }))}>
       <span aria-hidden="true" className="mm-nt-highlight" data-shown={highlight.shown ? 'true' : undefined} data-placed={highlight.placed ? 'true' : undefined} data-pressed={pressed ? 'true' : undefined} style={{ display: 'block', transform: `translateY(${highlight.y}px)`, height: highlight.h }} />
-      {options.map(option => { const selected = picked !== null ? picked === option.value : option.value === value; return <button key={option.value} type="button" role="option" aria-selected={selected} onClick={() => pick(option.value)} className="mm-nt-row" data-on={selected ? 'true' : undefined} style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '5px 8px', border: 'none', borderRadius: 6, color: 'var(--mm-text-primary)', fontSize: 11, fontWeight: 500, cursor: 'pointer', textAlign: 'left', whiteSpace: 'nowrap', outline: 'none', position: 'relative' }} onMouseEnter={event => event.currentTarget.focus({ preventScroll: true })} onFocus={event => focusRow(event.currentTarget)} onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}><span style={{ flex: 1 }}>{option.label}</span>{selected && <svg className="mm-nt-check" data-draw={picked === option.value ? 'true' : undefined} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}><path d="M20 6 9 17l-5-5" pathLength="1" /></svg>}</button>; })}
+      {options.map(option => { const selected = picked !== null ? picked === option.value : option.value === value; return <button key={option.value} type="button" role="option" aria-selected={selected} onClick={() => pick(option.value)} className="mm-nt-row" data-on={selected ? 'true' : undefined} style={S.templateOption} onMouseEnter={event => event.currentTarget.focus({ preventScroll: true })} onFocus={event => focusRow(event.currentTarget)} onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}><span style={{ flex: 1 }}>{option.label}</span>{selected && <svg className="mm-nt-check" data-draw={picked === option.value ? 'true' : undefined} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}><path d="M20 6 9 17l-5-5" pathLength="1" /></svg>}</button>; })}
     </span>}
   </span>;
 }
@@ -1664,6 +1693,7 @@ function NotesTemplatePicker({ currentTitles, modeDefault, onPick }: {
   modeDefault: { label: string; titles: string[] } | null;
   onPick: (templateId: string) => void;
 }) {
+  const menuId = useId();
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -1724,17 +1754,17 @@ function NotesTemplatePicker({ currentTitles, modeDefault, onPick }: {
   };
   const row = (id: string, label: string, titles: string[]) => {
     const selected = picked ? picked === id : matches(titles);
-    return <button key={id} type="button" role="menuitemradio" aria-checked={selected} onClick={() => pick(id, selected && !picked)} className="mm-nt-row" data-on={selected ? 'true' : undefined} style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '6px 8px', border: 'none', borderRadius: 6, color: 'var(--mm-text-primary)', fontSize: 11, fontWeight: 500, cursor: 'pointer', textAlign: 'left', outline: 'none', position: 'relative' }} onMouseEnter={e => e.currentTarget.focus({ preventScroll: true })} onFocus={e => focusRow(e.currentTarget)} onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}>
-      <span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+    return <button key={id} type="button" role="menuitemradio" aria-checked={selected} onClick={() => pick(id, selected && !picked)} className="mm-nt-row" data-on={selected ? 'true' : undefined} style={S.noteTemplateRow} onMouseEnter={e => e.currentTarget.focus({ preventScroll: true })} onFocus={e => focusRow(e.currentTarget)} onPointerDown={() => setPressed(true)} onPointerUp={() => setPressed(false)} onPointerLeave={() => setPressed(false)}>
+      <span style={S.noteTemplateName}>{label}</span>
       {selected && <svg className="mm-nt-check" data-draw={picked === id ? 'true' : undefined} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}><path d="M20 6 9 17l-5-5" pathLength="1" /></svg>}
     </button>;
   };
   return <div ref={root} style={{ position: 'relative', display: 'inline-flex' }}>
-    <button ref={trigger} type="button" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)} className="mm-press-soft mm-nt-trigger" data-open={open ? 'true' : undefined} style={{ ...S.removeTplBtn, color: undefined, display: 'inline-flex', alignItems: 'center', gap: 3 }}>{'Use a template'}<span className="mm-nt-chevron" aria-hidden="true"><ChevronDown size={12} /></span></button>
-    {mounted && <div ref={menu} role="menu" aria-label="Note templates" className="mm-nt-menu" data-closing={open ? undefined : 'true'} style={{ position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, transformOrigin: 'bottom right', background: 'var(--mm-bg)', border: '1px solid var(--mm-border)', borderRadius: 12, padding: 4, width: 220, maxHeight: 320, overflowY: 'auto', boxShadow: '0 12px 32px rgba(0,0,0,0.15)', zIndex: 100 }} onKeyDown={keys} onMouseLeave={() => setHighlight(old => ({ ...old, shown: false }))}>
+    <button ref={trigger} type="button" aria-haspopup="menu" aria-expanded={open} aria-controls={mounted ? menuId : undefined} onClick={() => setOpen(value => !value)} onKeyDown={event => { if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); setOpen(true); } }} className="mm-press-soft mm-nt-trigger" data-open={open ? 'true' : undefined} style={{ ...S.removeTplBtn, color: undefined, display: 'inline-flex', alignItems: 'center', gap: 3 }}>{'Use a template'}<span className="mm-nt-chevron" aria-hidden="true"><ChevronDown size={12} /></span></button>
+    {mounted && <div ref={menu} id={menuId} role="menu" aria-label="Note templates" className="mm-nt-menu" data-closing={open ? undefined : 'true'} style={S.noteTemplateMenu} onKeyDown={keys} onMouseLeave={() => setHighlight(old => ({ ...old, shown: false }))}>
       <div aria-hidden="true" className="mm-nt-highlight" data-shown={highlight.shown ? 'true' : undefined} data-placed={highlight.placed ? 'true' : undefined} data-pressed={pressed ? 'true' : undefined} style={{ transform: `translateY(${highlight.y}px)`, height: highlight.h }} />
-      {modeDefault && <div><div style={{ padding: '4px 8px 4px', fontSize: 10.5, fontWeight: 500, color: 'var(--mm-text-tertiary)' }}>This mode</div>{row(MODE_DEFAULT_NOTE_TEMPLATE_ID, modeDefault.label, modeDefault.titles)}</div>}
-      {NOTE_TEMPLATE_GROUPS.map((group, index) => <div key={group}><div style={{ padding: `${index === 0 && !modeDefault ? 4 : 10}px 8px 4px`, fontSize: 10.5, fontWeight: 500, color: 'var(--mm-text-tertiary)' }}>{group}</div>{NOTE_TEMPLATES.filter(template => template.group === group).map(template => row(template.id, template.name, template.sections.map(section => section.title)))}</div>)}
+      {modeDefault && <div><div style={S.noteTemplateGroup}>This mode</div>{row(MODE_DEFAULT_NOTE_TEMPLATE_ID, modeDefault.label, modeDefault.titles)}</div>}
+      {NOTE_TEMPLATE_GROUPS.map(group => <div key={group}><div style={S.noteTemplateGroup}>{group}</div>{NOTE_TEMPLATES.filter(template => template.group === group).map(template => row(template.id, template.name, template.sections.map(section => section.title)))}</div>)}
     </div>}
   </div>;
 }
@@ -2909,7 +2939,7 @@ export default function ModesSettings({
                   placeholder={contextPlaceholder(mode.templateType)}
                   style={{ ...S.textarea, flex: 1, minHeight: 120, background: 'rgba(255, 255, 255, 0.02)' }}
                 />
-                <div style={{ display: 'grid', alignItems: 'center', padding: '10px 12px', borderTop: '1px solid var(--mm-input-border)', width: '100%', boxSizing: 'border-box' }}>
+                <div style={{ display: 'grid', alignItems: 'center', padding: '12px', borderTop: '1px solid var(--mm-input-border)', width: '100%', boxSizing: 'border-box' }}>
                   {/* Normal save row */}
                   <div
                     className="mm-prompt-foot"
