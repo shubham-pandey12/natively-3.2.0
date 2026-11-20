@@ -16,6 +16,7 @@ test('normalizes renderer origins and owned paths while retaining meaningful val
       expression: 'a\\b',
       models: ['z', 'a'],
       fetchedAt: 1,
+      preflight: { finishedAt: 2, checks: [{ id: 'native', durationMs: 2, ok: true }] },
       isPremium: false,
     },
     skipped: { getKey: 'credential data' },
@@ -27,6 +28,7 @@ test('normalizes renderer origins and owned paths while retaining meaningful val
       profilePath: '<workspace>/logs/debug.log',
       expression: 'a\\b',
       models: ['z', 'a'],
+      preflight: { checks: [{ id: 'native', ok: true }] },
       isPremium: false,
     },
   });

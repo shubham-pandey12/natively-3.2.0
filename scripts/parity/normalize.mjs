@@ -1,4 +1,4 @@
-const volatileKeys = /^(?:createdAt|created_at|updatedAt|updated_at|lastCheckedAt|fetchedAt|timestamp|timeStamp|expiresAt|expires_at|startedAt|endsAt|requestId|processId|pid|cdpPort)$/;
+const volatileKeys = /^(?:createdAt|created_at|updatedAt|updated_at|lastCheckedAt|fetchedAt|timestamp|timeStamp|expiresAt|expires_at|startedAt|finishedAt|endsAt|durationMs|requestId|processId|pid|cdpPort)$/;
 const rendererUrl = /file:\/\/\/[^\s)"']*?\/app\.asar\/dist\/|https?:\/\/(?:localhost|127\.0\.0\.1):\d+\//gi;
 
 function normalizeValue(value, context) {
