@@ -13,6 +13,7 @@ import * as screenshots from './scenarios/screenshots.mjs';
 import * as premiumAutoAnswer from './scenarios/premium-auto-answer.mjs';
 import * as consoleErrors from './scenarios/console-errors.mjs';
 import { pageWindow } from './cdp.mjs';
+import { comparePngs, screenshotDiffPath } from './pixels.mjs';
 
 const scenarios = [api, licence, modes, settings, settingsRoundtrip, screenshots, premiumAutoAnswer, consoleErrors];
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -68,11 +69,27 @@ async function report(dir, raw, normalized, diagnostics, failure) {
   ]));
   const shots = new Set(Object.values(captures).flatMap((result) => Object.keys(result)));
   if (shots.size) {
-    lines.push('## Screenshot pairs', '', '| View | Installed | Local |', '| --- | --- | --- |');
+    lines.push('## Screenshot pairs', '',
+      'RGB distances greater than 48 are highlighted. The pixel percentages measure visual differences and do not affect scenario status.',
+      '', '| View | Installed | Local | Pixels changed | Comparison PNG |', '| --- | --- | --- | ---: | --- |');
     for (const shot of shots) {
       const cell = (app) => captures[app][shot] === 'captured'
         ? `![${app} ${shot}](screenshots/${shot}/${app}.png)` : 'Unavailable';
-      lines.push(`| ${shot} | ${cell('installed')} | ${cell('local')} |`);
+      let score = '—';
+      let image = '—';
+      if (captures.installed[shot] === 'captured' && captures.local[shot] === 'captured') {
+        const directory = path.join(dir, 'screenshots', shot);
+        const output = screenshotDiffPath(directory);
+        try {
+          const percent = await comparePngs(path.join(directory, 'installed.png'), path.join(directory, 'local.png'), output);
+          score = percent.toFixed(3) + '%';
+          image = `[Installed · Local · Diff](screenshots/${shot}/${path.basename(output)})`;
+        } catch (error) {
+          console.warn(`[parity] Could not compare screenshot "${shot}": ${error.message}`);
+          image = 'Comparison failed';
+        }
+      }
+      lines.push(`| ${shot} | ${cell('installed')} | ${cell('local')} | ${score} | ${image} |`);
     }
   }
   await writeFile(path.join(dir, 'report.md'), `${lines.join('\n')}\n`);

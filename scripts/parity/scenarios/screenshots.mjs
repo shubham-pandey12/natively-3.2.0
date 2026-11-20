@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { waitFor } from '../cdp.mjs';
+import { resetSettingsScroll } from './settings-view.mjs';
 
 export const id = 'screenshots';
 
@@ -32,10 +33,11 @@ export async function run(app) {
   const skipped = {};
   const tabs = await settingsTabs();
 
-  async function capture(name, prepare) {
+  async function capture(name, prepare, beforeShot) {
     try {
       await prepare();
       await delay(500, undefined, { signal });
+      await beforeShot?.();
       const output = path.join(app.runDir, 'screenshots', name);
       await mkdir(output, { recursive: true });
       await writeFile(path.join(output, `${app.name}.png`), await page.screenshot());
@@ -65,7 +67,15 @@ export async function run(app) {
   }
 
   await capture('launcher', enterLauncher);
+  // Built-in modes (including Sales) lock their type. Add an editable Sales
+  // fixture to the isolated profile before the manager loads its mode list.
+  let fixtureId;
   await capture('modes-manager', async () => {
+    const fixture = await page.evaluate(() => window.electronAPI.modesCreate({
+      name: 'Parity Sales', templateType: 'sales',
+    }));
+    if (!fixture?.success || !fixture.mode?.id) throw new Error('Could not create an editable Sales mode');
+    fixtureId = fixture.mode.id;
     const clicked = await waitFor(() => page.evaluate((selector) => {
       const button = document.querySelector(selector);
       button?.click();
@@ -77,6 +87,45 @@ export async function run(app) {
     if (!open) throw new Error('Modes Manager did not open');
   });
 
+  async function selectMode(name) {
+    const selected = await waitFor(() => page.evaluate((text) => {
+      const tab = [...document.querySelectorAll('[aria-label="Modes"][role="tablist"] [role="tab"]')]
+        .find((item) => item.querySelector('[title="Double-click to rename"]')?.textContent.trim() === text
+          || item.textContent.trim() === text);
+      if (!tab) return false;
+      if (tab.getAttribute('aria-selected') === 'true') return true;
+      tab.click();
+      return false;
+    }, name), signal, 5_000);
+    if (!selected) throw new Error('Mode did not open: ' + name);
+  }
+
+  async function openMenu(trigger, menu) {
+    const clicked = await waitFor(() => page.evaluate((selector) => {
+      const button = document.querySelector(selector);
+      if (!button?.getClientRects().length) return false;
+      button.scrollIntoView({ block: 'center', behavior: 'instant' });
+      if (button.getAttribute('aria-expanded') !== 'true') button.click();
+      return true;
+    }, trigger), signal, 5_000);
+    if (!clicked || !await waitFor(() => page.evaluate((selector) =>
+      Boolean(document.querySelector(selector)?.getClientRects().length), menu), signal, 5_000)) {
+      throw new Error('Modes menu did not open: ' + menu);
+    }
+  }
+
+  await capture('modes-sales', () => selectMode('Sales'));
+  await capture('modes-template-type', async () => {
+    await selectMode('Parity Sales');
+    await openMenu('.mm-tp-trigger', '.mm-tp-menu');
+  });
+  await capture('modes-note-template', async () => {
+    await page.evaluate(() => {
+      document.querySelector('.mm-tp-trigger[aria-expanded="true"]')?.click();
+    });
+    await openMenu('.mm-nt-trigger', '.mm-nt-menu');
+  });
+
   for (const tab of tabs) {
     await capture(`settings-${tab}`, async () => {
       await page.evaluate((id) => window.electronAPI.openSettingsTab(id), tab);
@@ -85,7 +134,11 @@ export async function run(app) {
         return panel?.dataset.genieView === id && Boolean(panel.getClientRects().length);
       }, tab), signal, 5_000);
       if (!visible) throw new Error(`Settings did not show tab "${tab}"`);
-    });
+    }, () => resetSettingsScroll(page));
+  }
+  if (fixtureId) {
+    const deleted = await page.evaluate((modeId) => window.electronAPI.modesDelete(modeId), fixtureId);
+    if (!deleted?.success) throw new Error('Could not clean up the editable Sales mode');
   }
   return { captures, skipped };
 }

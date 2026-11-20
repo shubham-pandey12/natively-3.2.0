@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { waitFor } from '../cdp.mjs';
+import { resetSettingsScroll } from './settings-view.mjs';
 
 export const id = 'premium-auto-answer';
 
@@ -25,7 +26,6 @@ export async function run(app) {
     const control = document.querySelector(selector);
     if (!control || !control.getClientRects().length || control.disabled) return false;
     if (control.getAttribute('aria-checked') !== 'false') throw new Error('Sharing switch is already on');
-    control.scrollIntoView({ block: 'center' });
     control.click();
     return true;
   }, sharingControl), signal);
@@ -42,6 +42,7 @@ export async function run(app) {
   if (!disclosure) throw new Error('Auto Answer consent disclosure did not render');
 
   await delay(500, undefined, { signal });
+  await resetSettingsScroll(page);
   const output = path.join(app.runDir, 'screenshots', 'auto-answer-consent');
   await mkdir(output, { recursive: true });
   await writeFile(path.join(output, app.name + '.png'), await page.screenshot());
