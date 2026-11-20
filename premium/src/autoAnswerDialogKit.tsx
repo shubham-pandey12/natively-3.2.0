@@ -1,5 +1,5 @@
 // Shared parts of the Auto Answer access and stop-sharing dialogs.
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ArrowRight, Loader2, X } from 'lucide-react';
 
@@ -37,9 +37,10 @@ export function genieDialogProps(isLight: boolean) {
   };
 }
 
+// 3.2.1: a fixed-height card that never scrolls itself; only the terms list
+// (FactList) scrolls, so the actions below it always stay in view.
 export const bodyStyle: React.CSSProperties = {
-  position: 'relative', minHeight: 'min(420px, calc(100vh - 48px))',
-  maxHeight: 'min(500px, calc(100vh - 48px))', overflowY: 'auto',
+  position: 'relative', height: '474px', maxHeight: 'calc(100vh - 48px)', overflow: 'hidden',
   padding: '40px 40px 34px 40px', display: 'flex', flexDirection: 'column',
 };
 export const bodyMotion = (reduced: boolean) => ({
@@ -75,29 +76,43 @@ export const FactRow: React.FC<{ ink: Ink; label: string; lit?: boolean; litColo
   </div>
 );
 
-export const FactList: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+// 3.2.1: the list scrolls inside the fixed card and fades whichever edge has
+// more to read. The negative left margin plus matching padding keeps
+// FactRow's highlight bar (left: -14px) inside the scroll box, where the
+// overflow would otherwise clip it.
+export const FactList: React.FC<{ label?: string; children: React.ReactNode }> = ({ label = 'Terms', children }) => {
   const list = useRef<HTMLDListElement>(null);
-  const [scrollable, setScrollable] = useState(false);
-  useLayoutEffect(() => {
+  const [edges, setEdges] = useState({ top: false, bottom: false });
+  const measure = useCallback(() => {
     const element = list.current;
     if (!element) return;
-    const measure = () => setScrollable(element.scrollHeight > element.clientHeight + 1);
+    const top = element.scrollTop > 1;
+    const bottom = element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+    setEdges((current) => (current.top === top && current.bottom === bottom ? current : { top, bottom }));
+  }, []);
+  useLayoutEffect(() => {
     measure();
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
-    observer?.observe(element);
-    return () => observer?.disconnect();
-  }, [children]);
+    const element = list.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [measure]);
 
+  const mask = `linear-gradient(to bottom, ${edges.top ? 'transparent 0, #000 18px' : '#000 0'}, ${edges.bottom ? '#000 calc(100% - 26px), transparent 100%' : '#000 100%'})`;
+  const scrollable = edges.top || edges.bottom;
   return (
     <dl
       ref={list}
-      tabIndex={scrollable ? 0 : undefined}
+      onScroll={measure}
+      tabIndex={scrollable ? 0 : -1}
       role={scrollable ? 'region' : undefined}
-      aria-label={scrollable ? 'Terms' : undefined}
+      aria-label={scrollable ? label : undefined}
       style={{
-        margin: '22px 0 0', paddingRight: 6, minHeight: 0, flex: '1 1 auto',
-        overflowY: 'auto', overscrollBehavior: 'contain',
+        margin: '22px 0 0 -14px', padding: '0 4px 2px 14px', flex: '1 1 auto', minHeight: 0,
+        overflowY: 'auto', overscrollBehavior: 'contain', outline: 'none',
         display: 'flex', flexDirection: 'column', gap: '9px',
+        maskImage: mask, WebkitMaskImage: mask,
       }}
     >{children}</dl>
   );

@@ -133,3 +133,22 @@ ed857030 Audit premium esbuild bundles against a release
 - **Reviewed but not executed on macOS**. The port is shared code. Reviewed the native licence-loader and model-runtime platform branches used by these flows.
 - The test profile carries Pro, so free-mode checkout and the stop-sharing confirmation were outside the physical run. Live licence activation, model download, consent submission, uploading and remote toaster campaigns were outside scope. The comparison checks the renderer evidence recorded above. It cannot prove all premium execution paths or pixel parity.
 - The code-review graph was unavailable. Review used the archived bundles, TypeScript source, local Git history, executable tests and screenshots.
+
+## Review and fixes (Claude)
+
+Verified independently: no secret in any commit (only the redaction code mentions `client_secret`) and none in `.parity/` output; premium-diff reproduces 65/72 full and 67/72 own-module identical; the two key residuals are equivalent (LicenseManager: comments and a catch-variable name; KnowledgeOrchestrator: the same deny-unless-`true` Pro gate, reformatted). 56/56 premium+licence tests, 18/18 harness tests, both typechecks, all 8 parity scenarios MATCH. Require/export audit: only the two known upstream-tolerated names.
+
+**Screens, measured.** A pixel comparison of the 16 screenshot pairs: 12 are identical. The rest:
+
+| Screen | Before | After | What remains |
+| --- | ---: | ---: | --- |
+| Auto Answer consent | 6.69% | 3.71% | The settings page behind the dialog is scrolled to a different section (harness scroll position, not the dialog). |
+| Modes Manager | 1.34% | 1.47% | Random mode order (expected) plus "Answer policy" and below sit ~3px higher locally. Open. |
+| Keybinds | 2.38% | 2.38% | "In use" on Ctrl+B / Ctrl+Shift+B: the installed app, running at the same time, holds them. Expected. |
+| About | 0.06% | 0.06% | Version text. |
+
+**Consent dialog fixed to 3.2.1's exact styles** (`premium/src/autoAnswerDialogKit.tsx`, read from the 3.2.1 renderer bundle): the card is a fixed `474px` (max `calc(100vh - 48px)`) with `overflow: hidden` instead of 420–500px and self-scrolling, so the dialog is now the same size and "Used for" sits behind the fade as in 3.2.1. The terms list now fades whichever edge has more to read, re-measures on scroll, uses the `-14px` margin with matching padding so the highlight bar is not clipped, `tabIndex -1` when not scrollable, and takes its label from a `label` prop defaulting to "Terms". Both consent dialogs share these, as in 3.2.1.
+
+**Open, for the next phase:**
+- Modes Manager: the ~3px offset above "Answer policy". `sectionLabel` was checked and is identical to 3.2.1.
+- Modes Manager style object: 3.2.1 has 7 entries ours lacks (`templateTrigger`, `templateMenu`, `templateOption`, `noteTemplateMenu`, `noteTemplateRow`, `noteTemplateGroup`, `noteTemplateName`). Both versions have the template-type and note-template dropdowns, but ours styles them differently, and the harness only screenshots General (where those dropdowns are hidden), so they have not been compared.
