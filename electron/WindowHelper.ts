@@ -27,6 +27,15 @@ import { resizeEnvelopeFor, OVERLAY_PANEL_INSET } from '../src/lib/overlayCustom
 import { decideLauncherClose } from '../src/lib/launcherCloseDecision.mjs';
 import { DEV_SERVER_URL } from './devServerUrl';
 import { shortcutRestoreBounds, shortcutRestoreDisplay } from './utils/shortcutRestore';
+import {
+  LauncherShowGate,
+  decideToggle,
+  LAUNCHER_FIRST_PAINT_TIMEOUT_MS,
+  LAUNCHER_MAX_PAINT_RELOADS,
+  LAUNCHER_HANG_RESTART_MS,
+  LAUNCHER_MAX_HANG_RESTARTS,
+  LAUNCHER_FALLBACK_BACKGROUND,
+} from './utils/launcherShowGate';
 
 const isEnvDev = process.env.NODE_ENV === 'development';
 const isPackaged = app.isPackaged;
@@ -61,6 +70,16 @@ export class WindowHelper {
   private launcherWindow: BrowserWindow | null = null;
   private overlayWindow: BrowserWindow | null = null;
   private isWindowVisible: boolean = false;
+
+  // Never show the launcher before its page paints (utils/launcherShowGate.ts):
+  // the win32 launcher is transparent, so an early show is an invisible window.
+  private readonly launcherShowGate = new LauncherShowGate();
+  private launcherFirstPaintListeners: Array<() => void> = [];
+  private launcherPaintWatchdog: NodeJS.Timeout | null = null;
+  private launcherPaintReloads = 0;
+  private launcherHangTimer: NodeJS.Timeout | null = null;
+  private launcherHangRestarts = 0;
+  private launcherFallbackBackground = false;
   // Stop with the notepad open (2026-10-31): launcher mode is entered but its
   // window waits until the notepad is closed (switchToLauncher's `hidden`).
   private launcherShowOwed = false;
@@ -787,7 +806,11 @@ export class WindowHelper {
         });
     };
 
+    this.launcherShowGate.reset();
+    this.launcherPaintReloads = 0;
+    this.launcherHangRestarts = 0;
     loadLauncher();
+    this.armLauncherRecovery(this.launcherWindow);
 
     this.launcherWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
       console.error(`[WindowHelper] did-fail-load: ${errorCode} ${errorDescription}`);
@@ -1001,8 +1024,13 @@ export class WindowHelper {
 
     // --- 3. Startup Sequence ---
     this.launcherWindow.once('ready-to-show', () => {
-      this.switchToLauncher();
-      this.isWindowVisible = true;
+      // The page painted after the watchdog had given up and put the launcher
+      // on a solid background: go back to the normal background.
+      if (this.launcherFallbackBackground && this.launcherWindow && !this.launcherWindow.isDestroyed()) {
+        this.launcherFallbackBackground = false;
+        this.launcherWindow.setBackgroundColor(process.platform === 'darwin' ? '#000000' : '#00000000');
+      }
+      this.markLauncherFirstPaint('ready-to-show');
     });
 
     this.setupWindowListeners();
@@ -1274,6 +1302,7 @@ export class WindowHelper {
       this.appState.recordNativeOomTrace('launcher-window-closed', { window: 'launcher' });
       this.appState.stopNativeOomContentTrace('launcher-window-closed');
       this.launcherWindow = null;
+      this.clearLauncherRecoveryTimers();
       // Reset so a later launcher recreation doesn't inherit a stale "preview
       // active" flag with no corresponding transparent/vibrancy-off window.
       this.launcherOpacityPreviewActive = false;
@@ -2494,7 +2523,23 @@ export class WindowHelper {
   }
 
   public toggleMainWindow(onCurrentDisplay = false): void {
-    if (this.isWindowVisible) {
+    // Decide from what is on screen, not from isWindowVisible alone: that flag
+    // drifts (a minimized launcher, one shown before it painted), and then the
+    // shortcut "hides" a window the user cannot see. See decideToggle().
+    const win = this.getMainWindow();
+    const live = !!win && !win.isDestroyed();
+    const action = decideToggle({
+      painted: this.currentWindowMode === 'launcher' ? this.launcherShowGate.isPainted() : true,
+      visible: live && win!.isVisible(),
+      minimized: live && win!.isMinimized(),
+      effectiveOpacity: !live ? 0 : (this.opacityTimeout ? 1 : win!.getOpacity()),
+    });
+    if (action === 'hold-show') {
+      console.log('[WindowHelper] Toggle before the launcher painted: it will show when ready');
+      this.launcherShowGate.requestShow(true);
+      return;
+    }
+    if (action === 'hide') {
       this.hideMainWindow();
     } else {
       // Always show without stealing focus — Natively is a ghost overlay.
@@ -2797,6 +2842,91 @@ export class WindowHelper {
     return this.overlayHeldHidden;
   }
 
+  /** Run `cb` once the launcher has first painted (on the next tick if it already has). */
+  public onLauncherFirstPaint(cb: () => void): void {
+    if (this.launcherShowGate.isPainted()) setImmediate(cb);
+    else this.launcherFirstPaintListeners.push(cb);
+  }
+
+  /** First paint (ready-to-show, or the watchdog giving up): show, run listeners. */
+  private markLauncherFirstPaint(reason: string): void {
+    if (this.launcherShowGate.isPainted()) return;
+    if (this.launcherPaintWatchdog) { clearTimeout(this.launcherPaintWatchdog); this.launcherPaintWatchdog = null; }
+    const held = this.launcherShowGate.markPainted();
+    console.log(`[WindowHelper] Launcher first paint (${reason})${held ? `; showing held request (inactive: ${held.inactive})` : ''}`);
+    // Cold start always shows the launcher, as before; a show requested while
+    // it was loading decides whether it takes focus.
+    this.switchToLauncher(held ? held.inactive : undefined);
+    this.isWindowVisible = true;
+    const listeners = this.launcherFirstPaintListeners;
+    this.launcherFirstPaintListeners = [];
+    for (const fn of listeners) {
+      try { fn(); } catch (e) { console.warn('[WindowHelper] first-paint listener failed:', e); }
+    }
+  }
+
+  /**
+   * A launcher that never paints, or whose renderer hangs, is a transparent
+   * window that is alive and unreachable: Ctrl+B and relaunch "work" on a
+   * window nobody can see. Reload it (bounded); as a last resort show it on a
+   * solid background so the user at least sees a window they can close.
+   * Crashes are handled by app.on('render-process-gone') in main.ts.
+   */
+  private armLauncherRecovery(win: BrowserWindow): void {
+    const firstPaintTimeout = isDev ? LAUNCHER_FIRST_PAINT_TIMEOUT_MS * 4 : LAUNCHER_FIRST_PAINT_TIMEOUT_MS;
+    const armPaintWatchdog = () => {
+      if (this.launcherPaintWatchdog) clearTimeout(this.launcherPaintWatchdog);
+      this.launcherPaintWatchdog = setTimeout(() => {
+        this.launcherPaintWatchdog = null;
+        if (win.isDestroyed() || this.launcherShowGate.isPainted()) return;
+        if (this.launcherPaintReloads < LAUNCHER_MAX_PAINT_RELOADS) {
+          this.launcherPaintReloads += 1;
+          console.error(`[WindowHelper] Launcher did not paint within ${firstPaintTimeout}ms; reloading (${this.launcherPaintReloads}/${LAUNCHER_MAX_PAINT_RELOADS})`);
+          try { win.webContents.reloadIgnoringCache(); } catch (e) { console.error('[WindowHelper] launcher reload failed:', e); }
+          armPaintWatchdog();
+          return;
+        }
+        console.error('[WindowHelper] Launcher never painted; showing it on a solid background so it is reachable');
+        try {
+          win.setBackgroundColor(LAUNCHER_FALLBACK_BACKGROUND);
+          this.launcherFallbackBackground = true;
+        } catch { /* best-effort */ }
+        this.markLauncherFirstPaint('paint-timeout');
+      }, firstPaintTimeout);
+    };
+    armPaintWatchdog();
+
+    win.on('unresponsive', () => {
+      if (this.launcherHangTimer || win.isDestroyed()) return;
+      this.launcherHangTimer = setTimeout(() => {
+        this.launcherHangTimer = null;
+        if (win.isDestroyed()) return;
+        if (this.launcherHangRestarts >= LAUNCHER_MAX_HANG_RESTARTS) {
+          console.error('[WindowHelper] Launcher still hung; restart budget used up');
+          return;
+        }
+        this.launcherHangRestarts += 1;
+        console.error(`[WindowHelper] Launcher hung for ${LAUNCHER_HANG_RESTART_MS}ms; restarting its renderer (${this.launcherHangRestarts}/${LAUNCHER_MAX_HANG_RESTARTS})`);
+        try {
+          // Documented recovery for a hung renderer: kill it, then reload in a
+          // fresh process.
+          win.webContents.forcefullyCrashRenderer();
+          win.webContents.reload();
+        } catch (e) {
+          console.error('[WindowHelper] launcher hang restart failed:', e);
+        }
+      }, LAUNCHER_HANG_RESTART_MS);
+    });
+    win.on('responsive', () => {
+      if (this.launcherHangTimer) { clearTimeout(this.launcherHangTimer); this.launcherHangTimer = null; }
+    });
+  }
+
+  private clearLauncherRecoveryTimers(): void {
+    if (this.launcherPaintWatchdog) { clearTimeout(this.launcherPaintWatchdog); this.launcherPaintWatchdog = null; }
+    if (this.launcherHangTimer) { clearTimeout(this.launcherHangTimer); this.launcherHangTimer = null; }
+  }
+
   public switchToLauncher(inactive?: boolean, opts?: { hidden?: boolean }): void {
     this.overlayHeldHidden = false;
     const requestedInactive = !!inactive;
@@ -2814,10 +2944,15 @@ export class WindowHelper {
     this.currentWindowMode = 'launcher';
     KeybindManager.getInstance().setMode('launcher'); // Adapted from public PR #123 — verify premium interaction
 
+    // "Visible" means the user can see it: not minimized, and not left at
+    // opacity 0 by an interrupted opacity shield (issue #529). Otherwise this
+    // early return would refuse the very show that repairs those states.
     const launcherAlreadyVisible =
       !!this.launcherWindow &&
       !this.launcherWindow.isDestroyed() &&
       this.launcherWindow.isVisible() &&
+      !this.launcherWindow.isMinimized() &&
+      (this.launcherWindow.getOpacity() > 0 || this.opacityTimeout !== null) &&
       this.isWindowVisible;
     const overlayAlreadyHidden =
       !this.overlayWindow ||
@@ -2853,6 +2988,16 @@ export class WindowHelper {
     // notepad, is still up, so there is no no-window gap to guard against)
     if (hidden) {
       this.launcherShowOwed = true;
+      this.isWindowVisible = false;
+    } else if (
+      this.launcherWindow &&
+      !this.launcherWindow.isDestroyed() &&
+      !this.launcherShowGate.requestShow(requestedInactive)
+    ) {
+      // Not painted yet: showing now would put an invisible (transparent,
+      // unpainted) window on screen. markLauncherFirstPaint() shows it.
+      console.log('[WindowHelper] Launcher has not painted yet; show held until first paint');
+      this.launcherShowOwed = false;
       this.isWindowVisible = false;
     } else if (this.launcherWindow && !this.launcherWindow.isDestroyed()) {
       this.launcherShowOwed = false;

@@ -75,6 +75,7 @@ test('no focused window falls back to current display, then primary', () => {
 // without bundling to isolate its imports from the app/native-module startup.
 // `platform` is injected so a test runs the same branch on any host.
 function helperFixture(mode = 'launcher', platform = 'darwin') {
+  let helperRef = null;
   let bounds = { ...original };
   const calls = [];
   let minimum = [0, 0];
@@ -95,6 +96,11 @@ function helperFixture(mode = 'launcher', platform = 'darwin') {
     on: (event, handler) => { listeners[event] = handler; },
     webContents: { id: 1, send() {} },
     setOpacity() {}, setContentProtection() {}, hide() {}, focus() {},
+    // Real on-screen state for decideToggle(): mirrors the helper's flag, which
+    // these tests set to say "the window is showing".
+    isVisible: () => helperRef.isWindowVisible,
+    isMinimized: () => false,
+    getOpacity: () => 1,
     setAlwaysOnTop: (...args) => calls.push(['always-on-top', ...args]),
     show: () => calls.push(['native-show']),
     showInactive: () => calls.push(['native-show']),
@@ -118,13 +124,21 @@ function helperFixture(mode = 'launcher', platform = 'darwin') {
       if (name === './services/KeybindManager') return { KeybindManager: { getInstance: () => ({ setMode() {} }) } };
       if (name.startsWith('node:')) return require(name);
       if (name === './utils/shortcutRestore') return { shortcutRestoreBounds, shortcutRestoreDisplay };
+      if (name === './utils/launcherShowGate') return require('../../../dist-electron/electron/utils/launcherShowGate.js');
       if (name === './utils/launcherAspect') return require('../../../dist-electron/electron/utils/launcherAspect.js');
       if (name === '../src/lib/overlayCustomSize.mjs') return { OVERLAY_PANEL_INSET: 12 };
       return {};
     },
   });
   const helper = Object.create(module.exports.WindowHelper.prototype);
+  helperRef = helper;
+  // Object.create skips field initializers: give it a launcher that has
+  // already painted, which is the state these restore tests are about.
+  const { LauncherShowGate } = require('../../../dist-electron/electron/utils/launcherShowGate.js');
+  const launcherShowGate = new LauncherShowGate();
+  launcherShowGate.markPainted();
   Object.assign(helper, {
+    launcherShowGate, opacityTimeout: null,
     currentWindowMode: mode, launcherWindow: window, overlayWindow: window,
     pillSize: { width: 200, height: 44 }, isWindowVisible: false,
     positionOverlayAuxWindows: () => calls.push(['aux']),
