@@ -19,8 +19,11 @@
 
 export interface PendingLauncherShow {
   inactive: boolean;
-  /** Cmd/Ctrl+B asked for the launcher on the cursor's display. */
-  onCurrentDisplay: boolean;
+  /**
+   * Cmd/Ctrl+B asked for the launcher on a display: the one under the cursor
+   * WHEN IT WAS PRESSED (resolved then, not at paint), or null for none.
+   */
+  targetDisplayId: number | null;
 }
 
 export class LauncherShowGate {
@@ -37,11 +40,13 @@ export class LauncherShowGate {
    * replaces an earlier one, except that a focused (non-inactive) request
    * wins over an inactive one.
    */
-  requestShow(inactive: boolean, opts: { onCurrentDisplay?: boolean } = {}): boolean {
+  requestShow(inactive: boolean, opts: { targetDisplayId?: number | null } = {}): boolean {
     if (this.painted) return true;
+    const target = opts.targetDisplayId ?? null;
     this.pending = {
       inactive: this.pending ? this.pending.inactive && inactive : inactive,
-      onCurrentDisplay: !!opts.onCurrentDisplay || !!this.pending?.onCurrentDisplay,
+      // The latest press that named a display wins; a plain show keeps it.
+      targetDisplayId: target !== null ? target : (this.pending?.targetDisplayId ?? null),
     };
     return false;
   }

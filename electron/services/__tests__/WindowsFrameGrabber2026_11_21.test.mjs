@@ -161,7 +161,7 @@ test('the page script reuses an open stream and reopens it when source/size chan
 
 test('main: full capture on win32 excludes windows instead of hiding, and restores protection', () => {
   const main = fs.readFileSync(path.resolve(__dirname, '../../main.ts'), 'utf8');
-  assert.match(main, /captureKind === 'full' && canExcludeFromCaptureWithoutHiding\(process\.platform, os\.release\(\)\)\) \{\s*return this\.captureExcludingWindows\(session, capture\)/);
+  assert.match(main, /captureKind === 'full' && canExcludeFromCaptureWithoutHiding\(process\.platform, os\.release\(\)\)\) \{\s*const outcome = await this\.runExclusionCapture\(session, capture\);/);
   const i = main.indexOf('private async captureExcludingWindows');
   assert.ok(i > 0);
   const block = main.slice(i, main.indexOf('private async withScreenshotCaptureSession', i));
@@ -173,7 +173,8 @@ test('main: full capture on win32 excludes windows instead of hiding, and restor
   assert.match(block, /this\.captureExclusionActive = true;/);
   assert.match(block, /app\.on\('browser-window-created', onCreated\)/);
   assert.match(block, /win\.on\('show', fn\)/);
-  assert.match(block, /if \(!windowsChanged \|\| attempt >= 2\) return result;/);
+  assert.match(block, /if \(!windowsChanged\) return \{ ok: true, result \};/);
+  assert.match(block, /return \{ ok: false \};/);
   assert.match(block, /if \(deferred !== undefined\) this\.setUndetectable\(deferred\);/);
   const su = main.slice(main.indexOf('public setUndetectable(state: boolean): void {'));
   assert.match(su.slice(0, 600), /^public setUndetectable\(state: boolean\): void \{\s*if \(this\.captureExclusionActive\) \{[\s\S]*?this\.deferredUndetectable = state;\s*return;/);

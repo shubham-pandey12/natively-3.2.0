@@ -22,7 +22,7 @@ test('a show before the first paint is held and handed to the paint', () => {
   const g = new LauncherShowGate();
   assert.equal(g.requestShow(true), false);
   assert.equal(g.hasPendingShow(), true);
-  assert.deepEqual(g.markPainted(), { inactive: true, onCurrentDisplay: false });
+  assert.deepEqual(g.markPainted(), { inactive: true, targetDisplayId: null });
   assert.equal(g.hasPendingShow(), false);
   assert.equal(g.requestShow(true), true, 'after the paint, shows go straight through');
 });
@@ -32,7 +32,7 @@ test('a focused request wins over an inactive one while held', () => {
   g.requestShow(true);
   g.requestShow(false);
   g.requestShow(true);
-  assert.deepEqual(g.markPainted(), { inactive: false, onCurrentDisplay: false });
+  assert.deepEqual(g.markPainted(), { inactive: false, targetDisplayId: null });
 });
 
 test('no held show: paint returns null; markPainted is idempotent; reset re-arms', () => {
@@ -76,7 +76,7 @@ test('WindowHelper: toggle uses decideToggle; already-visible check ignores mini
   const src = read('WindowHelper.ts');
   const t = src.slice(src.indexOf('public toggleMainWindow('), src.indexOf('private refreshLauncherMinimum('));
   assert.match(t, /decideToggle\(/);
-  assert.match(t, /this\.launcherShowGate\.requestShow\(true, \{ onCurrentDisplay \}\)/);
+  assert.match(t, /this\.launcherShowGate\.requestShow\(true, \{\s*targetDisplayId: onCurrentDisplay \? \(this\.shortcutTargetDisplay\(\)\?\.id \?\? null\) : null,/);
   assert.match(src, /!this\.launcherWindow\.isMinimized\(\) &&\s*\(this\.launcherWindow\.getOpacity\(\) > 0 \|\| this\.opacityTimeout !== null\)/);
 });
 
@@ -101,11 +101,15 @@ test('main: helper windows are preloaded after the launcher paints, not at start
 
 // ---- Review 2026-11-21 (Codex) ----
 
-test('a Ctrl+B held before paint keeps its display target', () => {
+test('a Ctrl+B held before paint keeps the display it was pressed on', () => {
   const g = new LauncherShowGate();
-  g.requestShow(true, { onCurrentDisplay: true });
+  g.requestShow(true, { targetDisplayId: 7 });
   g.requestShow(false); // a later plain show does not drop it
-  assert.deepEqual(g.markPainted(), { inactive: false, onCurrentDisplay: true });
+  assert.deepEqual(g.markPainted(), { inactive: false, targetDisplayId: 7 });
+  const g2 = new LauncherShowGate();
+  g2.requestShow(true, { targetDisplayId: 7 });
+  g2.requestShow(true, { targetDisplayId: 9 }); // the latest press wins
+  assert.equal(g2.markPainted().targetDisplayId, 9);
 });
 
 test('first paint does not override a newer mode decision', () => {
@@ -118,8 +122,10 @@ test('WindowHelper: first paint applies the held display target and respects the
   const src = read('WindowHelper.ts');
   const m = src.slice(src.indexOf('private markLauncherFirstPaint('), src.indexOf('private armLauncherRecovery('));
   assert.match(m, /shouldShowAtFirstPaint\(\{ mode: this\.currentWindowMode, launcherShowOwed: this\.launcherShowOwed \}\)/);
-  assert.match(m, /if \(held\?\.onCurrentDisplay\) this\.prepareShortcutRestore\(\);\s*[\s\S]*?this\.switchToLauncher\(/);
-  assert.match(src, /this\.launcherShowGate\.requestShow\(true, \{ onCurrentDisplay \}\)/);
+  assert.match(m, /if \(held && held\.targetDisplayId !== null\) this\.prepareShortcutRestore\(held\.targetDisplayId\);\s*[\s\S]*?this\.switchToLauncher\(/);
+  // Resolved when pressed; a display that went away falls back to the current target.
+  const prep = src.slice(src.indexOf('public prepareShortcutRestore('));
+  assert.match(prep.slice(0, 600), /const pinned = targetDisplayId != null \? screen\.getAllDisplays\(\)\.find\(\(d\) => d\.id === targetDisplayId\) : undefined;\s*const display = pinned \?\? shortcutRestoreDisplay\(/);
 });
 
 test('WindowHelper: a hang restart is reloaded by one owner only', () => {
@@ -130,16 +136,32 @@ test('WindowHelper: a hang restart is reloaded by one owner only', () => {
   assert.match(r, /webContents\.on\('render-process-gone', \(\) => \{\s*if \(this\.launcherHangTimer\)/);
 });
 
-test('IPC launcher reveals wait for the first paint', () => {
+test('IPC launcher navigation waits until the page listens; showing waits for the paint', () => {
   const ipc = read('ipcHandlers.ts');
-  for (const channel of ["'settings:open-tab'", "'notes-window:open-meeting'"]) {
-    const i = ipc.indexOf(`safeHandle(${channel}`);
+  for (const [handler, channel] of [["'settings:open-tab'", 'settings:open-tab'], ["'notes-window:open-meeting'", 'launcher:open-meeting']]) {
+    const i = ipc.indexOf(`safeHandle(${handler}`);
     const body = ipc.slice(i, i + 1500);
-    const gateAt = body.indexOf('onLauncherFirstPaint(');
-    assert.ok(gateAt > 0, `${channel} goes through onLauncherFirstPaint`);
-    assert.ok(body.indexOf('launcherWin.show()') > gateAt, `${channel} shows only inside the paint callback`);
-    assert.ok(body.indexOf('webContents.send(') > gateAt, `${channel} navigates only inside the paint callback`);
+    const at = body.indexOf(`sendToLauncherWhenListening('${channel}'`);
+    assert.ok(at > 0, `${handler} queues ${channel} until the launcher listens`);
+    assert.ok(body.indexOf('launcherWin.show()') > at, `${handler} shows only in the after-callback`);
+    assert.equal(body.indexOf('webContents.send('), -1, `${handler} never sends directly`);
   }
+  const wh = read('WindowHelper.ts');
+  assert.match(wh, /ipcMain\.on\('launcher:listening'[\s\S]*?event\.sender\.id !== launcher\.webContents\.id/);
+  assert.match(wh, /private deliverToLauncher\([\s\S]*?webContents\.send\(channel, \.\.\.args\);[\s\S]*?if \(after\) this\.onLauncherFirstPaint\(after\);/);
+  assert.match(wh, /if \(mainFrame && !sameDocument\) this\.launcherListening\.clear\(\);/);
+  const pre = read('preload.ts');
+  assert.match(pre, /ipcRenderer\.on\('settings:open-tab', subscription\);[\s\S]{0,200}ipcRenderer\.send\('launcher:listening', 'settings:open-tab'\)/);
+  assert.match(pre, /ipcRenderer\.on\('launcher:open-meeting', subscription\);[\s\S]{0,200}ipcRenderer\.send\('launcher:listening', 'launcher:open-meeting'\)/);
+});
+
+test('screenshot: an invalidated attempt is never returned; two in a row fall back to hiding', () => {
+  const main = read('main.ts');
+  const c = main.slice(main.indexOf('private async captureExcludingWindows'), main.indexOf('private async runExclusionCapture'));
+  assert.match(c, /for \(let attempt = 1; attempt <= 2; attempt\+\+\) \{[\s\S]*?if \(!windowsChanged\) return \{ ok: true, result \};[\s\S]*?deleteScreenshot\(result\)[\s\S]*?\}\s*return \{ ok: false \};/);
+  assert.doesNotMatch(c, /attempt >= 2\) return result/);
+  const w = main.slice(main.indexOf('private async withScreenshotCaptureSession'));
+  assert.match(w.slice(0, 1200), /const outcome = await this\.runExclusionCapture\(session, capture\);\s*if \(outcome\.ok\) return outcome\.result;/);
 });
 
 test('cropper: a late-painting cold cropper is shown only for a selection still waiting', () => {

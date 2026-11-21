@@ -9626,12 +9626,15 @@ export class AppState {
    * overlay never blinks, focus and stealth typing are untouched, and there is
    * no restore cost. Region capture keeps the hide path because the user
    * selects over the screen with the cropper. macOS keeps the hide path.
-   * Caller has already set screenshotCaptureInProgress.
+   * Caller has already set screenshotCaptureInProgress, and clears it.
+   * Returns { ok: false } when windows kept appearing in both attempts: every
+   * invalidated result has been discarded, and the caller falls back to the
+   * hide path.
    */
   private async captureExcludingWindows<T>(
     session: ScreenshotCaptureSession,
     capture: (session: ScreenshotCaptureSession) => Promise<T>
-  ): Promise<T> {
+  ): Promise<{ ok: true; result: T } | { ok: false }> {
     // While this runs, every visible window must stay excluded, whatever else
     // happens: setUndetectable() is deferred until the capture ends (it would
     // otherwise clear protection on windows this pass relied on), and a window
@@ -9661,17 +9664,20 @@ export class AppState {
         exclude(win, false);
       }
       app.on('browser-window-created', onCreated);
-      for (let attempt = 1; ; attempt++) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
         windowsChanged = false;
         // Only when something was just excluded must the frame be newer than that.
         this.screenshotExclusionWaitFrames = toggled.size > 0 ? EXCLUSION_SETTLE_FRAMES : 0;
         const result = await capture(session);
-        if (!windowsChanged || attempt >= 2) return result;
-        console.warn('[AppState] a window appeared during the screenshot; capturing again');
+        if (!windowsChanged) return { ok: true, result };
+        // A window appeared during this attempt: the image may contain it.
+        // Never return it.
+        console.warn(`[AppState] a window appeared during the screenshot (attempt ${attempt}); discarding it`);
         if (typeof result === 'string') {
           try { await this.deleteScreenshot(result); } catch { /* best-effort */ }
         }
       }
+      return { ok: false };
     } finally {
       app.removeListener('browser-window-created', onCreated);
       for (const [win, fn] of showListeners) {
@@ -9688,11 +9694,32 @@ export class AppState {
         }
       }
       this.captureExclusionActive = false;
-      this.screenshotCaptureInProgress = false;
       const deferred = this.deferredUndetectable;
       this.deferredUndetectable = undefined;
       if (deferred !== undefined) this.setUndetectable(deferred);
     }
+  }
+
+  /**
+   * captureExcludingWindows() plus the in-progress flag: cleared on success or
+   * throw; left set on { ok: false }, where the caller goes on to the hide path
+   * (whose finally clears it), because windows kept appearing in both attempts
+   * and an image that may show them must not be returned.
+   */
+  private async runExclusionCapture<T>(
+    session: ScreenshotCaptureSession,
+    capture: (session: ScreenshotCaptureSession) => Promise<T>
+  ): Promise<{ ok: true; result: T } | { ok: false }> {
+    let outcome: { ok: true; result: T } | { ok: false };
+    try {
+      outcome = await this.captureExcludingWindows(session, capture);
+    } catch (e) {
+      this.screenshotCaptureInProgress = false;
+      throw e;
+    }
+    if (outcome.ok) this.screenshotCaptureInProgress = false;
+    else console.warn('[AppState] windows kept appearing during the screenshot; capturing with windows hidden');
+    return outcome;
   }
 
   private async withScreenshotCaptureSession<T>(
@@ -9712,7 +9739,8 @@ export class AppState {
     this.screenshotCaptureInProgress = true;
 
     if (captureKind === 'full' && canExcludeFromCaptureWithoutHiding(process.platform, os.release())) {
-      return this.captureExcludingWindows(session, capture);
+      const outcome = await this.runExclusionCapture(session, capture);
+      if (outcome.ok) return outcome.result;
     }
 
     try {

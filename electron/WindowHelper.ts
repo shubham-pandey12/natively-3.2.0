@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, screen, systemPreferences } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, screen, systemPreferences } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppState } from './main';
@@ -81,6 +81,12 @@ export class WindowHelper {
   private launcherHangTimer: NodeJS.Timeout | null = null;
   private launcherHangRestarts = 0;
   private launcherFallbackBackground = false;
+  // Launcher channels its page has subscribed to (preload reports each one on
+  // 'launcher:listening'); navigation waits for that, not for a paint, which
+  // the watchdog can fake. Reset whenever the page reloads.
+  private launcherListening = new Set<string>();
+  private launcherNavQueue = new Map<string, { args: unknown[]; after?: () => void }>();
+  private static launcherListeningIpcAttached = false;
   // Stop with the notepad open (2026-10-31): launcher mode is entered but its
   // window waits until the notepad is closed (switchToLauncher's `hidden`).
   private launcherShowOwed = false;
@@ -808,6 +814,18 @@ export class WindowHelper {
     };
 
     this.launcherShowGate.reset();
+    this.attachLauncherListeningIpc();
+    this.launcherListening.clear();
+    {
+      const wc = this.launcherWindow.webContents;
+      // A new document or a dead renderer has no listeners yet.
+      wc.on('did-start-navigation', (details: any, _url?: string, isInPlace?: boolean, isMainFrame?: boolean) => {
+        const mainFrame = details && typeof details === 'object' && 'isMainFrame' in details ? details.isMainFrame : isMainFrame;
+        const sameDocument = details && typeof details === 'object' && 'isSameDocument' in details ? details.isSameDocument : isInPlace;
+        if (mainFrame && !sameDocument) this.launcherListening.clear();
+      });
+      wc.on('render-process-gone', () => this.launcherListening.clear());
+    }
     this.launcherPaintReloads = 0;
     this.launcherHangRestarts = 0;
     loadLauncher();
@@ -2537,7 +2555,9 @@ export class WindowHelper {
     });
     if (action === 'hold-show') {
       console.log('[WindowHelper] Toggle before the launcher painted: it will show when ready');
-      this.launcherShowGate.requestShow(true, { onCurrentDisplay });
+      this.launcherShowGate.requestShow(true, {
+        targetDisplayId: onCurrentDisplay ? (this.shortcutTargetDisplay()?.id ?? null) : null,
+      });
       return;
     }
     if (action === 'hide') {
@@ -2568,11 +2588,24 @@ export class WindowHelper {
   }
 
   /** Position before show/expand, synchronously on Electron's main process. */
-  public prepareShortcutRestore(): void {
+  /** The display a Cmd/Ctrl+B restore would target right now. */
+  private shortcutTargetDisplay(): Electron.Display | null {
+    const win = this.getMainWindow();
+    if (!win || win.isDestroyed()) return null;
+    return shortcutRestoreDisplay(screen, BrowserWindow.getFocusedWindow(), win.getBounds());
+  }
+
+  /**
+   * `targetDisplayId`: restore onto that display (a shortcut pressed before the
+   * launcher painted resolved it at press time). Falls back to the current
+   * target if that display is gone.
+   */
+  public prepareShortcutRestore(targetDisplayId?: number | null): void {
     const win = this.getMainWindow();
     if (!win || win.isDestroyed()) return;
     const bounds = win.getBounds();
-    const display = shortcutRestoreDisplay(screen, BrowserWindow.getFocusedWindow(), bounds);
+    const pinned = targetDisplayId != null ? screen.getAllDisplays().find((d) => d.id === targetDisplayId) : undefined;
+    const display = pinned ?? shortcutRestoreDisplay(screen, BrowserWindow.getFocusedWindow(), bounds);
     const launcher = this.currentWindowMode === 'launcher';
     let restoreBounds = bounds;
     if (launcher) {
@@ -2843,6 +2876,45 @@ export class WindowHelper {
     return this.overlayHeldHidden;
   }
 
+  private attachLauncherListeningIpc(): void {
+    if (WindowHelper.launcherListeningIpcAttached) return;
+    WindowHelper.launcherListeningIpcAttached = true;
+    ipcMain.on('launcher:listening', (event, channel: unknown) => {
+      const launcher = this.launcherWindow;
+      if (typeof channel !== 'string' || !launcher || launcher.isDestroyed()) return;
+      if (event.sender.id !== launcher.webContents.id) return; // other windows share the preload
+      this.launcherListening.add(channel);
+      const queued = this.launcherNavQueue.get(channel);
+      if (queued) {
+        this.launcherNavQueue.delete(channel);
+        this.deliverToLauncher(channel, queued.args, queued.after);
+      }
+    });
+  }
+
+  private deliverToLauncher(channel: string, args: unknown[], after?: () => void): void {
+    const launcher = this.launcherWindow;
+    if (!launcher || launcher.isDestroyed()) return;
+    launcher.webContents.send(channel, ...args);
+    // Showing still waits for the first paint (an unpainted launcher is an
+    // invisible window on win32).
+    if (after) this.onLauncherFirstPaint(after);
+  }
+
+  /**
+   * Send a navigation message to the launcher page once it is listening on
+   * `channel` (now, if it already is), then run `after` once it has painted.
+   * Until then the request is kept — the latest per channel — instead of being
+   * sent to a page that would drop it.
+   */
+  public sendToLauncherWhenListening(channel: string, args: unknown[], after?: () => void): void {
+    if (this.launcherListening.has(channel)) {
+      this.deliverToLauncher(channel, args, after);
+      return;
+    }
+    this.launcherNavQueue.set(channel, { args, after });
+  }
+
   /** Run `cb` once the launcher has first painted (on the next tick if it already has). */
   public onLauncherFirstPaint(cb: () => void): void {
     if (this.launcherShowGate.isPainted()) setImmediate(cb);
@@ -2857,8 +2929,8 @@ export class WindowHelper {
     const show = shouldShowAtFirstPaint({ mode: this.currentWindowMode, launcherShowOwed: this.launcherShowOwed });
     console.log(`[WindowHelper] Launcher first paint (${reason})${show ? (held ? `; showing held request (inactive: ${held.inactive})` : '') : `; not shown (mode=${this.currentWindowMode}${this.launcherShowOwed ? ', owed' : ''})`}`);
     if (show) {
-      // A Cmd/Ctrl+B pressed while it loaded asked for the cursor's display.
-      if (held?.onCurrentDisplay) this.prepareShortcutRestore();
+      // A Cmd/Ctrl+B pressed while it loaded: the display it was pressed on.
+      if (held && held.targetDisplayId !== null) this.prepareShortcutRestore(held.targetDisplayId);
       // Cold start shows the launcher, as before; a show requested while it
       // was loading decides whether it takes focus.
       this.switchToLauncher(held ? held.inactive : undefined);

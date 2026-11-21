@@ -1839,6 +1839,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onOpenSettingsTab: (callback: (tab: string) => void) => {
     const subscription = (_: any, tab: string) => callback(tab);
     ipcRenderer.on('settings:open-tab', subscription);
+    // Main queues settings:open-tab until the launcher page says it listens.
+    ipcRenderer.send('launcher:listening', 'settings:open-tab');
     return () => {
       ipcRenderer.removeListener('settings:open-tab', subscription);
     };
@@ -3222,6 +3224,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onLauncherOpenMeeting: (callback: (meetingId: string) => void) => {
     const subscription = (_: any, value: any) => callback(String(value));
     ipcRenderer.on('launcher:open-meeting', subscription);
+    // Main queues launcher:open-meeting until the launcher page says it listens.
+    ipcRenderer.send('launcher:listening', 'launcher:open-meeting');
     return () => {
       ipcRenderer.removeListener('launcher:open-meeting', subscription);
     };

@@ -17,7 +17,7 @@
  * dev:agent, but no CDP port.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, cpSync, existsSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { cpSync, existsSync, renameSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -76,44 +76,54 @@ export function seedProfile({ real, local }, { reseed = false, now = Date.now(),
 /**
  * One start:local per profile. The app skips Electron's single-instance lock
  * for this profile (NATIVELY_AGENT_USER_DATA), so two launches would both open
- * the same writable profile (DB, settings, keys). The lock file sits NEXT TO
- * the profile so --reseed (which renames the profile aside) cannot move it.
- * A lock left by a process that is gone is taken over.
- * Returns a release function.
+ * the same writable profile (DB, settings, keys).
+ *
+ * The lock is a listening socket on a localhost port derived from the profile
+ * path: binding is atomic, the OS releases it when the process exits (crash
+ * included), and it behaves the same on Windows and macOS. A lock FILE had a
+ * window between create and owner write in which a second launch read it as
+ * stale and took it over. A connection to the port gets a banner naming the
+ * profile, so a foreign program on that port is reported, not mistaken for us.
+ * Resolves to a release function.
  */
-export function acquireProfileLock(local, { pid = process.pid, isAlive = processAlive } = {}) {
-  const lockPath = `${local}.start-local.lock`;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(lockPath, 'wx');
-      writeSync(fd, String(pid));
-      closeSync(fd);
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        try { rmSync(lockPath, { force: true }); } catch { /* already gone */ }
-      };
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error;
-      let owner = NaN;
-      try { owner = Number.parseInt(readFileSync(lockPath, 'utf8'), 10); } catch { /* unreadable: treat as stale */ }
-      if (Number.isInteger(owner) && owner > 0 && owner !== pid && isAlive(owner)) {
-        throw new Error(`start:local is already running on ${local} (pid ${owner}); close it first`);
-      }
-      rmSync(lockPath, { force: true });
-    }
+export function profileLockPort(local) {
+  // FNV-1a over the case-folded path (NTFS/APFS are case-insensitive).
+  let h = 0x811c9dc5;
+  for (const ch of path.resolve(local).toLowerCase()) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
   }
-  throw new Error(`could not lock ${local}`);
+  return 49152 + (h % 16000);
 }
 
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0); // signal 0: existence check only, on Windows and macOS
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
+export function acquireProfileLock(local, { port = profileLockPort(local) } = {}) {
+  const banner = `natively-start-local ${path.resolve(local).toLowerCase()}\n`;
+  return new Promise((resolve, reject) => {
+    const server = createServer((socket) => socket.end(banner));
+    server.once('error', (error) => {
+      if (error?.code !== 'EADDRINUSE') { reject(error); return; }
+      const probe = connect(port, '127.0.0.1');
+      let text = '';
+      probe.setTimeout(2000);
+      probe.on('data', (chunk) => { text += chunk; });
+      probe.on('timeout', () => probe.destroy());
+      probe.on('close', () => {
+        reject(new Error(text === banner
+          ? `start:local is already running on ${local}; close it first`
+          : `port ${port} (the start:local lock for ${local}) is in use by another program`));
+      });
+      probe.on('error', () => { /* reported on close */ });
+    });
+    server.listen({ port, host: '127.0.0.1', exclusive: true }, () => {
+      server.unref();
+      let released = false;
+      resolve(() => {
+        if (released) return;
+        released = true;
+        server.close();
+      });
+    });
+  });
 }
 
 function freePort() {
@@ -147,7 +157,8 @@ function waitForPort(port, timeoutMs = 60_000) {
 async function main() {
   const reseed = process.argv.includes('--reseed');
   const profile = profilePaths(process.platform);
-  const releaseLock = acquireProfileLock(profile.local);
+  // Held for this launcher's lifetime; the OS drops it when we exit.
+  const releaseLock = await acquireProfileLock(profile.local);
   process.on('exit', releaseLock);
   seedProfile(profile, { reseed });
   console.log(`[start:local] userData=${profile.local}`);

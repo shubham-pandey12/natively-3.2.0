@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { acquireProfileLock, profilePaths, seedProfile, shouldCopy } from './start-local.mjs';
+import { acquireProfileLock, profileLockPort, profilePaths, seedProfile, shouldCopy } from './start-local.mjs';
 
 test('separate profile paths for win32 and darwin, unsupported elsewhere', () => {
   assert.deepEqual(profilePaths('win32', { APPDATA: 'C:\\Users\\a b\\AppData\\Roaming' }), {
@@ -43,19 +43,33 @@ test('seeding copies keys and settings, skips caches, and never overwrites', (t)
   assert.ok(readdirSync(dir).includes('natively-local.old-1'), 'old profile is kept aside, not deleted');
 });
 
-test('one start:local per profile; a stale lock is taken over; release frees it', (t) => {
+test('one start:local per profile: atomic, released on close, foreign port reported', async (t) => {
+  const { createServer } = await import('node:net');
   const dir = mkdtempSync(path.join(tmpdir(), 'start local lock '));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const local = path.join(dir, 'natively-local');
-  const release = acquireProfileLock(local, { pid: 111, isAlive: () => true });
-  assert.ok(existsSync(`${local}.start-local.lock`));
-  assert.throws(() => acquireProfileLock(local, { pid: 222, isAlive: () => true }), /already running .*pid 111/);
-  // Owner gone: the second launch takes the lock over.
-  const release2 = acquireProfileLock(local, { pid: 222, isAlive: () => false });
-  assert.equal(readFileSync(`${local}.start-local.lock`, 'utf8'), '222');
-  release2();
-  release(); // releasing twice / after takeover is harmless
-  assert.ok(!existsSync(`${local}.start-local.lock`));
-  const release3 = acquireProfileLock(local, { pid: 333 });
-  release3();
+  const port = 40000 + Math.floor(Math.random() * 5000);
+  // Two launches racing: exactly one wins.
+  const results = await Promise.allSettled([acquireProfileLock(local, { port }), acquireProfileLock(local, { port })]);
+  const won = results.filter((r) => r.status === 'fulfilled');
+  const lost = results.filter((r) => r.status === 'rejected');
+  assert.equal(won.length, 1);
+  assert.match(lost[0].reason.message, /already running/);
+  won[0].value();
+  await new Promise((r) => setTimeout(r, 50));
+  const again = await acquireProfileLock(local, { port });
+  again();
+  again(); // releasing twice is harmless
+  // Something else on the port is reported as such, never as "us".
+  const foreign = createServer((s) => s.end('hello\n'));
+  await new Promise((r) => foreign.listen(port, '127.0.0.1', r));
+  t.after(() => foreign.close());
+  await new Promise((r) => setTimeout(r, 50));
+  await assert.rejects(acquireProfileLock(local, { port }), /in use by another program/);
+});
+
+test('lock port is stable per profile, case-insensitive, in the dynamic range', () => {
+  const a = profileLockPort('C:\\Users\\A\\AppData\\Roaming\\natively-local');
+  assert.equal(a, profileLockPort('c:\\users\\a\\appdata\\roaming\\NATIVELY-LOCAL'));
+  assert.ok(a >= 49152 && a < 65152);
 });

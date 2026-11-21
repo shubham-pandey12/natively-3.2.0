@@ -8165,12 +8165,10 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle('settings:open-tab', (_, tab: string) => {
     const launcherWin = appState.getWindowHelper().getLauncherWindow();
     if (!launcherWin || launcherWin.isDestroyed()) return;
-    // After the launcher's first paint (WindowHelper.onLauncherFirstPaint): an
-    // unpainted launcher is an invisible window on win32, and its page would not
-    // be listening for the navigation yet.
-    appState.getWindowHelper().onLauncherFirstPaint(() => {
+    // Sent once the launcher page listens for it, shown once it has painted
+    // (an unpainted launcher is an invisible window on win32).
+    appState.getWindowHelper().sendToLauncherWhenListening('settings:open-tab', [tab], () => {
       if (launcherWin.isDestroyed()) return;
-      launcherWin.webContents.send('settings:open-tab', tab);
       if (appState.getUndetectable()) {
         // This is the ONE launcher show that does not funnel through
         // WindowHelper.switchToLauncher() (which re-asserts stealth centrally).
@@ -18925,10 +18923,9 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (typeof meetingId !== 'string' || !meetingId) return { success: false };
     const launcherWin = appState.getWindowHelper().getLauncherWindow();
     if (!launcherWin || launcherWin.isDestroyed()) return { success: false };
-    // As settings:open-tab: only once the launcher has painted.
-    appState.getWindowHelper().onLauncherFirstPaint(() => {
+    // As settings:open-tab: sent once the page listens, shown once painted.
+    appState.getWindowHelper().sendToLauncherWhenListening('launcher:open-meeting', [meetingId], () => {
       if (launcherWin.isDestroyed()) return;
-      launcherWin.webContents.send('launcher:open-meeting', meetingId);
       if (appState.getUndetectable()) {
         // As settings:open-tab: a launcher show outside switchToLauncher re-drives stealth.
         launcherWin.showInactive();
