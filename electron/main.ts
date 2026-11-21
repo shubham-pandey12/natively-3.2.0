@@ -652,6 +652,9 @@ function writeProcessReport(label: string): string | null {
   }
 }
 
+/** Delay after the launcher's first paint before helper windows are preloaded. */
+const STARTUP_DEFERRED_WINDOW_DELAY_MS = 1500;
+
 function logStartupPhase(phase: string, meta: Record<string, unknown> = {}): void {
   logToFile(`[STARTUP:${phase}] ${safeJsonForLog(getCrashDiagnostics(meta))}`);
   // The crash report says how far startup got (app_run_ended startup_phase).
@@ -1938,7 +1941,13 @@ export class AppState {
     });
 
     if (process.platform === 'win32' || process.platform === 'darwin') {
-      this.cropperWindowHelper.preload();
+      // After the launcher is on screen: each preloaded window is a renderer
+      // loading the full UI bundle, and at startup they competed with the
+      // launcher's first paint (7 windows at once). showCropper() creates the
+      // window itself if a screenshot comes first.
+      this.windowHelper.onLauncherFirstPaint(() => {
+        setTimeout(() => this.cropperWindowHelper.preload(), STARTUP_DEFERRED_WINDOW_DELAY_MS);
+      });
     }
 
     // Warm the local Whisper worker in the background so the first recording
@@ -11911,9 +11920,15 @@ if (process.env.THINKING_MATRIX === '1') {
     console.warn('[Main] screen display listeners unavailable — display-change shortcut recovery disabled:', err);
   }
 
-  // Pre-create detached overlay companion windows in background for faster first open
-  appState.settingsWindowHelper.preloadWindow()
-  appState.modelSelectorWindowHelper.preloadWindow()
+  // Pre-create detached overlay companion windows in background for faster
+  // first open — after the launcher is on screen, so they do not compete with
+  // its first paint. Both create their window on demand if opened sooner.
+  appState.getWindowHelper().onLauncherFirstPaint(() => {
+    setTimeout(() => {
+      appState.settingsWindowHelper.preloadWindow()
+      appState.modelSelectorWindowHelper.preloadWindow()
+    }, STARTUP_DEFERRED_WINDOW_DELAY_MS)
+  })
 
   // Restore Phone Mirror service if it was enabled in a previous session.
   // Failure here is non-fatal — the user can re-enable from Settings.

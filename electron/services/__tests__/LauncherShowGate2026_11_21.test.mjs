@@ -90,3 +90,10 @@ test('WindowHelper: never-painting or hung launcher is recovered, bounded', () =
   assert.match(r, /LAUNCHER_MAX_HANG_RESTARTS/);
   assert.match(src, /this\.launcherWindow = null;\s*this\.clearLauncherRecoveryTimers\(\);/);
 });
+
+test('main: helper windows are preloaded after the launcher paints, not at startup', () => {
+  const main = read('main.ts');
+  assert.match(main, /onLauncherFirstPaint\(\(\) => \{\s*setTimeout\(\(\) => this\.cropperWindowHelper\.preload\(\), STARTUP_DEFERRED_WINDOW_DELAY_MS\);/);
+  assert.match(main, /onLauncherFirstPaint\(\(\) => \{\s*setTimeout\(\(\) => \{\s*appState\.settingsWindowHelper\.preloadWindow\(\)\s*appState\.modelSelectorWindowHelper\.preloadWindow\(\)/);
+  assert.doesNotMatch(main, /^\s*appState\.settingsWindowHelper\.preloadWindow\(\)\n\s*appState\.modelSelectorWindowHelper\.preloadWindow\(\)\n\n/m);
+});
