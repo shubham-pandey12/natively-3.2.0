@@ -27,6 +27,7 @@
     "electron:dev:ultra": "concurrently --kill-others --kill-signal SIGKILL \"npm run dev -- --host 127.0.0.1 --port 5180 --strictPort\" \"wait-on http://127.0.0.1:5180 && cross-env NATIVELY_CORE_SMOKE=1 npm run build:electron && cross-env NODE_ENV=development NATIVELY_DEV_PREMIUM=1 NATIVELY_DEV_PLAN=ultra electron .\"",
     "app:dev": "concurrently --kill-others --kill-signal SIGKILL \"npm run dev -- --host 127.0.0.1 --port 5180 --strictPort\" \"wait-on http://127.0.0.1:5180 && npm run electron:dev\"",
     "dev:agent": "node scripts/dev-agent.mjs",
+    "start:local": "node scripts/start-local.mjs",
     "parity": "node scripts/parity/run.mjs",
     "update:check": "node scripts/update/check.mjs",
     "update:prepare": "node scripts/update/prepare.mjs",
