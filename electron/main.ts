@@ -21,6 +21,8 @@ import * as crypto from "crypto"
 import path from "path"
 import fs from "fs"
 import os from "os"
+import { canExcludeFromCaptureWithoutHiding } from "./services/screen/captureExclusion"
+import { EXCLUSION_SETTLE_FRAMES } from "./services/screen/WindowsFrameGrabber"
 import { windowsMicBlocker, windowsMicPage } from '../src/lib/micPermissionPolicy.mjs'
 import { SystemAudioHealthClassifier, peakToPeakInt16LE } from "./audio/systemAudioHealthClassifier.mjs"
 import { classifySttError } from "./audio/sttErrorClassifier.mjs"
@@ -1898,6 +1900,14 @@ export class AppState {
 
     // 3. Initialize other helpers
     this.screenshotHelper = new ScreenshotHelper(this.view)
+    // Windows only (no-op on macOS): enumerate screens once while idle so the
+    // first screenshot does not pay desktopCapturer's main-thread block.
+    setTimeout(() => {
+      try {
+        const d = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+        this.screenshotHelper?.prewarmCapture(d)
+      } catch { this.screenshotHelper?.prewarmCapture() }
+    }, 8000).unref?.()
     // Saved provider vision answers (2026-10-01). Before ProcessingHelper,
     // because its setModel at startup may refresh OpenRouter's catalogue, and
     // after dev:agent's userData override (module load, above whenReady).
@@ -9592,6 +9602,44 @@ export class AppState {
     }
   }
 
+  // Set only while a no-hide (content-protected) full capture runs.
+  private screenshotExclusionWaitFrames = 0;
+
+  /**
+   * Windows 10 2004+ full screenshots: keep every window on screen and only
+   * exclude it from the capture (WDA_EXCLUDEFROMCAPTURE). No hide/show, so the
+   * overlay never blinks, focus and stealth typing are untouched, and there is
+   * no restore cost. Region capture keeps the hide path because the user
+   * selects over the screen with the cropper. macOS keeps the hide path.
+   * Caller has already set screenshotCaptureInProgress.
+   */
+  private async captureExcludingWindows<T>(
+    session: ScreenshotCaptureSession,
+    capture: (session: ScreenshotCaptureSession) => Promise<T>
+  ): Promise<T> {
+    const toggled: BrowserWindow[] = [];
+    try {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed() || !win.isVisible() || win.isContentProtected()) continue;
+        win.setContentProtection(true);
+        toggled.push(win);
+      }
+      // Only when something was just excluded must the frame be newer than that.
+      this.screenshotExclusionWaitFrames = toggled.length > 0 ? EXCLUSION_SETTLE_FRAMES : 0;
+      return await capture(session);
+    } finally {
+      this.screenshotExclusionWaitFrames = 0;
+      for (const win of toggled) {
+        try {
+          if (!win.isDestroyed()) win.setContentProtection(this.isUndetectable);
+        } catch (e) {
+          console.warn('[AppState] failed to restore content protection after screenshot:', e);
+        }
+      }
+      this.screenshotCaptureInProgress = false;
+    }
+  }
+
   private async withScreenshotCaptureSession<T>(
     captureKind: ScreenshotCaptureKind,
     restoreFocus: boolean,
@@ -9607,6 +9655,10 @@ export class AppState {
 
     const session = this.createScreenshotCaptureSession(captureKind, restoreFocus);
     this.screenshotCaptureInProgress = true;
+
+    if (captureKind === 'full' && canExcludeFromCaptureWithoutHiding(process.platform, os.release())) {
+      return this.captureExcludingWindows(session, capture);
+    }
 
     try {
       this.hideWindowsForScreenshot(session);
@@ -9631,7 +9683,9 @@ export class AppState {
   // Screenshot management methods
   public async takeScreenshot(restoreFocus: boolean = true): Promise<string> {
     return this.withScreenshotCaptureSession('full', restoreFocus, (session) =>
-      this.screenshotHelper.takeScreenshot(this.getTargetDisplayForFullScreenshot(session))
+      this.screenshotHelper.takeScreenshot(this.getTargetDisplayForFullScreenshot(session), {
+        waitNewFrames: this.screenshotExclusionWaitFrames,
+      })
     )
   }
 
@@ -12456,6 +12510,7 @@ if (process.env.THINKING_MATRIX === '1') {
     // unref'd, so even an unfinished close never holds the quit on either system.
     try { require('./services/outputs/outputsIpc').stopMcpServerOnQuit(); } catch { /* never blocks a quit */ }
     appState.stopNativeOomTraceSampling();
+    try { appState.getScreenshotHelper()?.disposeCapture(); } catch { /* quitting */ }
     nativeOomTrace.stop('will-quit');
     stopAppManagedHindsight('will-quit');
     checkpointDatabase('will-quit');

@@ -189,6 +189,8 @@ const ASSETS = [
   { from: 'electron/audio/riva_asr.proto', to: 'electron/audio/riva_asr.proto' },
   // Page of the Chromium audio capture fallback (electron/audio/fallback/captureHost.ts).
   { from: 'electron/audio/fallback/capture.html', to: 'electron/audio/fallback/capture.html' },
+  // Blank page for the Windows screenshot frame grab (electron/services/screen/WindowsFrameGrabber.ts).
+  { from: 'electron/services/screen/frameGrab.html', to: 'electron/services/screen/frameGrab.html' },
 ];
 
 const copyAssets = () => {

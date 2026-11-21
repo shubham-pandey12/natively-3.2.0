@@ -8,6 +8,7 @@ import util from "util"
 import sharp, { type OverlayOptions } from "sharp"
 import { exec as execShell } from "child_process"
 import { FORMULA_IMAGE_PREFIX } from "./services/formulaScreenshotHandoff"
+import { createElectronFrameGrabber, shouldUseRendererFrameGrab, type WindowsFrameGrabber } from "./services/screen/WindowsFrameGrabber"
 
 // Module-level: promisified shell exec created once per process lifetime.
 // Uses the shell-capable exec variant (not execFile) because Linux screenshot
@@ -495,6 +496,35 @@ export class ScreenshotHelper {
 
   private view: "queue" | "solutions" = "queue"
 
+  // Windows-only non-blocking capture (null elsewhere, or once disabled).
+  private frameGrabber: WindowsFrameGrabber | null | undefined = undefined
+
+  private getFrameGrabber(): WindowsFrameGrabber | null {
+    if (this.frameGrabber !== undefined) return this.frameGrabber
+    this.frameGrabber = null
+    if (!shouldUseRendererFrameGrab(process.platform)) return null
+    try {
+      this.frameGrabber = createElectronFrameGrabber()
+    } catch (err) {
+      console.warn('[ScreenshotHelper] Renderer frame grab unavailable:', (err as Error)?.message ?? err)
+    }
+    return this.frameGrabber
+  }
+
+  /**
+   * Windows: enumerate screens once ahead of the first screenshot so the
+   * first capture does not pay the ~1–2 s getSources() block. No-op elsewhere.
+   */
+  public prewarmCapture(display?: Electron.Display): void {
+    const grabber = this.getFrameGrabber()
+    const size = display ? { width: display.bounds.width, height: display.bounds.height } : undefined
+    grabber?.prewarm(display?.id, size).catch((err) => console.warn('[ScreenshotHelper] Capture prewarm failed:', (err as Error)?.message ?? err))
+  }
+
+  public disposeCapture(): void {
+    this.frameGrabber?.dispose()
+  }
+
   constructor(view: "queue" | "solutions" = "queue") {
     this.view = view
 
@@ -525,7 +555,8 @@ export class ScreenshotHelper {
   private async captureWithDesktopCapturer(
     outputPath: string,
     area?: Electron.Rectangle,
-    preferredDisplay?: Electron.Display
+    preferredDisplay?: Electron.Display,
+    opts: { waitNewFrames?: number } = {}
   ): Promise<void> {
     // Abort early if screen recording is not usable. assertScreenRecordingPermission()
     // covers all macOS TCC states (denied, restricted, not-determined) with clear
@@ -547,7 +578,53 @@ export class ScreenshotHelper {
     const displayBounds = targetDisplay.bounds;
     
     console.log(`[ScreenshotHelper] Target display bounds: ${JSON.stringify(displayBounds)}, scale: ${scaleFactor}`);
-    
+
+    // Windows: grab the frame in a hidden renderer instead of desktopCapturer,
+    // whose getSources() blocks the main process ~0.8–2 s per call on Windows
+    // and freezes every window (see WindowsFrameGrabber.ts). Any failure in the
+    // grab itself falls through to the desktopCapturer path below; an empty crop
+    // still fails loudly and never falls back to a full-screen capture.
+    const grabber = this.getFrameGrabber();
+    if (grabber) {
+      let frame: Awaited<ReturnType<WindowsFrameGrabber['grab']>> | null = null;
+      try {
+        frame = await grabber.grab(targetDisplay.id, { width: displayBounds.width, height: displayBounds.height }, opts);
+      } catch (grabError) {
+        console.warn('[ScreenshotHelper] Renderer frame grab failed, falling back to desktopCapturer:', (grabError as Error)?.message ?? grabError);
+      }
+      if (frame) {
+        let crop: { x: number; y: number; width: number; height: number } | undefined;
+        if (area) {
+          const sourceSize = { width: frame.width, height: frame.height };
+          crop = computeThumbnailCrop(sourceSize, displayBounds, area);
+          if (crop.width <= 0 || crop.height <= 0) {
+            grabber.release();
+            throw new Error(
+              `Region capture failed: selection did not map to a valid crop ` +
+              `(area=${JSON.stringify(area)}, thumbnail=${sourceSize.width}x${sourceSize.height}, ` +
+              `computed=${JSON.stringify(crop)}).`
+            );
+          }
+        }
+        let png: Buffer | null = null;
+        try {
+          png = await frame.encode(crop);
+        } catch (encodeError) {
+          console.warn('[ScreenshotHelper] Renderer frame encode failed, falling back to desktopCapturer:', (encodeError as Error)?.message ?? encodeError);
+        }
+        if (png) {
+          try {
+            await fs.promises.writeFile(outputPath, png);
+          } catch (writeError) {
+            console.error('[ScreenshotHelper] Failed to write screenshot to disk:', writeError);
+            throw new Error(`Failed to save screenshot: ${(writeError as Error).message}`);
+          }
+          console.log(`[ScreenshotHelper] Screenshot saved (renderer grab ${frame.width}x${frame.height}) to: ${outputPath}`);
+          return;
+        }
+      }
+    }
+
     let sources: Electron.DesktopCapturerSource[];
 
     try {
@@ -713,7 +790,7 @@ export class ScreenshotHelper {
     throw new Error(`Unsupported platform for screenshots: ${platform}`);
   }
 
-  public async takeScreenshot(preferredDisplay?: Electron.Display): Promise<string> {
+  public async takeScreenshot(preferredDisplay?: Electron.Display, opts: { waitNewFrames?: number } = {}): Promise<string> {
     try {
       console.log('[ScreenshotHelper] Taking screenshot...');
 
@@ -731,7 +808,7 @@ export class ScreenshotHelper {
         // meeting was on. (Selective/cropper capture was unaffected — it passes
         // an explicit area, which routes through getDisplayContainingRect.)
         if (process.platform === 'darwin' || process.platform === 'win32') {
-          await this.captureWithDesktopCapturer(screenshotPath, undefined, preferredDisplay);
+          await this.captureWithDesktopCapturer(screenshotPath, undefined, preferredDisplay, opts);
         } else {
           await shellExecAsync(this.getScreenshotCommand(screenshotPath, false))
         }
@@ -749,7 +826,7 @@ export class ScreenshotHelper {
         // meeting was on. (Selective/cropper capture was unaffected — it passes
         // an explicit area, which routes through getDisplayContainingRect.)
         if (process.platform === 'darwin' || process.platform === 'win32') {
-          await this.captureWithDesktopCapturer(screenshotPath, undefined, preferredDisplay);
+          await this.captureWithDesktopCapturer(screenshotPath, undefined, preferredDisplay, opts);
         } else {
           await shellExecAsync(this.getScreenshotCommand(screenshotPath, false))
         }
