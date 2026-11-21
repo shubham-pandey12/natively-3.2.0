@@ -225,3 +225,21 @@ test('a zero exit from parity still requires matching rows for every scenario', 
   assert.throws(() => requireMatchingParity(table.replace('MATCH | 0', 'DIFF | 1'), 'report.md'), /Parity did not match/);
   assert.throws(() => requireMatchingParity(table.split('\n').slice(1).join('\n'), 'report.md'), /Parity did not match/);
 });
+
+test('reads the Electron version and CPU type from binaries without executing them', async () => {
+  const { embeddedElectronVersion, binaryArchitectures, electronBinary } = await import('../archive.mjs');
+  assert.equal(embeddedElectronVersion(Buffer.from('xx Chrome/1 Electron/43.7.7 Safari Electron/43.7.7')), '43.7.7');
+  assert.throws(() => embeddedElectronVersion(Buffer.from('none')), /found none/);
+  assert.throws(() => embeddedElectronVersion(Buffer.from('Electron/1.0.0 Electron/2.0.0')), /exactly one/);
+  const pe = Buffer.alloc(0x100); pe.writeUInt16LE(0x5a4d, 0); pe.writeUInt32LE(0x80, 0x3c); pe.writeUInt16LE(0x8664, 0x84);
+  assert.deepEqual(binaryArchitectures(pe), ['x64']);
+  const thin = Buffer.alloc(16); thin.writeUInt32LE(0xfeedfacf, 0); thin.writeUInt32LE(0x0100000c, 4);
+  assert.deepEqual(binaryArchitectures(thin), ['arm64']);
+  const fat = Buffer.alloc(64); fat.writeUInt32BE(0xcafebabe, 0); fat.writeUInt32BE(2, 4);
+  fat.writeUInt32BE(0x01000007, 8); fat.writeUInt32BE(0x0100000c, 28);
+  assert.deepEqual(binaryArchitectures(fat), ['x64', 'arm64']);
+  assert.equal(electronBinary({ executable: 'C:\\A\\N.exe' }, 'win32'), 'C:\\A\\N.exe');
+  assert.equal(electronBinary({ install: '/Applications/Natively.app' }, 'darwin'),
+    '/Applications/Natively.app/Contents/Frameworks/Electron Framework.framework/Electron Framework');
+  assert.throws(() => electronBinary({}, 'linux'), /Unsupported platform/);
+});

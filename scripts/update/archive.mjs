@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { copyFile, cp, mkdir, mkdtemp, rename, rm, stat } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { FuseV1Options, getCurrentFuseWire } from '@electron/fuses';
 import {
@@ -78,11 +78,59 @@ export async function archiveRelease({ directory, installed, platform, version, 
   return { archived, extracted, hash, appVersion, reused: false };
 }
 
+// The binary that embeds Chromium's "Electron/<version>" user-agent token.
+export function electronBinary(app, platform) {
+  switch (platform) {
+    case 'win32': return app.executable;
+    case 'darwin': return path.posix.join(app.install, 'Contents', 'Frameworks',
+      'Electron Framework.framework', 'Electron Framework');
+    default: throw new Error(`Unsupported platform: ${platform}`);
+  }
+}
+
+// CPU types from a PE (Windows) or Mach-O (macOS, thin or universal) header.
+export function binaryArchitectures(bytes) {
+  const pe = { 0x8664: 'x64', 0xaa64: 'arm64', 0x14c: 'ia32' };
+  const macho = { 0x01000007: 'x64', 0x0100000c: 'arm64' };
+  if (bytes.readUInt16LE(0) === 0x5a4d) {
+    const at = bytes.readUInt32LE(0x3c);
+    return [pe[bytes.readUInt16LE(at + 4)] ?? 'unknown'];
+  }
+  if (bytes.readUInt32LE(0) === 0xfeedfacf) return [macho[bytes.readUInt32LE(4)] ?? 'unknown'];
+  if (bytes.readUInt32BE(0) === 0xcafebabe) {
+    const count = bytes.readUInt32BE(4);
+    return Array.from({ length: count }, (_, i) => macho[bytes.readUInt32BE(8 + i * 20)] ?? 'unknown');
+  }
+  return ['unknown'];
+}
+
+export function embeddedElectronVersion(bytes) {
+  const versions = new Set([...bytes.toString('latin1').matchAll(/Electron\/(\d+\.\d+\.\d+)/g)].map((m) => m[1]));
+  if (versions.size !== 1) {
+    throw new Error(`Expected exactly one embedded Electron version, found ${[...versions].join(', ') || 'none'}`);
+  }
+  return [...versions][0];
+}
+
+export async function embeddedElectron(app, platform) {
+  const bytes = await readFile(electronBinary(app, platform));
+  return { electron: embeddedElectronVersion(bytes), arch: binaryArchitectures(bytes) };
+}
+
 export async function verifyElectron(app, platform, arch, expected) {
   const fuses = await getCurrentFuseWire(platform === 'darwin' ? app.install : app.executable);
   // Electron encodes an enabled fuse as the ASCII byte for '1'.
   if (fuses[FuseV1Options.RunAsNode] !== '1'.charCodeAt(0)) {
-    throw new Error('Packaged Electron disables RunAsNode. Cannot read process.versions.electron for native compatibility.');
+    // Production Natively (3.2.1) disables RunAsNode, so read the version and CPU
+    // type from the Electron binary itself instead of executing it.
+    const { electron: actual, arch: packagedArch } = await embeddedElectron(app, platform);
+    if (actual !== expected) {
+      throw new Error(`Packaged Electron version ${actual} does not equal the repository devDependency ${expected}`);
+    }
+    if (!packagedArch.includes(arch)) {
+      throw new Error(`Packaged Electron architecture ${packagedArch.join('/')} does not match ${arch}`);
+    }
+    return actual;
   }
   const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
   delete env.NODE_OPTIONS;
