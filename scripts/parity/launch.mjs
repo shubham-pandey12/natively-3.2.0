@@ -19,12 +19,14 @@ export function platformPaths(platform, env = process.env, home = homedir()) {
     case 'win32':
       if (!env.APPDATA) throw new Error('APPDATA is required to locate the licence files');
       return {
-        executable: path.win32.join(env.ProgramW6432 ?? env.ProgramFiles ?? 'C:\\Program Files', 'audiodg', 'Natively', 'Natively.exe'),
+        executable: env.NATIVELY_PARITY_INSTALLED_EXECUTABLE
+          ?? path.win32.join(env.ProgramW6432 ?? env.ProgramFiles ?? 'C:\\Program Files', 'audiodg', 'Natively', 'Natively.exe'),
         licenceSource: path.win32.join(env.APPDATA, 'Natively'),
       };
     case 'darwin':
       return {
-        executable: path.posix.join('/Applications', 'Natively.app', 'Contents', 'MacOS', 'Natively'),
+        executable: env.NATIVELY_PARITY_INSTALLED_EXECUTABLE
+          ?? path.posix.join('/Applications', 'Natively.app', 'Contents', 'MacOS', 'Natively'),
         licenceSource: path.posix.join(home, 'Library', 'Application Support', 'Natively'),
       };
     default:
