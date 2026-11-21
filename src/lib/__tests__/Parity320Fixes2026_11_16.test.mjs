@@ -38,10 +38,10 @@ test('closing the Plans card (not a forced one) starts the guide with its facts'
   const host = src('src/components/onboarding/OrchestratedToasterHost.tsx');
   assert.match(host, /onDismiss=\{closePlans\}/);
   assert.match(host, /if \(forced\) return;[\s\S]{0,200}type: 'plans_closed'/);
-  assert.match(host, /launchCount: user\.cardLedger\?\.launchCount \?\? 1/);
+  assert.match(host, /launchCount: \w+\.cardLedger\?\.launchCount \?\? 1/);
 });
 
 test('greetings never start an Auto Answer prefetch', () => {
   const eng = src('electron/IntelligenceEngine.ts');
-  assert.match(eng, /prefetchAutoAnswer\(questionId: string, text: string\): void \{\s*const trimmed = \(text \?\? ''\)\.trim\(\);\s*if \(trimmed\.length < 12\) return;[\s\S]{0,120}if \(IntelligenceEngine\.onlySmallTalk\(trimmed\)\) return;/);
+  assert.match(eng, /prefetchAutoAnswer\(questionId: string, text: string\): void \{\s*const trimmed = \(text \?\? ''\)\.trim\(\);\s*if \(trimmed\.length < 12\) return;(?:\s*\/\/[^\n]*)*\s*if \(IntelligenceEngine\.onlySmallTalk\(trimmed\)\) return;/);
 });

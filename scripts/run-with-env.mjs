@@ -8,7 +8,7 @@
  *   env-var prefix — `FOO=1 node x.js` is parsed as a command literally named
  *   `FOO=1` — and no `${VAR:-default}` expansion, so the token reaches the
  *   program verbatim. That is why `test:e2e:parity` passed the literal string
- *   "${ELECTRON_APP_PORT:-5173}" to Playwright on Windows.
+ *   "${ELECTRON_APP_PORT:-5180}" to Playwright on Windows.
  *
  *   `cross-env` fixes the prefix half but has no fallback syntax, which is
  *   precisely what those scripts relied on.

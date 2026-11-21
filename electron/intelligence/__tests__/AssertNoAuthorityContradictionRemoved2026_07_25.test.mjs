@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
@@ -31,22 +31,18 @@ test('no source file repo-wide imports/calls assertNoAuthorityContradiction', ()
   // not the removal note's prose mention of the identifier in
   // integration.ts's comment, and excludes this test file's own text.
   const usagePattern = 'assertNoAuthorityContradiction[,}(]';
-  let output;
-  try {
-    output = execFileSync(
-      'grep',
-      ['-rlE', usagePattern, 'electron', 'src', 'premium/electron'],
-      { cwd: repoRoot, encoding: 'utf8' },
-    );
-  } catch (err) {
-    // grep exits 1 with empty stdout when no matches are found — that's the
-    // expected, passing case.
-    if (err.status === 1 && !err.stdout) {
-      output = '';
-    } else {
-      throw err;
+  // A Node walk, not grep: Windows has no grep on PATH.
+  const usage = new RegExp(usagePattern);
+  const hits = [];
+  const walk = (rel) => {
+    for (const entry of fs.readdirSync(path.join(repoRoot, rel), { withFileTypes: true })) {
+      const child = path.join(rel, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'node_modules') walk(child); }
+      else if (entry.isFile() && usage.test(fs.readFileSync(path.join(repoRoot, child), 'utf8'))) hits.push(child.split(path.sep).join('/'));
     }
-  }
+  };
+  for (const dir of ['electron', 'src', 'premium/electron']) walk(dir);
+  const output = hits.join('\n');
   const remaining = output
     .split('\n')
     .map((l) => l.trim())

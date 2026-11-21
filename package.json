@@ -66,7 +66,7 @@
     "test:css:undetectable-ring": "electron tests/css/undetectable-ring.check.mjs",
     "test:e2e": "npx playwright test",
     "test:e2e:headed": "npx playwright test --headed",
-    "test:e2e:parity": "node scripts/run-with-env.mjs --set ELECTRON_E2E=1 --default ELECTRON_APP_PORT=5173 -- playwright test tests/e2e/parity-gaps-evidence.spec.ts",
+    "test:e2e:parity": "node scripts/run-with-env.mjs --set ELECTRON_E2E=1 --default ELECTRON_APP_PORT=5180 -- playwright test tests/e2e/parity-gaps-evidence.spec.ts",
     "test:e2e:screen-understanding": "npm run build:electron && node natively-api/tests/screen-understanding-live.e2e.mjs",
     "bench:screen-understanding": "npm run build:electron && node scripts/bench-screen-understanding.mjs",
     "benchmark:vision": "npm run build:electron && node dist-electron/electron/visionBenchmark/cli.js",

@@ -19,7 +19,7 @@
 // To run locally:
 //   npm run dev              # Vite dev server on the configured port
 //   npm run electron:dev     # Electron main process pointing at the dev server
-//   ELECTRON_E2E=1 ELECTRON_APP_PORT=5173 npm run test:e2e:parity
+//   ELECTRON_E2E=1 ELECTRON_APP_PORT=5180 npm run test:e2e:parity
 //
 // In CI, ELECTRON_E2E is unset so the spec auto-skips.
 
@@ -34,7 +34,7 @@ test.describe('Cluely-parity gap E2E evidence', () => {
       test.skip(true, 'Set ELECTRON_E2E=1 to run live parity-gap evidence');
     }
     if (!APP_PORT) {
-      test.skip(true, 'Set ELECTRON_APP_PORT (e.g. 5173) to the renderer port');
+      test.skip(true, 'Set ELECTRON_APP_PORT (e.g. 5180) to the renderer port');
     }
   });
 

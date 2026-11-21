@@ -8,7 +8,8 @@ const read = (p) => fs.readFileSync(p, 'utf8');
 const main = read('electron/main.ts');
 
 test('guide hears meeting_saved from main after stop, like 3.2.0', () => {
-  assert.match(main, /this\.liveNotes\.meetingEnded\(meetingId\);[^\n]*\n\s*try \{ applyGuideEvent\(\{ type: 'meeting_saved', meetingId \}\); \} catch \(e: any\) \{ console\.warn\('\[Main\] guide not told about the saved meeting:'/);
+  // 3.2.1 guards meetingEnded in its own try and adds a comment line before the guide event.
+  assert.match(main, /this\.liveNotes\.meetingEnded\(meetingId\);[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*try \{ applyGuideEvent\(\{ type: 'meeting_saved', meetingId \}\); \} catch \(e(?:: any)?\) \{ console\.warn\('\[Main\] guide not told about the saved meeting:'/);
   assert.ok(!main.includes("applyGuideEvent({ type: 'meeting_started' })"));
   assert.ok(!main.includes("applyGuideEvent({ type: 'meeting_stopped' })"));
   assert.ok(!read('electron/MeetingPersistence.ts').includes("type: 'meeting_saved'"));

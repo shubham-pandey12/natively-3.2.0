@@ -10,7 +10,8 @@ const src = (rel) => fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)
 
 test('answer length provider is registered in ipcHandlers with a guarded fallback', () => {
   const ipc = src('../../ipcHandlers.ts');
-  const at = ipc.indexOf('registerAnswerLengthProvider(() => effectiveAnswerLength(');
+  // 3.2.1 breaks the call after the arrow; the compiled form is one line either way.
+  const at = ipc.search(/registerAnswerLengthProvider\(\(\) =>\s*effectiveAnswerLength\(/);
   assert.ok(at > 0, 'registration present in ipcHandlers.ts');
   const tryAt = ipc.lastIndexOf('try {', at);
   const catchAt = ipc.indexOf("console.warn('[IPC] Answer length not wired, answers stay Smart:'", at);

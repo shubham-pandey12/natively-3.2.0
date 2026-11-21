@@ -25,7 +25,9 @@ test('no start given, or a start in the future: it starts now', () => {
 test('What to answer passes the press time to the engine, which starts its trace from it', () => {
   const ipc = read('electron/ipcHandlers.ts');
   const handler = ipc.split("'generate-what-to-say',")[1].split('safeHandle(')[0];
-  assert.ok(handler.indexOf('const pressedAt = tracerNow();') < handler.indexOf('return _tracked(async () => {'), 'taken before any work');
+  // 3.2.1 awaits the tracked work to count the press into the funnel (answerPress.mjs).
+  const trackedAt = handler.search(/(?:return|pressResult = await) _tracked\(async \(\) => \{/);
+  assert.ok(trackedAt > 0 && handler.indexOf('const pressedAt = tracerNow();') < trackedAt, 'taken before any work');
   assert.ok(handler.indexOf('const pressedAt = tracerNow();') < handler.indexOf('screen pre-pass'));
   assert.match(handler, /screenContext,\s*pressedAt,/);
   assert.match(read('electron/IntelligenceEngine.ts'), /\.\.\.\(typeof options\?\.pressedAt === 'number' \? \{ startedAt: options\.pressedAt \} : \{\}\),/);

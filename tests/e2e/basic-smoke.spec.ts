@@ -32,7 +32,7 @@ test.describe('FINDING-006: Natively E2E smoke', () => {
     }
     // Guard: if no dev server is running, skip instead of failing
     if (!APP_PORT) {
-      test.skip('Set ELECTRON_APP_PORT to the dev server port (e.g. 5173) before running E2E tests');
+      test.skip('Set ELECTRON_APP_PORT to the dev server port (e.g. 5180) before running E2E tests');
       return;
     }
   });

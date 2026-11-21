@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { isEntryScript } from '../lib/is-entry-script.mjs';
 import { parseArgs } from 'node:util';
 import ts from 'typescript';
 
@@ -143,7 +143,7 @@ function main() {
   console.log('Summary: ' + Object.entries(totals).map(([key, count]) => key + '=' + count).join(' '));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isEntryScript(import.meta.url)) {
   try {
     main();
   } catch (error) {

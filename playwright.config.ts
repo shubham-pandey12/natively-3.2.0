@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// The renderer dev server's port and host (vite.config.mts: 127.0.0.1:5180).
+// IPv4 loopback, not `localhost`: Windows can resolve that to ::1 and never connect.
+const rendererPort = Number(process.env.ELECTRON_APP_PORT) || 5180;
+
 export default defineConfig({
   testDir: './tests/e2e',
   timeout: 30_000,
@@ -21,7 +25,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'npm run dev',
-    url: 'http://localhost:5173',
+    url: `http://127.0.0.1:${rendererPort}`,
     reuseExistingServer: true,
     timeout: 60_000,
   },

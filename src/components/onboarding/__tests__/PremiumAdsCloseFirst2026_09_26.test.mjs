@@ -2,12 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../premium/src');
 const source = readFileSync(resolve(root, 'recovered/App-h7VwvpAg.js'), 'utf8');
-const runtime = await import(resolve(root, 'recovered/App-h7VwvpAg.js'));
+const runtime = await import(pathToFileURL(resolve(root, 'recovered/App-h7VwvpAg.js')).href);
 const markers = {
   ProfileFeatureToaster: 'fP = ({ className:',
   JDAwarenessToaster: '_P = ({ className:',

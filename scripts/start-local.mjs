@@ -23,6 +23,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { childExitReport } from './devAgentSupport.mjs';
+import { isEntryScript } from './lib/is-entry-script.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -216,7 +217,7 @@ async function main() {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryScript(import.meta.url)) {
   main().catch((error) => {
     console.error('[start:local]', error?.message || error);
     process.exitCode = 1;

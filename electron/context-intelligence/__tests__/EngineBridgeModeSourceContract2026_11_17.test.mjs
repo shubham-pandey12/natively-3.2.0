@@ -11,7 +11,7 @@ const { applyModeSourceContract, resolveModePolicy } = await import(pathToFileUR
 test('bridge reads the persisted mode contract lazily and passes it into the request', () => {
   assert.match(bridge, /if \(input\.modeUniqueId\) \{[\s\S]*?require\('\.\.\/\.\.\/services\/ModesManager'\)[\s\S]*?getModes\(\)\.find\([\s\S]*?typeof c\.sourceAuthority === 'string' && typeof c\.origin === 'string'/);
   assert.match(bridge, /extraAllowedSourceTypes: input\.extraAllowedSourceTypes,\s*modeSourceContract,\s*keepConversationState:/);
-  assert.match(bridge, /if \(input\.modeUniqueId\) \{[\s\S]*?\} catch \{\s*\}/);
+  assert.match(bridge, /if \(input\.modeUniqueId\) \{[\s\S]*?\} catch \{\s*(?:\/\*[^*]*\*\/\s*)?\}/);
 });
 
 test('a reference-files-only contract promotes reference files in recruiting mode', () => {
@@ -26,7 +26,7 @@ test('unknown, absent, throwing, and incomplete modes leave the contract null', 
   const start = bridge.indexOf('    let modeSourceContract:');
   const end = bridge.indexOf('    const req: AnswerRequest', start);
   assert.ok(start > 0 && end > start);
-  const snippet = bridge.slice(start, end).replace(/: \{ sourceAuthority: string; origin: string \} \| null/, '').replace(/\(m: \{ id: string; sourceContract\?: \{ sourceAuthority\?: unknown; origin\?: unknown \} \}\)/, '(m)');
+  const snippet = bridge.slice(start, end).replace(/: \{ sourceAuthority: string; origin: string \} \| null/, '').replace(/\(m: \{[^()]*\}\)/, '(m)');
   const read = (modeUniqueId, getModes) => vm.runInNewContext(`(() => { const input = { modeUniqueId }; ${snippet} return modeSourceContract; })()`, {
     modeUniqueId, require: () => ({ ModesManager: { getInstance: () => ({ getModes }) } }),
   });
