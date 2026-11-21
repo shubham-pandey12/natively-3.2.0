@@ -8,7 +8,7 @@ import util from "util"
 import sharp, { type OverlayOptions } from "sharp"
 import { exec as execShell } from "child_process"
 import { FORMULA_IMAGE_PREFIX } from "./services/formulaScreenshotHandoff"
-import { createElectronFrameGrabber, shouldUseRendererFrameGrab, type WindowsFrameGrabber } from "./services/screen/WindowsFrameGrabber"
+import { createElectronFrameGrabber, EXCLUSION_SETTLE_FRAMES, shouldUseRendererFrameGrab, type WindowsFrameGrabber } from "./services/screen/WindowsFrameGrabber"
 
 // Module-level: promisified shell exec created once per process lifetime.
 // Uses the shell-capable exec variant (not execFile) because Linux screenshot
@@ -588,7 +588,12 @@ export class ScreenshotHelper {
     if (grabber) {
       let frame: Awaited<ReturnType<WindowsFrameGrabber['grab']>> | null = null;
       try {
-        frame = await grabber.grab(targetDisplay.id, { width: displayBounds.width, height: displayBounds.height }, opts);
+        // The stream is kept warm, so its newest frame can predate the caller
+        // hiding (or excluding) our windows. Unless the caller says no window
+        // changed (waitNewFrames: 0), wait until that change has reached the
+        // stream, or the overlay/cropper could appear in the screenshot.
+        const waitNewFrames = opts.waitNewFrames ?? EXCLUSION_SETTLE_FRAMES;
+        frame = await grabber.grab(targetDisplay.id, { width: displayBounds.width, height: displayBounds.height }, { waitNewFrames });
       } catch (grabError) {
         console.warn('[ScreenshotHelper] Renderer frame grab failed, falling back to desktopCapturer:', (grabError as Error)?.message ?? grabError);
       }

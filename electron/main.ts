@@ -9602,8 +9602,10 @@ export class AppState {
     }
   }
 
-  // Set only while a no-hide (content-protected) full capture runs.
-  private screenshotExclusionWaitFrames = 0;
+  // Set only while a no-hide (content-protected) full capture runs:
+  // EXCLUSION_SETTLE_FRAMES when windows were just excluded, 0 when none were.
+  // undefined on the hide path, so the capture waits for the hide to land.
+  private screenshotExclusionWaitFrames: number | undefined = undefined;
 
   /**
    * Windows 10 2004+ full screenshots: keep every window on screen and only
@@ -9618,6 +9620,7 @@ export class AppState {
     capture: (session: ScreenshotCaptureSession) => Promise<T>
   ): Promise<T> {
     const toggled: BrowserWindow[] = [];
+    const undetectableAtStart = this.isUndetectable;
     try {
       for (const win of BrowserWindow.getAllWindows()) {
         if (win.isDestroyed() || !win.isVisible() || win.isContentProtected()) continue;
@@ -9628,10 +9631,14 @@ export class AppState {
       this.screenshotExclusionWaitFrames = toggled.length > 0 ? EXCLUSION_SETTLE_FRAMES : 0;
       return await capture(session);
     } finally {
-      this.screenshotExclusionWaitFrames = 0;
+      this.screenshotExclusionWaitFrames = undefined;
       for (const win of toggled) {
         try {
-          if (!win.isDestroyed()) win.setContentProtection(this.isUndetectable);
+          // Back to exactly what it was (unprotected), unless Undetectable was
+          // switched during the capture: then follow the new setting.
+          if (!win.isDestroyed()) {
+            win.setContentProtection(this.isUndetectable !== undetectableAtStart ? this.isUndetectable : false);
+          }
         } catch (e) {
           console.warn('[AppState] failed to restore content protection after screenshot:', e);
         }

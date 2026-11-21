@@ -91,6 +91,11 @@ export class WindowsFrameGrabber {
   private enumerating: Promise<Map<string, string>> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private busy = false;
+  // Resolves when the in-flight grab is encoded, released or failed. A second
+  // grab waits for it instead of failing (and falling back to the blocking
+  // desktopCapturer path), e.g. a screenshot during the launch prewarm.
+  private idle: Promise<void> = Promise.resolve();
+  private markIdle: (() => void) | null = null;
   private singleDisplayGuessFailed = false;
 
   constructor(private readonly deps: FrameGrabberDeps) {}
@@ -110,6 +115,7 @@ export class WindowsFrameGrabber {
   async prewarm(displayId?: string | number, maxSize?: { width: number; height: number }): Promise<void> {
     if (this.deps.displayCount?.() !== 1) await this.getSourceMap();
     if (displayId === undefined || !maxSize || this.busy) return;
+    // Opening the stream goes through the same queue as screenshots.
     // Open the stream now so the first screenshot is a warm read.
     await this.grab(displayId, maxSize);
     this.release();
@@ -151,8 +157,9 @@ export class WindowsFrameGrabber {
     maxSize: { width: number; height: number },
     opts: { waitNewFrames?: number } = {},
   ): Promise<FrameHandle> {
-    if (this.busy) throw new Error('frame grab already in progress');
+    while (this.busy) await this.idle;
     this.busy = true;
+    this.idle = new Promise<void>((resolve) => { this.markIdle = resolve; });
     this.cancelIdleClose();
     try {
       const sourceId = await this.resolveSourceId(displayId);
@@ -171,27 +178,40 @@ export class WindowsFrameGrabber {
             const b64 = await withTimeout(this.deps.runInPage(encodeScript(c)), GRAB_TIMEOUT_MS, 'frame encode');
             if (typeof b64 !== 'string' || b64.length === 0) throw new Error('frame encode returned no data');
             return Buffer.from(b64, 'base64');
+          } catch (encodeErr) {
+            // A timed-out or failed encode may leave the page mid-work: reset it.
+            this.deps.closePage();
+            throw encodeErr;
           } finally {
-            this.busy = false;
-            this.scheduleIdleClose();
+            this.finishOp();
           }
         },
       };
     } catch (err) {
-      this.busy = false;
+      // A timed-out grab may still be running in the page: drop the page so
+      // the next grab starts clean instead of racing it.
+      this.deps.closePage();
+      this.finishOp();
       // A failed grab may mean a stale source id (monitor change we missed),
       // or a wrong single-display guess: stop guessing, enumerate next time.
       if (!this.sourceMap) this.singleDisplayGuessFailed = true;
       this.invalidateSources();
-      this.scheduleIdleClose();
       throw err;
     }
   }
 
   /** Release a frame without encoding (e.g. the crop turned out empty). */
   release(): void {
-    this.busy = false;
+    if (!this.busy) return;
     this.deps.runInPage('window.__nativelyFrame = null; true').catch(() => {});
+    this.finishOp();
+  }
+
+  private finishOp(): void {
+    this.busy = false;
+    const done = this.markIdle;
+    this.markIdle = null;
+    done?.();
     this.scheduleIdleClose();
   }
 
@@ -349,6 +369,23 @@ export function createElectronFrameGrabber(): WindowsFrameGrabber {
       if (w && !w.isDestroyed()) w.destroy();
     },
   });
+
+  // The app quits on win32 from window-all-closed. This hidden window counts
+  // as open, so drop it as soon as it is the only window left; otherwise the
+  // app would linger for up to IDLE_CLOSE_MS after the user closed everything.
+  const { app } = require('electron') as typeof import('electron');
+  const watched = new WeakSet<BrowserWindowType>();
+  const closeIfAlone = () => {
+    const others = BrowserWindow.getAllWindows().filter((w) => w !== win && !w.isDestroyed());
+    if (others.length === 0) grabber.dispose();
+  };
+  const watch = (w: BrowserWindowType) => {
+    if (watched.has(w)) return;
+    watched.add(w);
+    w.once('closed', () => setImmediate(closeIfAlone));
+  };
+  for (const w of BrowserWindow.getAllWindows()) watch(w);
+  app.on('browser-window-created', (_e, w) => watch(w));
 
   const invalidate = () => grabber.onDisplaysChanged();
   screen.on('display-added', invalidate);
