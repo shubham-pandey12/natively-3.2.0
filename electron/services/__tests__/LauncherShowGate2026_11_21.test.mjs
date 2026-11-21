@@ -168,3 +168,12 @@ test('cropper: a late-painting cold cropper is shown only for a selection still 
   const src = read('CropperWindowHelper.ts');
   assert.match(src, /if \(showImmediately && this\.isWaitingForSelection\) \{\s*this\.applyOpacityShield\(\);/);
 });
+
+test('Ctrl+B no-focus show raises the launcher in front on Windows only', () => {
+  const src = read('WindowHelper.ts');
+  const m = src.slice(src.indexOf('private showLauncherInactive('), src.indexOf('public switchToLauncher('));
+  assert.match(m, /win\.showInactive\(\);\s*if \(process\.platform === 'win32'\) \{\s*try \{\s*win\.moveTop\(\);/);
+  const sw = src.slice(src.indexOf('public switchToLauncher('), src.indexOf('public showOwedLauncher('));
+  assert.equal((sw.match(/if \(inactive\) this\.showLauncherInactive\(\);/g) || []).length, 2, 'both show branches use it');
+  assert.doesNotMatch(sw, /this\.launcherWindow\.showInactive\(\)/);
+});

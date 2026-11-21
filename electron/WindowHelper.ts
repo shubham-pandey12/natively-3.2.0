@@ -3018,6 +3018,31 @@ export class WindowHelper {
     if (this.launcherHangTimer) { clearTimeout(this.launcherHangTimer); this.launcherHangTimer = null; }
   }
 
+  /**
+   * Show the launcher without taking focus, IN FRONT of other windows.
+   *
+   * On Windows showInactive() is SW_SHOWNOACTIVATE, which shows a window at its
+   * old place in the z-order. The launcher is a regular (not always-on-top)
+   * window, so after Cmd/Ctrl+B it came back visible, opaque and on screen —
+   * but under every app opened since (measured 2026-11-21: z-order #30, below a
+   * maximized IDE, browser and chat app), i.e. "Ctrl+B does nothing".
+   * moveTop() raises it above all non-topmost windows without activating it
+   * (SWP_NOACTIVATE), the same raise the cropper uses. macOS's showInactive
+   * already orders the window front, so it is left as it was.
+   */
+  private showLauncherInactive(): void {
+    const win = this.launcherWindow;
+    if (!win || win.isDestroyed()) return;
+    win.showInactive();
+    if (process.platform === 'win32') {
+      try {
+        win.moveTop();
+      } catch (e) {
+        console.warn('[WindowHelper] launcher moveTop failed:', e);
+      }
+    }
+  }
+
   public switchToLauncher(inactive?: boolean, opts?: { hidden?: boolean }): void {
     this.overlayHeldHidden = false;
     const requestedInactive = !!inactive;
@@ -3095,7 +3120,7 @@ export class WindowHelper {
       if (process.platform === 'win32' && this.contentProtection) {
         // Opacity Shield: Show at 0 opacity first
         this.launcherWindow.setOpacity(0);
-        if (inactive) this.launcherWindow.showInactive();
+        if (inactive) this.showLauncherInactive();
         else this.launcherWindow.show();
         this.launcherWindow.setContentProtection(true);
 
@@ -3111,7 +3136,7 @@ export class WindowHelper {
         // Restore opacity (may have been zeroed pre-screenshot by hideMainWindow)
         this.launcherWindow.setOpacity(1);
         this.launcherWindow.setContentProtection(this.contentProtection);
-        if (inactive) this.launcherWindow.showInactive();
+        if (inactive) this.showLauncherInactive();
         else this.launcherWindow.show();
         if (!inactive) this.launcherWindow.focus();
       }
