@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { profilePaths, seedProfile, shouldCopy } from './start-local.mjs';
+import { acquireProfileLock, profilePaths, seedProfile, shouldCopy } from './start-local.mjs';
 
 test('separate profile paths for win32 and darwin, unsupported elsewhere', () => {
   assert.deepEqual(profilePaths('win32', { APPDATA: 'C:\\Users\\a b\\AppData\\Roaming' }), {
@@ -41,4 +41,21 @@ test('seeding copies keys and settings, skips caches, and never overwrites', (t)
   assert.equal(seedProfile({ real, local }, { reseed: true, now: 1, log: quiet }), 'seeded');
   assert.equal(readFileSync(path.join(local, 'credentials.enc'), 'utf8'), 'keys');
   assert.ok(readdirSync(dir).includes('natively-local.old-1'), 'old profile is kept aside, not deleted');
+});
+
+test('one start:local per profile; a stale lock is taken over; release frees it', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'start local lock '));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const local = path.join(dir, 'natively-local');
+  const release = acquireProfileLock(local, { pid: 111, isAlive: () => true });
+  assert.ok(existsSync(`${local}.start-local.lock`));
+  assert.throws(() => acquireProfileLock(local, { pid: 222, isAlive: () => true }), /already running .*pid 111/);
+  // Owner gone: the second launch takes the lock over.
+  const release2 = acquireProfileLock(local, { pid: 222, isAlive: () => false });
+  assert.equal(readFileSync(`${local}.start-local.lock`, 'utf8'), '222');
+  release2();
+  release(); // releasing twice / after takeover is harmless
+  assert.ok(!existsSync(`${local}.start-local.lock`));
+  const release3 = acquireProfileLock(local, { pid: 333 });
+  release3();
 });

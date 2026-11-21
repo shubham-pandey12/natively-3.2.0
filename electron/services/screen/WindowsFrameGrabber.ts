@@ -34,6 +34,8 @@ const GRAB_TIMEOUT_MS = 5_000;
 export const EXCLUSION_SETTLE_FRAMES = 4;
 export const EXCLUSION_SETTLE_MS = 180;
 export const EXCLUSION_MAX_WAIT_MS = 500;
+/** Page error when no frame newer than the window change arrived in time. */
+export const STALE_FRAME_ERROR = 'no fresh frame after the window change';
 
 const SINGLE_DISPLAY_SOURCE_ID = 'screen:0:0';
 const IDLE_CLOSE_MS = 10 * 60_000;
@@ -194,8 +196,13 @@ export class WindowsFrameGrabber {
       this.finishOp();
       // A failed grab may mean a stale source id (monitor change we missed),
       // or a wrong single-display guess: stop guessing, enumerate next time.
-      if (!this.sourceMap) this.singleDisplayGuessFailed = true;
-      this.invalidateSources();
+      // Not for a stale-frame timeout: the source was fine, and enumerating
+      // again would cost the ~1 s main-thread block this module avoids.
+      const stale = String((err as Error)?.message ?? err).includes(STALE_FRAME_ERROR);
+      if (!stale) {
+        if (!this.sourceMap) this.singleDisplayGuessFailed = true;
+        this.invalidateSources();
+      }
       throw err;
     }
   }
@@ -277,7 +284,18 @@ export function grabScript(sourceId: string, maxW: number, maxH: number, waitFra
       tick();
     });
     if (!ng.latest) await waitFor(1, 0, 3000);
-    if (${waitFrames} > 0) await waitFor(ng.count + ${waitFrames}, ${EXCLUSION_SETTLE_MS}, ${EXCLUSION_MAX_WAIT_MS});
+    if (${waitFrames} > 0) {
+      // Fail rather than draw an old frame: on a deadline or a dead track
+      // ng.latest may still predate the window change, and drawing it could put
+      // the hidden/excluded window in the screenshot. The caller falls back to
+      // desktopCapturer while the windows are still hidden/excluded.
+      const target = ng.count + ${waitFrames};
+      const t0 = performance.now();
+      await waitFor(target, ${EXCLUSION_SETTLE_MS}, ${EXCLUSION_MAX_WAIT_MS});
+      if (ng.count < target || performance.now() - t0 < ${EXCLUSION_SETTLE_MS}) {
+        throw new Error(${JSON.stringify(STALE_FRAME_ERROR)});
+      }
+    }
     const frame = ng.latest;
     if (!frame) throw new Error('no video frame');
     const c = new OffscreenCanvas(frame.displayWidth, frame.displayHeight);

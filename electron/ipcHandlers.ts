@@ -8164,7 +8164,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Open the launcher's SettingsOverlay on a specific tab (callable from any window)
   safeHandle('settings:open-tab', (_, tab: string) => {
     const launcherWin = appState.getWindowHelper().getLauncherWindow();
-    if (launcherWin && !launcherWin.isDestroyed()) {
+    if (!launcherWin || launcherWin.isDestroyed()) return;
+    // After the launcher's first paint (WindowHelper.onLauncherFirstPaint): an
+    // unpainted launcher is an invisible window on win32, and its page would not
+    // be listening for the navigation yet.
+    appState.getWindowHelper().onLauncherFirstPaint(() => {
+      if (launcherWin.isDestroyed()) return;
       launcherWin.webContents.send('settings:open-tab', tab);
       if (appState.getUndetectable()) {
         // This is the ONE launcher show that does not funnel through
@@ -8179,7 +8184,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         launcherWin.show();
         launcherWin.focus();
       }
-    }
+    });
   });
 
   safeHandle('close-settings-window', () => {
@@ -18920,15 +18925,19 @@ export function initializeIpcHandlers(appState: AppState): void {
     if (typeof meetingId !== 'string' || !meetingId) return { success: false };
     const launcherWin = appState.getWindowHelper().getLauncherWindow();
     if (!launcherWin || launcherWin.isDestroyed()) return { success: false };
-    launcherWin.webContents.send('launcher:open-meeting', meetingId);
-    if (appState.getUndetectable()) {
-      // As settings:open-tab: a launcher show outside switchToLauncher re-drives stealth.
-      launcherWin.showInactive();
-      appState.reassertUndetectableStealth();
-    } else {
-      launcherWin.show();
-      launcherWin.focus();
-    }
+    // As settings:open-tab: only once the launcher has painted.
+    appState.getWindowHelper().onLauncherFirstPaint(() => {
+      if (launcherWin.isDestroyed()) return;
+      launcherWin.webContents.send('launcher:open-meeting', meetingId);
+      if (appState.getUndetectable()) {
+        // As settings:open-tab: a launcher show outside switchToLauncher re-drives stealth.
+        launcherWin.showInactive();
+        appState.reassertUndetectableStealth();
+      } else {
+        launcherWin.show();
+        launcherWin.focus();
+      }
+    });
     return { success: true };
   });
 

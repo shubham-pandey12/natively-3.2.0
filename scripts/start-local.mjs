@@ -17,7 +17,7 @@
  * dev:agent, but no CDP port.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, renameSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -73,6 +73,49 @@ export function seedProfile({ real, local }, { reseed = false, now = Date.now(),
   return 'seeded';
 }
 
+/**
+ * One start:local per profile. The app skips Electron's single-instance lock
+ * for this profile (NATIVELY_AGENT_USER_DATA), so two launches would both open
+ * the same writable profile (DB, settings, keys). The lock file sits NEXT TO
+ * the profile so --reseed (which renames the profile aside) cannot move it.
+ * A lock left by a process that is gone is taken over.
+ * Returns a release function.
+ */
+export function acquireProfileLock(local, { pid = process.pid, isAlive = processAlive } = {}) {
+  const lockPath = `${local}.start-local.lock`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      writeSync(fd, String(pid));
+      closeSync(fd);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { rmSync(lockPath, { force: true }); } catch { /* already gone */ }
+      };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let owner = NaN;
+      try { owner = Number.parseInt(readFileSync(lockPath, 'utf8'), 10); } catch { /* unreadable: treat as stale */ }
+      if (Number.isInteger(owner) && owner > 0 && owner !== pid && isAlive(owner)) {
+        throw new Error(`start:local is already running on ${local} (pid ${owner}); close it first`);
+      }
+      rmSync(lockPath, { force: true });
+    }
+  }
+  throw new Error(`could not lock ${local}`);
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0); // signal 0: existence check only, on Windows and macOS
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -104,6 +147,8 @@ function waitForPort(port, timeoutMs = 60_000) {
 async function main() {
   const reseed = process.argv.includes('--reseed');
   const profile = profilePaths(process.platform);
+  const releaseLock = acquireProfileLock(profile.local);
+  process.on('exit', releaseLock);
   seedProfile(profile, { reseed });
   console.log(`[start:local] userData=${profile.local}`);
 

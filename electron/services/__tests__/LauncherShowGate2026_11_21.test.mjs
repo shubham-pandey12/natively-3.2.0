@@ -22,7 +22,7 @@ test('a show before the first paint is held and handed to the paint', () => {
   const g = new LauncherShowGate();
   assert.equal(g.requestShow(true), false);
   assert.equal(g.hasPendingShow(), true);
-  assert.deepEqual(g.markPainted(), { inactive: true });
+  assert.deepEqual(g.markPainted(), { inactive: true, onCurrentDisplay: false });
   assert.equal(g.hasPendingShow(), false);
   assert.equal(g.requestShow(true), true, 'after the paint, shows go straight through');
 });
@@ -32,7 +32,7 @@ test('a focused request wins over an inactive one while held', () => {
   g.requestShow(true);
   g.requestShow(false);
   g.requestShow(true);
-  assert.deepEqual(g.markPainted(), { inactive: false });
+  assert.deepEqual(g.markPainted(), { inactive: false, onCurrentDisplay: false });
 });
 
 test('no held show: paint returns null; markPainted is idempotent; reset re-arms', () => {
@@ -76,7 +76,7 @@ test('WindowHelper: toggle uses decideToggle; already-visible check ignores mini
   const src = read('WindowHelper.ts');
   const t = src.slice(src.indexOf('public toggleMainWindow('), src.indexOf('private refreshLauncherMinimum('));
   assert.match(t, /decideToggle\(/);
-  assert.match(t, /this\.launcherShowGate\.requestShow\(true\)/);
+  assert.match(t, /this\.launcherShowGate\.requestShow\(true, \{ onCurrentDisplay \}\)/);
   assert.match(src, /!this\.launcherWindow\.isMinimized\(\) &&\s*\(this\.launcherWindow\.getOpacity\(\) > 0 \|\| this\.opacityTimeout !== null\)/);
 });
 
@@ -86,7 +86,7 @@ test('WindowHelper: never-painting or hung launcher is recovered, bounded', () =
   assert.match(r, /reloadIgnoringCache\(\)/);
   assert.match(r, /LAUNCHER_MAX_PAINT_RELOADS/);
   assert.match(r, /setBackgroundColor\(LAUNCHER_FALLBACK_BACKGROUND\)/);
-  assert.match(r, /forcefullyCrashRenderer\(\);\s*win\.webContents\.reload\(\);/);
+  assert.match(r, /forcefullyCrashRenderer\(\);/);
   assert.match(r, /LAUNCHER_MAX_HANG_RESTARTS/);
   assert.match(src, /this\.launcherWindow = null;\s*this\.clearLauncherRecoveryTimers\(\);/);
 });
@@ -96,4 +96,53 @@ test('main: helper windows are preloaded after the launcher paints, not at start
   assert.match(main, /onLauncherFirstPaint\(\(\) => \{\s*setTimeout\(\(\) => this\.cropperWindowHelper\.preload\(\), STARTUP_DEFERRED_WINDOW_DELAY_MS\);/);
   assert.match(main, /onLauncherFirstPaint\(\(\) => \{\s*setTimeout\(\(\) => \{\s*appState\.settingsWindowHelper\.preloadWindow\(\)\s*appState\.modelSelectorWindowHelper\.preloadWindow\(\)/);
   assert.doesNotMatch(main, /^\s*appState\.settingsWindowHelper\.preloadWindow\(\)\n\s*appState\.modelSelectorWindowHelper\.preloadWindow\(\)\n\n/m);
+});
+
+
+// ---- Review 2026-11-21 (Codex) ----
+
+test('a Ctrl+B held before paint keeps its display target', () => {
+  const g = new LauncherShowGate();
+  g.requestShow(true, { onCurrentDisplay: true });
+  g.requestShow(false); // a later plain show does not drop it
+  assert.deepEqual(g.markPainted(), { inactive: false, onCurrentDisplay: true });
+});
+
+test('first paint does not override a newer mode decision', () => {
+  assert.equal(gate.shouldShowAtFirstPaint({ mode: 'launcher', launcherShowOwed: false }), true);
+  assert.equal(gate.shouldShowAtFirstPaint({ mode: 'overlay', launcherShowOwed: false }), false, 'a meeting moved to the overlay first');
+  assert.equal(gate.shouldShowAtFirstPaint({ mode: 'launcher', launcherShowOwed: true }), false, 'a notepad meeting owes the launcher');
+});
+
+test('WindowHelper: first paint applies the held display target and respects the mode', () => {
+  const src = read('WindowHelper.ts');
+  const m = src.slice(src.indexOf('private markLauncherFirstPaint('), src.indexOf('private armLauncherRecovery('));
+  assert.match(m, /shouldShowAtFirstPaint\(\{ mode: this\.currentWindowMode, launcherShowOwed: this\.launcherShowOwed \}\)/);
+  assert.match(m, /if \(held\?\.onCurrentDisplay\) this\.prepareShortcutRestore\(\);\s*[\s\S]*?this\.switchToLauncher\(/);
+  assert.match(src, /this\.launcherShowGate\.requestShow\(true, \{ onCurrentDisplay \}\)/);
+});
+
+test('WindowHelper: a hang restart is reloaded by one owner only', () => {
+  const src = read('WindowHelper.ts');
+  const r = src.slice(src.indexOf('private armLauncherRecovery('), src.indexOf('private clearLauncherRecoveryTimers('));
+  assert.doesNotMatch(r, /forcefullyCrashRenderer\(\);\s*win\.webContents\.reload\(\);/);
+  assert.match(r, /once\('render-process-gone'[\s\S]*?if \(!appReloads && !win\.isDestroyed\(\)\)[\s\S]*?forcefullyCrashRenderer\(\);/);
+  assert.match(r, /webContents\.on\('render-process-gone', \(\) => \{\s*if \(this\.launcherHangTimer\)/);
+});
+
+test('IPC launcher reveals wait for the first paint', () => {
+  const ipc = read('ipcHandlers.ts');
+  for (const channel of ["'settings:open-tab'", "'notes-window:open-meeting'"]) {
+    const i = ipc.indexOf(`safeHandle(${channel}`);
+    const body = ipc.slice(i, i + 1500);
+    const gateAt = body.indexOf('onLauncherFirstPaint(');
+    assert.ok(gateAt > 0, `${channel} goes through onLauncherFirstPaint`);
+    assert.ok(body.indexOf('launcherWin.show()') > gateAt, `${channel} shows only inside the paint callback`);
+    assert.ok(body.indexOf('webContents.send(') > gateAt, `${channel} navigates only inside the paint callback`);
+  }
+});
+
+test('cropper: a late-painting cold cropper is shown only for a selection still waiting', () => {
+  const src = read('CropperWindowHelper.ts');
+  assert.match(src, /if \(showImmediately && this\.isWaitingForSelection\) \{\s*this\.applyOpacityShield\(\);/);
 });

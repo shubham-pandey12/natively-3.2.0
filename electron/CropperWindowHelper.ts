@@ -910,7 +910,11 @@ export class CropperWindowHelper {
                     console.error('[CropperWindowHelper] applyStealthToWindow failed:', e);
                 }
             }
-            if (showImmediately) {
+            // Only if that selection is still waiting: a cold cropper paints
+            // late, and a selection cancelled (Escape) or timed out meanwhile
+            // has already hidden it — showing it now would raise a cropper
+            // nobody is waiting on.
+            if (showImmediately && this.isWaitingForSelection) {
                 this.applyOpacityShield();
             }
         })

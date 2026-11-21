@@ -9611,6 +9611,10 @@ export class AppState {
     }
   }
 
+  // A no-hide capture is running: setUndetectable() waits for it to finish.
+  private captureExclusionActive = false;
+  private deferredUndetectable: boolean | undefined = undefined;
+
   // Set only while a no-hide (content-protected) full capture runs:
   // EXCLUSION_SETTLE_FRAMES when windows were just excluded, 0 when none were.
   // undefined on the hide path, so the capture waits for the hide to land.
@@ -9628,31 +9632,66 @@ export class AppState {
     session: ScreenshotCaptureSession,
     capture: (session: ScreenshotCaptureSession) => Promise<T>
   ): Promise<T> {
-    const toggled: BrowserWindow[] = [];
-    const undetectableAtStart = this.isUndetectable;
+    // While this runs, every visible window must stay excluded, whatever else
+    // happens: setUndetectable() is deferred until the capture ends (it would
+    // otherwise clear protection on windows this pass relied on), and a window
+    // shown mid-capture is excluded on the spot and the capture is retried,
+    // since a frame may already contain it.
+    const toggled = new Set<BrowserWindow>();
+    let windowsChanged = false;
+    const exclude = (win: BrowserWindow, midCapture: boolean) => {
+      if (win.isDestroyed() || !win.isVisible() || win.isContentProtected()) return;
+      win.setContentProtection(true);
+      toggled.add(win);
+      if (midCapture) windowsChanged = true;
+    };
+    const onShow = (win: BrowserWindow) => () => exclude(win, true);
+    const showListeners = new Map<BrowserWindow, () => void>();
+    const watch = (win: BrowserWindow) => {
+      if (showListeners.has(win) || win.isDestroyed()) return;
+      const fn = onShow(win);
+      showListeners.set(win, fn);
+      win.on('show', fn);
+    };
+    const onCreated = (_e: unknown, win: BrowserWindow) => watch(win);
+    this.captureExclusionActive = true;
     try {
       for (const win of BrowserWindow.getAllWindows()) {
-        if (win.isDestroyed() || !win.isVisible() || win.isContentProtected()) continue;
-        win.setContentProtection(true);
-        toggled.push(win);
+        watch(win);
+        exclude(win, false);
       }
-      // Only when something was just excluded must the frame be newer than that.
-      this.screenshotExclusionWaitFrames = toggled.length > 0 ? EXCLUSION_SETTLE_FRAMES : 0;
-      return await capture(session);
+      app.on('browser-window-created', onCreated);
+      for (let attempt = 1; ; attempt++) {
+        windowsChanged = false;
+        // Only when something was just excluded must the frame be newer than that.
+        this.screenshotExclusionWaitFrames = toggled.size > 0 ? EXCLUSION_SETTLE_FRAMES : 0;
+        const result = await capture(session);
+        if (!windowsChanged || attempt >= 2) return result;
+        console.warn('[AppState] a window appeared during the screenshot; capturing again');
+        if (typeof result === 'string') {
+          try { await this.deleteScreenshot(result); } catch { /* best-effort */ }
+        }
+      }
     } finally {
+      app.removeListener('browser-window-created', onCreated);
+      for (const [win, fn] of showListeners) {
+        if (!win.isDestroyed()) win.removeListener('show', fn);
+      }
       this.screenshotExclusionWaitFrames = undefined;
+      // Back to exactly what each was: unprotected. Undetectable cannot have
+      // changed meanwhile (deferred above); a deferred change is applied next.
       for (const win of toggled) {
         try {
-          // Back to exactly what it was (unprotected), unless Undetectable was
-          // switched during the capture: then follow the new setting.
-          if (!win.isDestroyed()) {
-            win.setContentProtection(this.isUndetectable !== undetectableAtStart ? this.isUndetectable : false);
-          }
+          if (!win.isDestroyed()) win.setContentProtection(false);
         } catch (e) {
           console.warn('[AppState] failed to restore content protection after screenshot:', e);
         }
       }
+      this.captureExclusionActive = false;
       this.screenshotCaptureInProgress = false;
+      const deferred = this.deferredUndetectable;
+      this.deferredUndetectable = undefined;
+      if (deferred !== undefined) this.setUndetectable(deferred);
     }
   }
 
@@ -10139,6 +10178,14 @@ export class AppState {
   }
 
   public setUndetectable(state: boolean): void {
+    if (this.captureExclusionActive) {
+      // A full screenshot is excluding windows with content protection right
+      // now; turning protection off mid-capture would let them into the image.
+      // The LAST requested value is applied when the capture ends (<= ~0.5 s).
+      console.log(`[Stealth] screenshot in progress; Undetectable(${state}) applied when it finishes`);
+      this.deferredUndetectable = state;
+      return;
+    }
     const decision = decideToggle(this.isUndetectable, state);
 
     // RC-2 fix: even when the value is unchanged, RE-BROADCAST the authoritative

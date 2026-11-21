@@ -19,6 +19,8 @@
 
 export interface PendingLauncherShow {
   inactive: boolean;
+  /** Cmd/Ctrl+B asked for the launcher on the cursor's display. */
+  onCurrentDisplay: boolean;
 }
 
 export class LauncherShowGate {
@@ -35,9 +37,12 @@ export class LauncherShowGate {
    * replaces an earlier one, except that a focused (non-inactive) request
    * wins over an inactive one.
    */
-  requestShow(inactive: boolean): boolean {
+  requestShow(inactive: boolean, opts: { onCurrentDisplay?: boolean } = {}): boolean {
     if (this.painted) return true;
-    this.pending = { inactive: this.pending ? this.pending.inactive && inactive : inactive };
+    this.pending = {
+      inactive: this.pending ? this.pending.inactive && inactive : inactive,
+      onCurrentDisplay: !!opts.onCurrentDisplay || !!this.pending?.onCurrentDisplay,
+    };
     return false;
   }
 
@@ -63,6 +68,16 @@ export class LauncherShowGate {
     this.painted = false;
     this.pending = null;
   }
+}
+
+/**
+ * At first paint, should the launcher be shown? Cold start shows it, as before,
+ * but only while launcher mode is still current: if a meeting moved the app to
+ * the overlay, or a notepad meeting owes the launcher (hidden switch), a late
+ * paint must not undo that newer decision.
+ */
+export function shouldShowAtFirstPaint(state: { mode: 'launcher' | 'overlay'; launcherShowOwed: boolean }): boolean {
+  return state.mode === 'launcher' && !state.launcherShowOwed;
 }
 
 export type ToggleAction = 'hold-show' | 'hide' | 'show';

@@ -30,6 +30,7 @@ import { shortcutRestoreBounds, shortcutRestoreDisplay } from './utils/shortcutR
 import {
   LauncherShowGate,
   decideToggle,
+  shouldShowAtFirstPaint,
   LAUNCHER_FIRST_PAINT_TIMEOUT_MS,
   LAUNCHER_MAX_PAINT_RELOADS,
   LAUNCHER_HANG_RESTART_MS,
@@ -2536,7 +2537,7 @@ export class WindowHelper {
     });
     if (action === 'hold-show') {
       console.log('[WindowHelper] Toggle before the launcher painted: it will show when ready');
-      this.launcherShowGate.requestShow(true);
+      this.launcherShowGate.requestShow(true, { onCurrentDisplay });
       return;
     }
     if (action === 'hide') {
@@ -2853,11 +2854,15 @@ export class WindowHelper {
     if (this.launcherShowGate.isPainted()) return;
     if (this.launcherPaintWatchdog) { clearTimeout(this.launcherPaintWatchdog); this.launcherPaintWatchdog = null; }
     const held = this.launcherShowGate.markPainted();
-    console.log(`[WindowHelper] Launcher first paint (${reason})${held ? `; showing held request (inactive: ${held.inactive})` : ''}`);
-    // Cold start always shows the launcher, as before; a show requested while
-    // it was loading decides whether it takes focus.
-    this.switchToLauncher(held ? held.inactive : undefined);
-    this.isWindowVisible = true;
+    const show = shouldShowAtFirstPaint({ mode: this.currentWindowMode, launcherShowOwed: this.launcherShowOwed });
+    console.log(`[WindowHelper] Launcher first paint (${reason})${show ? (held ? `; showing held request (inactive: ${held.inactive})` : '') : `; not shown (mode=${this.currentWindowMode}${this.launcherShowOwed ? ', owed' : ''})`}`);
+    if (show) {
+      // A Cmd/Ctrl+B pressed while it loaded asked for the cursor's display.
+      if (held?.onCurrentDisplay) this.prepareShortcutRestore();
+      // Cold start shows the launcher, as before; a show requested while it
+      // was loading decides whether it takes focus.
+      this.switchToLauncher(held ? held.inactive : undefined);
+    }
     const listeners = this.launcherFirstPaintListeners;
     this.launcherFirstPaintListeners = [];
     for (const fn of listeners) {
@@ -2908,16 +2913,30 @@ export class WindowHelper {
         this.launcherHangRestarts += 1;
         console.error(`[WindowHelper] Launcher hung for ${LAUNCHER_HANG_RESTART_MS}ms; restarting its renderer (${this.launcherHangRestarts}/${LAUNCHER_MAX_HANG_RESTARTS})`);
         try {
-          // Documented recovery for a hung renderer: kill it, then reload in a
-          // fresh process.
+          // Kill the hung renderer. app.on('render-process-gone') in main.ts
+          // owns crash reloads (with its crash-loop budget); a forced kill is
+          // reported as 'crashed' there (measured, Electron 43 on Windows), so
+          // reloading here as well navigated twice. Reload here only if the
+          // exit is reported as something that handler does not reload.
+          win.webContents.once('render-process-gone', (_event, details) => {
+            const reason = details?.reason;
+            const appReloads = reason === 'crashed' || reason === 'abnormal-exit' || reason === 'oom' || reason === 'integrity-failure';
+            if (!appReloads && !win.isDestroyed()) {
+              console.warn(`[WindowHelper] Hung launcher exited as '${reason}'; reloading it here`);
+              try { win.webContents.reload(); } catch (e) { console.error('[WindowHelper] launcher reload failed:', e); }
+            }
+          });
           win.webContents.forcefullyCrashRenderer();
-          win.webContents.reload();
         } catch (e) {
           console.error('[WindowHelper] launcher hang restart failed:', e);
         }
       }, LAUNCHER_HANG_RESTART_MS);
     });
     win.on('responsive', () => {
+      if (this.launcherHangTimer) { clearTimeout(this.launcherHangTimer); this.launcherHangTimer = null; }
+    });
+    // A renderer that exited on its own is no longer hung: drop a pending restart.
+    win.webContents.on('render-process-gone', () => {
       if (this.launcherHangTimer) { clearTimeout(this.launcherHangTimer); this.launcherHangTimer = null; }
     });
   }
