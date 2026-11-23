@@ -65,6 +65,7 @@ export type AutoAnswerCancelReason =
     | 'judge_unavailable'
     | 'transcript_revised'
     | 'manual_answer'
+    | 'dispatch_timeout'
     | 'auto_disabled_or_meeting_ended'
     | 'engine_reset';
 
@@ -75,7 +76,7 @@ export type AutoAnswerCancelReason =
 export interface AutoAnswerDispatchResult {
     status: 'completed' | 'cancelled' | 'failed' | 'skipped' | 'partial';
     retryable?: boolean;
-    reason?: 'busy' | 'declined' | 'already_answered';
+    reason?: 'busy' | 'declined' | 'already_answered' | 'adopted_draft_failed' | 'dispatch_timeout';
 }
 
 /** The judge's request: built and read only by premium code. */
@@ -85,11 +86,11 @@ export interface AutoAnswerEngineHost {
     isEnabled(): boolean;
     isMeetingActive(): boolean;
     meetingGeneration(): number;
-    engineAccepting(): boolean;
+    engineAccepting(skipCooldown?: boolean): boolean;
     answerStreamActive?(): boolean;
     recentTurns(): TranscriptTurn[];
     dispatch(question: AutoAnswerQuestion, options: { reuseSpeculative: boolean }): void | Promise<unknown>;
-    cancelAutomaticAnswer?(reason: 'user_barge_in'): boolean;
+    cancelAutomaticAnswer?(reason: AutoAnswerCancelReason): boolean;
     judgeCandidate?(req: AutoAnswerJudgeRequest, signal?: AbortSignal): Promise<string | null>;
     noteCandidate?(questionId: string, candidateGeneration: number): void;
     speculativeSnapshot?(): { questionId: string | null; text: string | null };
@@ -109,6 +110,7 @@ export interface AutoAnswerEngine {
     onModeChanged(): void;
     onMeetingStop(): void;
     onEngineIdle(): void;
+    onAutomaticAnswerProgress(): void;
     onProviderEndpoint(): void;
     /** `confirmEndpoint` false: a provider whose finals do not end a turn; the stop only restarts the quiet window. */
     onLocalSpeechEnd(confirmEndpoint?: boolean): void;
@@ -274,6 +276,7 @@ export const UNAVAILABLE_AUTO_ANSWER: AutoAnswerPremium = Object.freeze({
     available: false,
     createEngine: (): AutoAnswerEngine => ({
         setThresholds: noop, onMeetingStart: noop, onModeChanged: noop, onMeetingStop: noop, onEngineIdle: noop,
+        onAutomaticAnswerProgress: noop,
         onProviderEndpoint: noop, onLocalSpeechEnd: noop, onLocalSpeechEndBeforeFinal: noop, onLocalSpeechStart: noop,
         onManualAnswerStarted: () => 0, onManualSpokenAnswer: noop, onManualAnswerSettled: noop, ingest: noop,
     }),

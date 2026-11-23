@@ -42,6 +42,8 @@ import { isMidWordCut, joinTranscriptParts, normalizeForCompare, tokenContainmen
 import type { AutoAnswerThresholds } from './AutoAnswerPolicy';
 import { DEFAULT_THRESHOLDS } from './AutoAnswerPolicy';
 import type { AutoAnswerCancelReason, AutoAnswerDispatchResult, AutoAnswerQuestion, AutoAnswerTelemetryEvent } from './AutoAnswerTypes';
+import { DISPATCH_MAX_MS, DISPATCH_STALL_MS } from '../../../electron/llm/automaticAnswerTiming';
+export { DISPATCH_MAX_MS, DISPATCH_STALL_MS } from '../../../electron/llm/automaticAnswerTiming';
 
 /** Interviewer-side prefilter: a candidate that is nothing but acknowledgements never costs a judge call. */
 export const USER_BACKCHANNEL = /^(?:(?:yeah|yes|yep|yup|ya|mm-?hm+|mhm+|uh-?huh|ok(?:ay)?|right|sure|cool|got it|i see|nice|great|perfect|exactly|interesting|makes sense|sounds good|true|correct|wow|oh|ah|hm+|haha+|alright|of course|fair enough|no problem|totally|absolutely|definitely|indeed|good|fine)[\s,.!?-]*){1,4}$/i;
@@ -459,7 +461,7 @@ export interface SimpleAutoAnswerHost {
     isEnabled(): boolean;
     isMeetingActive(): boolean;
     meetingGeneration(): number;
-    engineAccepting(): boolean;
+    engineAccepting(skipCooldown?: boolean): boolean;
     /**
      * RETIRED 2026-09-03 with the user channel: the engine no longer calls
      * either of these (nothing here cancels a stream any more — see the header)
@@ -661,7 +663,7 @@ export class SimpleAutoAnswerEngine {
     private sequence = 0;
     private lastJudgedKey = '';
     /** One retry per candidate after a judge or answer failure (see scheduleRecovery). */
-    private recovery: { key: string } | null = null;
+    private recovery: { key: string; parts?: PendingPart[] } | null = null;
     private recoveryTimer: ClockTimer | null = null;
     /** The automatic answer started for these parts and not settled yet. */
     private dispatchInFlight: {
@@ -669,9 +671,12 @@ export class SimpleAutoAnswerEngine {
         parts: SimpleAutoAnswerEngine['pending'];
         stalled: { text: string; speaker?: string } | null;
         meetingGeneration: number;
+        startedAt: number;
+        lastProgressAt: number;
         /** A manual press started while this was in flight (see onManualAnswerStarted). */
         handedOver?: boolean;
     } | null = null;
+    private dispatchWatchdog: ClockTimer | null = null;
     private lastAnsweredText: string | null = null;
     private lastAnsweredAt = 0;
     /** A manual answer is running (onManualAnswerStarted → onManualAnswerSettled / onEngineIdle). */
@@ -701,7 +706,9 @@ export class SimpleAutoAnswerEngine {
     /** When the last prefetch fired, for PREFETCH_MIN_INTERVAL_MS pacing. */
     private lastPrefetchAt: number | null = null;
     /** A dispatch waiting on a busy engine, so onEngineIdle can wake it immediately. */
-    private parkedAttempt: (() => void) | null = null;
+    private parkedAttempt: { attempt: () => void; id: string; answerability: number } | null = null;
+    /** A judged ask waiting for an automatic answer to finish. */
+    private automaticPark: { parts: PendingPart[]; until: number } | null = null;
     /** A positive verdict superseded by still-arriving transcript — see HELD_MAX_AGE_MS. */
     private held: {
         id: string; key: string; text: string;
@@ -804,6 +811,30 @@ export class SimpleAutoAnswerEngine {
         this.bumpJudgeSeq('meeting_reset');
     }
     onMeetingStop(): void { this.reset(); }
+
+    onAutomaticAnswerProgress(): void {
+        if (this.dispatchInFlight) this.dispatchInFlight.lastProgressAt = this.clock.now();
+    }
+
+    private watchDispatch(request: NonNullable<SimpleAutoAnswerEngine['dispatchInFlight']>, onTimeout: () => void): void {
+        const remaining = Math.min(request.startedAt + DISPATCH_MAX_MS, request.lastProgressAt + DISPATCH_STALL_MS) - this.clock.now();
+        if (remaining <= 0) {
+            onTimeout();
+            return;
+        }
+        this.dispatchWatchdog = this.clock.setTimeout(() => {
+            this.dispatchWatchdog = null;
+            if (this.dispatchInFlight !== request) return;
+            if (this.host.meetingGeneration() !== request.meetingGeneration) this.clearDispatch();
+            else this.watchDispatch(request, onTimeout);
+        }, remaining);
+    }
+
+    private clearDispatch(): void {
+        if (this.dispatchWatchdog !== null) this.clock.clearTimeout(this.dispatchWatchdog);
+        this.dispatchWatchdog = null;
+        this.dispatchInFlight = null;
+    }
     /**
      * The engine went idle. A dispatch parked behind it should go NOW rather
      * than wait out the rest of its 500 ms poll — measured on a real interview,
@@ -836,7 +867,7 @@ export class SimpleAutoAnswerEngine {
         const parked = this.parkedAttempt;
         if (!parked) return;
         this.clearRetry();
-        parked();
+        parked.attempt();
     }
 
     private clearSettleWait(): void {
@@ -921,6 +952,9 @@ export class SimpleAutoAnswerEngine {
         this.localStopAt = 0;
         this.clearStallCap();
         this.disarm();
+        // The park goes, its words stay pending: a voice start carries no words
+        // (a cough, "mm"), and a continuation must join them. They are judged
+        // again after the stop.
         this.dropParked();
         this.held = null;
         this.lastJudgedKey = '';
@@ -986,6 +1020,9 @@ export class SimpleAutoAnswerEngine {
             // in hand, and it is gone as soon as the next one arrives.
             const glueNext = isMidWordCut(text, this.lastInterviewerInterim);
             const startedAt = this.lastInterviewerInterim ? this.utteranceStartAt : now;
+            if (this.automaticPark && (isQuestionShaped(text) || endsOnDeclarativeAsk(text, this.punctuationGuaranteed))) {
+                this.dropParked({ discardParts: true });
+            }
             this.finalsSeen++;
             if (/[.?!]["'”’)\]]*$/.test(text)) this.finalsTerminated++;
             this.lastInterviewerInterim = '';
@@ -1037,9 +1074,7 @@ export class SimpleAutoAnswerEngine {
     }
 
     private onStoppage(early: boolean): void {
-        // Never while the interviewer is talking, nor while an answer for these
-        // words is still in flight (it settles and re-arms for anything newer).
-        if (!this.host.isEnabled() || !this.host.isMeetingActive() || this.interviewerSpeaking || this.dispatchInFlight) return;
+        if (!this.host.isEnabled() || !this.host.isMeetingActive() || this.interviewerSpeaking) return;
         // Words still in flight as an interim: their final is coming and re-arms.
         if (this.lastInterviewerInterim && !this.pending.some(p => p.provisional)) return;
         const now = this.clock.now();
@@ -1048,10 +1083,17 @@ export class SimpleAutoAnswerEngine {
             this.lastAnsweredAt = 0;
         }
         const before = this.pending.length;
-        this.pending = this.pending.filter(p => now - p.at <= PENDING_MAX_AGE_MS);
+        const activeParts = this.dispatchInFlight?.parts;
+        this.pending = this.pending.filter(p => now - p.at <= PENDING_MAX_AGE_MS
+            || activeParts?.includes(p) || this.recovery?.parts?.includes(p));
         // Finals arrive in time order, so aged-out ones are always a prefix.
         this.judgedParts = Math.max(0, this.judgedParts - (before - this.pending.length));
         if (this.pending.length === 0) return;
+        if (activeParts) {
+            const answering = this.pending.findIndex(p => !activeParts.includes(p));
+            if (answering < 0) return;
+            this.judgedParts = Math.max(this.judgedParts, answering);
+        }
         const candidate = joinTranscriptParts(this.pending);
         const key = normalizeForCompare(candidate);
         const words = candidate.split(/\s+/).filter(Boolean).length;
@@ -1188,7 +1230,7 @@ export class SimpleAutoAnswerEngine {
      * be optimistic without stacking generations.
      */
     private maybePrefetch(id: string, candidate: string, unjudged: string, now: number): void {
-        if (!this.host.prefetchAnswer) return;
+        if (!this.host.prefetchAnswer || this.dispatchInFlight) return;
         // Question-shaped asks, and report-shaped ones (isReportShaped), always
         // get the head start; everything else is
         // rationed by time. See PREFETCH_MIN_INTERVAL_MS for why both exist.
@@ -1213,8 +1255,8 @@ export class SimpleAutoAnswerEngine {
         let timedOut = false;
         const turns = this.turnsBefore(committedAt);
         const parts = this.pending.map(p => ({ speaker: p.speaker, text: p.text }));
-        const partsAtConsult = this.pending.length;
         const snapshot = this.pending.slice();
+        const partsAtConsult = () => this.pending.filter(p => snapshot.includes(p)).length;
         const unjudgedParts = this.pending.slice(Math.min(this.judgedParts, this.pending.length));
         const unjudged = this.unjudgedText();
         const ruledOut = joinTranscriptParts(this.pending.slice(0, Math.min(this.judgedParts, this.pending.length)));
@@ -1307,7 +1349,7 @@ export class SimpleAutoAnswerEngine {
                     settled = true;
                 } else if (superseded.route !== 'wait_incomplete' && this.isInertExtension(snapshot)) {
                     this.settledNegative = snapshot;
-                    this.judgedParts = partsAtConsult;
+                    this.judgedParts = partsAtConsult();
                     settled = true;
                 }
             }
@@ -1351,7 +1393,7 @@ export class SimpleAutoAnswerEngine {
             }
             // Not shaped like a question: one more try, then let it go.
             if (outcome !== 'absent' && this.scheduleRecovery(candidate)) return;
-            this.host.cancelAutomaticAnswer?.('judge_unavailable');
+            if (!this.dispatchInFlight && !this.automaticPark) this.host.cancelAutomaticAnswer?.('judge_unavailable');
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'judge_unavailable', question: candidate });
             return;
         }
@@ -1377,7 +1419,7 @@ export class SimpleAutoAnswerEngine {
             }
             // Ruled not an ask: these finals stay as context, but a later
             // ask's shape is read after them. An INCOMPLETE ask stays open.
-            else { this.judgedParts = partsAtConsult; this.settledNegative = snapshot; }
+            else { this.judgedParts = partsAtConsult(); this.settledNegative = snapshot; }
             return;
         }
         // The ask the judge picked lies wholly in finals an EARLIER verdict
@@ -1394,7 +1436,7 @@ export class SimpleAutoAnswerEngine {
             && !` ${normalizeForCompare(unjudged)} `.includes(extractedKey)) {
             this.host.logContent?.(`ruled-out ask resurfaced ${id}`, route.questionText ?? candidate);
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'already_ruled_out', answerability: route.answerability });
-            this.judgedParts = partsAtConsult;
+            this.judgedParts = partsAtConsult();
             return;
         }
         // The whole of what the interviewer said is answered, not the judge's
@@ -1428,38 +1470,51 @@ export class SimpleAutoAnswerEngine {
             this.deliver(id, text, route.answerability, route.act, committedAt);
         } else {
             this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'low_answerability', answerability: route.answerability });
-            this.judgedParts = partsAtConsult;
+            this.judgedParts = partsAtConsult();
             this.settledNegative = snapshot;
         }
     }
 
     /** Dispatch now, or retry while the engine is busy — woken early by onEngineIdle. */
     private deliver(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number): void {
+        this.dropParked();
         const deadline = this.clock.now() + RETRY_TTL_MS;
         const seqAtDeliver = this.judgeSeq;
+        const parts = this.pending.filter(part => !this.dispatchInFlight?.parts.includes(part));
+        const parkAutomatic = () => {
+            if (!this.automaticPark) {
+                const until = this.clock.now() + MANUAL_PARK_MAX_MS;
+                // The dispatch we own is already bounded. Its successor may
+                // wake at that deadline, even when the stream outlasts 45 s.
+                const dispatchUntil = this.dispatchInFlight
+                    ? this.dispatchInFlight.startedAt + DISPATCH_MAX_MS + RETRY_MS
+                    : until;
+                this.automaticPark = { parts, until: Math.max(until, dispatchUntil) };
+            }
+            this.parkedAttempt = { attempt, id, answerability };
+            this.retryTimer = this.clock.setTimeout(attempt, RETRY_MS);
+        };
         const attempt = () => {
-            if (!this.host.isEnabled() || !this.host.isMeetingActive() || this.interviewerSpeaking
-                || this.judgeSeq !== seqAtDeliver || this.dispatchInFlight) {
-                // Live session 2026-09-03 (13-q6): a verdict of 1.0 was parked
-                // behind the engine's own prefetch, the next candidate bumped
-                // the sequence, and this branch exited with nothing — no
-                // telemetry, no log, no answer. A park was armed, so its death
-                // is an outcome and must be reported like every other one.
-                // Identity, not mere presence: deliver() arms a new retry timer
-                // without clearing the previous one, so a stale attempt closure
-                // can still fire while a NEWER, still-valid dispatch holds the
-                // park. Nulling that one here would cost it its onEngineIdle
-                // fast-wake and mis-attribute the drop to the wrong question.
-                const wasParked = this.parkedAttempt === attempt;
-                if (wasParked) this.parkedAttempt = null;
-                if (wasParked) {
-                    const reason = this.host.isMeetingActive() ? 'superseded_while_parked' : 'meeting_inactive';
-                    this.host.log?.(`[AutoAnswer:simple] parked dispatch for ${id} dropped: ${reason}${reason === 'superseded_while_parked' ? ` (by ${this.judgeSeqCause ?? 'unknown'})` : ''}`);
-                    this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: reason, answerability });
-                }
+            if (!this.host.isEnabled() || !this.host.isMeetingActive() || this.interviewerSpeaking || this.judgeSeq !== seqAtDeliver) {
+                if (this.parkedAttempt?.attempt === attempt) this.dropParked();
                 return;
             }
-            if (!this.host.engineAccepting()) {
+            if (this.automaticPark && this.clock.now() >= this.automaticPark.until) {
+                this.automaticPark = null;
+                this.parkedAttempt = null;
+                this.removePendingParts(parts);
+                this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling', question: text });
+                return;
+            }
+            if (this.dispatchInFlight) {
+                parkAutomatic();
+                return;
+            }
+            if (!this.host.engineAccepting(Boolean(this.automaticPark))) {
+                if (this.automaticPark) {
+                    parkAutomatic();
+                    return;
+                }
                 // Behind a manual answer the park outlives RETRY_TTL_MS (see
                 // MANUAL_PARK_MAX_MS); onEngineIdle wakes it when that ends.
                 const until = this.manualActive ? Math.max(deadline, committedAt + MANUAL_PARK_MAX_MS) : deadline;
@@ -1468,12 +1523,14 @@ export class SimpleAutoAnswerEngine {
                     this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling', question: text });
                     return;
                 }
-                this.parkedAttempt = attempt;
+                this.parkedAttempt = { attempt, id, answerability };
                 this.retryTimer = this.clock.setTimeout(attempt, RETRY_MS);
                 return;
             }
             this.parkedAttempt = null;
-            const q = this.question(id, text, answerability, act, committedAt);
+            const automaticPark = this.automaticPark;
+            this.automaticPark = null;
+            const q = this.question(id, text, answerability, act, committedAt, parts);
             // If the engine already has an answer in flight for THIS question
             // (our prefetch, or its own interim speculation keyed by
             // noteCandidate), adopt it instead of starting over — that is the
@@ -1486,15 +1543,28 @@ export class SimpleAutoAnswerEngine {
             if (snapshot && snapshot.questionId === id && snapshot.text && !reuseSpeculative) {
                 this.host.log?.(`[AutoAnswer:simple] the prefetched answer for ${id} was drafted for other words: starting over on the question`);
             }
-            const promoted = this.pending.find(p => p.provisional);
+            const promoted = parts.find(p => p.provisional);
+            const now = this.clock.now();
             const request: NonNullable<SimpleAutoAnswerEngine['dispatchInFlight']> = {
-                id, parts: [...this.pending],
+                id, parts,
                 stalled: promoted ? { text: promoted.text, speaker: promoted.speaker } : null,
                 meetingGeneration: this.host.meetingGeneration(),
+                startedAt: now, lastProgressAt: now,
             };
             // The candidate stays pending until the answer settles: a failed
             // or cancelled answer leaves these words to be judged again.
             this.dispatchInFlight = request;
+            const timeout = (cancel = true) => {
+                this.clearDispatch();
+                if (cancel) {
+                    try { this.host.cancelAutomaticAnswer?.('dispatch_timeout'); } catch { /* still recover the question */ }
+                }
+                this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'dispatch_timeout', question: text });
+                this.lastJudgedKey = '';
+                if (request.handedOver) this.settleParts(request, text, true);
+                else if (!this.scheduleRecovery(text, request.parts, seqAtDeliver)) this.giveUpParts(request, text);
+            };
+            this.watchDispatch(request, timeout);
             this.emit({ name: 'auto_answer_decision', questionId: id, action: 'auto', answerability });
             if (reuseSpeculative) this.host.log?.(`[AutoAnswer:simple] reusing the prefetched answer for ${id}`);
             void Promise.resolve().then(() => {
@@ -1505,10 +1575,13 @@ export class SimpleAutoAnswerEngine {
                 return this.host.dispatch(q, { reuseSpeculative });
             }).catch((): AutoAnswerDispatchResult => ({ status: 'failed' })).then((result) => {
                 if (this.dispatchInFlight !== request || this.host.meetingGeneration() !== request.meetingGeneration) return;
-                this.dispatchInFlight = null;
-                this.lastJudgedKey = '';
                 const status = dispatchStatus(result);
                 const outcome = result as AutoAnswerDispatchResult | undefined;
+                if (outcome?.reason === 'dispatch_timeout') {
+                    timeout(false);
+                    return;
+                }
+                this.clearDispatch();
                 // 'partial': part of the answer was shown. The engine keeps its
                 // cooldown for it too; answering these words again would put a
                 // second card under the first.
@@ -1529,9 +1602,12 @@ export class SimpleAutoAnswerEngine {
                     // An earlier automatic answer still held the engine: nothing
                     // was decided about this question, so it is sent again.
                     if (outcome?.reason === 'busy') {
-                        if (this.scheduleRecovery(text)) return;
-                        this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'engine_busy_or_cooling', question: text });
-                        this.giveUpParts(request, text);
+                        if (this.judgeSeq === seqAtDeliver && !this.interviewerSpeaking && this.host.isEnabled() && this.host.isMeetingActive()) {
+                            this.automaticPark = automaticPark;
+                            parkAutomatic();
+                        } else {
+                            this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'superseded_while_parked', answerability });
+                        }
                         return;
                     }
                     // A decision about these words (the planner stayed silent, or
@@ -1549,10 +1625,16 @@ export class SimpleAutoAnswerEngine {
                     // Cancelled before it was shown (transcript revised, Auto
                     // Answer turned off): these words are judged again.
                     this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'dispatch_cancelled', question: text });
+                    if (this.automaticPark) {
+                        this.giveUpParts(request, text);
+                    } else if (this.pending.length && !this.interviewerSpeaking && this.host.isEnabled() && this.host.isMeetingActive()) {
+                        this.lastJudgedKey = '';
+                        this.arm(STABILITY_MS);
+                    }
                     return;
                 }
                 const retryable = outcome?.retryable !== false;
-                if (retryable && this.scheduleRecovery(text)) return;
+                if (retryable && this.scheduleRecovery(text, request.parts, seqAtDeliver)) return;
                 this.emit({ name: 'auto_answer_ignored', questionId: id, skipReason: 'dispatch_failed', question: text });
                 this.giveUpParts(request, text);
             });
@@ -1575,9 +1657,15 @@ export class SimpleAutoAnswerEngine {
             if (request.stalled) this.stallAnswered.push({ ...request.stalled, at: this.clock.now() });
             this.stallAnswered = this.stallAnswered.slice(-64);
         }
-        this.pending = this.pending.filter(part => !request.parts.includes(part));
-        this.judgedParts = 0;
-        if (this.pending.length && !this.interviewerSpeaking) this.arm(STABILITY_MS);
+        this.removePendingParts(request.parts);
+        if (!this.inFlight && !this.held && !this.parkedAttempt) this.lastJudgedKey = '';
+        if (this.automaticPark) this.wakeParked();
+        else if (this.pending.length && !this.interviewerSpeaking && !this.inFlight && !this.timer) this.arm(STABILITY_MS);
+    }
+
+    private removePendingParts(parts: PendingPart[]): void {
+        this.judgedParts = this.pending.slice(0, this.judgedParts).filter(part => !parts.includes(part)).length;
+        this.pending = this.pending.filter(part => !parts.includes(part));
     }
 
     /**
@@ -1596,14 +1684,14 @@ export class SimpleAutoAnswerEngine {
      * One retry per candidate; any new speech (bumpJudgeSeq) cancels it.
      * Returns false when no retry was scheduled.
      */
-    private scheduleRecovery(text: string): boolean {
+    private scheduleRecovery(text: string, parts?: PendingPart[], seq = this.judgeSeq): boolean {
         const key = normalizeForCompare(text);
         if (this.recovery?.key === key) return false;
+        if (seq !== this.judgeSeq) return false;
         if (!this.host.isEnabled() || !this.host.isMeetingActive() || this.interviewerSpeaking) return false;
-        const seq = this.judgeSeq;
         const generation = this.host.meetingGeneration();
         this.disarm();
-        this.recovery = { key };
+        this.recovery = { key, parts };
         this.emit({ name: 'auto_answer_retrying', question: text });
         this.recoveryTimer = this.clock.setTimeout(() => {
             this.recoveryTimer = null;
@@ -1620,16 +1708,17 @@ export class SimpleAutoAnswerEngine {
         this.recovery = null;
     }
 
-    private question(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number): AutoAnswerQuestion {
+    private question(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number,
+        parts = this.pending): AutoAnswerQuestion {
         const now = this.clock.now();
         return {
             id, text,
             confidence: answerability, answerability, completionConfidence: 1,
             dialogueAct: act,
             isFollowUp: act === 'follow_up_question', followUpTarget: '',
-            startedAt: this.pending[0]?.at ?? committedAt, lastUpdatedAt: now, committedAt,
+            startedAt: parts[0]?.at ?? committedAt, lastUpdatedAt: now, committedAt,
             endpointSource: 'quiet_window',
-            sourceSegments: this.pending.map(p => p.at),
+            sourceSegments: parts.map(p => p.at),
             candidateGeneration: this.sequence,
             meetingGeneration: this.host.meetingGeneration(),
         };
@@ -1658,7 +1747,7 @@ export class SimpleAutoAnswerEngine {
         // The manual answer owns the screen now: nothing judged, parked or
         // dispatched before the press goes out after it.
         this.disarm();
-        this.dropParked();
+        this.dropParked({ handover: true });
         // An automatic answer in flight is NOT forgotten here: forgetting it
         // ignored how it ended, so a shown answer was never recorded and its
         // words were answered a second time. It is marked handed over instead;
@@ -1695,7 +1784,7 @@ export class SimpleAutoAnswerEngine {
         const hadWork = Boolean(candidate) || this.parkedAttempt !== null || this.held !== null || this.judgeAbort !== null;
         // Read BEFORE anything is cleared: was the interviewer mid-question?
         const unfinished = this.interviewerSpeaking || Boolean(this.lastInterviewerInterim);
-        this.dropParked();
+        this.dropParked({ handover: true });
         this.disarm();
         this.held = null;
         this.bumpJudgeSeq('manual_answer');
@@ -1814,7 +1903,17 @@ export class SimpleAutoAnswerEngine {
         if (this.retryTimer !== null) { this.clock.clearTimeout(this.retryTimer); this.retryTimer = null; }
     }
 
-    private dropParked(): void { this.parkedAttempt = null; this.clearRetry(); }
+    private dropParked({ discardParts = false, meetingStopped = false, handover = false } = {}): void {
+        const park = this.parkedAttempt;
+        const automatic = this.automaticPark;
+        this.automaticPark = null;
+        this.parkedAttempt = null;
+        this.clearRetry();
+        if (!park || handover) return;
+        if (discardParts && automatic) this.removePendingParts(automatic.parts);
+        const reason = meetingStopped || !this.host.isMeetingActive() || !this.host.isEnabled() ? 'meeting_inactive' : 'superseded_while_parked';
+        this.emit({ name: 'auto_answer_ignored', questionId: park.id, skipReason: reason, answerability: park.answerability });
+    }
 
     /**
      * Hand the host the candidate-to-be: the pending finals plus the interim
@@ -1869,12 +1968,13 @@ export class SimpleAutoAnswerEngine {
         const i = this.pending.findIndex(p => p.provisional);
         if (i < 0) return;
         // The answer in flight was for words the transcript has now revised.
-        if (this.dispatchInFlight?.parts.includes(this.pending[i])) {
-            this.dispatchInFlight = null;
-            this.host.cancelAutomaticAnswer?.('transcript_revised');
-        }
+        const cancel = this.dispatchInFlight?.parts.includes(this.pending[i]);
         this.pending.splice(i, 1);
         this.judgedParts = Math.min(this.judgedParts, this.pending.length);
+        if (cancel) {
+            this.clearDispatch();
+            this.host.cancelAutomaticAnswer?.('transcript_revised');
+        }
     }
 
     /**
@@ -1919,9 +2019,9 @@ export class SimpleAutoAnswerEngine {
     }
 
     private reset(): void {
-        this.dispatchInFlight = null;
+        this.clearDispatch();
         this.disarm();
-        this.dropParked();
+        this.dropParked({ meetingStopped: true });
         this.clearFeedback();
         this.pending = [];
         this.judgedParts = 0;

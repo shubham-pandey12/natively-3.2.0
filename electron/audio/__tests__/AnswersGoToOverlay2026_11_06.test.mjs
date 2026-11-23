@@ -53,7 +53,9 @@ test('submitted interviewer questions reach the overlay before automatic answer 
   const manager = read('electron/IntelligenceManager.ts');
   const preload = read('electron/preload.ts');
   const adoption = engine.slice(engine.indexOf('if (stillStreaming) {'), engine.indexOf('// Accepted, but the stream neither runs'));
-  assert.match(adoption, /what_to_answer_question[\s\S]*?speculativeAdoptHook/);
+  assert.match(adoption, /what_to_answer_question[\s\S]*?this\.waitForAdoptedAnswer\(adoptedGenerationId, signal\)/);
+  const adoptedWait = engine.slice(engine.indexOf('private async waitForAdoptedAnswer('), engine.indexOf('private async planSuggestionTrigger('));
+  assert.match(adoptedWait, /this\.speculativeAdoptHook\?\.\(generationId\)/);
   assert.match(adoption, /what_to_answer_question[\s\S]*?revealSpeculativeAnswer/);
   assert.match(engine, /if \(automaticQuestion\) \{\s*this\.emit\('what_to_answer_question'/);
   assert.match(engine, /if \(automaticQuestion \|\| isSpeculative\) \{\s*this\.emit\('what_to_answer_question', \{\s*generationId, pending: false/);

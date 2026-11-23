@@ -4,6 +4,7 @@
 
 import type { SessionWriteDecision } from './llm/FinalAnswerGenerationPolicy';
 import type { AutoAnswerCancelReason, AutoAnswerDispatchResult } from './premium/autoAnswer';
+import { DISPATCH_MAX_MS, DISPATCH_STALL_MS } from './llm/automaticAnswerTiming';
 import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 
 /** What an automatic trigger resolved to (Auto Answer retries or reports anything not completed). */
@@ -195,6 +196,7 @@ export interface IntelligenceModeEvents {
     'manual_answer_started': () => void;
     'manual_answer_result': (answer: string, question: string) => void;
     'mode_changed': (mode: IntelligenceMode) => void;
+    'automatic_answer_settled': () => void;
     'error': (error: Error, mode: IntelligenceMode) => void;
     // ARCHITECTURE: dedicated channel for live negotiation coaching payloads.
     // Previously the coaching JSON was multiplexed into the suggested_answer
@@ -579,14 +581,8 @@ export class IntelligenceEngine extends EventEmitter {
      * while speculation was running (review#2, 2026-08-24).
      */
     private speculativeGenerationId: number | null = null;
-    /**
-     * An AUTOMATIC trigger is between handleSuggestionTrigger entry and its
-     * stream start (parked at the planner). cancelAutomaticAnswer() flips
-     * `automaticTriggerCancelled` in that window so a user barge-in during the
-     * classifier await still cancels (review#3, 2026-08-24).
-     */
-    private automaticTriggerPending = false;
-    private automaticTriggerCancelled = false;
+    /** Cancellation is scoped to the trigger, including its planner and adopted stream. */
+    private automaticTrigger: AbortController | null = null;
     /**
      * Auto Answer V3: the controller's current candidate id, so a speculative
      * run started by maybeSpeculate is keyed to it (V3 Amendment 6 reuse).
@@ -682,11 +678,9 @@ export class IntelligenceEngine extends EventEmitter {
      */
     private speculativeAdoptedGenerationId: number | null = null;
     /** The latest speculative run, so an adopted stream's dispatch can wait for it to settle. */
-    private speculativeRunPromise: Promise<string | null> | null = null;
-    /** Every speculative runWhatShouldISay still running, however it was launched. */
-    private readonly speculativeRunsInFlight = new Set<Promise<unknown>>();
+    private speculativeRun: { generationId: number; settled: Promise<unknown> } | null = null;
     /** Whether the last revealed prefetch actually reached the screen (empty-after-strip does not). */
-    private lastSpeculativeReveal: { generationId: number; shown: boolean } | null = null;
+    private lastSpeculativeReveal: { generationId: number; visibleGenerationId?: number; shown: boolean } | null = null;
     /**
      * Registered by a RUNNING speculative stream: called with the adopted
      * generation id the moment the dispatch adopts it, so what has already
@@ -1244,7 +1238,7 @@ export class IntelligenceEngine extends EventEmitter {
             if (Date.now() - this.lastSpeculativeDeclineAt < this.triggerCooldown) return;
             console.log(`[IntelligenceEngine] Speculative inference fired on interim`, { length: text.length, confidence });
             this.speculativeQuestionId = this.currentAutoCandidateId;
-            this.speculativeRunPromise = this.runWhatShouldISay(text, confidence || 0.8, undefined, { speculative: true })
+            void this.runWhatShouldISay(text, confidence || 0.8, undefined, { speculative: true })
                 .catch(err => { console.error('[IntelligenceEngine] Speculative run error:', err); return null; });
         }, this.SPECULATIVE_DEBOUNCE_MS);
     }
@@ -1423,7 +1417,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Manual presses deliberately do NOT consult this: they pass `skipCooldown`
      * and are allowed to supersede.
      */
-    canAutoAnswer(): boolean {
+    canAutoAnswer(skipCooldown = false): boolean {
         if (this.activeMode !== 'idle' && this.activeMode !== 'assist') {
             // The engine's OWN speculative prefetch is not "busy": the dispatch
             // that arrives now is the one that adopts it. Refusing it parked a
@@ -1435,13 +1429,18 @@ export class IntelligenceEngine extends EventEmitter {
                 && this.speculativeGenerationId === this.currentGenerationId;
             if (!ownPrefetchLive) return false;
         }
-        if (Date.now() - this.lastTriggerTime < this.automaticTriggerCooldown) return false;
+        if (!skipCooldown && Date.now() - this.lastTriggerTime < this.automaticTriggerCooldown) return false;
         // An earlier automatic trigger is still at the planner or settling (for
         // example one the interviewer's resumed speech just cancelled). A
         // dispatch now would only come back 'skipped'; refusing here makes Auto
         // Answer park the question and send it once this one has settled.
-        if (this.automaticTriggerPending) return false;
+        if (this.automaticTrigger) return false;
         return true;
+    }
+
+    isAutomaticAnswerGeneration(generationId: number | undefined): boolean {
+        return this.automaticTrigger !== null && generationId !== undefined
+            && generationId === this.currentGenerationId && generationId === this.automaticGenerationId;
     }
 
     /**
@@ -1461,18 +1460,25 @@ export class IntelligenceEngine extends EventEmitter {
 
         // One automatic answer at a time: a second dispatch while one is at the
         // planner or streaming would answer the same question twice.
-        if (this.automaticTriggerPending) return { status: 'skipped', reason: 'busy' };
-        this.automaticTriggerPending = true;
-        this.automaticTriggerCancelled = false;
+        if (this.automaticTrigger) return { status: 'skipped', reason: 'busy' };
+        const controller = new AbortController();
+        this.automaticTrigger = controller;
+        const { signal } = controller;
+        const cancelled = new Promise<AutomaticAnswerResult>(resolve => {
+            signal.addEventListener('abort', () => resolve(signal.reason === 'dispatch_timeout'
+                ? { status: 'failed', retryable: true, reason: 'dispatch_timeout' }
+                : { status: 'cancelled' }), { once: true });
+        });
         try {
-            const result = await this.handleSuggestionTriggerInner(trigger);
+            const result = await Promise.race([this.handleSuggestionTriggerInner(trigger, signal), cancelled]);
             // An automatic answer that was not shown must not hold the trigger
             // cooldown: Auto Answer retries it, or the next question comes.
             if (result.status !== 'completed' && result.status !== 'partial') this.lastTriggerTime = 0;
             return result;
         } finally {
-            this.automaticTriggerPending = false;
-            this.automaticTriggerCancelled = false;
+            this.automaticTrigger = null;
+            this.automaticGenerationId = null;
+            if (this.activeMode === 'idle') this.emit('automatic_answer_settled');
         }
     }
 
@@ -1495,19 +1501,13 @@ export class IntelligenceEngine extends EventEmitter {
         return true;
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger): Promise<AutomaticAnswerResult> {
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal): Promise<AutomaticAnswerResult> {
         if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         const plannerDecision = await this.planSuggestionTrigger(trigger);
-        if (this.skipOwnedAutomaticTrigger(trigger, plannerDecision.confidence)) return { status: 'skipped', reason: 'already_answered' };
         // Cancelled while at the planner (the interviewer resumed, a barge-in,
         // the judge failed): do not start an answer to half a question.
-        if (trigger.automatic && this.automaticTriggerCancelled) {
-            console.log('[IntelligenceEngine] Automatic trigger dropped: cancelled during planning');
-            try {
-                this.emit('suggestion_skipped', { reason: 'user_barge_in', question: trigger.lastQuestion ?? '', confidence: plannerDecision.confidence });
-            } catch { /* a listener must never break the trigger path */ }
-            return { status: 'cancelled' };
-        }
+        if (signal?.aborted) return { status: 'cancelled' };
+        if (this.skipOwnedAutomaticTrigger(trigger, plannerDecision.confidence)) return { status: 'skipped', reason: 'already_answered' };
         if (plannerDecision.kind === 'silent') {
             console.log('[IntelligenceEngine] Planner stayed silent', { reason: plannerDecision.reason, confidence: plannerDecision.confidence });
             // A throttled turn used to end here with NO signal of any kind: no
@@ -1576,16 +1576,7 @@ export class IntelligenceEngine extends EventEmitter {
                         }
                         // Unmute the stream NOW: paint what it has, stream the rest.
                         const adoptedGenerationId = this.currentGenerationId;
-                        try { this.speculativeAdoptHook?.(adoptedGenerationId); } catch (err) { console.warn('[IntelligenceEngine] adopted-stream paint failed; it will reveal at completion:', err); }
-                        // Settled when the adopted stream finishes (or is cancelled).
-                        // Every speculative run in flight is awaited, not just
-                        // `speculativeRunPromise`: a prefetch that CLAIMED a running
-                        // interim speculation adopts a run that promise may not
-                        // track, and resolving early reported a shown answer as
-                        // cancelled (Auto Answer would then answer it again).
-                        await Promise.all([...this.speculativeRunsInFlight, this.speculativeRunPromise?.catch(() => null)]);
-                        const shown = this.lastSpeculativeReveal?.generationId === adoptedGenerationId && this.lastSpeculativeReveal.shown;
-                        return { status: shown ? 'completed' : 'cancelled' };
+                        return this.waitForAdoptedAnswer(adoptedGenerationId, signal);
                     }
                     if (finished) {
                         console.log(`[IntelligenceEngine] Speculative stream accepted (Jaccard=${similarity.toFixed(2)}) — already finished; revealing`);
@@ -1595,7 +1586,7 @@ export class IntelligenceEngine extends EventEmitter {
                         if (trigger.automatic) this.claimSpokenTurn(this.latestSpokenTurn(), true, finished.generationId);
                         this.revealSpeculativeAnswer(finished, trigger.automatic === true);
                         const shown = this.lastSpeculativeReveal?.generationId === finished.generationId && this.lastSpeculativeReveal.shown;
-                        return { status: shown ? 'completed' : 'failed', retryable: false };
+                        return shown ? { status: 'completed' } : { status: 'failed', retryable: true, reason: 'adopted_draft_failed' };
                     }
                     // Accepted, but the stream neither runs nor finished (aborted
                     // or errored between prefetch and dispatch): answer afresh.
@@ -1647,6 +1638,17 @@ export class IntelligenceEngine extends EventEmitter {
             if (ownGeneration !== null && generationId === ownGeneration && typeof answer === 'string' && answer.trim()) shown = true;
         };
         this.on('suggested_answer', onShown);
+        let cleanedUp = false;
+        const cleanup = () => {
+            if (cleanedUp) return;
+            cleanedUp = true;
+            this.off('suggested_answer', onShown);
+            this.nextRunIsAutomatic = false;
+            if (fastAuto && !previousFastMode) {
+                try { this.llmHelper.setGroqFastTextMode(false); } catch { /* routing hint only */ }
+            }
+        };
+        signal?.addEventListener('abort', cleanup, { once: true });
         try {
             // A judged automatic ask already passed the planner's same-utterance
             // cooldown, which compares the TEXT. The time-only 3 s throttle
@@ -1664,11 +1666,8 @@ export class IntelligenceEngine extends EventEmitter {
             if (shown) return { status: 'completed' };
             return { status: 'failed', retryable: outcome?.retryable !== false };
         } finally {
-            this.off('suggested_answer', onShown);
-            this.nextRunIsAutomatic = false;
-            if (fastAuto && !previousFastMode) {
-                try { this.llmHelper.setGroqFastTextMode(false); } catch { /* routing hint only */ }
-            }
+            signal?.removeEventListener('abort', cleanup);
+            cleanup();
         }
     }
 
@@ -1763,7 +1762,7 @@ export class IntelligenceEngine extends EventEmitter {
         this.currentAutoCandidateId = questionId;
         this.speculativeQuestionId = questionId;
         console.log(`[IntelligenceEngine] Auto Answer prefetch fired while the judge decides`, { questionId, length: trimmed.length });
-        this.speculativeRunPromise = this.runWhatShouldISay(trimmed, 0.9, undefined, { speculative: true })
+        void this.runWhatShouldISay(trimmed, 0.9, undefined, { speculative: true })
             .catch(err => { console.error('[IntelligenceEngine] Auto Answer prefetch error:', err); return null; });
     }
 
@@ -1935,6 +1934,9 @@ export class IntelligenceEngine extends EventEmitter {
         //    here would leave the streamed row orphaned beside a second copy.
         const alreadyPainting = streamed?.emitted === true;
         const generationId = alreadyPainting ? finished.generationId : ++this.currentGenerationId;
+        // A reveal that had not opened a row can mint a new visible id for the
+        // same draft. Publish the mapping before its first token is emitted.
+        this.lastSpeculativeReveal = { generationId: finished.generationId, visibleGenerationId: generationId, shown: false };
         this.automaticGenerationId = automatic ? generationId : null;
         if (alreadyPainting) {
             console.log(`[IntelligenceEngine] Finishing the adopted prefetch that streamed live (${text.length} chars, gen ${generationId})`);
@@ -1989,7 +1991,7 @@ export class IntelligenceEngine extends EventEmitter {
             : { status: 'success', retryable: false };
         this.settleSpokenTurn(finished.generationId, outcome.status === 'success');
         this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, finished.sourceLabel, finished.stopReason, outcome);
-        this.lastSpeculativeReveal = { generationId: finished.generationId, shown: true };
+        this.lastSpeculativeReveal = { generationId: finished.generationId, visibleGenerationId: generationId, shown: true };
     }
 
     /** Auto Answer V3: identity of the speculative cache, for keyed/embedding reuse. */
@@ -2033,15 +2035,13 @@ export class IntelligenceEngine extends EventEmitter {
      */
     cancelAutomaticAnswer(reason: AutoAnswerCancelReason): boolean {
         let cancelled = false;
-        // The stream has not started yet (parked at the planner/classifier):
-        // flag the pending trigger so handleSuggestionTrigger stops before
-        // runWhatShouldISay.
-        if (this.automaticTriggerPending && !this.automaticTriggerCancelled) {
-            this.automaticTriggerCancelled = true;
+        if (this.automaticTrigger && !this.automaticTrigger.signal.aborted) {
+            this.automaticTrigger.abort(reason);
             cancelled = true;
-            console.log(`[IntelligenceEngine] Automatic trigger cancelled pre-stream (${reason})`);
         }
-        const dropSpeculation = reason !== 'user_barge_in';
+        const automatic = this.automaticGenerationId === this.currentGenerationId;
+        const adopted = this.speculativeAdoptedGenerationId === this.currentGenerationId;
+        const dropSpeculation = reason !== 'user_barge_in' && (reason !== 'dispatch_timeout' || automatic || adopted);
         const speculativeLive = this.activeMode === 'what_to_say'
             && this.speculativeGenerationId !== null && this.speculativeGenerationId === this.currentGenerationId;
         if (dropSpeculation) {
@@ -2054,13 +2054,85 @@ export class IntelligenceEngine extends EventEmitter {
             this.speculativeAdoptedGenerationId = null;
         }
         if (this.activeMode !== 'what_to_say') return cancelled;
-        const automatic = this.automaticGenerationId !== null && this.automaticGenerationId === this.currentGenerationId;
         if (!automatic && !(dropSpeculation && speculativeLive)) return cancelled;
         if (!this.whatToAnswerCancellationToken) return cancelled;
+        const generationId = this.currentGenerationId;
         this.whatToAnswerCancellationToken.abort(reason);
         this.automaticGenerationId = null;
+        if (automatic || reason === 'dispatch_timeout') {
+            // A provider or verifier can ignore abort. Revoke the generation's
+            // authority immediately and settle the ownership and UI once here.
+            this.currentGenerationId++;
+            this.whatToAnswerCancellationToken = null;
+            this.speculativeRun = null;
+            this.speculativeAdoptHook = null;
+            this.settleSpokenTurn(generationId, false);
+            this.emit('suggested_answer_discard', reason, generationId);
+            this.setMode('idle');
+        }
         console.log(`[IntelligenceEngine] Automatic answer cancelled mid-stream (${reason})`);
         return true;
+    }
+
+    private async waitForAdoptedAnswer(generationId: number, signal?: AbortSignal): Promise<AutomaticAnswerResult> {
+        if (signal?.aborted) return { status: 'cancelled' };
+        const run = this.speculativeRun?.generationId === generationId ? this.speculativeRun.settled : undefined;
+        const startedAt = Date.now();
+        let lastProgressAt = startedAt;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let settle!: (result: AutomaticAnswerResult) => void;
+        const outcome = new Promise<AutomaticAnswerResult>(resolve => { settle = resolve; });
+        const failed = { status: 'failed', retryable: true, reason: 'adopted_draft_failed' } as const;
+        const onAbort = () => settle(signal?.reason === 'dispatch_timeout'
+            ? { status: 'failed', retryable: true, reason: 'dispatch_timeout' }
+            : { status: 'cancelled' });
+        const isAdoptedOutput = (id: number) => id === generationId
+            || (this.lastSpeculativeReveal?.generationId === generationId && this.lastSpeculativeReveal.visibleGenerationId === id);
+        const onVisible = (text: string, _question: string, _confidence: number, id?: number) => {
+            if (id === undefined || !text.trim()) return;
+            if (isAdoptedOutput(id)) lastProgressAt = Date.now();
+            else if (id > generationId) settle({ status: 'cancelled' });
+        };
+        const onFinal = (text: string, question: string, confidence: number, id?: number) => {
+            onVisible(text, question, confidence, id);
+            if (!run && id !== undefined && isAdoptedOutput(id) && text.trim()) settle({ status: 'completed' });
+        };
+        const checkDeadline = () => {
+            const remaining = Math.min(startedAt + DISPATCH_MAX_MS, lastProgressAt + DISPATCH_STALL_MS) - Date.now();
+            if (remaining > 0) {
+                timer = setTimeout(checkDeadline, remaining);
+            } else if (this.currentGenerationId === generationId) {
+                this.cancelAutomaticAnswer('dispatch_timeout');
+                settle({ status: 'failed', retryable: true, reason: 'dispatch_timeout' });
+            } else {
+                settle(failed);
+            }
+        };
+        this.on('suggested_answer_token', onVisible);
+        this.on('suggested_answer', onFinal);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        checkDeadline();
+        try {
+            // The wrapper registers each speculative run by generation before it can
+            // be adopted. If the slot is missing, the deadline still bounds the wait.
+            void run?.then(() => {
+                const shown = this.lastSpeculativeReveal?.generationId === generationId && this.lastSpeculativeReveal.shown;
+                settle(shown ? { status: 'completed' } : failed);
+            });
+            try { this.speculativeAdoptHook?.(generationId); } catch (err) { console.warn('[IntelligenceEngine] adopted-stream paint failed; it will reveal at completion:', err); }
+            const result = await outcome;
+            if (result.reason === 'adopted_draft_failed' && this.currentGenerationId === generationId) {
+                this.speculativeAdoptedGenerationId = null;
+                this.settleSpokenTurn(generationId, false);
+                this.setMode('idle');
+            }
+            return result;
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            this.off('suggested_answer_token', onVisible);
+            this.off('suggested_answer', onFinal);
+        }
     }
 
     private async planSuggestionTrigger(trigger: SuggestionTrigger): Promise<PlannerDecision> {
@@ -2415,13 +2487,16 @@ export class IntelligenceEngine extends EventEmitter {
         const outcomeOut = options?.outcomeOut ?? {};
         outcomeOut.value = { status: 'failed', retryable: true, reason: 'generation_not_completed' };
         const startedUnder = this.conversationSessionId();
+        const generationBefore = this.currentGenerationId;
         const run = this.runWhatShouldISayInner(question, confidence, imagePaths, { ...options, turnOut, outcomeOut });
-        if (options?.speculative) {
+        if (options?.speculative && this.currentGenerationId !== generationBefore) {
             // Tracked here, not at the launch sites: an adoption must wait for
             // the run it adopted however it was started (see handleSuggestionTriggerInner).
-            const tracked: Promise<unknown> = run.catch(() => null);
-            this.speculativeRunsInFlight.add(tracked);
-            void tracked.finally(() => this.speculativeRunsInFlight.delete(tracked));
+            const tracked = { generationId: this.currentGenerationId, settled: run.catch(() => null) };
+            this.speculativeRun = tracked;
+            void tracked.settled.then(() => {
+                if (this.speculativeRun === tracked) this.speculativeRun = null;
+            });
         }
         let answer: string | null = null;
         try {
@@ -5585,7 +5660,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // hook's `adoptedGenerationId !== generationId` guard passes, and the
                 // dead run's partial text paints as the answer. Clearing outside the
                 // `finally` left exactly that window open.
-                this.speculativeAdoptHook = null;
+                if (this.currentGenerationId === generationId) this.speculativeAdoptHook = null;
             });
             // Deadline cleanup aborts the provider transport too, but a deadline
             // still needs the established visible fallback below. Keep the owned
@@ -5794,8 +5869,8 @@ export class IntelligenceEngine extends EventEmitter {
                 // Don't update session or emit final event.
                 // If we opened a streaming row, discard it so the superseding
                 // generation's row is the only one (no orphaned partial answer).
-                if (discardOpenRow && openedStreamRow) this.emit('suggested_answer_discard', 'superseded', generationId);
-                if (isSpeculative && this.ownsSpeculativeSlot(generationId)) {
+                if (discardOpenRow && openedStreamRow && this.currentGenerationId === generationId) this.emit('suggested_answer_discard', 'superseded', generationId);
+                if (isSpeculative && this.currentGenerationId === generationId && this.ownsSpeculativeSlot(generationId)) {
                     this.speculativeText = null;
                     this.speculativeTextExpiry = Infinity;
                     // Stamp lastTriggerTime so the real trigger that caused this abort
@@ -7956,8 +8031,11 @@ export class IntelligenceEngine extends EventEmitter {
             // request or reset replaced this turn.
             if (isWtaSuperseded()) {
                 recordWtaCancellation();
-                if (isSpeculative && this.ownsSpeculativeSlot(generationId)) { this.speculativeText = null; this.speculativeTextExpiry = Infinity; }
-                if (openedStreamRow) this.emit('suggested_answer_discard', 'superseded', generationId);
+                if (isSpeculative && this.currentGenerationId === generationId && this.ownsSpeculativeSlot(generationId)) {
+                    this.speculativeText = null;
+                    this.speculativeTextExpiry = Infinity;
+                }
+                if (openedStreamRow && this.currentGenerationId === generationId) this.emit('suggested_answer_discard', 'superseded', generationId);
                 return null;
             }
             try {
@@ -9719,6 +9797,9 @@ export class IntelligenceEngine extends EventEmitter {
      * Reset engine state (cancels any in-flight operations)
      */
     reset(): void {
+        this.automaticTrigger?.abort('engine_reset');
+        this.speculativeRun = null;
+        this.speculativeAdoptHook = null;
         this.spokenAnswer?.settle(false);
         this.spokenAnswer = undefined;
         this.activeMode = 'idle';

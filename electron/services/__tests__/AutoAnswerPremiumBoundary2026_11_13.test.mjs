@@ -35,7 +35,7 @@ test('without premium: Auto Answer is unavailable and refused, never allowed', (
 test('without premium: every object main.ts builds is safe to call', async () => {
   const m = B.UNAVAILABLE_AUTO_ANSWER;
   const engine = m.createEngine({}, {});
-  for (const k of ['setThresholds', 'onMeetingStart', 'onModeChanged', 'onMeetingStop', 'onEngineIdle', 'onProviderEndpoint',
+  for (const k of ['setThresholds', 'onMeetingStart', 'onModeChanged', 'onMeetingStop', 'onEngineIdle', 'onAutomaticAnswerProgress', 'onProviderEndpoint',
     'onLocalSpeechEnd', 'onLocalSpeechStart', 'onManualSpokenAnswer', 'onManualAnswerSettled']) assert.equal(engine[k](), undefined, k);
   // A press id: 0 means no engine is tracking presses, so no settle is awaited.
   assert.equal(engine.onManualAnswerStarted(), 0);

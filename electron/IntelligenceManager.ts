@@ -89,7 +89,7 @@ export class IntelligenceManager extends EventEmitter {
             // The user's own buttons (llm/customButtons.ts).
             'custom_button', 'custom_button_token',
             'manual_answer_started', 'manual_answer_result',
-            'mode_changed', 'error',
+            'mode_changed', 'automatic_answer_settled', 'error',
             // Sprint 7: dedicated channel for negotiation coaching payloads.
             'negotiation_coaching',
             // Phase 3: Cluely-style dynamic action card emissions.
@@ -272,8 +272,12 @@ export class IntelligenceManager extends EventEmitter {
     }
 
     /** Mode + cooldown gate for the Auto Answer trigger. See IntelligenceEngine.canAutoAnswer. */
-    canAutoAnswer(): boolean {
-        return this.engine.canAutoAnswer();
+    canAutoAnswer(skipCooldown = false): boolean {
+        return this.engine.canAutoAnswer(skipCooldown);
+    }
+
+    isAutomaticAnswerGeneration(generationId: number | undefined): boolean {
+        return this.engine.isAutomaticAnswerGeneration(generationId);
     }
 
     /** Stop the AUTOMATIC answer only (never a manual one). See IntelligenceEngine.cancelAutomaticAnswer. */

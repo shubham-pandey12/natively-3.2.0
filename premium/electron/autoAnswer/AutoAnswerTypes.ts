@@ -144,6 +144,7 @@ export type AutoAnswerSkipReason =
     | 'judge_unavailable'
     /** The automatic answer was cancelled before it was shown (interviewer resumed, manual press, transcript revised). */
     | 'dispatch_cancelled'
+    | 'dispatch_timeout'
     /** The automatic answer failed and its one retry did too (or it was not retryable). */
     | 'dispatch_failed'
     /** The engine chose not to answer (the planner stayed silent). */
@@ -156,6 +157,7 @@ export type AutoAnswerCancelReason =
     | 'judge_unavailable'
     | 'transcript_revised'
     | 'manual_answer'
+    | 'dispatch_timeout'
     | 'auto_disabled_or_meeting_ended'
     | 'engine_reset';
 
@@ -171,7 +173,7 @@ export type AutoAnswerCancelReason =
 export interface AutoAnswerDispatchResult {
     status: 'completed' | 'cancelled' | 'failed' | 'skipped' | 'partial';
     retryable?: boolean;
-    reason?: 'busy' | 'declined' | 'already_answered';
+    reason?: 'busy' | 'declined' | 'already_answered' | 'adopted_draft_failed' | 'dispatch_timeout';
 }
 
 /** The ternary policy output (V3 Amendment 4) plus the orthogonal V2 actions. */

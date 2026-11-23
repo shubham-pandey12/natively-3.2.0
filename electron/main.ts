@@ -3947,7 +3947,7 @@ export class AppState {
     isEnabled: () => this.isAutoAnswerActive(),
     isMeetingActive: () => this.isMeetingActive,
     meetingGeneration: () => this._meetingGeneration,
-    engineAccepting: () => this.intelligenceManager.canAutoAnswer(),
+    engineAccepting: (skipCooldown) => this.intelligenceManager.canAutoAnswer(skipCooldown),
     answerStreamActive: () => this.intelligenceManager.isAnswerStreaming(),
     // 180 s — the SAME window the answer itself is written from
     // (IntelligenceEngine's getContext(180)). At 60 s the judge could not see
@@ -9070,7 +9070,12 @@ export class AppState {
       // other live streams (code hint / brainstorm) — id-less items are accepted.
       queueBatch('suggested_answer', { token, question, confidence, generationId });
       this.autoAnswerUsage.answerShown();
+      if (this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
+        this.simpleAutoAnswer.onAutomaticAnswerProgress();
+      }
     })
+
+    this.intelligenceManager.on('automatic_answer_settled', () => this.simpleAutoAnswer.onEngineIdle())
 
     // Orphaned-scaffold fix: a what-to-answer stream that already showed a
     // coding scaffold ended with no final answer (superseded/declined/errored).

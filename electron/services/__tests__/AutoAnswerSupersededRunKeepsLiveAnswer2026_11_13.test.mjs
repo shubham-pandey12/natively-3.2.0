@@ -207,7 +207,7 @@ test('unchanged: before adoption, the prefetch still replaces an interim specula
     assert.ok(!h.finals.some((f) => f.text.startsWith('STALE')), 'nothing was revealed without a dispatch');
 });
 
-test('a visible answer replaced during its verifier sends no late discard (the renderer would clear the NEW row)', async () => {
+test('a judged successor waits for the visible answer to finish verification and receives no late discard', async () => {
     const h = await makeEngine({ holdLiveVerifier: true });
     h.releaseStaleVerifier();
     void h.engine.runWhatShouldISay(TRUNCATED, 0.8, undefined, { speculative: true });   // run 1, finishes
@@ -223,18 +223,22 @@ test('a visible answer replaced during its verifier sends no late discard (the r
     await until(() => h.verifierCalls() === 2);
     assert.equal(h.engine.getActiveMode(), 'what_to_say');
 
-    // A new judged question replaces it (run 3 paints).
+    // The controller parks a busy result and retries it after the visible answer finishes.
+    const next = 'And how does a mutex differ from a semaphore?';
+    h.session.addTranscript({ speaker: 'interviewer', text: next, timestamp: Date.now(), final: true });
     h.engine.lastTriggerTime = 0;
+    const trigger = { ...autoTrigger(next, '1-q2'), reuseSpeculative: false };
     try {
-        const successor = await h.engine.handleSuggestionTrigger({ ...autoTrigger('And how does a mutex differ from a semaphore?', '1-q2'), reuseSpeculative: false });
-        assert.notEqual(successor.status, 'skipped', 'the newer judged question must be allowed to replace the answer');
-        await until(() => h.tokens.some((t) => t.gen !== firstGen));
+        assert.deepEqual(await h.engine.handleSuggestionTrigger(trigger), { status: 'skipped', reason: 'busy' });
+        assert.equal(h.runs(), 2, 'the successor does not interrupt the visible answer');
         const discardsBefore = h.discards.length;
-
-        h.releaseLiveVerifier();                                                          // run 2 resumes, already replaced
-        await dispatch;
+        h.releaseLiveVerifier();
+        assert.deepEqual(await dispatch, { status: 'completed' });
+        assert.equal(h.finals.filter(f => f.gen === firstGen).length, 1, 'the first generation finalizes once before the successor starts');
+        assert.deepEqual(await h.engine.handleSuggestionTrigger(trigger), { status: 'completed' });
+        await until(() => h.tokens.some(t => t.gen !== firstGen));
         assert.equal(h.discards.length, discardsBefore, 'no discard once the successor is painting');
-        assert.ok(!h.finals.some((f) => f.gen === firstGen), 'the replaced run does not finalize over its successor');
+        assert.equal(h.finals.filter(f => f.gen === firstGen).length, 1, 'the first run does not finalize again over its successor');
         await until(() => h.finals.some((f) => f.text.startsWith('Later run 3')));
     } finally {
         h.releaseLiveVerifier();
