@@ -61,14 +61,15 @@ test('D3: a different question judged right after an answer is answered', async 
 });
 
 test('D3 guard: the SAME ask judged again inside the window is still not answered twice', async () => {
-    const { engine, session, finals, skipped } = await makeEngine(['Raw spans are kept for 14 days.']);
+    const { engine, session, finals, skipped, calls } = await makeEngine(['Raw spans are kept for 14 days.']);
     session.addTranscript({ speaker: 'interviewer', text: Q1, timestamp: Date.now(), final: true });
     await engine.handleSuggestionTrigger(judged(Q1, '1-q1'));
     await until(() => finals.length === 1);
     await engine.handleSuggestionTrigger(judged(Q1, '1-q1b'));
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(finals.length, 1);
-    assert.equal(skipped.at(-1)?.reason, 'cooldown');
+    assert.equal(calls(), 1, 'the owned turn does not start another generation');
+    assert.equal(skipped.at(-1)?.reason, 'already_answered');
 });
 
 test('D4: a prefetch that declined does not silence the judged answer on the same ask', async () => {

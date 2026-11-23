@@ -16,7 +16,7 @@ import { FakeClock } from './fakeClock.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const DIST = path.resolve(__dirname, '../../../../dist-electron/electron/intelligence/autoAnswer');
+const DIST = path.resolve(__dirname, '..', '..', '..', '..', 'dist-electron', 'premium', 'electron', 'autoAnswer');
 const { SimpleAutoAnswerEngine, STALL_PROMOTE_MS, isSameUtterance } = require(path.join(DIST, 'SimpleAutoAnswer.js'));
 const { buildJudgePrompt } = require(path.join(DIST, 'AutoAnswerJudge.js'));
 

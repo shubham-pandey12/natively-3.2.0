@@ -25,12 +25,15 @@ const INCOMPLETE = verdict({ is_ask: false, complete: false, act: 'incomplete', 
 
 function rig(replies) {
   const clock = new FakeClock();
-  const state = { dispatched: [], skipped: [] };
+  const state = { dispatched: [], skipped: [], judged: [] };
   let n = 0;
   const host = {
     isEnabled: () => true, isMeetingActive: () => true, meetingGeneration: () => 1, engineAccepting: () => true,
     recentTurns: () => [], dispatch: (q) => { state.dispatched.push(q.text); return true; },
-    judgeCandidate: async () => replies[n++] ?? SILENT,
+    judgeCandidate: async ({ candidateText }) => {
+      state.judged.push(candidateText);
+      return replies[n++] ?? SILENT;
+    },
     telemetry: (e) => { if (e.name === 'auto_answer_ignored') state.skipped.push(e.skipReason); },
     log: () => {},
   };
@@ -65,10 +68,15 @@ test('a NEW question after a ruled-out remark is still answered', async () => {
 });
 
 test('an incomplete ask finished by later speech is still answered (incomplete is never ruled out)', async () => {
-  const whole = 'And what I want you to do is design a rate limiter for our public API.';
+  const fragment = 'And what I want you to do is';
+  const ending = 'design a rate limiter for our public API.';
+  const whole = `${fragment} ${ending}`;
   const h = rig([INCOMPLETE, verdict({ question_text: whole })]);
-  await h.say('And what I want you to do is', 300);
-  await h.say('design a rate limiter for our public API.');
-  assert.equal(h.state.dispatched.length, 1);
-  assert.match(h.state.dispatched[0], /rate limiter/);
+  // A mid-sentence final skips the early judge. Wait for the commit window.
+  await h.say(fragment);
+  assert.deepEqual(h.state.judged, [fragment]);
+  assert.deepEqual(h.state.dispatched, []);
+  await h.say(ending);
+  assert.deepEqual(h.state.judged, [fragment, whole]);
+  assert.deepEqual(h.state.dispatched, [whole]);
 });

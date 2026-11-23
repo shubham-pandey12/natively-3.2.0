@@ -20,8 +20,8 @@ import { FakeClock } from './fakeClock.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const REPO = path.resolve(__dirname, '../../../..');
-const DIST = path.join(REPO, 'dist-electron/electron/intelligence/autoAnswer');
+const REPO = path.resolve(__dirname, '..', '..', '..', '..');
+const DIST = path.resolve(REPO, 'dist-electron', 'premium', 'electron', 'autoAnswer');
 const { SimpleAutoAnswerEngine, FEEDBACK_WINDOW_MS } = require(path.join(DIST, 'SimpleAutoAnswer.js'));
 const { AutoAnswerUsageTelemetry } = require(path.join(DIST, 'AutoAnswerUsageTelemetry.js'));
 

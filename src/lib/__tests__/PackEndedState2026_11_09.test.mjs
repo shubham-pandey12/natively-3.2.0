@@ -10,6 +10,7 @@ const lastPack = {
   billing_period: 'pack',
   pack: { plan: 'pack_heavy', seconds_total: 18000, seconds_used: 180, seconds_left: 17820, ends_at: '2026-11-23T00:52:40.866Z', ended: false, ended_reason: null },
 };
+const beforePackExpires = Date.parse('2026-11-09T00:00:00Z');
 
 test('server reason pack_ended: uses the refusal\'s own pack block', () => {
   const r = endedPackFromRefusal({
@@ -48,11 +49,13 @@ test('network errors, no key and good answers are not an ended pack', () => {
 });
 
 test('banner: no meeting line under 90% used', () => {
-  assert.equal(packMeetingBucket(lastPack.pack), null);
+  assert.equal(packMeetingBucket(lastPack.pack, undefined, beforePackExpires), null);
 });
 
 test('banner: meeting line from 90% used, with time left', () => {
-  const b = packMeetingBucket({ seconds_total: 18000, seconds_used: 16500, seconds_left: 1500, ends_at: '2099-01-01T00:00:00Z' });
+  const b = packMeetingBucket({
+    seconds_total: 18000, seconds_used: 16500, seconds_left: 1500, ends_at: lastPack.pack.ends_at,
+  }, undefined, beforePackExpires);
   assert.deepEqual(b, { label: 'Meeting time', detail: '25 min left of 5 h', pct: 92 });
 });
 

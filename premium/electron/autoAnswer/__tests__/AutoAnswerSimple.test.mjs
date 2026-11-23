@@ -781,16 +781,19 @@ test('a question re-judged after an interim still answers while the user talks o
   const h = makeSimple(() => new Promise((r) => resolvers.push(r)));
   h.interviewer('So how would you scale that service to ten times the traffic?');
   await h.advance(STABILITY_MS + 100);
-  h.interviewer('mm', false);
+  // A continuation changes the ask. Filler is deliberately carried over without re-judging.
+  h.interviewer('And what would you', false);
   resolvers[0](YES({ answerability: 0.9 }));      // stale: superseded by the interim
   await flush(); await flush();
+  assert.deepEqual(h.texts(), [], 'the stale verdict does not dispatch');
   h.user('I would start by adding a read replica and caching the hot keys.');
-  h.interviewer('mm.');                           // the interim's final
+  h.interviewer('And what would you monitor?');  // the interim's final
   await h.advance(STABILITY_MS + 200);
   assert.equal(resolvers.length, 2, 're-judged once the interviewer stopped');
   resolvers[1](YES({ answerability: 0.9 }));
   await flush(); await flush();
-  assert.equal(h.texts().length, 1, `the user's speech does not block it (skips: ${h.state.skips.join(',')})`);
+  assert.deepEqual(h.texts(), ['So how would you scale that service to ten times the traffic? And what would you monitor?'],
+    `the user's speech does not block the updated question (skips: ${h.state.skips.join(',')})`);
 });
 
 test('a deferred verdict expires, and a SILENT verdict is never deferred at all', async () => {

@@ -127,7 +127,8 @@ test('F-CTX-01: a replaced run finishing its verifier does not mark the engine i
     const h = await makeEngine();
     await staleRunWaitingBehindPrefetch(h);
 
-    await h.engine.handleSuggestionTrigger(autoTrigger(FULL));   // adopts gen B, paints live
+    // Dispatch now settles with the adopted answer, whose tail this test releases.
+    const dispatch = h.engine.handleSuggestionTrigger(autoTrigger(FULL));
     await until(() => h.tokens.length > 0);
     const liveGen = h.tokens[0].gen;
 
@@ -143,6 +144,7 @@ test('F-CTX-01: a replaced run finishing its verifier does not mark the engine i
     assert.equal(h.runs(), 2, 'no speculation may start on top of the visible answer');
 
     h.releaseLiveTail();
+    await dispatch;
     await until(() => h.finals.length === 1);
     assert.deepEqual(h.discards.filter((d) => d.gen === liveGen), [], 'the visible answer was never discarded');
     assert.equal(h.finals[0].gen, liveGen);
@@ -160,8 +162,10 @@ test('F-CTX-02: when the stale run finishes before the dispatch, the dispatch st
     assert.equal(h.engine.getActiveMode(), 'what_to_say', 'gen B still owns the engine');
     assert.equal(h.engine.getSpeculativeSnapshot().text, FULL, 'the slot still holds the full question');
 
-    await h.engine.handleSuggestionTrigger(autoTrigger(FULL));
+    const dispatch = h.engine.handleSuggestionTrigger(autoTrigger(FULL));
+    await until(() => h.tokens.length > 0);
     h.releaseLiveTail();
+    await dispatch;
     await until(() => h.finals.length === 1);
     assert.ok(!h.finals[0].text.startsWith('STALE'), 'the cut-off question\'s draft must never be revealed');
     assert.ok(h.finals[0].text.includes('threads inside it share'));
@@ -178,7 +182,7 @@ test('prefetch gate: a new candidate cannot abort an adopted answer that is on s
     h.engine.lastTriggerTime = 0;
     h.engine.prefetchAutoAnswer('1-q1', FULL);
     await until(() => h.runs() === 2);
-    await h.engine.handleSuggestionTrigger(autoTrigger(FULL));
+    const dispatch = h.engine.handleSuggestionTrigger(autoTrigger(FULL));
     await until(() => h.tokens.length > 0);
     const liveGen = h.tokens[h.tokens.length - 1].gen;
 
@@ -188,6 +192,7 @@ test('prefetch gate: a new candidate cannot abort an adopted answer that is on s
     assert.equal(h.runs(), 2, 'the aside\'s prefetch did not start');
 
     h.releaseLiveTail();
+    await dispatch;
     await until(() => h.finals.some((f) => f.gen === liveGen));
     assert.deepEqual(h.discards.filter((d) => d.gen === liveGen), []);
 });
@@ -211,7 +216,7 @@ test('a visible answer replaced during its verifier sends no late discard (the r
     h.engine.lastTriggerTime = 0;
     h.engine.prefetchAutoAnswer('1-q1', FULL);                                            // run 2
     await until(() => h.runs() === 2);
-    await h.engine.handleSuggestionTrigger(autoTrigger(FULL));                           // adopted, painting
+    const dispatch = h.engine.handleSuggestionTrigger(autoTrigger(FULL));
     await until(() => h.tokens.length > 0);
     const firstGen = h.tokens[0].gen;
     h.releaseLiveTail();                                                                  // stream ends, verifier held
@@ -220,15 +225,21 @@ test('a visible answer replaced during its verifier sends no late discard (the r
 
     // A new judged question replaces it (run 3 paints).
     h.engine.lastTriggerTime = 0;
-    await h.engine.handleSuggestionTrigger({ ...autoTrigger('And how does a mutex differ from a semaphore?', '1-q2'), reuseSpeculative: false });
-    await until(() => h.tokens.some((t) => t.gen !== firstGen));
-    const discardsBefore = h.discards.length;
+    try {
+        const successor = await h.engine.handleSuggestionTrigger({ ...autoTrigger('And how does a mutex differ from a semaphore?', '1-q2'), reuseSpeculative: false });
+        assert.notEqual(successor.status, 'skipped', 'the newer judged question must be allowed to replace the answer');
+        await until(() => h.tokens.some((t) => t.gen !== firstGen));
+        const discardsBefore = h.discards.length;
 
-    h.releaseLiveVerifier();                                                              // run 2 resumes, already replaced
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(h.discards.length, discardsBefore, 'no discard once the successor is painting');
-    assert.ok(!h.finals.some((f) => f.gen === firstGen), 'the replaced run does not finalize over its successor');
-    await until(() => h.finals.some((f) => f.text.startsWith('Later run 3')));
+        h.releaseLiveVerifier();                                                          // run 2 resumes, already replaced
+        await dispatch;
+        assert.equal(h.discards.length, discardsBefore, 'no discard once the successor is painting');
+        assert.ok(!h.finals.some((f) => f.gen === firstGen), 'the replaced run does not finalize over its successor');
+        await until(() => h.finals.some((f) => f.text.startsWith('Later run 3')));
+    } finally {
+        h.releaseLiveVerifier();
+        await dispatch;
+    }
 });
 
 test('F-CTX-07: stopping the meeting cancels the answer still streaming; it never finishes into the next meeting', async () => {
@@ -239,7 +250,7 @@ test('F-CTX-07: stopping the meeting cancels the answer still streaming; it neve
     h.engine.lastTriggerTime = 0;
     h.engine.prefetchAutoAnswer('1-q1', FULL);                                            // run 2
     await until(() => h.runs() === 2);
-    await h.engine.handleSuggestionTrigger(autoTrigger(FULL));
+    const dispatch = h.engine.handleSuggestionTrigger(autoTrigger(FULL));
     await until(() => h.tokens.length > 0);
     const modes = [];
     h.engine.on('mode_changed', (m) => modes.push(m));
@@ -250,7 +261,7 @@ test('F-CTX-07: stopping the meeting cancels the answer still streaming; it neve
     const tokensAtStop = h.tokens.length;
 
     h.releaseLiveTail();
-    await new Promise((r) => setTimeout(r, 100));
+    await dispatch;
     assert.equal(h.tokens.length, tokensAtStop, 'no tokens after the stop');
     assert.equal(h.finals.length, 0, 'the old answer is never finalized');
     assert.equal(h.session.getLastAssistantMessage(), null, 'nor recorded as an answer');

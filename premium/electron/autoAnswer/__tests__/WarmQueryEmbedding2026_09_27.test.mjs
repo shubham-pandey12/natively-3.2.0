@@ -14,9 +14,9 @@ import { FakeClock } from './fakeClock.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const DIST = path.resolve(__dirname, '../../../../dist-electron/electron');
-const { EmbeddingPipeline, isNearQueryText } = require(path.join(DIST, 'rag/EmbeddingPipeline.js'));
-const { SimpleAutoAnswerEngine } = require(path.join(DIST, 'intelligence/autoAnswer/SimpleAutoAnswer.js'));
+const DIST = path.resolve(__dirname, '..', '..', '..', '..', 'dist-electron');
+const { EmbeddingPipeline, isNearQueryText } = require(path.join(DIST, 'electron', 'rag', 'EmbeddingPipeline.js'));
+const { SimpleAutoAnswerEngine } = require(path.join(DIST, 'premium', 'electron', 'autoAnswer', 'SimpleAutoAnswer.js'));
 
 const flush = () => new Promise((r) => setImmediate(r));
 
