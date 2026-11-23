@@ -47,6 +47,7 @@ export interface AutoAnswerQuestion {
     isFollowUp: boolean;
     endpointSource?: string;
     candidateGeneration: number;
+    sourceSegments?: readonly number[];
 }
 
 /** auto_answer_* events: enums and numbers, never text. Only the fields the app reads are named. */
@@ -122,7 +123,7 @@ export interface AutoAnswerEngine {
     onManualChatStarted(id: symbol): void;
     onManualChatSettled(id: symbol): void;
     /** A spoken manual press takes the current question over from Auto Answer. */
-    onManualSpokenAnswer(): void;
+    onManualSpokenAnswer(question?: string): void;
     /** The manual press ended: a failed or cancelled press gives its question back. */
     onManualAnswerSettled(outcome: { answered: boolean; answeredQuestion?: string; pressId?: number }): void;
     ingest(segment: TranscriptSegment): void;

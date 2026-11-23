@@ -206,31 +206,15 @@ test('reset aborts an in-flight WTA request without delivering a final answer', 
 });
 
 test('the type contract preserves generationId as an optional 4th arg (backward compatible)', () => {
-  // Source-shape regression guard: every `emit('suggested_answer', …)`
-  // call site in the WTA path now passes an extra 5th arg
-  // `generationId`. The legacy answerLLM path (lines ~859, ~877) still
-  // omits it. Pin both shapes so a future refactor doesn't drop the
-  // new arg on the WTA path or accidentally fabricate one on the
-  // legacy path (which has no `generationId` to forward).
   const src = fs.readFileSync(path.resolve(__dirname, '../../../electron/IntelligenceEngine.ts'), 'utf8');
-  // Every emit('suggested_answer', …) call inside `runWhatShouldISay`
-  // must pass exactly 5 args (answer, question, confidence, generationId).
-  // Match the emit calls followed by generationId on the same logical
-  // statement — narrowed by the leading pattern of the WTA fallback
-  // site (`emit('suggested_answer', <var>, question || ..., confidence, generationId)`).
-  const emitCallPattern = /emit\(\s*'suggested_answer'\s*,\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*[^,]+,\s*confidence\s*,\s*generationId\s*\)/g;
-  const wtaEmitsWithGen = src.match(emitCallPattern) || [];
-  assert.ok(wtaEmitsWithGen.length >= 1,
-    'expected the WTA path to emit at least one final with generationId');
-  // Every branch inside runWhatShouldISay, including legacy-provider and
-  // deterministic clarification exits, must now carry its t0 generationId.
-  // Id-less suggested-answer emissions remain valid for non-WTA features but
-  // must not bypass newest-wins delivery on this WTA surface.
+  assert.match(src, /'suggested_answer': \(answer: string, question: string, confidence: number, generationId\?: number,/);
+  // All WTA finals go through the delivery helper. It must carry the t0
+  // generation even when the final is a clarification or an error notice.
   const methodStart = src.indexOf('async runWhatShouldISay(');
   const methodEnd = src.indexOf('async runFollowUp(', methodStart);
   assert.ok(methodStart >= 0 && methodEnd > methodStart, 'runWhatShouldISay must be isolatable');
   const wtaBody = src.slice(methodStart, methodEnd);
-  const idlessWtaEmits = wtaBody.match(/this\.emit\(\s*'suggested_answer'\s*,\s*[\s\S]*?\);/g) || [];
-  assert.equal(idlessWtaEmits.filter((emit) => !/generationId/.test(emit)).length, 0,
-    'every WTA final emit must carry its t0 generationId');
+  const wtaEmits = wtaBody.match(/this\.emit\(\s*'suggested_answer'\s*,\s*[\s\S]*?\);/g) || [];
+  assert.equal(wtaEmits.length, 1, 'all WTA finals share the generation-scoped emit');
+  assert.match(wtaEmits[0], /this\.emit\('suggested_answer', answer, answeredQuestion, score, generationId, sourceLabel, stopReason, outcome\);/);
 });

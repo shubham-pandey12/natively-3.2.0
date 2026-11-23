@@ -17972,7 +17972,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         return {
           answer,
           outcome: outcomeOut.value ?? { status: 'failed', retryable: true, reason: 'missing_generation_outcome' },
-          ...(outcomeOut.value?.status === 'failed' ? { error: outcomeOut.value.reason || 'generation_failed' } : {}),
+          ...(outcomeOut.value?.status === 'failed' && !outcomeOut.value.delivered ? { error: outcomeOut.value.reason || 'generation_failed' } : {}),
           question: question || 'inferred from context',
           screenContextStatus,
           visionProviderUsed,

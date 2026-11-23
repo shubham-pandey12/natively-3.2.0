@@ -4279,13 +4279,13 @@ export class AppState {
 
   /** A manual What-to-Answer started (hotkey / button / accepted offer): the offer card is committed. */
   /** Returns the press id its settle call must carry. */
-  public onManualWhatToAnswer(press?: { spoken?: boolean }): number {
+  public onManualWhatToAnswer(press?: { spoken?: boolean; spokenQuestion?: string }): number {
     // What streams next is the manual answer, not the automatic one.
     this.autoAnswerUsage.stopAwaitingAnswer();
     const pressId = this.simpleAutoAnswer.onManualAnswerStarted();
     // A press that answers what was just said takes the question over from
     // Auto Answer, so nothing it still held for it dispatches afterwards.
-    if (press?.spoken) this.simpleAutoAnswer.onManualSpokenAnswer();
+    if (press?.spoken) this.simpleAutoAnswer.onManualSpokenAnswer(press.spokenQuestion);
     else this.intelligenceManager.cancelAutomaticAnswer('manual_answer');
     return pressId;
   }
@@ -4593,12 +4593,13 @@ export class AppState {
       const micEcho = speaker === 'user' && segment.isFinal && this._micEcho.isEcho(segment.text, Date.now());
       if (micEcho) console.log(`[STT] mic final repeats the interviewer (${segment.text.length} chars): not counted as the user`);
 
+      const transcriptAt = Date.now();
       if (!micEcho) {
         this.intelligenceManager.handleTranscript({
           speaker: speaker,
           ...(speakerId ? { speakerId } : {}),
           text: segment.text,
-          timestamp: Date.now(),
+          timestamp: transcriptAt,
           final: segment.isFinal,
           confidence: segment.confidence,
           // Defect B (2026-08-01): this is the ONLY real spoken-audio seam —
@@ -4628,7 +4629,7 @@ export class AppState {
           speaker,
           ...(speakerId ? { speakerId } : {}),
           text: segment.text,
-          timestamp: Date.now(),
+          timestamp: transcriptAt,
           final: segment.isFinal,
           confidence: segment.confidence,
           origin: 'stt',

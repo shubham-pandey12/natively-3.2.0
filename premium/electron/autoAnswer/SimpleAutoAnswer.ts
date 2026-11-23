@@ -545,7 +545,7 @@ export const RULED_OUT_CONTAINMENT = 0.9;
 export const SPECULATION_HOLDS_QUESTION = 0.9;
 
 /** `startedAt`: when the utterance's first interim arrived (its final's arrival when there were none). */
-type PendingPart = { text: string; at: number; startedAt?: number; speaker?: string; glueNext?: boolean; provisional?: boolean };
+type PendingPart = { text: string; at: number; sourceAt?: number; startedAt?: number; speaker?: string; glueNext?: boolean; provisional?: boolean };
 
 /**
  * Back-to-back asks (pipeline forensics 2026-11-13, F-CTX-04). When a second
@@ -660,6 +660,7 @@ export class SimpleAutoAnswerEngine {
     private lastInterviewerAt = 0;
     private lastInterviewerFinal: PendingPart | null = null;
     private lastInterviewerInterimAt = 0;
+    private lastInterviewerInterimSourceAt: number | undefined;
     private awaitingVoiceFinal = false;
     private catchupTimer: ClockTimer | null = null;
     private retryTimer: ClockTimer | null = null;
@@ -1016,6 +1017,7 @@ export class SimpleAutoAnswerEngine {
                         if (!this.lastInterviewerInterim) this.utteranceStartAt = now;
                         this.lastInterviewerAt = now;
                         this.lastInterviewerInterimAt = now;
+                        this.lastInterviewerInterimSourceAt = segment.timestamp;
                         this.lastInterviewerInterim = text;
                         this.lastInterviewerSpeaker = (segment as { speakerId?: string }).speakerId;
                         this.armStallCap();
@@ -1038,7 +1040,7 @@ export class SimpleAutoAnswerEngine {
                 }
             }
             const confirmsStop = this.awaitingVoiceFinal && now - this.localStopAt <= TRANSCRIPT_CATCHUP_MAX_MS;
-            if (this.absorbStalledFinal(text, now, speaker)) {
+            if (this.absorbStalledFinal(text, now, speaker, segment.timestamp)) {
                 if (confirmsStop) {
                     this.clearCatchup();
                     if (this.pending.length && !this.dispatchInFlight) this.arm(ENDPOINT_CONFIRM_MS);
@@ -1083,7 +1085,7 @@ export class SimpleAutoAnswerEngine {
             this.finalsSeen++;
             if (/[.?!]["'”’)\]]*$/.test(text)) this.finalsTerminated++;
             this.lastInterviewerInterim = '';
-            const part = { text, at: now, startedAt, speaker, glueNext };
+            const part = { text, at: now, sourceAt: segment.timestamp, startedAt, speaker, glueNext };
             this.lastInterviewerFinal = part;
             this.pending.push(part);
             // Supersede any in-flight verdict: it judged less than this. Inert
@@ -1836,7 +1838,7 @@ export class SimpleAutoAnswerEngine {
             isFollowUp: act === 'follow_up_question', followUpTarget: '',
             startedAt: parts[0]?.at ?? committedAt, lastUpdatedAt: now, committedAt,
             endpointSource: 'quiet_window',
-            sourceSegments: parts.map(p => p.at),
+            sourceSegments: parts.map(p => p.sourceAt ?? p.at),
             candidateGeneration: this.sequence,
             meetingGeneration: this.host.meetingGeneration(),
         };
@@ -1913,13 +1915,21 @@ export class SimpleAutoAnswerEngine {
      * restatement of it is not dispatched either. Speech that arrives after
      * the press starts a new candidate as usual.
      */
-    onManualSpokenAnswer(): void {
-        if (this.dispatchInFlight) this.dispatchInFlight.handedOver = true;
-        this.manualPausedParts = null;
-        const candidate = this.pending.length > 0 ? joinTranscriptParts(this.pending) : '';
+    onManualSpokenAnswer(question?: string): void {
+        const target = question?.trim();
+        const normalized = target ? ` ${normalizeForCompare(target)} ` : '';
+        const parts = target ? this.pending.filter(part => normalized.includes(` ${normalizeForCompare(part.text)} `)) : [...this.pending];
+        const request = this.dispatchInFlight;
+        if (request && (!target || (request.parts.length && request.parts.every(part => parts.includes(part))))) {
+            request.handedOver = true;
+        }
+        if (!target || this.manualPausedParts?.every(part => parts.includes(part))) this.manualPausedParts = null;
+        const candidate = target || joinTranscriptParts(parts);
         const hadWork = Boolean(candidate) || this.parkedAttempt !== null || this.held !== null || this.judgeAbort !== null;
         // Read BEFORE anything is cleared: was the interviewer mid-question?
-        const unfinished = this.interviewerSpeaking || Boolean(this.lastInterviewerInterim);
+        const unfinished = target
+            ? Boolean(this.lastInterviewerInterim && isSameUtterance(target, this.lastInterviewerInterim))
+            : this.interviewerSpeaking || Boolean(this.lastInterviewerInterim);
         this.dropParked({ handover: true });
         this.disarm();
         this.held = null;
@@ -1928,14 +1938,13 @@ export class SimpleAutoAnswerEngine {
         // while it streams, a restatement of these words is not dispatched.
         if (candidate) { this.lastAnsweredText = candidate; this.lastAnsweredAt = this.clock.now(); }
         this.manualHandoff = candidate
-            ? { candidate, pressId: this.manualPressSeq, parts: [...this.pending], at: this.clock.now(), unfinished, meetingGeneration: this.host.meetingGeneration() }
+            ? { candidate, pressId: this.manualPressSeq, parts, at: this.clock.now(), unfinished, meetingGeneration: this.host.meetingGeneration() }
             : null;
         // A stalled interim stood in for its final: that late final is the
         // same question, already handed over (see absorbStalledFinal).
-        const promoted = this.pending.find(p => p.provisional);
+        const promoted = parts.find(p => p.provisional);
         if (promoted) this.stallAnswered = [...this.stallAnswered, { text: promoted.text, speaker: promoted.speaker, at: this.clock.now() }].slice(-64);
-        this.pending = [];
-        this.judgedParts = 0;
+        this.removePendingParts(parts);
         this.lastJudgedKey = '';
         if (hadWork) this.host.log?.('[AutoAnswer:simple] the question was handed over to a manual answer');
     }
@@ -2097,7 +2106,8 @@ export class SimpleAutoAnswerEngine {
         const now = this.clock.now();
         const frozenFor = now - Math.max(this.lastInterviewerInterimAt, this.localStopAt);
         if (frozenFor < STALL_PROMOTE_MS) { this.armStallCap(); return; }
-        this.pending.push({ text: interim, at: this.lastInterviewerInterimAt, speaker: this.lastInterviewerSpeaker, provisional: true });
+        this.pending.push({ text: interim, at: this.lastInterviewerInterimAt, sourceAt: this.lastInterviewerInterimSourceAt,
+            speaker: this.lastInterviewerSpeaker, provisional: true });
         this.promotedInterim = interim;
         this.host.log?.(`[AutoAnswer:simple] transcript stalled ${now - this.lastInterviewerInterimAt}ms since the last interim`);
         this.host.logContent?.('stalled interim promoted', interim);
@@ -2126,7 +2136,7 @@ export class SimpleAutoAnswerEngine {
      * the stand-in was already answered, it is not answered twice. Returns true
      * when the final was absorbed.
      */
-    private absorbStalledFinal(text: string, now: number, speaker: string | undefined): boolean {
+    private absorbStalledFinal(text: string, now: number, speaker: string | undefined, sourceAt: number): boolean {
         this.stallAnswered = this.stallAnswered.filter(record => now - record.at <= STALL_ANSWERED_TTL_MS);
         const sameSpeaker = (record: { speaker?: string }) => record.speaker == null || speaker == null || record.speaker === speaker;
         const answered = this.stallAnswered.find(record => sameSpeaker(record) && isSameUtterance(record.text, text));
@@ -2144,7 +2154,7 @@ export class SimpleAutoAnswerEngine {
             if (!isSameUtterance(this.pending[i].text, text)) { this.dropProvisional(); return false; }
             const before = normalizeForCompare(joinTranscriptParts(this.pending));
             // In place: the answer in flight holds this part by identity.
-            Object.assign(this.pending[i], { text, ...(speaker != null ? { speaker } : {}) });
+            Object.assign(this.pending[i], { text, sourceAt, ...(speaker != null ? { speaker } : {}) });
             delete this.pending[i].provisional;
             const after = normalizeForCompare(joinTranscriptParts(this.pending));
             this.lastInterviewerInterim = '';
@@ -2171,6 +2181,7 @@ export class SimpleAutoAnswerEngine {
         this.lastInterviewerInterim = '';
         this.lastInterviewerAt = 0;
         this.lastInterviewerInterimAt = 0;
+        this.lastInterviewerInterimSourceAt = undefined;
         this.lastInterviewerFinal = null;
         this.utteranceStartAt = 0;
         this.localStopAt = 0;

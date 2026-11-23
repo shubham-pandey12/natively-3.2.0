@@ -105,7 +105,8 @@ describe('observeAnswerJsSyntax (observe-only reporter)', () => {
     assert.match(ipc, /observeAnswerJsSyntax\(finalText, 'manual_chat_v3'\)/);
     assert.match(ipc, /observeAnswerJsSyntax\(finalText \?\? fullResponse, 'manual_chat_legacy'\)/);
     assert.match(engine, /observeAnswerJsSyntax\(finalWtaAnswer, 'what_to_answer'\)/);
-    assert.ok(engine.indexOf("observeAnswerJsSyntax(finalWtaAnswer") > engine.indexOf("this.emit('suggested_answer', finalWtaAnswer"), 'after the final emit');
+    const finalEmit = engine.indexOf('showWtaAnswer(finalWtaAnswer');
+    assert.ok(finalEmit >= 0 && engine.indexOf('observeAnswerJsSyntax(finalWtaAnswer') > finalEmit, 'after the final emit');
     for (const src of [ipc, engine]) assert.doesNotMatch(src, /=\s*observeAnswerJsSyntax\([^)]*\)\s*\.\s*(?:text|answer)/);
   });
   test('the checker never runs code (no run* call in the module)', () => {

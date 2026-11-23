@@ -104,6 +104,7 @@ export interface SuggestionTrigger {
     isFollowUp?: boolean;
     endpointSource?: string;
     candidateGeneration?: number;
+    sourceSegments?: readonly number[];
     /** The controller verified (by id or embedding cosine) that the speculative cache answers THIS question. */
     reuseSpeculative?: boolean;
 }

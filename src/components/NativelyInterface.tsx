@@ -8852,7 +8852,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       );
       if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
       settleScreenshotRetry(screenshotAttempt.id, result.outcome?.reason === 'attachment_unavailable'
-        ? 'cancelled' : result.outcome?.status ?? 'failed');
+        ? 'cancelled' : result.outcome?.delivered ? 'success' : result.outcome?.status ?? 'failed');
       setScreenContextStatus(result.screenContextStatus || 'not_available');
       setLatestUsedImageInput(Boolean(result.usedImageInput));
       setLatestVisionProviderUsed(result.visionProviderUsed);

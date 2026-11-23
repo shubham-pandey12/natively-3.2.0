@@ -38,8 +38,10 @@ describe('WTA governed-input guard', () => {
   test('speculative runs return silently; manual presses get a deterministic message', () => {
     const block = src.slice(guardIdx, guardIdx + 2400);
     assert.match(block, /if \(isSpeculative\) return null;/);
-    assert.match(block, /emit\('suggested_answer', noContextMsg/,
+    assert.match(block, /showWtaAnswer\(noContextMsg, 'inferred', 1\.0, false\)/,
       'the emit resolves the renderer placeholder — returning without emitting hangs it');
+    const emit = src.slice(src.indexOf('const showWtaAnswer ='), src.indexOf('this.automaticGenerationId = this.nextRunIsAutomatic'));
+    assert.match(emit, /this\.emit\('suggested_answer', answer, answeredQuestion, score, generationId/);
     assert.match(block, /setMode\('idle'\)/);
     assert.match(block, /return noContextMsg;/);
   });

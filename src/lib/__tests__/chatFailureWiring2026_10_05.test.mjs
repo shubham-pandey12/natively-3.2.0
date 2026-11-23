@@ -57,7 +57,9 @@ test('a What to Answer failure is never silent, and is said once', () => {
   const at = engine.indexOf("this.emit('error', error as Error, 'what_to_say');");
   assert.ok(at > 0);
   const after = engine.slice(at, at + 1400);
-  assert.ok(after.indexOf("this.emit('suggested_answer', providerMessage") > 0);
+  assert.match(after, /if \(providerMessage\) \{\s*if \(!isSpeculative\) showWtaAnswer\(providerMessage, [^\n]+, false\);/);
+  const emit = engine.slice(engine.indexOf('const showWtaAnswer ='), engine.indexOf('this.automaticGenerationId = this.nextRunIsAutomatic'));
+  assert.equal(emit.split("this.emit('suggested_answer',").length - 1, 1, 'the delivery helper emits exactly one final');
   assert.ok(after.includes('return buildGracefulRetry(question);'), 'the other branch emits nothing');
   // When that sentence arrives, the notice posted a moment before goes: only
   // if it is still the last row, so an older one is never removed.
