@@ -260,10 +260,10 @@ test('a provider endpoint confirms the stop early', async () => {
 // means the final for the last words has not landed, and that final re-arms
 // the window itself when it does.
 
-test('the local VAD stop confirms the window early when the transcript is caught up', async () => {
+test('the first final after a local VAD stop confirms the window early', async () => {
   const h = makeSimple(async () => YES());
-  h.interviewer('Why did you choose PostgreSQL over the alternatives here?');   // final landed
   h.engine.onLocalSpeechEnd();
+  h.interviewer('Why did you choose PostgreSQL over the alternatives here?');
   await h.advance(ENDPOINT_CONFIRM_MS + 100);
   assert.equal(h.texts().length, 1, 'committed at ENDPOINT_CONFIRM_MS, not STABILITY_MS');
 });

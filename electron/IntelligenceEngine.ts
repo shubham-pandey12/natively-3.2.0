@@ -193,7 +193,8 @@ export interface IntelligenceModeEvents {
     // The user's own buttons (llm/customButtons.ts), shown in Recap's card.
     'custom_button': (text: string, name: string) => void;
     'custom_button_token': (token: string, name: string) => void;
-    'manual_answer_started': () => void;
+    'manual_answer_started': (id: symbol) => void;
+    'manual_answer_settled': (id: symbol) => void;
     'manual_answer_result': (answer: string, question: string) => void;
     'mode_changed': (mode: IntelligenceMode) => void;
     'automatic_answer_settled': () => void;
@@ -9170,13 +9171,19 @@ export class IntelligenceEngine extends EventEmitter {
         // the ring at the buildV3Prompt call below and, like the other two live
         // surfaces, had no writer — so its own answers never became history.
         const startedUnder = this.conversationSessionId();
-        const manualAnswer = await this.runManualAnswerInner(question);
-        this.recordLiveTurn(manualAnswer, undefined, question, 0, undefined, 'meeting', { startedUnder });
-        return manualAnswer;
+        const id = Symbol();
+        this.emit('manual_answer_started', id);
+        try {
+            this.cancelAutomaticAnswer('manual_answer');
+            const manualAnswer = await this.runManualAnswerInner(question);
+            this.recordLiveTurn(manualAnswer, undefined, question, 0, undefined, 'meeting', { startedUnder });
+            return manualAnswer;
+        } finally {
+            this.emit('manual_answer_settled', id);
+        }
     }
 
     private async runManualAnswerInner(question: string): Promise<string | null> {
-        this.emit('manual_answer_started');
         this.setMode('manual');
 
         try {

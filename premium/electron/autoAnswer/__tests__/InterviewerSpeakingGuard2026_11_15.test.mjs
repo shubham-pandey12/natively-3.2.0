@@ -21,7 +21,7 @@ import { FakeClock } from './fakeClock.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, RETRY_MS, SPEAKING_STALE_MS } = require(path.resolve(__dirname, '../../../../dist-electron/premium/electron/autoAnswer/SimpleAutoAnswer.js'));
+const { SimpleAutoAnswerEngine, STABILITY_MS, ENDPOINT_CONFIRM_MS, TRANSCRIPT_CATCHUP_MAX_MS, RETRY_MS, SPEAKING_STALE_MS } = require(path.resolve(__dirname, '../../../../dist-electron/premium/electron/autoAnswer/SimpleAutoAnswer.js'));
 
 const flush = () => new Promise((r) => setImmediate(r));
 const YES = JSON.stringify({ is_ask: true, directed_at_user: true, complete: true, act: 'question', answerability: 0.95, question_text: null });
@@ -78,7 +78,7 @@ test('a cough or "mm-hmm" while the answer streams does not cancel it (shipped 3
   const h = rig({ results: [held] });
   h.say(PART_1 + ' ' + PART_2);
   h.engine.onLocalSpeechEnd();
-  await h.advance(ENDPOINT_CONFIRM_MS + 200);
+  await h.advance(TRANSCRIPT_CATCHUP_MAX_MS + 200);
   assert.equal(h.state.dispatched.length, 1);
 
   h.engine.onLocalSpeechStart();                 // a cough: a start and a stop with no words
@@ -95,7 +95,7 @@ test('the answer finishes as the interviewer speaks again: the question is not a
   const h = rig({ results: [held] });
   h.say(PART_1 + ' ' + PART_2);
   h.engine.onLocalSpeechEnd();
-  await h.advance(ENDPOINT_CONFIRM_MS + 200);
+  await h.advance(TRANSCRIPT_CATCHUP_MAX_MS + 200);
   assert.equal(h.state.dispatched.length, 1);
 
   h.engine.onLocalSpeechStart();                 // "Okay, great." starts…
@@ -114,7 +114,7 @@ test('a speech start drops a verdict still being judged', async () => {
   const h = rig({ judge: (_req, signal) => new Promise((r) => { resolveJudge = r; signal?.addEventListener?.('abort', () => r(null)); }) });
   h.say(PART_1);
   h.engine.onLocalSpeechEnd();
-  await h.advance(ENDPOINT_CONFIRM_MS + 50);
+  await h.advance(TRANSCRIPT_CATCHUP_MAX_MS + 50);
   assert.equal(h.state.judgeCalls.length, 1);
   h.engine.onLocalSpeechStart();
   resolveJudge(YES);
@@ -151,7 +151,7 @@ test('a completed answer is not answered again at the next stoppage', async () =
   const h = rig();
   h.say(PART_1 + ' ' + PART_2);
   h.engine.onLocalSpeechEnd();
-  await h.advance(ENDPOINT_CONFIRM_MS + 200);
+  await h.advance(TRANSCRIPT_CATCHUP_MAX_MS + 200);
   assert.equal(h.state.dispatched.length, 1);
   h.engine.onLocalSpeechStart();
   h.engine.onLocalSpeechEnd();                   // a cough: a start and a stop with no words
@@ -185,7 +185,7 @@ test('a question the engine declined is dropped, not merged into the next one', 
   const h = rig({ results: [{ status: 'skipped', reason: 'declined' }] });
   h.say(PART_1 + ' ' + PART_2);
   h.engine.onLocalSpeechEnd();
-  await h.advance(ENDPOINT_CONFIRM_MS + 200);
+  await h.advance(TRANSCRIPT_CATCHUP_MAX_MS + 200);
   assert.equal(h.state.dispatched.length, 1);
   assert.ok(h.state.skips.includes('dispatch_declined'), 'reported as a decision, not a failure');
 
@@ -206,19 +206,21 @@ test('a dispatch that found the engine busy is sent again, not lost', async () =
   assert.ok(!h.state.skips.includes('dispatch_failed'));
 });
 
-test('a manual press during an automatic answer: its words are not answered again', async () => {
+test('a spoken press during an automatic answer: its words are not answered again', async () => {
   for (const ending of [true, { status: 'cancelled' }]) {
     let release;
     const held = new Promise((r) => { release = r; });
     const h = rig({ results: [held] });
     h.say(PART_1 + ' ' + PART_2);
     h.engine.onLocalSpeechEnd();
-    await h.advance(ENDPOINT_CONFIRM_MS + 200);
+    await h.advance(TRANSCRIPT_CATCHUP_MAX_MS + 200);
     assert.equal(h.state.dispatched.length, 1);
 
-    h.engine.onManualAnswerStarted();             // typed question or screenshot press
+    const pressId = h.engine.onManualAnswerStarted();
+    h.engine.onManualSpokenAnswer();
     release(ending);
     await h.advance(100);
+    h.engine.onManualAnswerSettled({ answered: true, pressId });
     h.engine.onLocalSpeechStart();
     h.engine.onLocalSpeechEnd();                   // a cough
     await h.advance(STABILITY_MS * 4);

@@ -39,6 +39,9 @@ test('without premium: every object main.ts builds is safe to call', async () =>
     'onLocalSpeechEnd', 'onLocalSpeechStart', 'onManualSpokenAnswer', 'onManualAnswerSettled']) assert.equal(engine[k](), undefined, k);
   // A press id: 0 means no engine is tracking presses, so no settle is awaited.
   assert.equal(engine.onManualAnswerStarted(), 0);
+  const chat = Symbol();
+  assert.equal(engine.onManualChatStarted(chat), undefined);
+  assert.equal(engine.onManualChatSettled(chat), undefined);
   assert.equal(engine.ingest({ speaker: 'interviewer', text: 'what is a closure?', timestamp: 1, final: true }), undefined);
 
   const usage = m.createUsageTelemetry({ sink() { throw new Error('no rows without premium'); }, mode: () => null, answerModel: () => null });

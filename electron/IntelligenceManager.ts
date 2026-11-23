@@ -88,7 +88,7 @@ export class IntelligenceManager extends EventEmitter {
             'live_helper', 'live_helper_token',
             // The user's own buttons (llm/customButtons.ts).
             'custom_button', 'custom_button_token',
-            'manual_answer_started', 'manual_answer_result',
+            'manual_answer_started', 'manual_answer_result', 'manual_answer_settled',
             'mode_changed', 'automatic_answer_settled', 'error',
             // Sprint 7: dedicated channel for negotiation coaching payloads.
             'negotiation_coaching',

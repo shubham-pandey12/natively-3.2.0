@@ -119,6 +119,8 @@ export interface AutoAnswerEngine {
     onLocalSpeechStart(): void;
     /** Returns the press id its settle call must carry. */
     onManualAnswerStarted(): number;
+    onManualChatStarted(id: symbol): void;
+    onManualChatSettled(id: symbol): void;
     /** A spoken manual press takes the current question over from Auto Answer. */
     onManualSpokenAnswer(): void;
     /** The manual press ended: a failed or cancelled press gives its question back. */
@@ -278,7 +280,8 @@ export const UNAVAILABLE_AUTO_ANSWER: AutoAnswerPremium = Object.freeze({
         setThresholds: noop, onMeetingStart: noop, onModeChanged: noop, onMeetingStop: noop, onEngineIdle: noop,
         onAutomaticAnswerProgress: noop,
         onProviderEndpoint: noop, onLocalSpeechEnd: noop, onLocalSpeechEndBeforeFinal: noop, onLocalSpeechStart: noop,
-        onManualAnswerStarted: () => 0, onManualSpokenAnswer: noop, onManualAnswerSettled: noop, ingest: noop,
+        onManualAnswerStarted: () => 0, onManualChatStarted: noop, onManualChatSettled: noop,
+        onManualSpokenAnswer: noop, onManualAnswerSettled: noop, ingest: noop,
     }),
     createUsageTelemetry: (): AutoAnswerUsage => ({
         meetingStarted: noop, meetingEnded: noop, observe: noop, answerShown: noop, stopAwaitingAnswer: noop,

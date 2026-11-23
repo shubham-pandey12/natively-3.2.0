@@ -4286,6 +4286,7 @@ export class AppState {
     // A press that answers what was just said takes the question over from
     // Auto Answer, so nothing it still held for it dispatches afterwards.
     if (press?.spoken) this.simpleAutoAnswer.onManualSpokenAnswer();
+    else this.intelligenceManager.cancelAutomaticAnswer('manual_answer');
     return pressId;
   }
 
@@ -5298,8 +5299,8 @@ export class AppState {
         this.googleSTT_User?.releaseHeldSpeech?.();
         // Auto Answer: the local VAD saw the interviewer stop. For a provider
         // with no end-of-turn event of its own this is the only early signal;
-        // the controller guards against a half-transcribed turn by ignoring the
-        // stop while an interim is dangling. Excluded: providers whose FINAL
+        // the controller waits for a post-stop final or the catch-up cap.
+        // Excluded: providers whose FINAL
         // is produced by the end of the segment itself, with no interim to
         // guard on — the REST ones (Groq Whisper, Azure, IBM Watson), OpenAI
         // (its whisper-1 REST fallback; its Realtime mode emits its own
@@ -9185,12 +9186,14 @@ export class AppState {
       this.sendToWindow(answerWindow(), 'intelligence-recap', { summary: text })
     })
 
-    this.intelligenceManager.on('manual_answer_started', () => {
-      // The hotkey/click commits whatever Auto Answer was offering — and,
-      // inside the feedback window, says the automatic answer missed.
-      this.simpleAutoAnswer.onManualAnswerStarted();
+    this.intelligenceManager.on('manual_answer_started', (id: symbol) => {
+      this.simpleAutoAnswer.onManualChatStarted(id);
       const win = answerWindow()
       this.sendToWindow(win, 'intelligence-manual-started')
+    })
+
+    this.intelligenceManager.on('manual_answer_settled', (id: symbol) => {
+      this.simpleAutoAnswer.onManualChatSettled(id);
     })
 
     this.intelligenceManager.on('manual_answer_result', (answer: string, question: string) => {

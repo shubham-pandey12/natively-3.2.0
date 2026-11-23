@@ -37,10 +37,9 @@ function rig(judgeMs) {
 
 test('fast judge + confirmed stop: the answer is dispatched when the verdict lands', async () => {
   const h = rig(650);                                   // DeepSeek-fast
+  h.engine.onLocalSpeechEnd();                          // the next final gets the endpoint window
   const t0 = h.clock.now();
   h.engine.ingest({ speaker: 'interviewer', text: 'Tell me more about the payout service rewrite on your resume.', final: true, timestamp: t0, origin: 'stt', punctuationSource: 'provider' });
-  await h.advance(10);
-  h.engine.onLocalSpeechEnd();                          // local VAD confirms the stop → 350 ms commit
   await h.advance(EARLY_JUDGE_MS + 650 + 100);          // the early ask's verdict arrives < STABILITY_MS after the final
   assert.ok(h.clock.now() - t0 < STABILITY_MS, 'the scenario: the verdict lands inside the stability window');
   assert.equal(h.state.dispatched.length, 1, 'the verdict must dispatch, not wait for a commit that already ran');
