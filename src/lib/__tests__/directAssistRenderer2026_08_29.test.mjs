@@ -96,14 +96,15 @@ test('STT Answer Now awaits finalization, bypasses RAG, and marks image-only tur
 
 test('What-to-Say forwards recent interviewer STT and never auto-captures a page before Direct dispatch', () => {
   const body = section('const handleWhatToSay = async', 'const handleFollowUp = async');
-  const directBranch = body.indexOf('if (directAssistEnabled) {');
+  const directBranch = body.search(/if \((?:directAssistEnabled|useDirectAssist)\) \{/);
   const autoCapture = body.indexOf('phoneMirrorRequestAutoContext');
   assert.ok(directBranch >= 0 && autoCapture > directBranch, 'Direct WTA must precede legacy auto capture');
   assert.match(body, /const directTranscriptSnapshot = pendingRollingPartialRef\.current/);
   assert.match(body, /const interviewerRequest = directTranscriptSnapshot/);
   assert.match(body, /buildDirectWhatToSayPayload\(\{\s*interviewerRequest,\s*dynamicPromptInstruction,\s*hasScreenshots,/);
   assert.match(body, /source: directWhatToSayPayload\.source/);
-  assert.match(body, /currentRequest: directWhatToSayPayload\.currentRequest/);
+  // A held screenshot's own question wins over the rolling transcript.
+  assert.match(body, /currentRequest: (?:retrySnapshot\?\.question \|\| )?directWhatToSayPayload\.currentRequest/);
   assert.match(body, /transcript: directWhatToSayPayload\.transcript/);
 
   // Screenshot+STT keeps audio out of currentRequest so the IPC transcript
@@ -206,7 +207,7 @@ test('Direct start tombstones tagged and id-less legacy Intelligence finals beyo
   const finalMarker = 'window.electronAPI.onIntelligenceSuggestedAnswer((data) => {';
   const finalStart = interfaceSource.indexOf(finalMarker);
   assert.ok(finalStart >= 0);
-  const finalHandler = interfaceSource.slice(finalStart, finalStart + 2400);
+  const finalHandler = interfaceSource.slice(finalStart, finalStart + 4000);
   const tombstoneGuard = finalHandler.indexOf('if (legacyIntelligenceTombstonedRef.current) return;');
   const appendPath = finalHandler.indexOf("finalizeStreamingByIntent('what_to_answer', answerText)");
   assert.ok(tombstoneGuard >= 0 && appendPath > tombstoneGuard);

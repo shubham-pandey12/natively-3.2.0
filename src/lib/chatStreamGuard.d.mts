@@ -41,6 +41,7 @@ export function isStaleDesktopChatEvent(
 export function resolveLiveAnswerBatch(
   activeId: number | null | undefined,
   incomingId: number | null | undefined,
+  floorId?: number | null,
 ): { accept: boolean; activeId: number | null };
 
 export function resolveChatStreamSurfaceError(

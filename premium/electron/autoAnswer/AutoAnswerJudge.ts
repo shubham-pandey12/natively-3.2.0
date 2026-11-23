@@ -47,7 +47,11 @@ export const JUDGE_CONTEXT_TURNS = 8;
  * Tails are kept, never heads: an ask lands at the END of speech.
  */
 export const JUDGE_TURN_CHAR_CAP = 400;
-export const JUDGE_CANDIDATE_CHAR_CAP = 1000;
+/**
+ * Above this the candidate is not cut to its tail (the ask may be at the
+ * start); buildJudgePrompt throws and the user answers it manually.
+ */
+export const JUDGE_CANDIDATE_CHAR_CAP = 16000;
 export const JUDGE_ANSWERED_CHAR_CAP = 250;
 export const JUDGE_PROMPT_MAX_VARIABLE_CHARS =
   JUDGE_CONTEXT_TURNS * JUDGE_TURN_CHAR_CAP + JUDGE_CANDIDATE_CHAR_CAP + JUDGE_ANSWERED_CHAR_CAP;
@@ -87,6 +91,8 @@ export interface JudgeRequest {
      * see that "your task is to recreate this game in React" is the same ask.
      */
     lastAnsweredText?: string | null;
+    /** How long ago lastAnsweredText was answered, so the judge can weigh a deliberate repeat. */
+    lastAnsweredAgeMs?: number | null;
     /**
      * The USER's name, when the app knows it (the active résumé, else the
      * connected Calendar account). Team meets and lectures call on people BY
@@ -223,8 +229,8 @@ const NEVER_CONSULT: ReadonlySet<AutoAnswerDialogueAct> = new Set([
  */
 export function shouldConsultJudge(act: AutoAnswerDialogueAct, candidateText: string): boolean {
     if (NEVER_CONSULT.has(act)) return false;
-    const words = candidateText.split(/\s+/).filter(Boolean).length;
-    if (words < JUDGE_MIN_WORDS && !candidateText.includes('?')) return false;
+    // Short asks ("Why?", "And Kafka?") are the judge's call, not a word count's.
+    if (!/[\p{L}\p{N}]/u.test(candidateText)) return false;
     return true;
 }
 
@@ -271,19 +277,19 @@ export function buildJudgePrompt(req: JudgeRequest): string {
             const text = keepTail(t.text, JUDGE_TURN_CHAR_CAP);
             if (t.role !== 'interviewer') return `USER: ${text}`;
             const who = speakerOf(i);
-            return `${who ? `OTHERS/${who}` : 'OTHERS'}: ${text}`;
+            return `${who != null ? `OTHERS/${who}` : 'OTHERS'}: ${text}`;
         })
         .join('\n');
     // Only shown when the transcript actually carries labels, so an
     // undiarized session never sees a rule it cannot apply.
     const parts = req.candidateParts ?? [];
-    const partsLabelled = parts.some(p => p.speaker);
-    const candidateBlock = keepTail(
-        partsLabelled
-            ? parts.map(p => `${p.speaker ? `OTHERS/${p.speaker}` : 'OTHERS'}: ${p.text}`).join('\n')
-            : req.candidateText,
-        JUDGE_CANDIDATE_CHAR_CAP,
-    );
+    const partsLabelled = parts.some(p => p.speaker != null);
+    const candidateBlock = partsLabelled
+        ? parts.map(p => `${p.speaker != null ? `OTHERS/${p.speaker}` : 'OTHERS'}: ${p.text}`).join('\n')
+        : req.candidateText;
+    if (candidateBlock.length > JUDGE_CANDIDATE_CHAR_CAP) {
+        throw new RangeError('Auto Answer candidate exceeds judge context; use Manual Answer.');
+    }
     const diarization = anyLabels || partsLabelled ? `
 The meeting audio is SPEAKER-LABELLED (OTHERS/speaker_1, OTHERS/speaker_2, …). Where a rule below asks you to work out WHO said something, the labels settle it — prefer them over any guess from wording, including in the merged-reply rule:
 - A question and its answer under the SAME label is one person answering themselves: closed, is_ask false, however substantive the question sounds.
@@ -295,7 +301,7 @@ ${partsLabelled ? 'The candidate itself is split by speaker below; judge the ASK
     // 2026-08-25, with it in the preamble the model fired on five separate
     // elaborations of a task it had just answered (API-endpoint details).
     const answered = req.lastAnsweredText
-        ? `\nAlready answered for the USER moments ago: "${keepTail(req.lastAnsweredText, JUDGE_ANSWERED_CHAR_CAP)}"\nAnything that RESTATES that ask, or adds its details, constraints, materials or follow-on explanation, is NOT a new ask: is_ask false, answerability at most 0.2. Only a genuinely NEW question or a changed requirement counts.\n`
+        ? `\nAlready answered for the USER ${Number.isFinite(req.lastAnsweredAgeMs) ? `${Math.max(0, Math.floor((req.lastAnsweredAgeMs as number) / 1000))} seconds ago` : 'recently'}: "${keepTail(req.lastAnsweredText, JUDGE_ANSWERED_CHAR_CAP)}"\nAnything that RESTATES that ask, or adds its details, constraints, materials or follow-on explanation, is NOT a new ask: is_ask false, answerability at most 0.2. An explicit request to repeat, explain differently, or correct the answer DOES count as an ask. A genuinely NEW question or changed requirement also counts.\n`
         : '';
     // Only when the candidate calls on SOMEONE ELSE by name. Any extra text
     // here moves the model on unrelated borderline turns (measured 2026-09-27:

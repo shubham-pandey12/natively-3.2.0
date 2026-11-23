@@ -7,6 +7,7 @@
 //   IntelligenceEngine — LLM mode routing (6 modes), event emission
 //   MeetingPersistence — meeting stop/save/recovery
 
+import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 import { EventEmitter } from 'events';
 import { LLMHelper } from './LLMHelper';
 import { SessionTracker, type ConversationSurface } from './SessionTracker';
@@ -74,7 +75,7 @@ export class IntelligenceManager extends EventEmitter {
      */
     private forwardEngineEvents(): void {
         const events = [
-            'assist_update', 'suggested_answer', 'suggested_answer_token', 'suggested_answer_discard',
+            'assist_update', 'what_to_answer_question', 'suggested_answer', 'suggested_answer_token', 'suggested_answer_discard',
             // Planner declined to answer a trigger (cooldown dedup) — forwarded so
             // a skip is observable rather than silent.
             'suggestion_skipped',
@@ -266,7 +267,7 @@ export class IntelligenceManager extends EventEmitter {
         return inserted;
     }
 
-    async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): Promise<void> {
+    async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): ReturnType<IntelligenceEngine['handleSuggestionTrigger']> {
         return this.engine.handleSuggestionTrigger(trigger);
     }
 
@@ -275,8 +276,8 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.canAutoAnswer();
     }
 
-    /** Barge-in: abort the streaming AUTOMATIC answer only. See IntelligenceEngine.cancelAutomaticAnswer. */
-    cancelAutomaticAnswer(reason: 'user_barge_in'): boolean {
+    /** Stop the AUTOMATIC answer only (never a manual one). See IntelligenceEngine.cancelAutomaticAnswer. */
+    cancelAutomaticAnswer(reason: Parameters<IntelligenceEngine['cancelAutomaticAnswer']>[0]): boolean {
         return this.engine.cancelAutomaticAnswer(reason);
     }
 
@@ -322,7 +323,7 @@ export class IntelligenceManager extends EventEmitter {
     runAutoAnswer(
         question: Parameters<IntelligenceEngine['runAutoAnswer']>[0],
         options: { reuseSpeculative: boolean },
-    ): Promise<void> {
+    ): ReturnType<IntelligenceEngine['runAutoAnswer']> {
         return this.engine.runAutoAnswer(question, { ...options, context: this.getFormattedContext(120) });
     }
     /**
@@ -348,7 +349,11 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.runAssistMode();
     }
 
-    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[], options?: { skipCooldown?: boolean; forceFresh?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; pressedAt?: number }): Promise<string | null> {
+    beginWhatToSayPress(screenshotAskedAt?: number) {
+        return this.engine.beginWhatToSayPress(screenshotAskedAt);
+    }
+
+    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[], options?: { skipCooldown?: boolean; forceFresh?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         return this.engine.runWhatShouldISay(question, confidence, imagePaths, options);
     }
 

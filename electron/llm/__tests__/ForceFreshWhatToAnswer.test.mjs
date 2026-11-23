@@ -41,7 +41,9 @@ describe('source: engine honors forceFresh option', () => {
     // The fix added a new option. Pin the type signature so a future refactor
     // that drops the option is caught.
     const sigMatch = engineSrc.match(
-      /runWhatShouldISay\(\s*question\??:\s*string[^)]*\)\s*:\s*Promise<string\s*\|\s*null>\s*\{/,
+      // The options type holds callback types (onStart: (press) => void), so the
+      // signature is anchored on its head, not matched up to the first ')'.
+      /async runWhatShouldISay\(\s*question\??:\s*string/,
     );
     assert.ok(sigMatch, 'runWhatShouldISay method must be locatable');
     // Locate the signature, then walk the options type with a balanced-brace

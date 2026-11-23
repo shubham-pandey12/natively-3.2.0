@@ -11,6 +11,10 @@ export interface TranscriptTurn {
      *  must treat a missing '?' as NEUTRAL. Absent = legacy writer (legacy
      *  scoring applies unchanged). */
     punctuationSource?: import('./punctuationProvenance').PunctuationSource;
+    /** Assistant turns: when the answer started generating (see SessionTracker ContextItem). */
+    startedAt?: number;
+    /** Assistant turns: the question the answer answered (see SessionTracker ContextItem). */
+    answeredQuestion?: string;
 }
 
 /**
@@ -142,6 +146,8 @@ export function cleanTranscript(turns: TranscriptTurn[]): TranscriptTurn[] {
                 // F9: provenance rides through cleaning so the extractor can
                 // score punctuation absence correctly for the CHOSEN turn.
                 ...(turn.punctuationSource ? { punctuationSource: turn.punctuationSource } : {}),
+                ...(typeof turn.startedAt === 'number' ? { startedAt: turn.startedAt } : {}),
+                ...(turn.answeredQuestion ? { answeredQuestion: turn.answeredQuestion } : {}),
             });
         }
     }

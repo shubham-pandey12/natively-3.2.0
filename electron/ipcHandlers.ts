@@ -1,5 +1,6 @@
 // ipcHandlers.ts
 
+import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 import * as crypto from 'crypto';
 import { prewarmPreparedJpeg } from './services/screen/preparedJpeg';
 import { repairCapReached, endsInsideFence } from './llm/repairCap';
@@ -2187,6 +2188,53 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
     appState.getWindowHelper().setWindowMode(mode, inactive);
     return { success: true };
+  });
+
+  // Leases belong to the requesting renderer; another window cannot release them.
+  const screenshotRetryLeases = new Map<number, Set<string>>();
+  safeHandle('retain-screenshot-retry', async (event, imagePaths: unknown) => {
+    if (event.sender.id !== appState.getWindowHelper().getOverlayWindow()?.webContents.id) {
+      throw new Error('Screenshot retry is only available from the overlay');
+    }
+    if (!Array.isArray(imagePaths) || imagePaths.length === 0 || imagePaths.length > 5
+        || imagePaths.some((item) => typeof item !== 'string')) throw new Error('Invalid screenshot attachments');
+    const { validateImagePath } = require('./utils/curlUtils');
+    for (const imagePath of imagePaths) {
+      if (!validateImagePath(imagePath, app.getPath('userData')).isValid) throw new Error('Screenshot attachment is unavailable');
+    }
+    let leases = screenshotRetryLeases.get(event.sender.id);
+    if (!leases) {
+      leases = new Set<string>();
+      screenshotRetryLeases.set(event.sender.id, leases);
+      const senderId = event.sender.id;
+      event.sender.once('destroyed', () => {
+        for (const lease of screenshotRetryLeases.get(senderId) ?? []) {
+          void appState.getScreenshotHelper().releaseScreenshots(lease).catch(() => {});
+        }
+        screenshotRetryLeases.delete(senderId);
+      });
+    }
+    const lease = appState.getScreenshotHelper().retainScreenshots(imagePaths);
+    leases.add(lease);
+    return lease;
+  });
+  safeHandle('release-screenshot-retry', async (event, lease: unknown) => {
+    const leases = screenshotRetryLeases.get(event.sender.id);
+    if (typeof lease !== 'string' || !leases?.delete(lease)) return;
+    await appState.getScreenshotHelper().releaseScreenshots(lease);
+  });
+
+  // Start of a legacy Cmd/Ctrl+Enter press: the generation floor for the
+  // renderer's late-event guard and, for a screenshot question the renderer
+  // still holds, whether newer interviewer speech has replaced it.
+  safeHandle('begin-what-to-say-press', async (event, screenshotAskedAt: unknown) => {
+    if (event.sender.id !== appState.getWindowHelper().getOverlayWindow()?.webContents.id) {
+      throw new Error('What to say is only available from the overlay');
+    }
+    const intelligenceManager = appState.getIntelligenceManager();
+    return intelligenceManager.beginWhatToSayPress(
+      typeof screenshotAskedAt === 'number' && Number.isFinite(screenshotAskedAt) ? screenshotAskedAt : undefined,
+    );
   });
 
   safeHandle('delete-screenshot', async (event, filePath: string) => {
@@ -17560,7 +17608,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       _,
       question?: string,
       imagePaths?: string[],
-      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown },
+      options?: { promptInstruction?: string; domContext?: string; domContextEnvelope?: unknown; overlayQuestionId?: string; spokenQuestion?: string },
     ) => {
       // The press, for the answer's latency trace (PiTraceInit.startedAt).
       const pressedAt = tracerNow();
@@ -17572,9 +17620,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       let pressThrew = false;
       try {
         pressResult = await _tracked(async () => {
-      // Auto Answer V3: a manual What-to-Answer (hotkey, button, or an accepted
-      // offer card) commits whatever Auto Answer was offering — retract the card.
-      try { appState.onManualWhatToAnswer?.(); } catch { /* never block the answer */ }
+      // A manual What-to-Answer tells Auto Answer when the press really starts
+      // (onStart below) and how it ended (onSettled), not here.
       try {
         let screenContext: any;
         let screenContextStatus: 'not_available' | 'available' | 'failed' = 'not_available';
@@ -17630,6 +17677,14 @@ export function initializeIpcHandlers(appState: AppState): void {
                 question: question || 'unknown',
                 screenContextStatus,
                 error: `Invalid image path: ${validation.reason}`,
+              };
+            }
+            if (!(await fs.promises.stat(imagePath).catch(() => null))?.isFile()) {
+              return {
+                answer: null,
+                outcome: { status: 'failed', retryable: false, reason: 'attachment_unavailable' },
+                error: 'The screenshot is unavailable. Capture it again to retry.',
+                screenContextStatus,
               };
             }
             validatedImagePaths!.push(imagePath);
@@ -17761,8 +17816,14 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const phonePress = startPhonePress();
+        const outcomeOut: WhatToSayOutcomeOut = {};
+        // Set when this press really starts (onStart); its settle carries it.
+        let manualPressId: number | undefined;
+        const effectiveQuestion = (typeof question === 'string' && question.trim().length > 0)
+          ? question
+          : (validatedImagePaths?.length ? 'What should I say about this?' : question);
         let answer = await phonePress.run(() => intelligenceManager.runWhatShouldISay(
-          question,
+          effectiveQuestion,
           0.8,
           validatedImagePaths,
           {
@@ -17778,6 +17839,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             // gate can otherwise bleed a previous question's answer into the
             // current manual press). See runWhatShouldISay.forceFresh branch.
             forceFresh: true,
+            outcomeOut,
             screenContext,
             pressedAt,
             ...(screenFromImage ? { screenFromImage: true } : {}),
@@ -17786,6 +17848,31 @@ export function initializeIpcHandlers(appState: AppState): void {
                 ? options.promptInstruction
                 : undefined,
             domContext: effectiveDomContext,
+            overlayQuestionId: typeof options?.overlayQuestionId === 'string' ? options.overlayQuestionId : undefined,
+            // The spoken question main chose at the start of this press
+            // (begin-what-to-say-press), answered as chosen.
+            ...(typeof options?.spokenQuestion === 'string' && options.spokenQuestion.trim()
+              ? { spokenQuestion: options.spokenQuestion.trim().slice(0, 4000) } : {}),
+            // No joinAutomatic: every press answers fresh, as in the shipped
+            // 3.1.0 app. Joining the automatic answer swallowed a press after
+            // that answer had finished and waited up to 60 s on a stuck one.
+            // Auto Answer V3: a manual What-to-Answer (hotkey, button, or an
+            // accepted offer card) commits whatever Auto Answer was offering.
+            // Called only when this press really answers — a press that joined
+            // the automatic answer did not supersede it. A spoken-only press
+            // also takes the question over from Auto Answer.
+            // The engine decides `spoken` with the same test it uses for joining.
+            onStart: (press) => {
+              try { manualPressId = appState.onManualWhatToAnswer?.(press); } catch { /* never block the answer */ }
+            },
+            // How the press ended: a failed or cancelled press gives a spoken
+            // question back to Auto Answer instead of leaving it "answered".
+            // Only a press that started reports, tagged with ITS id, so an
+            // older press ending late cannot clear a newer press's handover.
+            onSettled: (result) => {
+              if (manualPressId === undefined) return;
+              try { appState.onManualWhatToAnswerSettled?.({ ...result, pressId: manualPressId }); } catch { /* never block the answer */ }
+            },
           },
         ));
         // The refusal-triggered retry of #647's Problem A. The refusal ("I
@@ -17800,6 +17887,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         let refusalRetry: { cropped: boolean; improved: boolean } | undefined;
         if (
           answer
+          && outcomeOut.value?.status === 'success'
           && validatedImagePaths?.length
           && process.env.NATIVELY_ASSESSMENT_RETRY !== 'off'
         ) {
@@ -17819,6 +17907,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               );
               if (crop) {
                 const retryPaths = validatedImagePaths.slice(0, -1).concat(croppedImagePath);
+                const retryOutcomeOut: WhatToSayOutcomeOut = {};
                 const retryAnswer = await phonePress.run(() => intelligenceManager.runWhatShouldISay(
                   question,
                   0.8,
@@ -17826,6 +17915,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                   {
                     skipCooldown: true,
                     forceFresh: true,
+                    outcomeOut: retryOutcomeOut,
                     promptInstruction:
                       typeof options?.promptInstruction === 'string'
                         ? options.promptInstruction
@@ -17838,7 +17928,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                     // would re-tell the model what we cropped away.
                   },
                 ));
-                if (retryAnswer) {
+                if (retryAnswer && retryOutcomeOut.value?.status === 'success') {
                   // Both runs recorded a turn, each with the screenshot: the
                   // refusal is dropped from the conversation, so it neither
                   // takes a screen's room nor steers the next follow-up toward
@@ -17863,7 +17953,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             }
           }
         }
-        if (answer) {
+        if (answer && outcomeOut.value?.status === 'success') {
           // The conversation-ring write lives in IntelligenceEngine.runWhatShouldISay
           // now, not here. Placed at this IPC handler it only ever recorded a
           // MANUAL press: Auto Answer calls runWhatShouldISay directly and never
@@ -17881,6 +17971,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
         return {
           answer,
+          outcome: outcomeOut.value ?? { status: 'failed', retryable: true, reason: 'missing_generation_outcome' },
+          ...(outcomeOut.value?.status === 'failed' ? { error: outcomeOut.value.reason || 'generation_failed' } : {}),
           question: question || 'inferred from context',
           screenContextStatus,
           visionProviderUsed,

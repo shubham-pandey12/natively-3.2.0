@@ -141,10 +141,17 @@ describe('Issue #540: handleWhatToSay legacy path still lets main extract the qu
   test('generateWhatToSay receives undefined, not a rolling-bar blob', () => {
     const handleWhatToSayBlock = between(
       interfaceSource,
-      'const handleWhatToSay = async (promptInstruction?: string | React.MouseEvent) => {',
+      'const handleWhatToSay = async (promptInstruction?: string | React.MouseEvent, retryExplicitly = false) => {',
       'const handleClarify = async () => {',
     );
-    assert.match(handleWhatToSayBlock, /generateWhatToSay\(\s*undefined,/);
+    // A bare press passes no question (questionForWta is undefined with no
+    // screenshot or page); a held screenshot passes its own question.
+    assert.match(handleWhatToSayBlock, /generateWhatToSay\(\s*(?:undefined|questionForWta),/);
+    const questionForWta = handleWhatToSayBlock.slice(
+      handleWhatToSayBlock.indexOf('const questionForWta ='),
+      handleWhatToSayBlock.indexOf('// Pass imagePath if attached'),
+    );
+    assert.doesNotMatch(questionForWta, /interviewerRequest/);
     assert.doesNotMatch(handleWhatToSayBlock, /generateWhatToSay\(\s*interviewerRequest/);
   });
 });

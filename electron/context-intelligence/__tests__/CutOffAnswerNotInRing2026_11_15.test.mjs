@@ -24,7 +24,7 @@ const slice = (from, to) => {
 };
 
 const wrapper = slice('async runWhatShouldISay(', 'private async runWhatShouldISayInner(');
-const inner = slice('private async runWhatShouldISayInner(', "this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer');")
+const inner = slice('private async runWhatShouldISayInner(', "this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer'")
   + "this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer');";
 
 test('the wrapper does not record a turn the session declined to store', () => {

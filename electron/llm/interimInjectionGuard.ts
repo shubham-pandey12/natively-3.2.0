@@ -164,3 +164,23 @@ export function resolveInterimInjection(input: InterimInjectionInput): InterimIn
   }
   return { action: 'inject', text: capToWordBoundaryTail(trimmed), reason: 'length_capped_tail' };
 }
+
+/** A manual press keeps an unfinalized partial this long (the context window). */
+export const PRESS_INTERIM_MAX_AGE_MS = 180_000;
+
+/**
+ * A manual press (the user asked for an answer NOW) and an interim the
+ * provider never finalized. A final clears the interim, so one still held is
+ * the newest thing the interviewer said, however long ago its last partial
+ * arrived. The 30 s stale rule skipped it, and the extractor then fell back to
+ * the previous question (n−1). A press keeps it within the context window;
+ * every other rule (duplicate, novel tail, length cap) still applies.
+ */
+export function resolvePressInterimInjection(input: InterimInjectionInput): InterimInjectionResult {
+  const verdict = resolveInterimInjection(input);
+  if (verdict.action === 'skip' && verdict.reason === 'stale'
+    && input.now - input.interim.timestamp <= PRESS_INTERIM_MAX_AGE_MS) {
+    return resolveInterimInjection({ ...input, now: input.interim.timestamp });
+  }
+  return verdict;
+}

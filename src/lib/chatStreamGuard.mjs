@@ -205,17 +205,26 @@ export function resolveChatStreamDone(activeId, incomingId, activeSource, incomi
 // and never changes the active id (the code-hint / brainstorm live streams emit
 // id-less tokens, and so do older main builds).
 //
+// `floorId` (2026-11-16): a manual press resets the adopted id to null before
+// main mints the press's own generation. Main reports the newest id it had
+// minted when the press began; until the renderer adopts a newer one, any id at
+// or below that floor belongs to an earlier request and is refused, so its late
+// token or final cannot fill the new press's row.
 /**
  * @param {number|null|undefined} activeId   the renderer's currently-adopted live-answer generation id
  * @param {number|null|undefined} incomingId the generationId on the incoming batch item (may be absent)
+ * @param {number|null|undefined} [floorId]  newest generation minted before the current press, if any
  * @returns {{ accept: boolean, activeId: number|null }}
  */
-export function resolveLiveAnswerBatch(activeId, incomingId) {
+export function resolveLiveAnswerBatch(activeId, incomingId, floorId) {
   const cur = typeof activeId === 'number' ? activeId : null;
   if (typeof incomingId !== 'number') {
     return { accept: true, activeId: cur };
   }
   if (cur === null) {
+    if (typeof floorId === 'number' && incomingId <= floorId) {
+      return { accept: false, activeId: null };
+    }
     return { accept: true, activeId: incomingId };
   }
   if (incomingId === cur) {

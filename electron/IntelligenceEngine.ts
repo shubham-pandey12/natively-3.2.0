@@ -3,6 +3,11 @@
 // Extracted from IntelligenceManager to decouple LLM logic from state management.
 
 import type { SessionWriteDecision } from './llm/FinalAnswerGenerationPolicy';
+import type { AutoAnswerCancelReason, AutoAnswerDispatchResult } from './premium/autoAnswer';
+import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
+
+/** What an automatic trigger resolved to (Auto Answer retries or reports anything not completed). */
+export type AutomaticAnswerResult = AutoAnswerDispatchResult;
 import { LiveHelperLLM, LIVE_HELPER_EMPTY, LIVE_HELPER_WINDOW_SECONDS, catchUpWindowSeconds, liveHelperDisplayKind, type LiveHelperAction } from './llm/liveHelpers';
 import { CustomButtonLLM, CUSTOM_BUTTON_EMPTY, CUSTOM_BUTTON_WINDOW_SECONDS } from './llm/customButtons';
 import type { CustomButtonActionV2 } from './llm/promptSystemV2';
@@ -150,7 +155,8 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
-    'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number) => void;
+    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean }) => void;
+    'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => void;
     // generationId (audit finding #3): stamped on every live token so the renderer
     // can drop a batch from an answer that was already superseded. Optional →
     // id-less emits still accepted downstream (backward-compatible).
@@ -236,6 +242,54 @@ interface SpeculativeAnswer {
     stopReason?: string;
     /** The run's source badge, computed from the evidence its prompt carried (F-ACC-04). */
     sourceLabel?: string;
+    /** When the prefetch run started: the answer boundary for question joining (see SessionTracker ContextItem.startedAt). */
+    startedAt?: number;
+}
+
+/** The answer that owns an interviewer turn (see IntelligenceEngine.spokenAnswer). */
+interface SpokenAnswerClaim {
+    turn: { timestamp: number; text: string };
+    automatic: boolean;
+    generationId: number;
+    completed: boolean;
+    /** Resolves true when the owner answered, false when it failed or was superseded. */
+    settled: Promise<boolean>;
+    settle: (answered: boolean) => void;
+}
+
+/** Two timestamps further apart than this are different turns, whatever their words. */
+const SPOKEN_TURN_MATCH_WINDOW_MS = 15_000;
+/** Longest a manual press waits on the automatic answer it joined before answering itself. */
+const SPOKEN_JOIN_MAX_WAIT_MS = 60_000;
+
+function spokenWords(text: string): string {
+    return text.toLowerCase()
+        .replace(/[\p{Pd}]+/gu, ' ')
+        .replace(/[\p{P}\p{S}]+/gu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * Whether two readings of the interviewer's latest turn are the same
+ * utterance: the interim the press saw and the final that replaced it, or a
+ * final the provider later revised. One must contain the other, word for
+ * word; three words is enough so a short question ("why did you leave?")
+ * still matches its own final.
+ */
+export function isSameSpokenTurn(
+    a: { timestamp: number; text: string } | undefined,
+    b: { timestamp: number; text: string } | undefined,
+): boolean {
+    if (!a || !b) return false;
+    if (a.timestamp === b.timestamp && a.text === b.text) return true;
+    if (Math.abs(a.timestamp - b.timestamp) > SPOKEN_TURN_MATCH_WINDOW_MS) return false;
+    const x = spokenWords(a.text);
+    const y = spokenWords(b.text);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    const [shorter, longer] = x.length <= y.length ? [x, y] : [y, x];
+    return shorter.split(' ').length >= 3 && ` ${longer} `.includes(` ${shorter} `);
 }
 
 export class IntelligenceEngine extends EventEmitter {
@@ -545,6 +599,54 @@ export class IntelligenceEngine extends EventEmitter {
      * question (answer). Null ⇒ the cooldown behaves exactly as it always has.
      */
     private lastTriggerQuestion: string | null = null;
+    /**
+     * Which answer owns the interviewer's latest spoken turn — one owner per
+     * question. A manual press and Auto Answer used to race for the same
+     * turn and the user got two answers to one question:
+     *  - an automatic dispatch parked behind the manual run fired once the
+     *    engine went idle and answered the same question again;
+     *  - a manual press after (or during) an automatic answer started a second
+     *    generation for the question already answered.
+     * Now an automatic trigger whose turn is owned is skipped, and a spoken-only
+     * manual press JOINS an automatic answer for the same turn (no second model
+     * call). If that automatic answer fails, the joined press answers instead.
+     * A failed owner releases the turn, so the next press or trigger may answer.
+     */
+    private spokenAnswer: SpokenAnswerClaim | undefined;
+
+    private latestSpokenTurn(): { timestamp: number; text: string } | undefined {
+        const items = this.session.getContextWithInterim(180);
+        for (let i = items.length - 1; i >= 0; i--) {
+            if (items[i].role === 'interviewer' && items[i].text.trim()) {
+                return { timestamp: items[i].timestamp, text: items[i].text };
+            }
+        }
+        return undefined;
+    }
+
+    /** The interviewer's latest turn already has an owner (answered, or being answered). */
+    private spokenTurnOwned(): boolean {
+        return Boolean(this.spokenAnswer) && isSameSpokenTurn(this.spokenAnswer?.turn, this.latestSpokenTurn());
+    }
+
+    private claimSpokenTurn(turn: { timestamp: number; text: string } | undefined, automatic: boolean, generationId: number): void {
+        // Whoever waited on the previous owner is released: it was superseded.
+        const previous = this.spokenAnswer;
+        if (previous && !previous.completed) previous.settle(false);
+        if (!turn) { this.spokenAnswer = undefined; return; }
+        let settle: (answered: boolean) => void = () => {};
+        const settled = new Promise<boolean>((resolve) => { settle = resolve; });
+        this.spokenAnswer = { turn, automatic, generationId, completed: false, settled, settle };
+    }
+
+    /** The owning run ended: answered keeps the claim, anything else releases the turn. */
+    private settleSpokenTurn(generationId: number, answered: boolean): void {
+        const claim = this.spokenAnswer;
+        if (!claim || claim.generationId !== generationId || claim.completed) return;
+        if (answered) claim.completed = true;
+        else this.spokenAnswer = undefined;
+        claim.settle(answered);
+    }
 
     // Speculative inference: start LLM on high-confidence interviewer partials
     private speculativeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -579,6 +681,12 @@ export class IntelligenceEngine extends EventEmitter {
      * is the only non-automatic caller — but wrong on any caller.
      */
     private speculativeAdoptedGenerationId: number | null = null;
+    /** The latest speculative run, so an adopted stream's dispatch can wait for it to settle. */
+    private speculativeRunPromise: Promise<string | null> | null = null;
+    /** Every speculative runWhatShouldISay still running, however it was launched. */
+    private readonly speculativeRunsInFlight = new Set<Promise<unknown>>();
+    /** Whether the last revealed prefetch actually reached the screen (empty-after-strip does not). */
+    private lastSpeculativeReveal: { generationId: number; shown: boolean } | null = null;
     /**
      * Registered by a RUNNING speculative stream: called with the adopted
      * generation id the moment the dispatch adopts it, so what has already
@@ -1136,8 +1244,8 @@ export class IntelligenceEngine extends EventEmitter {
             if (Date.now() - this.lastSpeculativeDeclineAt < this.triggerCooldown) return;
             console.log(`[IntelligenceEngine] Speculative inference fired on interim`, { length: text.length, confidence });
             this.speculativeQuestionId = this.currentAutoCandidateId;
-            this.runWhatShouldISay(text, confidence || 0.8, undefined, { speculative: true })
-                .catch(err => console.error('[IntelligenceEngine] Speculative run error:', err));
+            this.speculativeRunPromise = this.runWhatShouldISay(text, confidence || 0.8, undefined, { speculative: true })
+                .catch(err => { console.error('[IntelligenceEngine] Speculative run error:', err); return null; });
         }, this.SPECULATIVE_DEBOUNCE_MS);
     }
 
@@ -1328,6 +1436,11 @@ export class IntelligenceEngine extends EventEmitter {
             if (!ownPrefetchLive) return false;
         }
         if (Date.now() - this.lastTriggerTime < this.automaticTriggerCooldown) return false;
+        // An earlier automatic trigger is still at the planner or settling (for
+        // example one the interviewer's resumed speech just cancelled). A
+        // dispatch now would only come back 'skipped'; refusing here makes Auto
+        // Answer park the question and send it once this one has settled.
+        if (this.automaticTriggerPending) return false;
         return true;
     }
 
@@ -1335,7 +1448,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
      */
-    async handleSuggestionTrigger(trigger: SuggestionTrigger): Promise<void> {
+    async handleSuggestionTrigger(trigger: SuggestionTrigger): Promise<AutomaticAnswerResult> {
         // An absent confidence is not a low one: the planner substitutes the
         // intent classifier's score. Only an EXPLICIT sub-threshold value skips.
         // Not for an AUTOMATIC trigger: its confidence is the judge's
@@ -1343,26 +1456,57 @@ export class IntelligenceEngine extends EventEmitter {
         // decision). This 0.5 line silently dropped every 0.3-0.5 verdict — the
         // judge's logistics band ("can you hear me okay?") — after the engine
         // had reported it dispatched, leaving its prefetch orphaned (2026-09-26).
-        if (!trigger.automatic && trigger.confidence !== undefined && trigger.confidence < 0.5) return;
+        if (!trigger.automatic && trigger.confidence !== undefined && trigger.confidence < 0.5) return { status: 'skipped' };
+        if (!trigger.automatic) return this.handleSuggestionTriggerInner(trigger);
 
-        if (trigger.automatic) { this.automaticTriggerPending = true; this.automaticTriggerCancelled = false; }
+        // One automatic answer at a time: a second dispatch while one is at the
+        // planner or streaming would answer the same question twice.
+        if (this.automaticTriggerPending) return { status: 'skipped', reason: 'busy' };
+        this.automaticTriggerPending = true;
+        this.automaticTriggerCancelled = false;
         try {
-            await this.handleSuggestionTriggerInner(trigger);
+            const result = await this.handleSuggestionTriggerInner(trigger);
+            // An automatic answer that was not shown must not hold the trigger
+            // cooldown: Auto Answer retries it, or the next question comes.
+            if (result.status !== 'completed' && result.status !== 'partial') this.lastTriggerTime = 0;
+            return result;
         } finally {
-            if (trigger.automatic) { this.automaticTriggerPending = false; this.automaticTriggerCancelled = false; }
+            this.automaticTriggerPending = false;
+            this.automaticTriggerCancelled = false;
         }
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger): Promise<void> {
+    /**
+     * An automatic trigger for a turn something else already owns: a manual
+     * answer is running, or the latest turn was (or is being) answered. Checked
+     * on entry and again after the planner await, which a manual press can
+     * overtake.
+     */
+    private skipOwnedAutomaticTrigger(trigger: SuggestionTrigger, confidence: number): boolean {
+        if (!trigger.automatic) return false;
+        if (!this.isManualAnswerActive() && !this.spokenTurnOwned()) return false;
+        console.log('[IntelligenceEngine] Automatic trigger skipped: this question already has an answer', {
+            manualActive: this.isManualAnswerActive(),
+            owner: this.spokenAnswer ? (this.spokenAnswer.automatic ? 'automatic' : 'manual') : 'none',
+        });
+        try {
+            this.emit('suggestion_skipped', { reason: 'already_answered', question: trigger.lastQuestion ?? '', confidence });
+        } catch { /* a listener must never break the trigger path */ }
+        return true;
+    }
+
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger): Promise<AutomaticAnswerResult> {
+        if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         const plannerDecision = await this.planSuggestionTrigger(trigger);
-        // A user barge-in landed while we were at the planner: the user is
-        // answering the question themselves — do not stream over them.
+        if (this.skipOwnedAutomaticTrigger(trigger, plannerDecision.confidence)) return { status: 'skipped', reason: 'already_answered' };
+        // Cancelled while at the planner (the interviewer resumed, a barge-in,
+        // the judge failed): do not start an answer to half a question.
         if (trigger.automatic && this.automaticTriggerCancelled) {
-            console.log('[IntelligenceEngine] Automatic trigger dropped: cancelled during planning (user_barge_in)');
+            console.log('[IntelligenceEngine] Automatic trigger dropped: cancelled during planning');
             try {
                 this.emit('suggestion_skipped', { reason: 'user_barge_in', question: trigger.lastQuestion ?? '', confidence: plannerDecision.confidence });
             } catch { /* a listener must never break the trigger path */ }
-            return;
+            return { status: 'cancelled' };
         }
         if (plannerDecision.kind === 'silent') {
             console.log('[IntelligenceEngine] Planner stayed silent', { reason: plannerDecision.reason, confidence: plannerDecision.confidence });
@@ -1378,12 +1522,12 @@ export class IntelligenceEngine extends EventEmitter {
                     confidence: plannerDecision.confidence,
                 });
             } catch { /* a listener must never break the trigger path */ }
-            return;
+            return { status: 'skipped', reason: 'declined' };
         }
 
         if (plannerDecision.kind !== 'answer') {
             await this.runPlannerDecision(plannerDecision, trigger.lastQuestion);
-            return;
+            return { status: 'completed' };
         }
 
         // If a speculative stream answered (or is answering) this question, reuse it.
@@ -1423,15 +1567,35 @@ export class IntelligenceEngine extends EventEmitter {
                         // generated first, then live); completion finishes the
                         // same row (see completeSpeculativeRun / revealSpeculativeAnswer).
                         this.speculativeAdoptedGenerationId = this.currentGenerationId;
-                        if (trigger.automatic) this.automaticGenerationId = this.currentGenerationId;
+                        if (trigger.automatic) {
+                            this.automaticGenerationId = this.currentGenerationId;
+                            this.claimSpokenTurn(this.latestSpokenTurn(), true, this.currentGenerationId);
+                        }
+                        if (trigger.automatic && trigger.lastQuestion) {
+                            this.emit('what_to_answer_question', { generationId: this.currentGenerationId, question: trigger.lastQuestion, pending: true });
+                        }
                         // Unmute the stream NOW: paint what it has, stream the rest.
-                        try { this.speculativeAdoptHook?.(this.currentGenerationId); } catch (err) { console.warn('[IntelligenceEngine] adopted-stream paint failed; it will reveal at completion:', err); }
-                        return;
+                        const adoptedGenerationId = this.currentGenerationId;
+                        try { this.speculativeAdoptHook?.(adoptedGenerationId); } catch (err) { console.warn('[IntelligenceEngine] adopted-stream paint failed; it will reveal at completion:', err); }
+                        // Settled when the adopted stream finishes (or is cancelled).
+                        // Every speculative run in flight is awaited, not just
+                        // `speculativeRunPromise`: a prefetch that CLAIMED a running
+                        // interim speculation adopts a run that promise may not
+                        // track, and resolving early reported a shown answer as
+                        // cancelled (Auto Answer would then answer it again).
+                        await Promise.all([...this.speculativeRunsInFlight, this.speculativeRunPromise?.catch(() => null)]);
+                        const shown = this.lastSpeculativeReveal?.generationId === adoptedGenerationId && this.lastSpeculativeReveal.shown;
+                        return { status: shown ? 'completed' : 'cancelled' };
                     }
                     if (finished) {
                         console.log(`[IntelligenceEngine] Speculative stream accepted (Jaccard=${similarity.toFixed(2)}) — already finished; revealing`);
+                        if (trigger.automatic && trigger.lastQuestion) {
+                            this.emit('what_to_answer_question', { generationId: finished.generationId, question: trigger.lastQuestion });
+                        }
+                        if (trigger.automatic) this.claimSpokenTurn(this.latestSpokenTurn(), true, finished.generationId);
                         this.revealSpeculativeAnswer(finished, trigger.automatic === true);
-                        return;
+                        const shown = this.lastSpeculativeReveal?.generationId === finished.generationId && this.lastSpeculativeReveal.shown;
+                        return { status: shown ? 'completed' : 'failed', retryable: false };
                     }
                     // Accepted, but the stream neither runs nor finished (aborted
                     // or errored between prefetch and dispatch): answer afresh.
@@ -1468,15 +1632,39 @@ export class IntelligenceEngine extends EventEmitter {
         if (fastAuto && !previousFastMode) {
             try { this.llmHelper.setGroqFastTextMode(true); } catch { /* routing hint only */ }
         }
+        const outcomeOut: WhatToSayOutcomeOut = {};
+        // Several failure paths still SHOW a card (a provider error, an invalid
+        // artifact's fallback, the non-answer fallback, a stream cut short).
+        // Shipped counts any shown answer as delivered; reporting it as a
+        // retryable failure made Auto Answer retry and put a second card under it.
+        // Only THIS run's cards count: runWhatShouldISay mints its generation id
+        // before its first await, so it is known as soon as the call returns. A
+        // card from another generation (a manual press, a speculative reveal)
+        // must not turn this run's failure into "completed".
+        let shown = false;
+        let ownGeneration: number | null = null;
+        const onShown = (answer: unknown, _question?: unknown, _confidence?: unknown, generationId?: unknown) => {
+            if (ownGeneration !== null && generationId === ownGeneration && typeof answer === 'string' && answer.trim()) shown = true;
+        };
+        this.on('suggested_answer', onShown);
         try {
             // A judged automatic ask already passed the planner's same-utterance
             // cooldown, which compares the TEXT. The time-only 3 s throttle
             // inside runWhatShouldISay could then only drop a DIFFERENT question
             // asked soon after the last answer, silently, after Auto Answer had
             // recorded it as answered (forensics 2026-11-13, F-ACC-08 / D3).
-            await this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
-                trigger.automatic === true ? { skipCooldown: true } : undefined);
+            const generationBefore = this.currentGenerationId;
+            const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
+                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true } : {}) });
+            if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
+            await run;
+            const outcome = outcomeOut.value;
+            if (outcome?.status === 'success') return { status: 'completed' };
+            if (outcome?.status === 'cancelled') return { status: 'cancelled' };
+            if (shown) return { status: 'completed' };
+            return { status: 'failed', retryable: outcome?.retryable !== false };
         } finally {
+            this.off('suggested_answer', onShown);
             this.nextRunIsAutomatic = false;
             if (fastAuto && !previousFastMode) {
                 try { this.llmHelper.setGroqFastTextMode(false); } catch { /* routing hint only */ }
@@ -1575,8 +1763,8 @@ export class IntelligenceEngine extends EventEmitter {
         this.currentAutoCandidateId = questionId;
         this.speculativeQuestionId = questionId;
         console.log(`[IntelligenceEngine] Auto Answer prefetch fired while the judge decides`, { questionId, length: trimmed.length });
-        this.runWhatShouldISay(trimmed, 0.9, undefined, { speculative: true })
-            .catch(err => console.error('[IntelligenceEngine] Auto Answer prefetch error:', err));
+        this.speculativeRunPromise = this.runWhatShouldISay(trimmed, 0.9, undefined, { speculative: true })
+            .catch(err => { console.error('[IntelligenceEngine] Auto Answer prefetch error:', err); return null; });
     }
 
     /**
@@ -1641,7 +1829,7 @@ export class IntelligenceEngine extends EventEmitter {
         generationId: number, question: string | undefined, confidence: number, text: string,
         writeDecision: SessionWriteDecision | undefined,
         streamed?: SpeculativeStreamed,
-        plan?: { answerType?: AnswerType; answerStyle?: string; stopReason?: string; sourceLabel?: string },
+        plan?: { answerType?: AnswerType; answerStyle?: string; stopReason?: string; sourceLabel?: string; startedAt?: number },
     ): string {
         const finished: SpeculativeAnswer = {
             generationId, question: question || 'inferred', confidence, text, writeDecision,
@@ -1649,6 +1837,7 @@ export class IntelligenceEngine extends EventEmitter {
             ...(plan?.answerStyle ? { answerStyle: plan.answerStyle } : {}),
             ...(plan?.stopReason ? { stopReason: plan.stopReason } : {}),
             ...(plan?.sourceLabel ? { sourceLabel: plan.sourceLabel } : {}),
+            ...(typeof plan?.startedAt === 'number' ? { startedAt: plan.startedAt } : {}),
         };
         const adoptedInFlight = this.speculativeAdoptedGenerationId === generationId && this.currentGenerationId === generationId;
         if (this.speculativeAdoptedGenerationId === generationId) this.speculativeAdoptedGenerationId = null;
@@ -1702,8 +1891,10 @@ export class IntelligenceEngine extends EventEmitter {
         }
         if (!text.trim()) {
             console.warn('[IntelligenceEngine] Prefetched answer was empty — nothing to reveal');
+            this.settleSpokenTurn(finished.generationId, false);
             // An adopted stream already opened a row; it gets no final, so close it.
             if (streamed?.emitted) this.emit('suggested_answer_discard', 'empty_after_strip', finished.generationId);
+            this.lastSpeculativeReveal = { generationId: finished.generationId, shown: false };
             return;
         }
         // "Repetition guard" covers THIS path too. An adopted prefetch (the most
@@ -1762,7 +1953,12 @@ export class IntelligenceEngine extends EventEmitter {
         if (designNote && 'question' in designNote) this.session.noteDesignQuestion(designNote.question);
         else if (designNote && 'mayFollowUp' in designNote) this.session.touchActiveDesign(false, true);
         else if (designNote) this.session.touchActiveDesign();
-        this.session.addAssistantMessage(text, finished.writeDecision, 'what_to_answer');
+        // Recorded with the PREFETCH's start, not the reveal time, so a question
+        // begun while it was generating is not joined onto this one.
+        this.session.addAssistantMessage(text, finished.writeDecision, 'what_to_answer', undefined,
+            typeof finished.startedAt === 'number'
+                ? { startedAt: finished.startedAt, question: finished.question !== 'inferred' ? finished.question : undefined }
+                : undefined);
         if (finished.writeDecision?.policy !== 'do_not_store') {
             this.session.pushUsage({ type: 'assist', timestamp: Date.now(), question: finished.question, answer: text });
             // THE ADOPTED ANSWER'S ONLY RECORDING POINT.
@@ -1788,7 +1984,12 @@ export class IntelligenceEngine extends EventEmitter {
         } else {
             console.warn(`[IntelligenceEngine] Prefetched answer revealed but not stored (${finished.writeDecision.reason ?? 'do_not_store'})`);
         }
-        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, finished.sourceLabel, finished.stopReason);
+        const outcome: WhatToSayOutcome = finished.writeDecision?.policy === 'do_not_store'
+            ? { status: 'failed', retryable: true, reason: finished.writeDecision.reason }
+            : { status: 'success', retryable: false };
+        this.settleSpokenTurn(finished.generationId, outcome.status === 'success');
+        this.emit('suggested_answer', text, finished.question, finished.confidence, generationId, finished.sourceLabel, finished.stopReason, outcome);
+        this.lastSpeculativeReveal = { generationId: finished.generationId, shown: true };
     }
 
     /** Auto Answer V3: identity of the speculative cache, for keyed/embedding reuse. */
@@ -1806,7 +2007,7 @@ export class IntelligenceEngine extends EventEmitter {
     async runAutoAnswer(question: {
         id: string; text: string; confidence: number; answerability: number; dialogueAct: string;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
-    }, options: { reuseSpeculative: boolean; context: string }): Promise<void> {
+    }, options: { reuseSpeculative: boolean; context: string }): Promise<AutomaticAnswerResult> {
         return this.handleSuggestionTrigger({
             context: options.context,
             lastQuestion: question.text,
@@ -1822,22 +2023,43 @@ export class IntelligenceEngine extends EventEmitter {
         });
     }
 
-    cancelAutomaticAnswer(reason: 'user_barge_in'): boolean {
+    /**
+     * Stop the AUTOMATIC answer: the interviewer resumed (the question was not
+     * finished), the judge failed, the transcript it answers was revised, or
+     * the user barged in. Narrow by construction: a manual press (its own
+     * generation) is never touched. Except on a barge-in, the speculative
+     * prefetch for the old words is dropped too, so it is neither adopted nor
+     * shown for a question that has since grown.
+     */
+    cancelAutomaticAnswer(reason: AutoAnswerCancelReason): boolean {
+        let cancelled = false;
         // The stream has not started yet (parked at the planner/classifier):
-        // flag the pending trigger so handleSuggestionTrigger aborts before
-        // runWhatShouldISay instead of streaming over the user's own speech.
-        if (this.activeMode !== 'what_to_say') {
-            if (this.automaticTriggerPending) {
-                this.automaticTriggerCancelled = true;
-                console.log(`[IntelligenceEngine] Automatic trigger cancelled pre-stream (${reason})`);
-                return true;
-            }
-            return false;
+        // flag the pending trigger so handleSuggestionTrigger stops before
+        // runWhatShouldISay.
+        if (this.automaticTriggerPending && !this.automaticTriggerCancelled) {
+            this.automaticTriggerCancelled = true;
+            cancelled = true;
+            console.log(`[IntelligenceEngine] Automatic trigger cancelled pre-stream (${reason})`);
         }
-        if (this.automaticGenerationId === null || this.automaticGenerationId !== this.currentGenerationId) return false;
-        if (!this.whatToAnswerCancellationToken) return false;
+        const dropSpeculation = reason !== 'user_barge_in';
+        const speculativeLive = this.activeMode === 'what_to_say'
+            && this.speculativeGenerationId !== null && this.speculativeGenerationId === this.currentGenerationId;
+        if (dropSpeculation) {
+            // A live speculative stream is aborted below, so its slot goes with it.
+            if (this.speculativeTimer !== null) { clearTimeout(this.speculativeTimer); this.speculativeTimer = null; }
+            this.speculativeText = null;
+            this.speculativeTextExpiry = Infinity;
+            this.speculativeAnswer = null;
+            this.speculativeQuestionId = null;
+            this.speculativeAdoptedGenerationId = null;
+        }
+        if (this.activeMode !== 'what_to_say') return cancelled;
+        const automatic = this.automaticGenerationId !== null && this.automaticGenerationId === this.currentGenerationId;
+        if (!automatic && !(dropSpeculation && speculativeLive)) return cancelled;
+        if (!this.whatToAnswerCancellationToken) return cancelled;
         this.whatToAnswerCancellationToken.abort(reason);
         this.automaticGenerationId = null;
+        console.log(`[IntelligenceEngine] Automatic answer cancelled mid-stream (${reason})`);
         return true;
     }
 
@@ -2156,15 +2378,64 @@ export class IntelligenceEngine extends EventEmitter {
         })();
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number }): Promise<string | null> {
+    /**
+     * Start of a manual Cmd/Ctrl+Enter press, before the renderer opens its
+     * answer row. Returns the newest generation id already minted, so the
+     * renderer can refuse any event from an older request (a late token or
+     * final must never fill the new press's row), and — when the renderer holds
+     * a screenshot question asked at `screenshotAskedAt` — whether that
+     * screenshot or newer interviewer speech is the question to answer.
+     */
+    beginWhatToSayPress(screenshotAskedAt?: number): { generationFloor: number; source?: import('./llm/whatToSaySourceSelector').WhatToSaySourceDecision } {
+        const generationFloor = this.currentGenerationId;
+        if (typeof screenshotAskedAt !== 'number' || !Number.isFinite(screenshotAskedAt)) return { generationFloor };
+        const { selectWhatToSaySource } = require('./llm/whatToSaySourceSelector') as typeof import('./llm/whatToSaySourceSelector');
+        const interim = this.session.getLastInterimInterviewer();
+        const source = selectWhatToSaySource({
+            askedAt: screenshotAskedAt,
+            contextItems: this.session.getContext(180).map((item) => ({
+                role: item.role,
+                text: item.text,
+                timestamp: item.timestamp,
+                ...(item.punctuationSource ? { punctuationSource: item.punctuationSource } : {}),
+            })),
+            interim: interim ? { text: interim.text, timestamp: interim.timestamp, ...(interim.punctuationSource ? { punctuationSource: interim.punctuationSource } : {}) } : null,
+            now: Date.now(),
+        });
+        return { generationFloor, source };
+    }
+
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
         // advanced the state, or, with no state yet, not at all: the turn and
         // its screenshot were simply never recorded.
         const turnOut: { question?: string; writeDecision?: SessionWriteDecision } = {};
+        const outcomeOut = options?.outcomeOut ?? {};
+        outcomeOut.value = { status: 'failed', retryable: true, reason: 'generation_not_completed' };
         const startedUnder = this.conversationSessionId();
-        const answer = await this.runWhatShouldISayInner(question, confidence, imagePaths, { ...options, turnOut });
+        const run = this.runWhatShouldISayInner(question, confidence, imagePaths, { ...options, turnOut, outcomeOut });
+        if (options?.speculative) {
+            // Tracked here, not at the launch sites: an adoption must wait for
+            // the run it adopted however it was started (see handleSuggestionTriggerInner).
+            const tracked: Promise<unknown> = run.catch(() => null);
+            this.speculativeRunsInFlight.add(tracked);
+            void tracked.finally(() => this.speculativeRunsInFlight.delete(tracked));
+        }
+        let answer: string | null = null;
+        try {
+            answer = await run;
+        } finally {
+            // Tells Auto Answer how a manual press ended (answered or not, and
+            // what it answered), so a failed press gives its question back.
+            try {
+                options?.onSettled?.({
+                    answered: Boolean(answer?.trim()) && outcomeOut.value?.status === 'success',
+                    question: question?.trim() || turnOut.question?.trim() || undefined,
+                });
+            } catch { /* never block the answer */ }
+        }
         // With no question, the turn is recorded only once the run got as far as
         // resolving one (turnOut is set there). A press that returned earlier
         // ("configure your API keys", "nothing to answer yet") answered nothing,
@@ -2199,7 +2470,11 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; turnOut?: { question?: string; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; onStart?: (press: { spoken: boolean }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+        const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
+            if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
+            return options?.outcomeOut?.value;
+        };
         const now = Date.now();
         // Intelligence OS observe-only trace (Phase 1). Zero-cost NO-OP unless
         // intelligence_trace_enabled is on. Committed at the primary final-answer emit
@@ -2210,6 +2485,37 @@ export class IntelligenceEngine extends EventEmitter {
         const isSpeculative = options?.speculative === true;
         const skipCooldown = options?.skipCooldown === true;
         const forceFresh = options?.forceFresh === true;
+        // A manual press that asks only "answer what was just said": no typed
+        // question, no screenshot, page, screen text or quick-action prompt.
+        // Only this press can share a turn with Auto Answer; anything extra is
+        // a different request and runs on its own.
+        const manualSpoken = !isSpeculative && forceFresh && !question?.trim()
+            && !(imagePaths?.length) && !options?.screenContext && !options?.domContext?.trim()
+            && !options?.promptInstruction?.trim();
+
+        // One answer per spoken question: join the automatic answer that owns
+        // this turn instead of starting a second generation for it.
+        if (manualSpoken && options?.joinAutomatic) {
+            const claim = this.spokenAnswer;
+            if (claim?.automatic && isSameSpokenTurn(claim.turn, this.latestSpokenTurn())) {
+                if (!claim.completed) {
+                    console.log('[IntelligenceEngine] Manual press joins the automatic answer in flight', { generationId: claim.generationId });
+                    // Bounded: a run that never settled must not hang the press.
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const answered = await Promise.race([
+                        claim.settled,
+                        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), SPOKEN_JOIN_MAX_WAIT_MS); }),
+                    ]).finally(() => { if (timer) clearTimeout(timer); });
+                    if (!answered) console.log('[IntelligenceEngine] The joined automatic answer failed — answering the manual press');
+                }
+                if (claim.completed) {
+                    console.log('[IntelligenceEngine] Manual press: the automatic answer already covers this question', { generationId: claim.generationId });
+                    setOutcome('cancelled', 'automatic_answer_exists', false);
+                    return null;
+                }
+            }
+        }
+        options?.onStart?.({ spoken: manualSpoken });
 
         // Manual user action (button press / hotkey) MUST start from a clean
         // speculativeText slate. The previous answer arriving on a manual press
@@ -2321,11 +2627,23 @@ export class IntelligenceEngine extends EventEmitter {
         // Auto Answer and by the hotkey was planned differently (forensics
         // 2026-11-13, F-ACC-11).
         const questionTyped = Boolean(question) && !isSpeculative && this.automaticGenerationId !== generationId;
+        // This run owns the interviewer's latest turn (see spokenAnswer). Any
+        // other run starting now superseded the previous owner, which releases
+        // the turn from its own finally.
+        if (this.automaticGenerationId === generationId && !isSpeculative) {
+            this.claimSpokenTurn(this.latestSpokenTurn(), true, generationId);
+        } else if (manualSpoken) {
+            this.claimSpokenTurn(this.latestSpokenTurn(), false, generationId);
+        }
         const isWtaSuperseded = () => (
             this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken
             || this.currentGenerationId !== generationId
         );
 
+        const automaticQuestion = this.automaticGenerationId === generationId && !isSpeculative ? question?.trim() : undefined;
+        if (automaticQuestion) {
+            this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true });
+        }
         this.setMode('what_to_say');
         // Speculative runs don't stamp lastTriggerTime at start — the cooldown slot
         // is reserved for the real trigger. We stamp it only on successful completion.
@@ -2488,6 +2806,7 @@ export class IntelligenceEngine extends EventEmitter {
             modeId: snapshotModeId ?? 'none',
         });
         const recordWtaCancellation = () => {
+            setOutcome('cancelled', 'superseded', false);
             try {
                 const reason = whatToAnswerCancellationToken.signal.reason === 'engine_reset'
                     ? 'engine_reset'
@@ -2533,6 +2852,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (!this.answerLLM) {
                     if (isSpeculative) { this.speculativeText = null; this.speculativeTextExpiry = Infinity; }
                     this.setMode('idle');
+                    setOutcome('failed', 'configuration_required', false);
                     const noKeyMsg = "Please configure your API Keys in Settings to use this feature.";
                     // The renderer renders the answer via the 'suggested_answer'
                     // EVENT (the IPC return value's non-null answer is only used to
@@ -2550,13 +2870,14 @@ export class IntelligenceEngine extends EventEmitter {
                     return null;
                 }
                 if (isSpeculative) {
-                    return this.completeSpeculativeRun(generationId, question, confidence, answer || buildGracefulRetry(question), undefined);
+                    return this.completeSpeculativeRun(generationId, question, confidence, answer || buildGracefulRetry(question), answer ? undefined : decideSessionWritePolicy({ finalGenerationMode: 'provider_error_no_answer' }), undefined, { startedAt: now });
                 }
                 if (answer && IntelligenceEngine.isNonAnswerSentinel(answer)) {
                     this.setMode('idle');
                     return null;
                 }
                 if (answer) {
+                    setOutcome('success');
                     this.session.addAssistantMessage(answer, undefined, 'what_to_answer');
                     this.emit('suggested_answer', answer, question || 'inferred', confidence, generationId);
                     this.setMode('idle');
@@ -2585,13 +2906,20 @@ export class IntelligenceEngine extends EventEmitter {
             // novel tail against recent finals, caps length, and skips stale ones.
             const lastInterim = this.session.getLastInterimInterviewer();
             if (lastInterim && lastInterim.text.trim().length > 0) {
-                const { resolveInterimInjection } = require('./llm/interimInjectionGuard') as typeof import('./llm/interimInjectionGuard');
-                const verdict = resolveInterimInjection({
+                const { resolveInterimInjection, resolvePressInterimInjection } = require('./llm/interimInjectionGuard') as typeof import('./llm/interimInjectionGuard');
+                const interimInput = {
                     interim: { text: lastInterim.text, timestamp: lastInterim.timestamp },
                     recentInterviewerFinals: contextItems.filter(item => item.role === 'interviewer'),
                     lastContextItem: contextItems[contextItems.length - 1] ?? null,
                     now: Date.now(),
-                });
+                };
+                // A manual press with no question of its own answers the newest
+                // speech: a partial the provider never finalized is kept past
+                // the 30 s stale window, so the press does not fall back to the
+                // previous (already answered) question n−1.
+                const verdict = !isSpeculative && !question?.trim()
+                    ? resolvePressInterimInjection(interimInput)
+                    : resolveInterimInjection(interimInput);
                 if (verdict.action === 'inject') {
                     console.log(`[IntelligenceEngine] Injecting interim transcript`, { length: verdict.text.length, rawLength: lastInterim.text.length, reason: verdict.reason });
                     contextItems.push({
@@ -2613,6 +2941,8 @@ export class IntelligenceEngine extends EventEmitter {
                 timestamp: item.timestamp,
                 // F9: provenance flows to the extractor's confidence scoring.
                 ...(item.punctuationSource ? { punctuationSource: item.punctuationSource } : {}),
+                ...(typeof item.startedAt === 'number' ? { startedAt: item.startedAt } : {}),
+                ...(item.answeredQuestion ? { answeredQuestion: item.answeredQuestion } : {}),
             }));
 
             let preparedTranscript = prepareTranscriptForWhatToAnswer(transcriptTurns, 12);
@@ -2624,7 +2954,23 @@ export class IntelligenceEngine extends EventEmitter {
             );
 
             const lastInterviewerTurn = this.session.getLastInterviewerTurn();
-            const extractedQuestion = extractLatestQuestion(transcriptTurns);
+            // A press with no question of its own answers what the interviewer
+            // just said: take the whole utterance, as Auto Answer does, not only
+            // the last speech-to-text segment (which was often just its tail).
+            const extractedQuestion = extractLatestQuestion(transcriptTurns, undefined, {
+                joinUtterance: !isSpeculative && !question?.trim(),
+            });
+            // A press whose source main already chose (beginWhatToSayPress picked
+            // newer interviewer speech over a held screenshot) answers exactly
+            // that question: re-extracting here could pick a different turn or
+            // a different span of the same one if the transcript moved since.
+            const lockedSpokenQuestion = !isSpeculative && !question?.trim()
+                ? options?.spokenQuestion?.trim() || undefined : undefined;
+            if (lockedSpokenQuestion) {
+                extractedQuestion.latestQuestion = lockedSpokenQuestion;
+                extractedQuestion.confidence = Math.max(extractedQuestion.confidence ?? 0, 0.6);
+                trace.mark('repair_used', { reason: 'question_locked_at_press' });
+            }
             // Set when the user's OWN spoken line is chosen as the question below.
             let questionSpokenByUser = false;
             // SPEAKER-MISATTRIBUTION FALLBACK (2026-09-07, always answer). Real
@@ -2635,7 +2981,7 @@ export class IntelligenceEngine extends EventEmitter {
             // fully catch that — could you rephrase the question?". The user
             // pressed the key: the most recent utterance from anyone is the
             // thing to answer. Speculative runs keep the strict extractor.
-            if (!isSpeculative && !question?.trim() && !extractedQuestion.latestQuestion && !lastInterviewerTurn) {
+            if (!isSpeculative && !question?.trim() && !lockedSpokenQuestion && !extractedQuestion.latestQuestion && !lastInterviewerTurn) {
                 const lastAnyTurn = [...transcriptTurns].reverse().find((t) => t.role !== 'assistant' && String(t.text || '').trim().length >= 3);
                 if (lastAnyTurn) {
                     extractedQuestion.latestQuestion = String(lastAnyTurn.text).trim();
@@ -2655,7 +3001,7 @@ export class IntelligenceEngine extends EventEmitter {
             // utterance is the thing they want looked up. A clarification
             // thrown back at the other party ("what do you mean by that?") and
             // a plain statement keep the extractor's choice.
-            if (!isSpeculative && !question?.trim()) {
+            if (!isSpeculative && !question?.trim() && !lockedSpokenQuestion) {
                 const lastIdx = (role: 'user' | 'interviewer') => { for (let i = transcriptTurns.length - 1; i >= 0; i--) if (transcriptTurns[i].role === role && String(transcriptTurns[i].text || '').trim()) return i; return -1; };
                 const ui = lastIdx('user'), ii = lastIdx('interviewer');
                 const userText = ui >= 0 ? String(transcriptTurns[ui].text).trim() : '';
@@ -2672,6 +3018,12 @@ export class IntelligenceEngine extends EventEmitter {
                     trace.mark('repair_used', { reason: 'question_from_user_utterance' });
                     questionSpokenByUser = true;
                     console.log('[IntelligenceEngine] the user asked after the other party — answering the user\'s own question', { chars: userText.length });
+                }
+            }
+            if (!isSpeculative && !question && options?.overlayQuestionId && !questionSpokenByUser) {
+                const submitted = (extractedQuestion.latestQuestion || lastInterviewerTurn)?.trim();
+                if (submitted) {
+                    this.emit('what_to_answer_question', { generationId, question: submitted, overlayQuestionId: options.overlayQuestionId });
                 }
             }
             // WTA mint point (Phase 6 Slice 1, "what changes" item 1): one
@@ -2724,6 +3076,7 @@ export class IntelligenceEngine extends EventEmitter {
                 this.setMode('idle');
                 const noContextMsg = "I don't have anything to answer yet — no conversation, screen capture, or question has come in. Ask something or start the meeting audio, then press again.";
                 this.session.addAssistantMessage(noContextMsg, undefined, 'what_to_answer');
+                setOutcome('failed', 'no_context', false);
                 this.emit('suggested_answer', noContextMsg, 'inferred', 1.0, generationId);
                 return noContextMsg;
             }
@@ -2836,6 +3189,7 @@ export class IntelligenceEngine extends EventEmitter {
                     }
                     if (fr.isClarification && fr.clarificationText && !isSpeculative && !_wtaHasVisualContext) {
                         piTelemetry.emit('wta_context_free_clarification', { surface: 'what_to_answer', via: (fr as any).resolvedVia ?? 'clarification' });
+                        setOutcome('success');
                         this.session.addAssistantMessage(fr.clarificationText, undefined, 'what_to_answer');
                         this.emit('suggested_answer', fr.clarificationText, extractedQuestion.latestQuestion || 'inferred', 0.9, generationId);
                         this.setMode('idle');
@@ -4164,6 +4518,7 @@ export class IntelligenceEngine extends EventEmitter {
                             hasProfileFacts: Boolean((this.llmHelper.getKnowledgeOrchestrator?.() as any)?.activeResume?.structured_data),
                             hasLiveTranscript: true, // WTA is always transcript-driven
                         });
+                    setOutcome('success');
                     this.session.addAssistantMessage(clarify, undefined, 'what_to_answer');
                     // Generation id is minted at request t0, before every
                     // await or early-return branch, so even this clarification
@@ -5483,6 +5838,17 @@ export class IntelligenceEngine extends EventEmitter {
                 // back, press again" line, never a request to repeat.
                 fullAnswer = regenerated ?? buildGracefulRetry(question || extractedQuestion.latestQuestion || lastInterviewerTurn);
                 streamedAnswerReplaced = true;
+                // The "couldn't generate, press again" line is a failure notice,
+                // not an answer: like the deadline fallback above it must report
+                // a failed outcome and stay out of session and turn history, or
+                // the next press (and Auto Answer) treat this question as answered.
+                if (regenerated === null) {
+                    wtaWriteDecision = decideSessionWritePolicy({
+                        finalGenerationMode: 'provider_error_no_answer',
+                        validationOk: false,
+                        criticalViolations: ['empty_stream_no_answer'],
+                    });
+                }
             }
 
             // LEAKED-SCHEMA-STUB GUARD + PROVIDER-TRANSPORT-ERROR GUARD — MUST run
@@ -5542,6 +5908,7 @@ export class IntelligenceEngine extends EventEmitter {
                     ? "I don't have enough context from the conversation to answer that yet."
                     : "The model produced an invalid answer artifact, so I won't guess from your profile. Please try again.";
                 trace.mark('fallback_answer_used', { answerType: answerPlan.answerType, reason: 'leaked_schema_stub', finalGenerationMode: 'provider_error_no_answer' });
+                setOutcome('failed', 'leaked_schema_stub');
                 const stubWriteDecision = decideSessionWritePolicy({
                     finalGenerationMode: 'provider_error_no_answer',
                     validationOk: false,
@@ -5569,6 +5936,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // earlier press caused a LATER, unrelated press to answer as if
                 // resuming mid error-recovery instead of the fresh question).
                 trace.mark('fallback_answer_used', { answerType: answerPlan.answerType, reason: 'provider_transport_error', finalGenerationMode: 'provider_error_no_answer' });
+                setOutcome('failed', 'provider_transport_error');
                 const transportWriteDecision = decideSessionWritePolicy({
                     finalGenerationMode: 'provider_error_no_answer',
                     validationOk: false,
@@ -5636,6 +6004,7 @@ export class IntelligenceEngine extends EventEmitter {
                     ? "I don't have enough context from the conversation to answer that yet."
                     : "The model produced an invalid answer artifact, so I won't guess from your profile. Please try again.";
                 trace.mark('fallback_answer_used', { answerType: answerPlan.answerType, reason: 'leaked_internal_tag_block', finalGenerationMode: 'provider_error_no_answer' });
+                setOutcome('failed', 'leaked_internal_tag_block');
                 const tagLeakWriteDecision = decideSessionWritePolicy({
                     finalGenerationMode: 'provider_error_no_answer',
                     validationOk: false,
@@ -7250,6 +7619,7 @@ export class IntelligenceEngine extends EventEmitter {
                     stopReason: wtaTruncation.truncated && !streamedAnswerReplaced ? wtaTruncation.reason : undefined,
                     // The badge rides with the held answer so its reveal is labelled too (F-ACC-04).
                     sourceLabel: this.answerSourceLabel(requestSnapshot, _c3TurnPlan),
+                    startedAt: now,
                 });
             }
 
@@ -7414,9 +7784,18 @@ export class IntelligenceEngine extends EventEmitter {
             // writes nothing: no history line, no usage row, no final, and it
             // leaves the mode to its successor (pipeline forensics 2026-11-13,
             // F-CTX-08). Speculative runs check this above, before completing.
-            if (isWtaSuperseded()) return yieldToSupersedingRun(false);
+            if (isWtaSuperseded()) { setOutcome('cancelled'); return yieldToSupersedingRun(false); }
+            setOutcome(wtaWriteDecision.policy !== 'do_not_store' && finalWtaAnswer.trim() ? 'success' : 'failed',
+                wtaWriteDecision.policy === 'do_not_store' ? wtaWriteDecision.reason : undefined);
+            // `now` is when this run started: a question the interviewer began
+            // while this answer was streaming is not cut at this answer. The
+            // answered question tells the late-arriving tail of THIS question
+            // apart from that new speech.
             if (options?.turnOut) options.turnOut.writeDecision = wtaWriteDecision;
-            this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer');
+            this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer', undefined, {
+                startedAt: now,
+                question: question || extractedQuestion.latestQuestion || lastInterviewerTurn || undefined,
+            });
 
             // Full-JIT write-gating law (§6): a provider-error/no-answer WTA
             // fallback (deadline timeout, leaked-schema-stub) carries a
@@ -7600,6 +7979,9 @@ export class IntelligenceEngine extends EventEmitter {
             // having heard the question. Name the actual problem; keep the
             // graceful retry for everything that is not a provider failure.
             const providerMessage = providerFailureUserMessage(error);
+            // A provider failure the user was shown is not retried automatically:
+            // the retry would put a second card under the first.
+            setOutcome('failed', 'generation_error', !providerMessage);
             if (providerMessage) {
                 if (!isSpeculative) this.emit('suggested_answer', providerMessage, question || 'inferred', 0.9, generationId);
                 return providerMessage;
@@ -7610,6 +7992,15 @@ export class IntelligenceEngine extends EventEmitter {
             // cancelled request must not sever the newer request's controller.
             if (this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) {
                 this.whatToAnswerCancellationToken = null;
+            }
+            // An adopted prefetch settled its claim when it was revealed; for
+            // every other run, only a successful answer keeps the turn.
+            this.settleSpokenTurn(generationId, !isSpeculative && options?.outcomeOut?.value?.status === 'success');
+            if (automaticQuestion || isSpeculative) {
+                this.emit('what_to_answer_question', {
+                    generationId, pending: false,
+                    failed: Boolean(automaticQuestion && options?.outcomeOut?.value?.status === 'failed'),
+                });
             }
             // Resume background drains on EVERY exit path (answer, abort, error).
             releaseFg();
@@ -9328,6 +9719,8 @@ export class IntelligenceEngine extends EventEmitter {
      * Reset engine state (cancels any in-flight operations)
      */
     reset(): void {
+        this.spokenAnswer?.settle(false);
+        this.spokenAnswer = undefined;
         this.activeMode = 'idle';
         this.currentGenerationId++; // Increment to break all active LLM streams
         if (this.whatToAnswerCancellationToken) {

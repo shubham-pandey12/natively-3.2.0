@@ -3958,9 +3958,13 @@ export class AppState {
       if (!this.contentTraceEnabled()) return;
       console.log(`[AutoAnswer:text] ${label}\n    “${text}”`);
     },
+    // Resolves to the answer's status (completed / cancelled / failed /
+    // skipped): Auto Answer keeps the question until it was shown, retries a
+    // failure once, and re-judges a cancelled one with the rest of the speech.
     dispatch: (question, { reuseSpeculative }) => {
       return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
+        return { status: 'failed' as const };
       });
     },
     cancelAutomaticAnswer: (reason) => this.intelligenceManager.cancelAutomaticAnswer(reason),
@@ -3998,7 +4002,8 @@ export class AppState {
     telemetry: (event) => {
       try {
         const { telemetryService } = require('./services/telemetry/TelemetryService');
-        const { name, meetingGeneration, provider, ...properties } = event;
+        // `question` is transcript text: never persisted or sent as telemetry.
+        const { name, meetingGeneration, provider, question: _question, ...properties } = event;
         telemetryService.track({ name, provider, properties: { meetingGeneration, ...properties } });
       } catch { /* telemetry must never break the pipeline */ }
       this.autoAnswerUsage.observe(event);
@@ -4273,10 +4278,20 @@ export class AppState {
   });
 
   /** A manual What-to-Answer started (hotkey / button / accepted offer): the offer card is committed. */
-  public onManualWhatToAnswer(): void {
+  /** Returns the press id its settle call must carry. */
+  public onManualWhatToAnswer(press?: { spoken?: boolean }): number {
     // What streams next is the manual answer, not the automatic one.
     this.autoAnswerUsage.stopAwaitingAnswer();
-    this.simpleAutoAnswer.onManualAnswerStarted();
+    const pressId = this.simpleAutoAnswer.onManualAnswerStarted();
+    // A press that answers what was just said takes the question over from
+    // Auto Answer, so nothing it still held for it dispatches afterwards.
+    if (press?.spoken) this.simpleAutoAnswer.onManualSpokenAnswer();
+    return pressId;
+  }
+
+  /** The manual What-to-Answer ended (answered, failed or cancelled). */
+  public onManualWhatToAnswerSettled(result: { answered: boolean; question?: string; pressId?: number }): void {
+    this.simpleAutoAnswer.onManualAnswerSettled({ answered: result.answered, answeredQuestion: result.question, pressId: result.pressId });
   }
 
   /** Per-mode ternary thresholds (V3 Amendment 4), resolved from the mode policy registry. */
@@ -4293,6 +4308,9 @@ export class AppState {
 
   private cancelAutoAnswer(): void {
     this.simpleAutoAnswer.onMeetingStop();
+    // Auto Answer off or the meeting ended: an automatic answer still at the
+    // planner or streaming is not wanted any more.
+    this.intelligenceManager.cancelAutomaticAnswer('auto_disabled_or_meeting_ended');
   }
 
   /** Stable id prefix so the renderer can replace the card in place and retract it by id. */
@@ -4607,6 +4625,7 @@ export class AppState {
         try { this.trainingUploader().noteAutoAnswerRan(); } catch { /* never a blocker */ }
         this.simpleAutoAnswer.ingest({
           speaker,
+          ...(speakerId ? { speakerId } : {}),
           text: segment.text,
           timestamp: Date.now(),
           final: segment.isFinal,
@@ -5289,16 +5308,20 @@ export class AppState {
         // the text, so it would judge the turn without its last words: they
         // get the stop as a hint for the final that FOLLOWS it instead
         // (F-LAT-07; the engine ignores it once the interviewer speaks again).
+        // Every provider still reports the stop, so Auto Answer knows the
+        // interviewer is no longer speaking; only the trusted ones confirm
+        // the end of the turn early (the others restart the quiet window).
         if (this.isAutoAnswerActive() && this.isMeetingActive) {
           try {
             const { CredentialsManager } = require('./services/CredentialsManager');
             const provider = CredentialsManager.getInstance().getSttProvider();
-            if (loadAutoAnswerPremium().acceptsLocalSpeechEndHint(provider)) {
-              this.simpleAutoAnswer.onLocalSpeechEnd();
-            } else if (provider && provider !== 'none') {
-              this.simpleAutoAnswer.onLocalSpeechEndBeforeFinal();
-            }
-          } catch { /* an endpoint hint must never break capture */ }
+            const trusted = loadAutoAnswerPremium().acceptsLocalSpeechEndHint(provider);
+            this.simpleAutoAnswer.onLocalSpeechEnd(trusted);
+            if (!trusted && provider && provider !== 'none') this.simpleAutoAnswer.onLocalSpeechEndBeforeFinal();
+          } catch {
+            /* an endpoint hint must never break capture */
+            this.simpleAutoAnswer.onLocalSpeechEnd(false);
+          }
         }
       }
     });
@@ -8906,6 +8929,10 @@ export class AppState {
       const overlay = this.windowHelper.getOverlayWindow();
       return overlay && !overlay.isDestroyed() ? overlay : this.getMainWindow();
     }
+
+    this.intelligenceManager.on('what_to_answer_question', (data) => {
+      this.sendToWindow(answerWindow(), 'intelligence-what-to-answer-question', data);
+    });
 
     // Sprint 9: time-batched IPC token sends.
     //

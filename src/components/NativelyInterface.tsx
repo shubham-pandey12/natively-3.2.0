@@ -348,6 +348,7 @@ import {
   type DirectAssistFallbackNotice,
 } from '../lib/directAssistFailure.mjs';
 import { addAttachment, revealsOverlay, withoutFormulaImages } from '../lib/attachmentTray.mjs';
+import { createScreenshotRetry } from '../lib/screenshotRetry.mjs';
 import { createPendingScreenshots } from '../lib/pendingScreenshots.mjs';
 import { imageFilesFromDrop, overlayPasteAction } from '../lib/overlayImageDrop.mjs';
 import { shouldSkipLiveRagForChatFollowUp } from '../lib/liveRagFollowUpGate.mjs';
@@ -460,6 +461,7 @@ import { AutoStopNoticeBanner, useMeetingAutoStopNotice } from './overlay/AutoSt
 import { useAmbientChatMeeting } from './overlay/AmbientChatNotice';
 import { LastTimeRecapBanner, useLastTimeRecap } from './overlay/LastTimeRecapNotice';
 import type { LiveHelperAction } from '../types/assist';
+import type { WhatToSayPressStart } from '../types/whatToSayOutcome';
 import { useMeetingMute } from './overlay/useMeetingMute';
 import { HeroGlassButton } from './overlay/heroGlass/HeroGlassButton';
 
@@ -565,6 +567,8 @@ interface Message {
   role: 'user' | 'system' | 'interviewer';
   text: string;
   isStreaming?: boolean;
+  answerPending?: boolean;
+  answerFailed?: boolean;
   hasScreenshot?: boolean;
   screenshotPreview?: string;
   // Every attached screenshot's data-URL preview (screenshotPreview is the first
@@ -643,7 +647,22 @@ interface DirectAssistHistoryTurn {
   imagePaths?: string[];
 }
 
+interface ScreenshotRetrySnapshot {
+  audioRevision: number;
+  /** When this screenshot question was first asked. Main compares newer
+   *  interviewer speech against it to decide which question a bare
+   *  Cmd/Ctrl+Enter answers. */
+  askedAt?: number;
+  attachments: { path: string; preview: string; formulaCapture?: string }[];
+  question?: string;
+  promptInstruction?: string;
+  domContext?: string;
+  domContextEnvelope?: import('../types/electron').ContextEnvelope;
+  pageMeta?: { title?: string; url?: string } | null;
+}
+
 interface ActiveDirectAssistRequest {
+  screenshotAttemptId?: number;
   requestId: string;
   source: DirectAssistSource;
   currentRequest: string;
@@ -1354,7 +1373,7 @@ const MessageRow = React.memo(
                 attached" equivalent for browser captures (⌘/Ctrl+Shift+Y or
                 auto-attach). Shows host — title so the user can see WHICH page
                 fed the answer; the transient status pill vanished on use. */}
-            {msg.role === 'user' && msg.pageContext && (
+            {msg.role !== 'system' && msg.pageContext && (
               (() => {
                 const host = hostnameFromUrl(msg.pageContext.url);
                 const title = msg.pageContext.title?.trim();
@@ -1393,6 +1412,11 @@ const MessageRow = React.memo(
               <ChatHintLine>{t(CHAT_HINTS[msg.hint])}</ChatHintLine>
             ) : msg.role === 'system' && msg.note?.alone ? null
               : msg.role === 'system' && msg.failure && !msg.failure.partial ? null : renderMessageText(msg)}
+            {(msg.answerPending || msg.answerFailed) && (
+              <div role="status" className="mt-1 text-[12px] overlay-text-muted">
+                {msg.answerPending ? t('Thinking') : t('No answer generated')}
+              </div>
+            )}
             {/* What happened to the answer, under it; or, with no answer, alone. */}
             {msg.role === 'system' && msg.note && msg.note.kind !== 'late' && (
               <ChatNoteLine kind={msg.note.kind} className={msg.note.alone ? '' : 'mt-2'}>{chatNoteText(msg.note, t)}</ChatNoteLine>
@@ -1401,7 +1425,7 @@ const MessageRow = React.memo(
                 model's context window (see requestBuilder's per-source drop
                 order) — surfaced so a thin-looking answer isn't a silent
                 mystery. Field names only, never the dropped content. */}
-            {msg.role === 'user' && (msg.trimmedFields?.length || msg.shortenedFields?.length) ? (
+            {msg.role !== 'system' && (msg.trimmedFields?.length || msg.shortenedFields?.length) ? (
               <div className="flex items-center gap-1 mt-1.5 text-[10px] opacity-60">
                 <HelpCircle className="w-2.5 h-2.5 flex-shrink-0" />
                 <span className="truncate max-w-[260px]">
@@ -2298,6 +2322,24 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const phoneSentShotCardsRef = useRef(new Set<string>());
   // The tray as of the last render, for listeners registered once.
   const attachedContextRef = useRef(attachedContext);
+  const audioInputRevisionRef = useRef(0);
+  const lastSpeechBySpeakerRef = useRef(new Map<string, string>());
+  const screenshotRetryRef = useRef(createScreenshotRetry<ScreenshotRetrySnapshot>(
+    (lease) => window.electronAPI.releaseScreenshotRetry(lease),
+  ));
+  const [screenshotRetryAvailable, setScreenshotRetryAvailable] = useState(false);
+  const legacyScreenshotAttemptRef = useRef<{ id: number; streamId?: number } | null>(null);
+  const settleScreenshotRetry = useCallback((id: number | undefined, status: 'success' | 'failed' | 'cancelled') => {
+    if (id === undefined || !screenshotRetryRef.current.settle(id, status)) return;
+    setScreenshotRetryAvailable(Boolean(screenshotRetryRef.current.pending(audioInputRevisionRef.current, true)));
+  }, []);
+  const clearScreenshotRetry = useCallback(() => {
+    screenshotRetryRef.current.clear();
+    legacyScreenshotAttemptRef.current = null;
+    setScreenshotRetryAvailable(false);
+  }, []);
+  useEffect(() => () => screenshotRetryRef.current.clear(), []);
+
 
   // Settings State with Persistence
   const [isUndetectable, setIsUndetectable] = useState(false);
@@ -5686,6 +5728,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (!window.electronAPI?.onSessionReset) return;
     const unsubscribe = window.electronAPI.onSessionReset((payload) => {
       console.log('[NativelyInterface] Resetting session state...');
+      clearScreenshotRetry();
+      clearScreenshotRetry();
+      lastSpeechBySpeakerRef.current.clear();
       window.electronAPI?.cancelChatStream?.();
       chatStreamIdRef.current = null;
       chatStreamSourceRef.current = null;
@@ -6174,6 +6219,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // generation. null = no id adopted yet (id-less items are always accepted →
   // backward compatible with the code-hint / brainstorm streams that omit it).
   const liveAnswerGenIdRef = useRef<number | null>(null);
+  // Newest generation main had minted when the latest legacy press began.
+  // Until a newer generation is adopted, an id at or below it is an earlier
+  // request's late token/final and must not fill the press's row. Only grows.
+  const liveAnswerFloorRef = useRef<number | null>(null);
   // Direct Assist supersedes every legacy WTA generation visible to this
   // renderer. The numeric MAX tombstone rejects tagged generations through the
   // existing newest-wins guard; this companion flag also rejects older/id-less
@@ -7159,6 +7208,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // sentence kept as the text of an answer that never started.
     failure?: DirectAssistAnswerFailure,
   ) => {
+    if (!failure) settleScreenshotRetry(active.screenshotAttemptId, 'cancelled');
     if (streamingMsgIdRef.current === active.placeholderId) {
       if (streamingRafRef.current !== null) {
         cancelAnimationFrame(streamingRafRef.current);
@@ -7214,6 +7264,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     active: ActiveDirectAssistRequest,
     failure: DirectAssistAnswerFailure,
   ) => {
+    settleScreenshotRetry(active.screenshotAttemptId, failure.code === 'INVALID_ATTACHMENT' ? 'cancelled' : 'failed');
     reportAnswerFailed(failure);
     settleDirectAssistIncomplete(active, directAssistFailureText(failure, t), failure);
   }, [settleDirectAssistIncomplete, t]);
@@ -7340,6 +7391,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           ));
         }
 
+        settleScreenshotRetry(active.screenshotAttemptId, 'success');
+
         // The ONLY Direct history write. Both rows are appended atomically after
         // a successful terminal event, then bounded by completed turns.
         const completedTurns: DirectAssistHistoryTurn[] = [
@@ -7411,6 +7464,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, [finalizeWhenRevealCaughtUp, queueToken, settleDirectAssistFailure, settleDirectAssistIncomplete]);
 
   const beginDirectAssist = useCallback(async ({
+    screenshotAttemptId,
     source,
     currentRequest,
     imagePaths,
@@ -7418,6 +7472,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     transcript,
     userMessageId,
   }: {
+    screenshotAttemptId?: number;
     source: DirectAssistSource;
     currentRequest: string;
     imagePaths?: string[];
@@ -7449,9 +7504,36 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // send): follow it even if the chat was held for reading (#723).
     resumeAutoScroll();
 
+    if (screenshotAttemptId === undefined) {
+      const snapshot = imagePaths?.length ? {
+        audioRevision: audioInputRevisionRef.current,
+        askedAt: Date.now(),
+        attachments: imagePaths.map((path) => ({ path, preview: '' })),
+        question: currentRequest,
+        domContext: directPageContext?.dom,
+        pageMeta: directPageContext,
+      } : null;
+      const attempt = screenshotRetryRef.current.begin(snapshot);
+      screenshotAttemptId = attempt.id;
+      setScreenshotRetryAvailable(false);
+      if (snapshot) {
+        try {
+          const lease = await window.electronAPI.retainScreenshotRetry(imagePaths!);
+          if (!screenshotRetryRef.current.attachLease(attempt.id, lease)) return;
+        } catch (error) {
+          settleScreenshotRetry(attempt.id, 'failed');
+          setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', ...failedLine(error) }]);
+          setIsProcessing(false);
+          return;
+        }
+      }
+    }
+    if (!screenshotRetryRef.current.isCurrent(screenshotAttemptId)) return;
+
     const requestId = createDirectAssistRequestId();
     const placeholderId = genMessageId();
     const active: ActiveDirectAssistRequest = {
+      screenshotAttemptId,
       requestId,
       source,
       currentRequest,
@@ -7516,6 +7598,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, [flushToken, forceFinalizeStaleRagStream, settleDirectAssistFailure, settleDirectAssistIncomplete, resumeAutoScroll]);
 
   const cancelActiveChatStream = useCallback(() => {
+    clearScreenshotRetry();
     // Stop also stops diagram repairs: any in flight is cancelled, and the
     // answer being stopped never starts an automatic one afterwards.
     cancelAllDiagramRepairs();
@@ -7558,9 +7641,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       cancelAnimationFrame(tokenBufRef.current.raf);
       tokenBufRef.current.raf = null;
     }
-  }, [flushToken, settleDirectAssistIncomplete]);
+  }, [clearScreenshotRetry, flushToken, settleDirectAssistIncomplete]);
 
   const resetChatState = useCallback(() => {
+    clearScreenshotRetry();
+    clearScreenshotRetry();
     cancelActiveChatStream();
     diagramRepairBlockedRef.current.clear();
     previousDiagramRef.current = null;
@@ -7817,6 +7902,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Real-time Transcripts
     cleanups.push(
       window.electronAPI.onNativeAudioTranscript((transcript) => {
+        const speech = transcript.text?.trim().replace(/\s+/g, ' ').replace(/[?.!,;:]+$/, '').toLowerCase();
+        // Distinct speech events can contain identical words; the producer's
+        // timestamp distinguishes those from the same throttled partial being replayed.
+        const speechEvent = speech ? `${transcript.timestamp ?? 'unknown'}\0${speech}` : '';
+        if (speech && lastSpeechBySpeakerRef.current.get(transcript.speaker) !== speechEvent) {
+          lastSpeechBySpeakerRef.current.set(transcript.speaker, speechEvent);
+          audioInputRevisionRef.current++;
+        }
         // When Answer button is active, capture USER transcripts for voice input
         // Use ref to avoid stale closure issue
         if (isRecordingRef.current && transcript.speaker === 'user') {
@@ -7878,6 +7971,43 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           setIsInterviewerSpeaking(false);
         }, 3000);
       }),
+    );
+
+    cleanups.push(
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed }) => {
+        const id = overlayQuestionId ?? `interviewer-answer-${generationId}`;
+        if (!question) {
+          setMessages((prev) => prev.some((message) => message.id === id && message.answerPending)
+            ? prev.map((message) => message.id === id ? { ...message, answerPending: false, answerFailed: failed } : message)
+            : prev);
+          return;
+        }
+        if (activeDirectAssistRef.current) return;
+        if (overlayQuestionId) {
+          if (legacyIntelligenceTombstonedRef.current) return;
+          setMessages((prev) => prev.map((message) => message.id === id
+            ? { ...message, role: 'interviewer', text: question, isQuickActionLabel: false }
+            : message));
+          return;
+        }
+        // Only a new, committed automatic question may reopen legacy streaming after Direct.
+        const decision = resolveLiveAnswerBatch(
+          legacyIntelligenceTombstonedRef.current ? null : liveAnswerGenIdRef.current,
+          generationId,
+          liveAnswerFloorRef.current,
+        );
+        if (!decision.accept) return;
+        legacyIntelligenceTombstonedRef.current = false;
+        liveAnswerGenIdRef.current = decision.activeId;
+        pinAnswerPanel();
+        setMessages((prev) => {
+          if (prev.some((message) => message.id === id)) return prev;
+          // Keep any active streaming row at the tail for the legacy token handlers.
+          const insertAt = prev.findLastIndex((message) => !message.isStreaming) + 1;
+          const row: Message = { id, role: 'interviewer', text: question, answerPending: pending };
+          return [...prev.slice(0, insertAt), row, ...prev.slice(insertAt)];
+        });
+      }) ?? (() => {}),
     );
 
     // AI Suggestions from native audio (legacy)
@@ -7950,6 +8080,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         const decision = resolveLiveAnswerBatch(
           liveAnswerGenIdRef.current,
           (data as { generationId?: number }).generationId,
+          liveAnswerFloorRef.current,
         );
         liveAnswerGenIdRef.current = decision.activeId;
         if (!decision.accept) return;
@@ -7989,8 +8120,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (activeDirectAssistRef.current) return;
         if (legacyIntelligenceTombstonedRef.current) return;
         // A late discard from a replaced run must not clear the newer answer's
-        // row: the row is found by intent, not by generation (F-CTX-09).
+        // row: the row is found by intent, not by generation (F-CTX-09). An
+        // event from a request older than the current press is ignored too.
         if (!shouldApplyLiveAnswerDiscard(liveAnswerGenIdRef.current, data?.generationId)) return;
+        if (!resolveLiveAnswerBatch(liveAnswerGenIdRef.current, data?.generationId, liveAnswerFloorRef.current).accept) return;
         setIsProcessing(false);
         if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
         streamingNodeRef.current = null;
@@ -8085,6 +8218,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             const decision = resolveLiveAnswerBatch(
               liveAnswerGenIdRef.current,
               (it as any).generationId,
+              liveAnswerFloorRef.current,
             );
             liveAnswerGenIdRef.current = decision.activeId;
             if (!decision.accept) continue;
@@ -8388,7 +8522,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     'live:sound_smart': 'Sound smart',
   };
 
-  const handleWhatToSay = async (promptInstruction?: string | React.MouseEvent) => {
+  const handleWhatToSay = async (promptInstruction?: string | React.MouseEvent, retryExplicitly = false) => {
     // Timing: the moment this request was accepted (content-free; see diagramTimings).
     diagramRequestAtRef.current = performance.now();
     warmDiagramRendererOnIdle();
@@ -8399,24 +8533,104 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       postChatHint('what_to_say');
       return;
     }
-    const dynamicPromptInstruction =
+    let dynamicPromptInstruction =
       typeof promptInstruction === 'string' ? promptInstruction : undefined;
     setIsExpanded(true);
     setIsProcessing(true);
     // ⌘H then ⌘Enter in one motion: wait for a screenshot still capturing.
+    const pending = pendingCaptureRef.current;
+    const waitingForCapture = pendingShotsRef.current.inFlight();
     const lateShots = await pendingShotsRef.current.settle();
+    if (pendingShotsRef.current.inFlight() || (waitingForCapture && lateShots.length === 0)) {
+      for (const shot of lateShots) handleScreenshotAttach(shot);
+      setIsProcessing(false);
+      endOverlayAction('what_to_say');
+      setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', text: 'Screenshot capture did not finish. Wait for an attachment or capture again, then press again.' }]);
+      return;
+    }
+
     // Capture and clear attached image context.
     // Also merge in any screenshot from the capture-and-process shortcut that
     // arrived via pendingCaptureRef before the React state flush (React 18 fix).
-    const pending = pendingCaptureRef.current;
     // The question card's id — kept so the "Page attached" line can be stamped
     // onto it below, once we know whether captured page context was consumed.
     const questionCardId = genMessageId();
-    let currentAttachments = attachedContext;
+    let currentAttachments = attachedContextRef.current;
     if (pending && !currentAttachments.some((s) => s.path === pending.path)) {
       currentAttachments = addAttachment(currentAttachments, pending);
     }
     for (const shot of lateShots) currentAttachments = addAttachment(currentAttachments, shot);
+    const barePress = currentAttachments.length === 0 && !dynamicPromptInstruction && !inputValue.trim()
+      && !(window as any).lastCapturedDOM && !pendingPageCaptureAtRef.current;
+    // Legacy flow: ask main where this press starts. It reports the newest
+    // generation already minted (the late-event floor) and, for a screenshot
+    // question still held here, whether newer interviewer speech replaced it.
+    // The screenshot stays the question after a failed OR successful answer;
+    // unrelated audio (the candidate's "umm", "take your time") does not
+    // displace it, a genuine new question — even a usable partial — does.
+    const heldScreenshot = !directAssistEnabled && !retryExplicitly && barePress
+      ? screenshotRetryRef.current.latest() : null;
+    let pressStart: WhatToSayPressStart | null = null;
+    if (!directAssistEnabled) {
+      try {
+        pressStart = await window.electronAPI.beginWhatToSayPress(
+          typeof heldScreenshot?.snapshot.askedAt === 'number' ? heldScreenshot.snapshot.askedAt : undefined,
+        );
+      } catch { pressStart = null; }
+      if (typeof pressStart?.generationFloor === 'number') {
+        liveAnswerFloorRef.current = Math.max(liveAnswerFloorRef.current ?? 0, pressStart.generationFloor);
+      }
+    }
+    let retry: ReturnType<typeof screenshotRetryRef.current.pending> = null;
+    let lockedSpokenQuestion: string | undefined;
+    if (retryExplicitly) {
+      retry = screenshotRetryRef.current.pending(audioInputRevisionRef.current, true);
+    } else if (barePress && directAssistEnabled) {
+      retry = screenshotRetryRef.current.pending(audioInputRevisionRef.current, false);
+    } else if (heldScreenshot && screenshotRetryRef.current.latest() === heldScreenshot) {
+      const decision = pressStart?.source;
+      if (decision?.source === 'unidentified') {
+        setIsProcessing(false);
+        endOverlayAction('what_to_say');
+        setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', text: 'The interviewer is still asking something new. Press again when they finish, so the answer is not for the earlier screenshot.' }]);
+        return;
+      }
+      if (decision?.source === 'speech') {
+        clearScreenshotRetry();
+        // Answer exactly the question main chose, not a re-extraction of a
+        // transcript that may have moved on by the time generation starts.
+        lockedSpokenQuestion = decision.question;
+      } else {
+        // 'screenshot', or main could not choose (the call failed): the held
+        // screenshot is still the newest question we know of. Never drop it
+        // silently and fall back to older transcript speech.
+        retry = heldScreenshot;
+      }
+    }
+    if (retryExplicitly && !retry) {
+      for (const shot of lateShots) handleScreenshotAttach(shot);
+      setIsProcessing(false);
+      endOverlayAction('what_to_say');
+      return;
+    }
+    if (retry) {
+      for (const shot of lateShots) handleScreenshotAttach(shot);
+      currentAttachments = retry.snapshot.attachments.map((shot) => ({ ...shot }));
+      dynamicPromptInstruction = retry.snapshot.promptInstruction;
+    }
+    const retrySnapshot: ScreenshotRetrySnapshot | null = currentAttachments.length ? {
+      ...(retry?.snapshot ?? {}),
+      audioRevision: audioInputRevisionRef.current,
+      askedAt: retry?.snapshot.askedAt ?? Date.now(),
+      attachments: currentAttachments.map((shot) => ({ ...shot })),
+      promptInstruction: dynamicPromptInstruction,
+    } : null;
+    // Legacy answers keep the screenshot after success too: it is still the
+    // newest question until something replaces it (see heldScreenshot above).
+    const screenshotAttempt = screenshotRetryRef.current.begin(retrySnapshot, Boolean(retry), { keepOnSuccess: !directAssistEnabled });
+    legacyScreenshotAttemptRef.current = null;
+    setScreenshotRetryAvailable(false);
+
 
     if (currentAttachments.length > 0) {
       setAttachedContext([]);
@@ -8444,9 +8658,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     }
 
+    // Every press produces its own fresh answer, as in the shipped 3.1.0 app,
+    // whether or not Auto Answer already answered the same turn. A press that
+    // joined the automatic answer was swallowed when that answer had already
+    // finished, waited on it when it was stuck, and lost its card when it was
+    // cancelled.
+    const useDirectAssist = directAssistEnabled;
+
     // Create AI response placeholder AFTER user message so thinking dots + response
     // appear BELOW the question card (not above it)
-    if (!directAssistEnabled) {
+    if (!useDirectAssist) {
       legacyIntelligenceTombstonedRef.current = false;
       liveAnswerGenIdRef.current = null;
       prepareIntelligenceStreamPlaceholder('what_to_answer');
@@ -8454,7 +8675,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     analytics.trackCommandExecuted('what_to_say');
 
     try {
-      if (directAssistEnabled) {
+      if (retrySnapshot && !screenshotAttempt.lease) {
+        const lease = await window.electronAPI.retainScreenshotRetry(currentAttachments.map((shot) => shot.path));
+        if (!screenshotRetryRef.current.attachLease(screenshotAttempt.id, lease)) return;
+      }
+      if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
+      if (useDirectAssist) {
         // Direct screenshot requests never trigger automatic page capture. A
         // deliberate, already-captured page is still consumed once and can ride
         // alongside the image because the user explicitly attached both.
@@ -8492,9 +8718,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           hasScreenshots,
           customScreenshotPrompt: customPrompt || undefined,
         });
+        if (retrySnapshot) {
+          retrySnapshot.question = retry?.snapshot.question || directWhatToSayPayload.currentRequest;
+          retrySnapshot.domContext = directPageContext?.dom;
+          retrySnapshot.pageMeta = directPageContext;
+        }
+        if (directWhatToSayPayload.source === 'stt') {
+          setMessages((prev) => prev.map((message) => message.id === questionCardId
+            ? { ...message, role: 'interviewer', text: interviewerRequest, isQuickActionLabel: false }
+            : message));
+        }
         await beginDirectAssist({
+          screenshotAttemptId: screenshotAttempt.id,
           source: directWhatToSayPayload.source,
-          currentRequest: directWhatToSayPayload.currentRequest,
+          currentRequest: retrySnapshot?.question || directWhatToSayPayload.currentRequest,
           imagePaths: currentAttachments.map((attachment) => attachment.path),
           pageContext: directPageContext,
           // When a screenshot is the request surface, retain STT provenance as a
@@ -8602,12 +8839,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             }
           : undefined;
 
+      const questionForWta = retry?.snapshot.question || (currentAttachments.length > 0
+        ? 'What should I say about this?'
+        : (domContext ? 'What should I say about this?' : undefined));
+      if (retrySnapshot) Object.assign(retrySnapshot, { question: questionForWta, domContext, domContextEnvelope, pageMeta: consumedPageMeta });
+
       // Pass imagePath if attached
       const result = await window.electronAPI.generateWhatToSay(
-        undefined,
+        questionForWta,
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
-        options,
+        { ...options, overlayQuestionId: questionCardId, ...(lockedSpokenQuestion ? { spokenQuestion: lockedSpokenQuestion } : {}) },
       );
+      if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
+      settleScreenshotRetry(screenshotAttempt.id, result.outcome?.reason === 'attachment_unavailable'
+        ? 'cancelled' : result.outcome?.status ?? 'failed');
       setScreenContextStatus(result.screenContextStatus || 'not_available');
       setLatestUsedImageInput(Boolean(result.usedImageInput));
       setLatestVisionProviderUsed(result.visionProviderUsed);
@@ -8655,6 +8900,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         pinAnswerPanel();
       }
     } catch (err) {
+      if (!screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) return;
+      settleScreenshotRetry(screenshotAttempt.id, 'failed');
       setMessages((prev) => [
         ...prev,
         {
@@ -8668,7 +8915,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       endOverlayAction('what_to_say');
       // A Direct stream outlives the start IPC acknowledgement; its correlated
       // terminal event owns the processing state. Legacy WTA is request/response.
-      if (!directAssistEnabled) setIsProcessing(false);
+      if (!useDirectAssist && screenshotRetryRef.current.isCurrent(screenshotAttempt.id)) setIsProcessing(false);
     }
   };
 
@@ -8978,6 +9225,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     cleanups.push(
       window.electronAPI.onGeminiStreamStarted((data) => {
         if (typeof data?.streamId !== 'number') return;
+        if (awaitingChatStreamStartRef.current && legacyScreenshotAttemptRef.current) {
+          legacyScreenshotAttemptRef.current.streamId = data.streamId;
+        }
         replacedChatStreamFloorRef.current = data.streamId - 1;
         awaitingChatStreamStartRef.current = false;
       }),
@@ -9035,6 +9285,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         const pendingTextSnapshot = streamingTextRef.current;
         const pendingMsgIdSnapshot = streamingMsgIdRef.current;
         const authoritativeText = finalText || pendingTextSnapshot;
+        const streamOutcome = data?.outcome;
+        const attempt = legacyScreenshotAttemptRef.current;
+        if (attempt?.streamId !== undefined && attempt.streamId === data?.streamId) {
+          settleScreenshotRetry(attempt.id, streamOutcome?.status ?? (data?.incomplete ? 'failed' : 'success'));
+          legacyScreenshotAttemptRef.current = null;
+        }
+        if (streamOutcome?.status === 'failed' && pendingMsgIdSnapshot != null) {
+          setMessages((prev) => prev.map((m) => m.id === pendingMsgIdSnapshot
+            ? { ...m, answerOutcome: 'failed', failure: { code: 'GENERATION_FAILED', message: authoritativeText || 'The model did not produce an answer.' } } : m));
+        }
         // An answer Natively stopped itself — at the length limit, or because it
         // began repeating — says so under the text (2026-10-04). Attached
         // before either finalize path; both keep the row's other fields.
@@ -9185,6 +9445,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (typeof meta?.streamId === 'number'
           && chatStreamIdRef.current !== null
           && meta.streamId !== chatStreamIdRef.current) return;
+        const attempt = legacyScreenshotAttemptRef.current;
+        if (attempt?.streamId !== undefined && attempt.streamId === meta?.streamId) {
+          settleScreenshotRetry(attempt.id, 'failed');
+          legacyScreenshotAttemptRef.current = null;
+        }
         flushToken();
         setIsProcessing(false);
         requestStartTimeRef.current = null; // Clear timer on error
@@ -9784,10 +10049,18 @@ Provide only the answer, nothing else.`;
     setInputValue('');
 
     // ⌘H then Enter in one motion: wait for a screenshot still capturing.
-    let currentAttachments = attachedContext;
-    for (const shot of await pendingShotsRef.current.settle()) {
-      currentAttachments = addAttachment(currentAttachments, shot);
+    const waitingForCapture = pendingShotsRef.current.inFlight();
+    const lateShots = await pendingShotsRef.current.settle();
+    if (pendingShotsRef.current.inFlight() || (waitingForCapture && lateShots.length === 0)) {
+      for (const shot of lateShots) handleScreenshotAttach(shot);
+      manualSubmitInFlightRef.current = false;
+      lastManualSubmitRef.current = last;
+      setInputValue((current) => current || userText);
+      setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', text: 'Screenshot capture did not finish. Wait for an attachment or capture again, then send again.' }]);
+      return;
     }
+    let currentAttachments = attachedContextRef.current;
+    for (const shot of lateShots) currentAttachments = addAttachment(currentAttachments, shot);
     if (!userText && currentAttachments.length === 0) {
       // Empty input sent only for a capture that then failed: nothing to send.
       manualSubmitInFlightRef.current = false;
@@ -9795,8 +10068,36 @@ Provide only the answer, nothing else.`;
       return;
     }
 
+    const manualRetrySnapshot: ScreenshotRetrySnapshot | null = currentAttachments.length ? {
+      audioRevision: audioInputRevisionRef.current,
+      askedAt: Date.now(),
+      attachments: currentAttachments.map((shot) => ({ ...shot })),
+      question: userText || 'Analyze this screenshot',
+    } : null;
+    const manualScreenshotAttempt = screenshotRetryRef.current.begin(manualRetrySnapshot);
+    legacyScreenshotAttemptRef.current = null;
+    setScreenshotRetryAvailable(false);
+    if (manualRetrySnapshot) {
+      try {
+        const lease = await window.electronAPI.retainScreenshotRetry(currentAttachments.map((shot) => shot.path));
+        screenshotRetryRef.current.attachLease(manualScreenshotAttempt.id, lease);
+      } catch (error) {
+        settleScreenshotRetry(manualScreenshotAttempt.id, 'failed');
+        manualSubmitInFlightRef.current = false;
+        setInputValue((current) => current || userText);
+        setMessages((prev) => [...prev, { id: genMessageId(), role: 'system', ...failedLine(error) }]);
+        return;
+      }
+    }
+    if (!screenshotRetryRef.current.isCurrent(manualScreenshotAttempt.id)) {
+      manualSubmitInFlightRef.current = false;
+      return;
+    }
+
     // Clear the tray (the input was cleared before the wait above)
-    setAttachedContext([]);
+    const consumed = new Set(currentAttachments.map((shot) => shot.path));
+    attachedContextRef.current = attachedContextRef.current.filter((shot) => !consumed.has(shot.path));
+    setAttachedContext((shots) => shots.filter((shot) => !consumed.has(shot.path)));
 
     // Seal any in-flight streaming rows from a previous turn before we
     // append the new user message + placeholder. Without this, the rAF
@@ -9851,6 +10152,7 @@ Provide only the answer, nothing else.`;
           ));
         }
         await beginDirectAssist({
+          screenshotAttemptId: manualScreenshotAttempt.id,
           source: 'typed',
           // Keep the user's typed instruction unchanged. Only an attachment-only
           // turn needs a deterministic fallback because it has no text to retain.
@@ -9926,6 +10228,7 @@ Provide only the answer, nothing else.`;
       // Sent: the next question may go while this one streams (main stops this
       // stream for it). The double-press dedupe above still applies.
       manualSubmitInFlightRef.current = false;
+      legacyScreenshotAttemptRef.current = { id: manualScreenshotAttempt.id };
       await window.electronAPI.streamGeminiChat(
         userText || 'Analyze this screenshot',
         currentAttachments.length > 0 ? currentAttachments.map((s) => s.path) : undefined,
@@ -9941,6 +10244,7 @@ Provide only the answer, nothing else.`;
       chatStreamIdRef.current = null;
       chatStreamSourceRef.current = null;
       setIsProcessing(false);
+      settleScreenshotRetry(manualScreenshotAttempt.id, 'failed');
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.isStreaming && last.text === '') {
@@ -12026,6 +12330,17 @@ Provide only the answer, nothing else.`;
                 )}
               </div>
               </ChromeFold>
+
+              {screenshotRetryAvailable && (
+                <OverlayBanner
+                  className="mx-4"
+                  title={t('Screenshot answer failed')}
+                  message={t('The screenshot is available to retry.')}
+                  onDismiss={clearScreenshotRetry}
+                  dismissLabel={t('Dismiss screenshot retry')}
+                  actions={<OverlayBannerButton onClick={() => { void handleWhatToSay(undefined, true); }}>{t('Retry screenshot')}</OverlayBannerButton>}
+                />
+              )}
 
               {/* Multi-tab picker — choose which open browser tab to capture. */}
               <ChromeFold show={tabPicker !== null} overlayVisible={isExpanded} requestHeightMotion={requestChromeHeightMotion} innerClassName="pt-1 pb-1" testId="fold-tab-picker">

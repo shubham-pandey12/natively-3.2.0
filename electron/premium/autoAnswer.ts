@@ -54,6 +54,28 @@ export interface AutoAnswerTelemetryEvent {
     name: string;
     meetingGeneration: number;
     provider?: string;
+    /** Transcript text on some events: never persisted or sent (main.ts strips it). */
+    question?: string;
+}
+
+/** Why an automatic answer was cancelled (premium AutoAnswerTypes mirrors this). */
+export type AutoAnswerCancelReason =
+    | 'user_barge_in'
+    | 'interviewer_resumed'
+    | 'judge_unavailable'
+    | 'transcript_revised'
+    | 'manual_answer'
+    | 'auto_disabled_or_meeting_ended'
+    | 'engine_reset';
+
+/**
+ * What an automatic dispatch resolved to. `true` also means completed.
+ * 'skipped' says why in `reason` ('busy' is retried by Auto Answer).
+ */
+export interface AutoAnswerDispatchResult {
+    status: 'completed' | 'cancelled' | 'failed' | 'skipped' | 'partial';
+    retryable?: boolean;
+    reason?: 'busy' | 'declined' | 'already_answered';
 }
 
 /** The judge's request: built and read only by premium code. */
@@ -88,11 +110,17 @@ export interface AutoAnswerEngine {
     onMeetingStop(): void;
     onEngineIdle(): void;
     onProviderEndpoint(): void;
-    onLocalSpeechEnd(): void;
+    /** `confirmEndpoint` false: a provider whose finals do not end a turn; the stop only restarts the quiet window. */
+    onLocalSpeechEnd(confirmEndpoint?: boolean): void;
     /** A stop from a provider whose final follows it (REST, local): a hint for that final, not an endpoint (F-LAT-07). */
     onLocalSpeechEndBeforeFinal(): void;
     onLocalSpeechStart(): void;
-    onManualAnswerStarted(): void;
+    /** Returns the press id its settle call must carry. */
+    onManualAnswerStarted(): number;
+    /** A spoken manual press takes the current question over from Auto Answer. */
+    onManualSpokenAnswer(): void;
+    /** The manual press ended: a failed or cancelled press gives its question back. */
+    onManualAnswerSettled(outcome: { answered: boolean; answeredQuestion?: string; pressId?: number }): void;
     ingest(segment: TranscriptSegment): void;
 }
 
@@ -247,7 +275,7 @@ export const UNAVAILABLE_AUTO_ANSWER: AutoAnswerPremium = Object.freeze({
     createEngine: (): AutoAnswerEngine => ({
         setThresholds: noop, onMeetingStart: noop, onModeChanged: noop, onMeetingStop: noop, onEngineIdle: noop,
         onProviderEndpoint: noop, onLocalSpeechEnd: noop, onLocalSpeechEndBeforeFinal: noop, onLocalSpeechStart: noop,
-        onManualAnswerStarted: noop, ingest: noop,
+        onManualAnswerStarted: () => 0, onManualSpokenAnswer: noop, onManualAnswerSettled: noop, ingest: noop,
     }),
     createUsageTelemetry: (): AutoAnswerUsage => ({
         meetingStarted: noop, meetingEnded: noop, observe: noop, answerShown: noop, stopAwaitingAnswer: noop,
