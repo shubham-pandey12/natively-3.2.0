@@ -1159,6 +1159,10 @@ interface ElectronAPI {
   stealthReadClipboard: () => Promise<string>;
   /** Copy/cut from the stealth-typed box (overlay only). */
   stealthWriteClipboard: (text: string) => Promise<void>;
+  /** Overlay: report highlighted text (null when cleared) so Ctrl+C copies it on Windows. */
+  setSelectionCopy: (text: string | null) => Promise<void>;
+  /** Overlay: main copied the reported selection (clear the highlight). */
+  onSelectionCopied: (cb: () => void) => () => void;
   stealthTapStart: () => Promise<boolean>;
   /** False on macOS when a composition IME (Pinyin/Hangul/Kanji/…) is
    *  enabled — the tap captures below the IME and breaks composition, so
@@ -3476,6 +3480,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stealthTapStop: () => ipcRenderer.invoke('stealth-tap:stop'),
   stealthReadClipboard: () => ipcRenderer.invoke('stealth-edit:read-clipboard'),
   stealthWriteClipboard: (text: string) => ipcRenderer.invoke('stealth-edit:write-clipboard', text),
+  setSelectionCopy: (text: string | null) => ipcRenderer.invoke('selection-copy:set', text),
+  onSelectionCopied: (cb: () => void) => {
+    const sub = () => cb();
+    ipcRenderer.on('selection-copy:done', sub);
+    return () => {
+      ipcRenderer.removeListener('selection-copy:done', sub);
+    };
+  },
   stealthTapStart: () => ipcRenderer.invoke('stealth-tap:start'),
   stealthTapShouldAutoEngage: () => ipcRenderer.invoke('stealth-tap:should-auto-engage'),
   stealthTapRefreshIme: () => ipcRenderer.invoke('stealth-tap:refresh-ime'),

@@ -9,6 +9,7 @@ import { buildEmbeddingConfig } from './rag/embeddingConfigIdentity';
 import { app, BrowserWindow, clipboard, dialog, desktopCapturer, ipcMain, nativeImage, safeStorage, screen, shell, systemPreferences } from 'electron';
 import { startChatWebSearch } from './services/webSearch/chatWebSearch';
 import { setOpenAtLogin, getOpenAtLogin } from './utils/windowsTaskbarPolicy';
+import { resolveDebugLogPath } from './utils/debugLogPath.mjs';
 import { normalizeMeetingSurface } from './utils/meetingSurface';
 import { openInNotepadBlockReason, resumeBlockReason } from './services/meeting/meetingResume';
 import { micSettingsUri } from '../src/lib/micPermissionPolicy.mjs';
@@ -8278,6 +8279,9 @@ export function initializeIpcHandlers(appState: AppState): void {
   // name and clean the old per-disguise ones. macOS: the same single call as
   // before. See utils/windowsTaskbarPolicy.ts.
   safeHandle('set-open-at-login', async (_, openAtLogin: boolean) => {
+    if (!app.isPackaged) {
+      return { success: false, error: 'Open at Login is only available in the installed app.' };
+    }
     // Explicitly point to executable for production reliability
     setOpenAtLogin(app, process.platform, openAtLogin, app.getPath('exe'));
     // The user chose: a pending fresh-install default (e.g. a DMG launch on
@@ -8292,6 +8296,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   });
 
   safeHandle('get-open-at-login', async () => {
+    if (!app.isPackaged) return false;
     return getOpenAtLogin(app, process.platform, app.getPath('exe'));
   });
 
@@ -9960,9 +9965,14 @@ export function initializeIpcHandlers(appState: AppState): void {
     return { success: true };
   });
 
+  const debugLogFile = () => resolveDebugLogPath({
+    isPackaged: app.isPackaged,
+    userDataDir: app.getPath('userData'),
+    documentsDir: () => app.getPath('documents'),
+  });
   safeHandle('get-log-file-path', async () => {
     try {
-      return path.join(app.getPath('documents'), 'natively_debug.log');
+      return debugLogFile();
     } catch {
       return null;
     }
@@ -9970,7 +9980,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle('open-log-file', async () => {
     try {
-      const logPath = path.join(app.getPath('documents'), 'natively_debug.log');
+      const logPath = debugLogFile();
       // Ensure the file exists before opening
       if (!fs.existsSync(logPath)) {
         fs.writeFileSync(logPath, '');

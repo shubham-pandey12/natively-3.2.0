@@ -1,6 +1,6 @@
 export const DEBUG_LOG_FILENAME: string;
 export function resolveDebugLogPath(opts: {
   isPackaged: boolean;
-  agentUserData?: string | null;
+  userDataDir: string;
   documentsDir: () => string;
 }): string;

@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { app } from 'electron';
 import { RECOGNITION_LANGUAGES, EnglishVariant } from '../config/languages';
 import { getSttContextTerms, googleSpeechContexts } from './sttContextTerms';
 
@@ -306,7 +307,8 @@ export class GoogleSTT extends EventEmitter {
     private openDumpStream(): void {
         if (process.env.NATIVELY_STT_DUMP !== '1' || this.dumpStream) return;
         try {
-            const file = path.join(os.homedir(), `google_stt_${this.label}_${this.sampleRateHertz}hz.raw`);
+            const debugDir = app?.isPackaged === false ? app.getPath('userData') : os.homedir();
+            const file = path.join(debugDir, `google_stt_${this.label}_${this.sampleRateHertz}hz.raw`);
             this.dumpStream = fs.createWriteStream(file);
             this.dumpBytes = 0;
             console.log(`[GoogleSTT/${this.label}] 🎙️  PCM dump OPEN → ${file} (play: ffmpeg -f s16le -ar ${this.sampleRateHertz} -ac ${this.audioChannelCount} -i "${file}" out.wav)`);

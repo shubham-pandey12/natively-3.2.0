@@ -832,6 +832,11 @@ impl StealthKeyboardTap {
     /// stale value. That's safe: the worker is exiting, the per-event reader
     /// short-circuits on `!active`, and the next `start()` re-snapshots
     /// bounds from the provider — so the stale write is invisible.
+    /// No-op on macOS, for API parity with the Windows hook. Cmd+C over the
+    /// overlay's selection already copies through the Edit menu's copy role.
+    #[napi]
+    pub fn set_copy_armed(&self, _armed: bool) {}
+
     #[napi]
     pub fn update_overlay_bounds(&self, overlay_bounds: Option<OverlayBoundsInput>) {
         if !self.state.active.load(Ordering::Acquire) {

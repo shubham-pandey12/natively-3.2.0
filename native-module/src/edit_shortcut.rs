@@ -126,6 +126,18 @@ pub fn windows_edit_key(vk: u32, ctrl: bool, alt: bool, shift: bool) -> Option<(
     windows_vk_letter(vk).map(|letter| (0, letter))
 }
 
+/// Chord id the Windows hook tags a selection copy with. Not a KeybindManager
+/// action: StealthKeyboardManager handles it itself.
+pub const SELECTION_COPY_ID: &str = "natively:selection-copy";
+
+/// Windows: Ctrl+C while the overlay has highlighted response text. The overlay
+/// never takes focus, so without this the keystroke reaches the foreground app
+/// and nothing is copied. Only while armed (main arms it when the overlay
+/// reports a non-empty selection); otherwise Ctrl+C stays the meeting app's.
+pub fn windows_is_selection_copy(vk: u32, ctrl: bool, alt: bool, shift: bool, armed: bool) -> bool {
+    armed && vk == 0x43 && windows_is_edit_chord(ctrl, alt, shift)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +241,15 @@ mod tests {
         assert!(!mac_edit_letter_is_app_chord(&[], "v"));
         let shifted = vec![chord(0x56, MOD_CTRL | crate::app_chord::MOD_SHIFT)];
         assert!(!mac_edit_letter_is_app_chord(&shifted, "v"), "Cmd+Shift+V is not Cmd+V");
+    }
+
+    #[test]
+    fn selection_copy_only_when_armed_and_plain_ctrl_c() {
+        assert!(windows_is_selection_copy(0x43, true, false, false, true));
+        assert!(!windows_is_selection_copy(0x43, true, false, false, false), "unarmed: meeting app keeps Ctrl+C");
+        assert!(!windows_is_selection_copy(0x43, true, false, true, true), "Ctrl+Shift+C is not copy");
+        assert!(!windows_is_selection_copy(0x43, true, true, false, true), "AltGr+C is text");
+        assert!(!windows_is_selection_copy(0x43, false, false, false, true), "plain C is typing");
+        assert!(!windows_is_selection_copy(0x56, true, false, false, true), "Ctrl+V is not copy");
     }
 }

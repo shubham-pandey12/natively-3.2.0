@@ -87,6 +87,10 @@ export interface NativeModule {
       overlayBounds?: OverlayBoundsInput | null,
     ): boolean;
     stop(): void;
+    // Windows: while armed, plain Ctrl+C arrives as appChordId
+    // 'natively:selection-copy' instead of reaching the foreground app. No-op on
+    // macOS. Optional: binaries built before it lack it.
+    setCopyArmed?(armed: boolean): void;
     readonly isActive: boolean;
   };
   SystemAudioCapture: new (deviceId?: string | null) => {
