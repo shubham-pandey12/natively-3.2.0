@@ -1,3 +1,9 @@
+export function decideResetCancel(state: {
+  isProcessing: boolean;
+  hasLiveStream: boolean;
+  hasDirectAssist: boolean;
+}): 'cancel' | 'reset';
+
 export function resolveChatStreamToken(
   activeId: number | null | undefined,
   incomingId: number | null | undefined,

@@ -329,7 +329,7 @@ import {
   pinnedViewportBudget,
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
-import { resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent, shouldApplyLiveAnswerDiscard } from '../lib/chatStreamGuard.mjs';
+import { decideResetCancel, resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent, shouldApplyLiveAnswerDiscard } from '../lib/chatStreamGuard.mjs';
 import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
 import { resolveScreenshotPromptText, getScreenshotPresetPrompt } from '../lib/screenshotPrompt';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
@@ -6205,6 +6205,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // or 'phone'). Supersession is scoped to a surface because both paths
   // allocate stream ids from ONE shared counter in the main process.
   const chatStreamSourceRef = useRef<string | null>(null);
+  const hasLiveChatStream = useCallback(
+    () => chatStreamIdRef.current !== null || chatStreamSourceRef.current === 'desktop',
+    [],
+  );
   // Direct Assist owns a separate request-correlated stream and a deliberately
   // isolated history. Only a successful terminal `done` appends turns here;
   // transcript cards, RAG, WTA, partial output and cancelled turns never enter it.
@@ -7879,6 +7883,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // Connect to Native Audio Backend — deps must NOT include isExpanded (see clarify effect).
   useEffect(() => {
     const cleanups: (() => void)[] = [];
+    const hasUnrelatedStreamingRow = () =>
+      streamingMsgIdRef.current !== null && streamingIntentRef.current !== 'what_to_answer';
+    const hasOtherLiveRequest = () =>
+      Boolean(activeDirectAssistRef.current) || hasLiveChatStream() || hasUnrelatedStreamingRow();
 
     // Connection Status
     window.electronAPI
@@ -8094,7 +8102,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         const emittedAt = (data as { emittedAt?: number }).emittedAt;
         const STALE_ANSWER_MS = 30_000;
         const isStale = typeof emittedAt === 'number' && Date.now() - emittedAt > STALE_ANSWER_MS;
-        setIsProcessing(false);
+        if (!hasOtherLiveRequest()) setIsProcessing(false);
         pinAnswerPanel();
         // An answer Natively stopped itself says so under the text (2026-10-04),
         // like a typed one. Attached to the live row before the finalize, which
@@ -8124,21 +8132,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         // event from a request older than the current press is ignored too.
         if (!shouldApplyLiveAnswerDiscard(liveAnswerGenIdRef.current, data?.generationId)) return;
         if (!resolveLiveAnswerBatch(liveAnswerGenIdRef.current, data?.generationId, liveAnswerFloorRef.current).accept) return;
-        setIsProcessing(false);
-        if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
-        streamingNodeRef.current = null;
-        streamingTextRef.current = '';
-        streamingMsgIdRef.current = null;
-        streamingIntentRef.current = null;
-        streamingRenderModeRef.current = 'imperative';
-        eagerCodeExpansionHoldRef.current = false;
-        if (streamingRafRef.current !== null) {
-          cancelAnimationFrame(streamingRafRef.current);
-          streamingRafRef.current = null;
-        }
-        if (streamingCodeRafRef.current !== null) {
-          cancelAnimationFrame(streamingCodeRafRef.current);
-          streamingCodeRafRef.current = null;
+        if (!hasOtherLiveRequest()) setIsProcessing(false);
+        if (!hasUnrelatedStreamingRow()) {
+          if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
+          streamingNodeRef.current = null;
+          streamingTextRef.current = '';
+          streamingMsgIdRef.current = null;
+          streamingIntentRef.current = null;
+          streamingRenderModeRef.current = 'imperative';
+          eagerCodeExpansionHoldRef.current = false;
+          if (streamingRafRef.current !== null) {
+            cancelAnimationFrame(streamingRafRef.current);
+            streamingRafRef.current = null;
+          }
+          if (streamingCodeRafRef.current !== null) {
+            cancelAnimationFrame(streamingCodeRafRef.current);
+            streamingCodeRafRef.current = null;
+          }
         }
         setMessages((prev) => discardStreamingByIntentMessages(prev, 'what_to_answer'));
       }) ?? (() => {}),
@@ -8412,7 +8422,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
       cleanups.forEach((fn) => fn());
     };
-  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent, prepareIntelligenceStreamPlaceholder]);
+  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent, prepareIntelligenceStreamPlaceholder, hasLiveChatStream]);
 
   // Stable mount-only effect for screenshot listeners.
   // These MUST NOT be inside the [isExpanded] effect — when a screenshot is
@@ -11206,7 +11216,11 @@ Provide only the answer, nothing else.`;
     toggleVisibility: () => window.electronAPI.toggleWindow(),
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
-      if (isProcessing) {
+      if (decideResetCancel({
+        isProcessing,
+        hasLiveStream: hasLiveChatStream() || streamingMsgIdRef.current !== null,
+        hasDirectAssist: activeDirectAssistRef.current !== null,
+      }) === 'cancel') {
         cancelActiveChatStream();
       } else {
         await window.electronAPI.resetIntelligence();
@@ -11250,7 +11264,11 @@ Provide only the answer, nothing else.`;
     toggleVisibility: () => window.electronAPI.toggleWindow(),
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
-      if (isProcessing) {
+      if (decideResetCancel({
+        isProcessing,
+        hasLiveStream: hasLiveChatStream() || streamingMsgIdRef.current !== null,
+        hasDirectAssist: activeDirectAssistRef.current !== null,
+      }) === 'cancel') {
         cancelActiveChatStream();
       } else {
         await window.electronAPI.resetIntelligence();

@@ -23,6 +23,14 @@
 //   - incoming id  <  active id  → DROP (stale stream still trickling tokens)
 
 /**
+ * @param {{ isProcessing: boolean, hasLiveStream: boolean, hasDirectAssist: boolean }} state
+ * @returns {'cancel' | 'reset'}
+ */
+export function decideResetCancel({ isProcessing, hasLiveStream, hasDirectAssist }) {
+  return isProcessing || hasLiveStream || hasDirectAssist ? 'cancel' : 'reset';
+}
+
+/**
  * @param {number|null|undefined} activeId  the renderer's currently-adopted chat stream id
  * @param {number|null|undefined} incomingId the streamId on the incoming token (may be absent)
  * @returns {{ accept: boolean, activeId: number|null }}
