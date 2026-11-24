@@ -4199,6 +4199,8 @@ export class IntelligenceEngine extends EventEmitter {
                                 // try block; null-safe here.
                                 // F-ACC-12: a failed plan does not seed (was `?? true`).
                                 seedCandidateBackground: (_c3TurnPlan?.answerDirectives?.seedCandidateBackground ?? false),
+                                // Technical Interview gap filling (recovered 3.1.0 build).
+                                interviewSynthesis: snapshotModeInfo?.id === 'technical-interview' && wtaDecisionAllowsCandidateProfile,
                             });
                             candidateProfile = `<profile_jit_evidence_request>\n${jit.userPrompt}\n</profile_jit_evidence_request>`;
                             trace.mark('repair_used', { reason: 'identity_jit_evidence_grounding', evidenceItems: evidence.items.length, promptChars: jit.promptChars });

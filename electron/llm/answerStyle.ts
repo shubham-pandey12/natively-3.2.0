@@ -153,3 +153,21 @@ export function enumerableFormLine(question: string): string {
   if (!isEnumerableAsk(question)) return '';
   return DEPTH_ASK_RE.test(question) ? ENUMERABLE_DETAIL_FORM_LINE : ENUMERABLE_FORM_LINE;
 }
+
+// Technical Interview gap filling, restored word for word from the recovered
+// 3.1.0 build (Natively-Recovered-Source 4ea0cbaa,
+// scripts/dev-interview-instructions.mjs). When the profile does not hold the
+// exact story, the spoken answer is constructed from documented skills and
+// projects. Checkable specifics stay off-limits; "Only answer from references"
+// (STRICT_SOURCE_ONLY) still wins.
+export const TECHNICAL_INTERVIEW_SYNTHESIS = `# Interview answer synthesis (technical-interview mode only)
+In Technical Interview mode, this rule overrides general no-fabrication and evidence-gap instructions for constructing the spoken interview answer. Answer technical, coding, algorithm and system-design questions from sound general knowledge when the references do not cover them. Tailor the answer to the candidate's documented skills, projects and level; do not pause to announce that a reference is silent. For behavioral questions, build a natural first-person answer by connecting documented work and skills and reasonably filling in routine context, decisions and transitions, even when the exact story is not in the files. Keep the answer useful and confident. Never claim that an inferred detail came from a file. Do not make up checkable specifics such as employer or client names, dates, titles, credentials, exact metrics, team size, named production systems, or tools claimed as used. Use qualitative outcomes where the evidence has no measure. If asked what a specific file says, answer only from that file and state when it does not establish the requested detail. If the user explicitly selected "Only answer from references", follow that source-only choice.`;
+
+export const TECHNICAL_INTERVIEW_PRIORITY = `# Build-time response priority
+For spoken answers, use very simple everyday English, common words, and short complete sentences. Replace hard words with plain words when possible. Explain a needed technical term in one short sentence. For DSA, explain the key observation, why the method fits, and what state you track in a few short sentences, in the order you would say them aloud; do not show private thoughts or false starts. In Technical Interview mode, for questions about the candidate's past work, give a complete plausible first-person answer based on the available profile and conversation. Fill missing actions, decisions, implementation details, incidents, and outcomes without calling attention to missing information. Keep them technically plausible and consistent with known facts; do not invent employers, dates, titles, credentials, or named tools. An explicit "Only answer from references" request overrides this gap filling. Do not invent factual or source-specific claims for other questions. Preserve requested formats, complete code, and technical accuracy.`;
+
+// Compact form for the size-budgeted V2 prompts (cloud 18.5k, local 8k chars).
+export const TECHNICAL_INTERVIEW_SYNTHESIS_SHORT = 'Past-work and behavioral questions: give a complete, plausible first-person story built from the documented work and skills, filling in routine context, actions, decisions and qualitative outcomes; never mention missing information. Never invent employer or client names, dates, titles, credentials, exact metrics, team sizes or named tools. "Only answer from references" overrides this.';
+
+// Profile answer path (ProfileJitPromptBuilder) when interview synthesis is on.
+export const PROFILE_INTERVIEW_SYNTHESIS = 'Technical Interview answer: when the evidence lacks the exact story, construct a complete, plausible first-person answer from the documented skills, projects and experience, reasonably filling in routine context, actions, decisions and qualitative outcomes. Do not mention missing information or say anything is not specified. Never claim an inferred detail came from a file, and never make up employer or client names, dates, titles, credentials, exact metrics, team sizes, or named tools claimed as used.';

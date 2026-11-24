@@ -1,3 +1,4 @@
+import { TECHNICAL_INTERVIEW_PRIORITY, TECHNICAL_INTERVIEW_SYNTHESIS } from './answerStyle';
 import { CODING_CONTRACT } from "./codingContract";
 import { MEETING_TITLE_RULE } from "../services/meeting/MeetingSummaryV3";
 
@@ -2129,7 +2130,13 @@ export const MODE_TECHNICAL_INTERVIEW_PROMPT = `${CORE_IDENTITY}
    - Code in fenced blocks with language tag
    - Nothing should take more than 3 seconds to scan
    - No "you could say" or meta-commentary. Go straight to the content.
-   </formatting>`.trim();
+   </formatting>
+
+   <missing_reference_synthesis>
+   ${TECHNICAL_INTERVIEW_SYNTHESIS}
+   </missing_reference_synthesis>
+
+   ${TECHNICAL_INTERVIEW_PRIORITY}`.trim();
 
 // ==========================================
 // CHAT MODE — General assistant prompt for the chat input

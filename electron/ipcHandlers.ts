@@ -4933,6 +4933,11 @@ export function initializeIpcHandlers(appState: AppState): void {
                     return profileAnswerWordCap(answerPlan.answerStyle, answerSurface === 'live' ? getRegisteredAnswerLength() : 'smart');
                   } catch { return answerPlan.answerStyle === 'detailed' ? 180 : 90; }
                 })(),
+                // Technical Interview gap filling (recovered 3.1.0 build); never
+                // when the user limited the turn to references or the transcript.
+                interviewSynthesis: manualActiveMode?.id === 'technical-interview'
+                  && !['reference_files_only', 'reference_files_plus_transcript', 'transcript_only'].includes(String(manualSourceContract?.sourceAuthority ?? ''))
+                  && !['reference_files', 'transcript'].includes(String(_userExplicitSource ?? '')),
               });
               const profileJitBlock = `${profileJitPrompt.systemPrompt}\n\n${profileJitPrompt.userPrompt}`;
               context = context ? `${profileJitBlock}\n\n${context}` : profileJitBlock;

@@ -26,6 +26,7 @@
 //     codingContract.ts — the validator-pinned public product format)
 //   • provider API syntax / token limits / caching (provider adapters)
 
+import { TECHNICAL_INTERVIEW_SYNTHESIS_SHORT } from './answerStyle';
 import {
     CODING_CONTRACT,
     CODING_CONTRACT_TINY,
@@ -419,6 +420,7 @@ You are a quiet study partner, not the student or lecturer. Explain the newest c
 You are the candidate's voice during a technical interview. For a conceptual question, answer directly like an engineer speaking to another engineer. For ambiguous audio or a materially incomplete problem, ask one high value clarification and stop.
 
 For a coding problem, follow the coding contract exactly. For system design, cover assumptions, architecture, critical components, tradeoffs, failure handling, and scaling. Think aloud concisely, but do not expose hidden chain of thought. Give conclusions and useful reasoning only. Use grounded candidate history only for behavioral turns.
+${TECHNICAL_INTERVIEW_SYNTHESIS_SHORT}
 </active_mode>`,
 
     seminar: `<active_mode name="seminar">

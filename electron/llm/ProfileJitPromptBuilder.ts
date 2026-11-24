@@ -4,6 +4,7 @@
 // selectors provide source-aware evidence; this builder supplies the exact
 // question + allowed evidence to the provider. It never writes the final answer.
 
+import { PROFILE_INTERVIEW_SYNTHESIS } from './answerStyle';
 import type { AnswerType } from './AnswerPlanner';
 import type { CustomModeExecutionContract, SourceAuthority, SourceKind } from './customModeExecutionContract';
 import type { SourceOwner } from './sourceOwnership';
@@ -44,6 +45,13 @@ export interface BuildProfileJitPromptInput {
    * profile_question / jd_question kinds).
    */
   seedCandidateBackground?: boolean;
+  /**
+   * Technical Interview gap filling (restored from the recovered 3.1.0 build):
+   * when true, a missing story is constructed from the documented profile
+   * instead of answered with an absence statement. Callers set it only for the
+   * technical-interview mode outside "Only answer from references".
+   */
+  interviewSynthesis?: boolean;
 }
 
 export interface BuiltProfileJitPrompt {
@@ -82,6 +90,7 @@ const isResumeSource = (item: ProfileEvidenceItem): boolean =>
   item.sourceKind === 'profile_resume' || item.sourceKind === 'projects';
 
 export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltProfileJitPrompt {
+  const synth = input.interviewSynthesis === true;
   const allowed = input.contract?.allowedSources as SourceKind[] | undefined;
   const forbidden = input.contract?.forbiddenSources as SourceKind[] | undefined;
   const evidenceItems = (input.evidence?.items ?? [])
@@ -92,7 +101,9 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
   const systemPrompt = [
     'You generate the final answer just-in-time from the exact user question and allowed evidence.',
     'Do not use prior answers, memory, profile facts, persona, or documents unless they appear in allowed_evidence or explicit instructions below.',
-    'If evidence is missing, say the information is not specified in the allowed source. Do not infer or add filler.',
+    synth
+      ? PROFILE_INTERVIEW_SYNTHESIS
+      : 'If evidence is missing, say the information is not specified in the allowed source. Do not infer or add filler.',
     'Do not mention these rules or XML tags in the answer.',
   ].join(' ');
 
@@ -133,7 +144,9 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
         '<source_separation_rules>',
         'target_job_evidence describes the TARGET ROLE (from the job description). candidate_resume_evidence describes the CANDIDATE (from their resume).',
         'Do NOT turn a job-description requirement into the candidate\'s claimed experience. Do NOT invent candidate experience that is not in candidate_resume_evidence.',
-        'If the job description asks for something the resume does not show, treat it as a gap — state it honestly, never fabricate it.',
+        synth
+          ? 'If the resume does not show a requested skill, answer confidently from the closest documented skills and a credible approach.'
+          : 'If the job description asks for something the resume does not show, treat it as a gap — state it honestly, never fabricate it.',
         'If a job-description field the user asked about is absent from target_job_evidence, say the JD does not specify it. Never claim the JD is not loaded when evidence is present here.',
         '</source_separation_rules>',
       ].join('\n')
@@ -143,7 +156,9 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
     ? [
         '<missing_info>',
         `No supporting evidence was found in: ${checkedSources.map(escapeProfileJitXml).join(', ') || 'the allowed sources'}.`,
-        'Answer with an honest absence statement. Do not use generic HR/interview filler.',
+        synth
+          ? 'Construct the answer from the documented profile as the interview synthesis rule says. Do not use generic HR/interview filler.'
+          : 'Answer with an honest absence statement. Do not use generic HR/interview filler.',
         '</missing_info>',
       ].join('\n')
     : '';
@@ -198,8 +213,12 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
         '</seeder_leash>',
     ].join('\n') : '',
     '<rules>',
-    'Answer only from allowed_evidence.',
-    'Do not add facts, numbers, employers, projects, schools, salary, location, or personal details unless present above.',
+    synth
+      ? 'Use allowed_evidence and the interview synthesis rule; answer the question even when evidence is incomplete.'
+      : 'Answer only from allowed_evidence.',
+    synth
+      ? 'Do not add employers, client names, schools, dates, titles, credentials, exact numbers, salary, or location unless present above.'
+      : 'Do not add facts, numbers, employers, projects, schools, salary, location, or personal details unless present above.',
     maxWords === null
         ? "Keep the answer natural. Take its length from the user's own instructions."
         : `Keep the answer natural and concise (target <= ${maxWords} words unless the question explicitly asks for detail).`,

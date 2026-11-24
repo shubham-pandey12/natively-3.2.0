@@ -24,7 +24,7 @@ const compose = (modeId, q) => composePrompt({
 });
 
 describe('the own-life rule is in the job modes\' system prompts', () => {
-  for (const modeId of ['looking-for-work', 'technical-interview']) {
+  for (const modeId of ['looking-for-work']) {
     test(modeId, () => {
       const { system } = compose(modeId, 'Why did you leave your last job?');
       assert.match(system, /Speaking as the user about their own life/);
@@ -32,6 +32,18 @@ describe('the own-life rule is in the job modes\' system prompts', () => {
       assert.match(system, /never with "I don't have a specific example"/);
     });
   }
+  // Technical Interview gap filling (2026-11-24, recovered 3.1.0 build): the
+  // own-life rule's "how they handle that situation" fallback is replaced by a
+  // constructed story; the no-document and no-denial parts stay.
+  test('technical-interview', () => {
+    const { system } = compose('technical-interview', 'Tell me about a time you had a conflict with a teammate.');
+    assert.match(system, /Speaking as the user about their own career/);
+    assert.match(system, /never cite their résumé or profile as a document/);
+    assert.match(system, /tell a concrete first-person story/);
+    assert.match(system, /# Interview answer synthesis/);
+    assert.doesNotMatch(system, /open directly with how\s+they handle that situation/);
+    assert.doesNotMatch(system, /Never fabricate personal experience/);
+  });
   // Scoped (2026-09-30): in Team Meet the rule turned a colleague's "You did a payments
   // migration at your last company, right?" into "I don't have a payments migration in
   // my background" 6 of 6 times (0 of 6 without it).
