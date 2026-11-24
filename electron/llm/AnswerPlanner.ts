@@ -2,7 +2,7 @@ import type { IntentResult } from './PlannerDecision';
 import type { ExtractedQuestion } from './transcriptQuestionExtractor';
 import { CODING_CONTRACT, CODING_CONTRACT_IMPL, CODING_VERIFICATION_INSTRUCTION, CODING_SHAPE_CONTRACTS, type CodingShape } from './codingContract';
 import { isActiveCodingProblemFollowUp } from './codingFollowup';
-import { CAREER_STORY_FALLBACK, detectAnswerStyle, type AnswerStyle } from './answerStyle';
+import { detectAnswerStyle, type AnswerStyle } from './answerStyle';
 import { classifyTargetSpeakability, classifyShortBand, shortBandTargetWords, lengthBandTarget, spokenFullPromptMaxWords, HARD_MAX_WORDS, SPOKEN_FULL_PROMPT_MAX_WORDS } from './speakability';
 import { getRegisteredAnswerLength, type AnswerLength } from './answerLength';
 import { analyzeUserInstructions, getRegisteredUserInstructions, userInstructionsOverrideAppLength } from './userInstructionContract';
@@ -266,7 +266,7 @@ Direct Answer:
 [One clear first-person answer.]
 
 Strong Example / STAR:
-[Situation, task, action, and result. Follow the grounding policy above.]
+[Situation, task, action, result using only grounded candidate facts.]
 
 Why It Matters For This Role:
 [Connect to the role only if JD context is present.]
@@ -2425,8 +2425,7 @@ maxInitialLatencyMs: ${plan.maxInitialLatencyMs}
 answerStyle: ${plan.answerStyle}
 
 VOICE: ${voiceLine}
-GROUNDING: ${policyLine}${!_docEnforcement && plan.profileContextPolicy !== 'forbidden'
-    && plan.answerType === 'behavioral_interview_answer' ? `\n${CAREER_STORY_FALLBACK}` : ''}
+GROUNDING: ${policyLine}
 
 STRICT RESPONSE TEMPLATE:
 ${shapedTemplate ?? diagramTemplate ?? plan.responseTemplate}${renderingDirective}${styleDirective}${lengthDirective}${verificationBlock}

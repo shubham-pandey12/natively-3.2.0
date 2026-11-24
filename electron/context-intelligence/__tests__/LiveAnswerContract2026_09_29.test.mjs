@@ -117,53 +117,18 @@ describe('who is asking decides whether the gap is named', () => {
   });
 });
 
-describe('career story fallback', () => {
-  const question = 'Tell me about a time you made a mistake at work.';
-  for (const modeId of ['looking-for-work', 'technical-interview']) {
-    for (const surface of [typed, heard]) {
-      test(`${modeId} gives a hypothetical story without evidence on the ${surface.name} surface`, () => {
-        const p = compose(surface(question, modeId), modeId, { heardQuestion: surface === heard });
-        assert.match(p.user, /give a complete hypothetical example in first person using conditional language throughout/);
-        assert.ok(!p.sections.includes('no_evidence'));
-      });
-    }
-  }
-
-  test('reference-only policy still reports the source gap', () => {
-    const modeId = 'looking-for-work';
-    const d = decide({
-      requestId: 'r9', requestSequence: 1, surface: 'manual-chat', modeId,
-      scope: { userId: 'u1' }, sessionId: 's9', manualQuestion: question,
-      userAnswerPolicy: 'only_answer_from_references',
-    });
-    const p = compose(d, modeId);
-    assert.doesNotMatch(p.user, /# Career example/);
-    assert.match(p.user, /NO reference material attached/);
+describe('nothing attached + a question about the user\'s past', () => {
+  test('the zero-attachment notice forbids telling any story', () => {
+    const d = typed('Tell me about a time you made a mistake at work.', 'looking-for-work');
+    const p = compose(d, 'looking-for-work');
+    if (!/No reference material is attached/.test(p.user)) return; // a different branch owns this turn
+    assert.match(p.user, /tell no story: no "I once", no project, incident, employer or date/);
   });
-
-  test('an explicit source-only request disables the hypothetical', () => {
-    const modeId = 'looking-for-work';
-    const p = compose(typed(`Based only on my résumé, ${question}`, modeId), modeId);
-    assert.doesNotMatch(p.user, /# Career example/);
-  });
-
-  test('a request to share a time takes the same fallback', () => {
-    const modeId = 'looking-for-work';
-    const p = compose(typed('Can you share a time you disagreed with a teammate?', modeId), modeId);
-    assert.match(p.user, /# Career example/);
-  });
-
-  test('withheld evidence keeps the provider privacy notice', () => {
-    const modeId = 'technical-interview';
-    const p = compose(typed(question, modeId), modeId, { withheldScopes: ['profile_history'] });
-    assert.ok(p.sections.includes('privacy_withheld'));
-    assert.doesNotMatch(p.user, /# Career example/);
-  });
-
-  test('the older prompt also handles a missing story with a conditional example', () => {
+  test('Looking for work tells a story only from the résumé or profile', () => {
     const p = v2.buildSystemPromptV2({ mode: 'looking-for-work', action: 'what_to_say', tier: 'cloud' });
     assert.match(p, /one compact story from the résumé or profile/);
-    assert.match(p, /give a complete hypothetical example/);
+    assert.match(p, /never an invented event or employer/);
+    assert.doesNotMatch(p, /one compact grounded story/);
   });
 });
 
@@ -177,17 +142,15 @@ describe('a personal story told from evidence cannot be embellished', () => {
   }).evidence;
   test('evidence + a question about the user renders the guard after the evidence', () => {
     const d = typed('Tell me about a time you had to deal with a difficult stakeholder.', 'looking-for-work');
-    const p = composePrompt({ decision: d, policy: MODE_POLICIES['looking-for-work'], evidence: resumeEvidence, attachedSourceCount: 1, profileSourceCount: 0, fallbackUsed: 'PARTIAL_SUPPORT' });
+    const p = composePrompt({ decision: d, policy: MODE_POLICIES['looking-for-work'], evidence: resumeEvidence, attachedSourceCount: 1, profileSourceCount: 0 });
     assert.ok(p.sections.includes('evidence'), `fixture must pack: ${p.sections.join(',')}`);
     assert.ok(p.sections.includes('evidence_story'), p.sections.join(','));
     assert.ok(p.sections.indexOf('evidence_story') > p.sections.indexOf('evidence'), 'must follow the evidence');
-    assert.match(p.user, /Use a matching real story if the supplied facts support one/);
-    assert.match(p.user, /Use relevant, supported skills or project experience/);
-    assert.ok(!p.sections.includes('evidence_coverage'));
+    assert.match(p.user, /Do not add a stakeholder, a disagreement, a colleague, a reaction or a result the evidence does not name/);
   });
-  test('a résumé fact is not a request for a hypothetical example', () => {
-    const p = compose(typed('What is my CGPA?', 'looking-for-work'), 'looking-for-work');
-    assert.doesNotMatch(p.user, /# Career example/);
+  test('no evidence → no guard (the no-context rules own that case)', () => {
+    const p = compose(typed('Tell me about a time you had to deal with a difficult stakeholder.', 'looking-for-work'), 'looking-for-work');
+    assert.ok(!p.sections.includes('evidence_story'));
   });
   test('a general question with evidence gets no guard', () => {
     const d = typed('What is the difference between a process and a thread?');

@@ -21,8 +21,6 @@ import type { ModePolicy } from '../policies/mode-policy-registry';
 import { CLAIM_AUTHORITY, claimAuthority } from '../policies/source-authority-policy';
 import { isRetrievalFixEnabled } from '../contracts/retrieval-flags';
 
-export const BEHAVIORAL_STORY_RE = /\b(?:tell (?:me|us) about a time|describe a (?:time|situation)|give (?:me|us) an example (?:of (?:a time|when)|where)|share a (?:time|situation)|walk (?:me|us) through a (?:time|situation))\b/i;
-
 // T2's kill switch, read PER CALL. A module-level `const on = isRetrievalFix…()`
 // would freeze whatever the environment happened to be at import time, which is
 // the exact drift `FlagSpec.default`'s docblock in intelligenceFlags.ts warns
@@ -914,7 +912,7 @@ function detectTypes(q: string, input: ClassificationInput): { types: QuestionTy
     // interviewer-perspective contract): "tell me about a time you said no to
     // a stakeholder" is a work-history question, never assistant meta-talk —
     // bare speech verbs swallowed it (audit 2026-08-01, HIGH).
-    const behavioralFraming = BEHAVIORAL_STORY_RE.test(clause);
+    const behavioralFraming = /\b(?:tell (?:me|us) about a time|describe a (?:time|situation)|give (?:me|us) an example of (?:a time|when)|walk (?:me|us) through a (?:time|situation))\b/.test(clause);
     // Speech verbs are assistant-meta ONLY with a deictic or empty complement:
     // "what did you just say?" / "you answered that wrong" are about the
     // assistant; "you said no to a stakeholder" / "you said you left Google"
