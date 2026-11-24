@@ -1208,6 +1208,8 @@ export interface ElectronAPI {
   stealthTapStop: () => Promise<void>
   stealthReadClipboard: () => Promise<string>
   stealthWriteClipboard: (text: string) => Promise<void>
+  setSelectionCopy?: (text: string | null) => Promise<void>
+  onSelectionCopied?: (cb: () => void) => () => void
   stealthTapStart: () => Promise<boolean>
   /** False on macOS when a composition IME (Pinyin/Hangul/Kanji/…) is
    *  enabled — the tap captures below the IME and breaks composition, so

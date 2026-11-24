@@ -2164,6 +2164,13 @@ export class AppState {
       registerStealthHandler('stealth-edit:read-clipboard', (event: any) =>
         typingSessionOf(event) ? clipboard.readText() : '',
       );
+      // Ctrl+C over highlighted overlay text (Windows; no-op on macOS, where the
+      // Edit menu copies). The overlay reports its selection, or null when it is
+      // cleared; the hook then hands Ctrl+C to main. See utils/selectionCopy.ts.
+      registerStealthHandler('selection-copy:set', (event: any, text: unknown) => {
+        if (typingTargetOf(event) !== 'overlay') return;
+        stealth.setSelectionCopy(text, event.sender);
+      });
       registerStealthHandler('stealth-edit:write-clipboard', (event: any, text: unknown) => {
         if (typingSessionOf(event) && typeof text === 'string') clipboard.writeText(text);
       });
@@ -2207,6 +2214,7 @@ export class AppState {
       registerStealthHandler('stealth-tap:start', () => false);
       registerStealthHandler('stealth-edit:read-clipboard', () => '');
       registerStealthHandler('stealth-edit:write-clipboard', () => {});
+      registerStealthHandler('selection-copy:set', () => {});
       // Non-desktop: returns true so the renderer's stealthAutoEngageOkRef
       // stays true and the explicit isCgEventTapAvailableRef guard (added in
       // PR #250) is what actually gates blockInputFocus. Inverted relative

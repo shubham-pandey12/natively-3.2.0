@@ -49,6 +49,12 @@ export declare class StealthKeyboardTap {
    * short-circuits on `!active`, and the next `start()` re-snapshots
    * bounds from the provider — so the stale write is invisible.
    */
+  /**
+   * Arm or disarm the selection-copy intercept (Windows). While armed, plain
+   * Ctrl+C is delivered with appChordId "natively:selection-copy" and kept from
+   * the foreground app. No-op on macOS.
+   */
+  setCopyArmed(armed: boolean): void
   updateOverlayBounds(overlayBounds?: OverlayBoundsInput | undefined | null): void
   /**
    * Disengage the tap. After this returns, the next keystroke will

@@ -11248,6 +11248,39 @@ Provide only the answer, nothing else.`;
   // HID virtual keycodes referenced below (stable across layouts):
   //   36 = Return,  48 = Tab,  51 = Delete (Backspace),  53 = Esc,
   //   76 = Numpad Enter,  123 = Left,  124 = Right,  125 = Down,  126 = Up.
+  // Ctrl+C over highlighted response text. On Windows the overlay is never
+  // focused, so the keystroke goes to the meeting app. Report the highlight to
+  // main, which arms the keyboard hook to hand Ctrl+C back and copies the text
+  // (electron/utils/selectionCopy.ts). Main ignores this on macOS, where the
+  // Edit menu copies. Form fields report nothing: getSelection() excludes them.
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.setSelectionCopy) return;
+    let last: string | null = null;
+    let frame = 0;
+    const report = () => {
+      frame = 0;
+      const sel = window.getSelection();
+      const text = sel && !sel.isCollapsed ? sel.toString() : '';
+      const next = text.trim() ? text : null;
+      if (next === last) return;
+      last = next;
+      api.setSelectionCopy?.(next).catch(() => {});
+    };
+    const onSelectionChange = () => {
+      if (!frame) frame = requestAnimationFrame(report);
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    // Copied: clear the highlight so Ctrl+C goes back to the meeting app.
+    const offCopied = api.onSelectionCopied?.(() => window.getSelection()?.removeAllRanges());
+    return () => {
+      document.removeEventListener('selectionchange', onSelectionChange);
+      if (frame) cancelAnimationFrame(frame);
+      offCopied?.();
+      if (last) api.setSelectionCopy?.(null).catch(() => {});
+    };
+  }, []);
+
   useEffect(() => {
     if (!window.electronAPI?.onStealthTapState || !window.electronAPI?.onStealthKeyCaptured) return;
 

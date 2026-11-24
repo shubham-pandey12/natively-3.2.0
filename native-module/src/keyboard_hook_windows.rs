@@ -62,7 +62,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::edit_shortcut::{windows_edit_key, FLAG_CTRL as EDIT_FLAG_CTRL};
+use crate::edit_shortcut::{
+    windows_edit_key, windows_is_selection_copy, FLAG_CTRL as EDIT_FLAG_CTRL, SELECTION_COPY_ID,
+};
 use crate::app_chord::{
     app_chords_from_inputs, match_app_chord, AppChord, AppChordInput, MOD_ALT, MOD_CTRL, MOD_SHIFT,
 };
@@ -180,6 +182,11 @@ struct HookState {
     /// full stealth-typing tap: it swallows typing into the overlay and arms the
     /// outside-click / Alt+Tab auto-stop hooks. See StealthKeyboardManager.
     shortcut_only: AtomicBool,
+    /// True while the overlay has highlighted response text. Plain Ctrl+C is
+    /// then swallowed and delivered as SELECTION_COPY_ID so main copies the
+    /// selection; false leaves Ctrl+C to the foreground app. Set any time via
+    /// set_copy_armed, kept across start/stop.
+    copy_armed: AtomicBool,
 }
 
 impl HookState {
@@ -194,6 +201,7 @@ impl HookState {
             app_chords: Mutex::new(Vec::new()),
             swallowed_ups: Mutex::new(HashSet::new()),
             shortcut_only: AtomicBool::new(false),
+            copy_armed: AtomicBool::new(false),
         }
     }
 }
@@ -313,6 +321,32 @@ unsafe fn keyboard_hook_inner(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRES
     let altgr = ctrl && alt;
     if win_held() {
         return pass();
+    }
+
+    // ── SELECTION COPY ──
+    // The overlay is never focused, so Ctrl+C over highlighted response text
+    // would go to the meeting app. Only while main has armed it (the overlay
+    // reported a selection): deliver it tagged, swallow down and up. Both modes.
+    if is_key_down
+        && windows_is_selection_copy(
+            vk,
+            ctrl,
+            alt,
+            modifier_held(VK_SHIFT),
+            state.copy_armed.load(Ordering::Acquire),
+        )
+    {
+        if let Some(swallowed) = deliver_and_swallow(&state, vk, CapturedKey {
+            key_code: 0,
+            chars: String::new(),
+            flags: 0,
+            is_key_down: true,
+            is_outside_mouse_down: false,
+            app_chord_id: SELECTION_COPY_ID.to_string(),
+        }) {
+            return swallowed;
+        }
+        // Nowhere to deliver: let the OS have it.
     }
 
     // ── APP-CHORD SWALLOW (defence against the RegisterHotKey-drop leak) ──
@@ -1224,6 +1258,13 @@ impl StealthKeyboardTap {
                 Ok(false)
             }
         }
+    }
+
+    /// Arm or disarm the selection-copy intercept (see HookState::copy_armed).
+    /// Only takes effect while the hook is running.
+    #[napi]
+    pub fn set_copy_armed(&self, armed: bool) {
+        self.state.copy_armed.store(armed, Ordering::Release);
     }
 
     /// No-op on Windows (accepted for API parity — see `start`).

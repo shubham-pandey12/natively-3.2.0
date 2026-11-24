@@ -1,4 +1,6 @@
-import { BrowserWindow, shell, systemPreferences } from 'electron';
+import { BrowserWindow, clipboard, shell, systemPreferences } from 'electron';
+import type { WebContents } from 'electron';
+import { SELECTION_COPY_ARM_MS, SELECTION_COPY_ID, selectionCopyText } from '../utils/selectionCopy';
 import type { CapturedKey, OverlayBoundsInput } from '../audio/nativeModuleLoader';
 import { isVerboseLogging } from '../verboseLog';
 
@@ -56,6 +58,11 @@ export class StealthKeyboardManager {
     // Default on (explicit false opts out) — see setShortcutGuardEnabled. Windows only.
     private shortcutGuardEnabled = false;
     private guardRunning = false;
+    // Selection copy (Windows): text highlighted in the overlay, the window that
+    // reported it, and the auto-disarm timer. See utils/selectionCopy.ts.
+    private selectionCopy: string | null = null;
+    private selectionCopySender: WebContents | null = null;
+    private selectionCopyTimer: NodeJS.Timeout | null = null;
     private nativeAvailable = false;
     private idleTimer: NodeJS.Timeout | null = null;
     /// Explicit reference to the overlay BrowserWindow that should receive
@@ -494,7 +501,50 @@ export class StealthKeyboardManager {
         if (this.shortcutGuardEnabled === enabled) return;
         this.shortcutGuardEnabled = enabled;
         if (enabled) this.maybeStartGuard();
-        else this.stopGuard();
+        else if (!this.selectionCopy) this.stopGuard();
+    }
+
+    // ─── Selection copy (Windows only) ───────────────────────────────────
+
+    /**
+     * The overlay reports its highlighted text (null when cleared). While set,
+     * the hook delivers plain Ctrl+C here instead of to the foreground app, and
+     * handleCapturedKey copies the text. Runs the hook in guard mode if nothing
+     * else is. No-op off Windows: the Edit menu's copy role covers macOS.
+     */
+    public setSelectionCopy(text: unknown, sender: WebContents | null): void {
+        if (process.platform !== 'win32') return;
+        const next = selectionCopyText(text);
+        this.clearSelectionCopyTimer();
+        this.selectionCopy = next;
+        this.selectionCopySender = next ? sender : null;
+        try {
+            this.tap?.setCopyArmed?.(next !== null);
+        } catch (e) {
+            console.error('[StealthKeyboardManager] setCopyArmed threw:', e);
+        }
+        if (next) {
+            this.selectionCopyTimer = setTimeout(() => this.setSelectionCopy(null, null), SELECTION_COPY_ARM_MS);
+            this.maybeStartGuard();
+        } else if (!this.shortcutGuardEnabled && !this.active) {
+            this.stopGuard();
+        }
+    }
+
+    private clearSelectionCopyTimer(): void {
+        if (this.selectionCopyTimer) clearTimeout(this.selectionCopyTimer);
+        this.selectionCopyTimer = null;
+    }
+
+    private copySelection(): void {
+        const text = this.selectionCopy;
+        const sender = this.selectionCopySender;
+        if (!text) return;
+        clipboard.writeText(text);
+        // The renderer clears its highlight, which disarms through its
+        // selectionchange report. Disarm here too in case it never answers.
+        if (sender && !sender.isDestroyed()) sender.send('selection-copy:done');
+        this.setSelectionCopy(null, null);
     }
 
     /** Re-arm the guard with the current chord table (call after a rebind). */
@@ -507,13 +557,13 @@ export class StealthKeyboardManager {
     /** Start the shortcut-guard if it should run and isn't already. */
     private maybeStartGuard(): void {
         if (process.platform !== 'win32') return;
-        if (!this.shortcutGuardEnabled) return;
+        if (!this.shortcutGuardEnabled && !this.selectionCopy) return;
         if (this.active) return;        // full stealth typing owns the tap
         if (this.guardRunning) return;  // already guarding
         if (!this.tap) return;
         try {
             const appChords = this.getAppChordTable();
-            if (appChords.length === 0) return; // nothing to guard
+            if (appChords.length === 0 && !this.selectionCopy) return; // nothing to guard
             const ok = this.tap.start((err: Error | null, ev: CapturedKey) => {
                 if (err) {
                     console.error('[StealthKeyboardManager] guard callback error:', err);
@@ -667,6 +717,11 @@ export class StealthKeyboardManager {
         // App-chord: the native hook (Windows) swallowed one of the app's OWN
         // global shortcuts so it couldn't leak into the foreground app. Dispatch
         // the action instead of typing it. Never carries chars/keyCode.
+        if (ev.appChordId === SELECTION_COPY_ID) {
+            if (!this.active && !this.guardRunning) return;
+            this.copySelection();
+            return;
+        }
         if (ev.appChordId) {
             // Fires in BOTH modes: full stealth typing (active) and the always-on
             // shortcut-guard (guardRunning). Drop only if neither is running
