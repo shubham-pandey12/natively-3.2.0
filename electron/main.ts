@@ -371,15 +371,14 @@ let _logFile: string | null = null;
 const getLogFile = (): string | null => {
   if (_logFile) return _logFile;
   try {
-    // An agent instance (npm run dev:agent) logs into its own userData; see
-    // resolveDebugLogPath. Packaged builds always use Documents.
     _logFile = resolveDebugLogPath({
       isPackaged: app.isPackaged,
-      agentUserData: process.env.NATIVELY_AGENT_USER_DATA,
+      userDataDir: app.getPath('userData'),
       documentsDir: () => app.getPath('documents'),
     });
     return _logFile;
   } catch {
+    if (!app.isPackaged) return null;
     // app.ready may not have fired yet (including native module boot gates).
     // Still write somewhere stable so a pre-ready crash leaves a reason behind.
     const home = os.homedir?.();
@@ -11068,17 +11067,8 @@ export class AppState {
   a user's shell would silently give them a second app writing to a throwaway
   directory — and CLAUDE.md forbids enabling this in packaged builds outright.
 */
-// The packaged userData pin now lives in utils/pinUserData.ts, imported at the
-// very top of this file — it must run before import-time readers (e.g.
-// CredentialsManager), which an inline statement here could never beat. The
-// dev-only agent override below still runs at module scope, after all imports,
-// so it keeps winning over the pin.
+// Both profiles are pinned before import-time readers by utils/pinUserData.ts.
 const agentUserData = !app.isPackaged ? process.env.NATIVELY_AGENT_USER_DATA : undefined;
-if (agentUserData) {
-  // Before whenReady and before anything reads userData, or the log file and
-  // the DB would already have been opened against the real profile.
-  app.setPath('userData', agentUserData);
-}
 
 // Skipping the lock is what lets an agent instance run beside the developer's.
 const gotSingleInstanceLock = agentUserData ? true : app.requestSingleInstanceLock();

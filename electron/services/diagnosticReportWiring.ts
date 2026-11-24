@@ -4,8 +4,7 @@
  * The decisions are in diagnosticReport.ts. Nothing here runs unless the person
  * clicks (src/components/settings/DiagnosticReportActions.tsx → IPC).
  *
- * No platform branches: the log path comes from resolveDebugLogPath (Documents
- * on both OSes), the identity from the same install token the transcript upload
+ * The log path comes from resolveDebugLogPath, and the identity comes from the same install token the transcript upload
  * uses, and the read is bounded.
  */
 import { app } from 'electron';
@@ -26,7 +25,7 @@ function readLogTail(): string {
   try {
     const file = resolveDebugLogPath({
       isPackaged: app.isPackaged,
-      agentUserData: process.env.NATIVELY_AGENT_USER_DATA,
+      userDataDir: app.getPath('userData'),
       documentsDir: () => app.getPath('documents'),
     });
     const fd = fs.openSync(file, 'r');

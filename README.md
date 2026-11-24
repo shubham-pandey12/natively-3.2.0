@@ -845,6 +845,10 @@ DEFAULT_MODEL=gemini-3.1-flash-lite-preview
 npm start
 ```
 
+Development uses its own `natively-local` profile alongside the installed
+app's profile. It starts with fresh settings and storage on first launch.
+`npm run start:local` uses the same development profile.
+
 ### Build (Production)
 
 ```bash

@@ -3,37 +3,23 @@
  * npm run start:local: run the dev build on its OWN profile, separate from the
  * installed Natively.
  *
- * `npm start` uses the same userData folder as the installed app (the npm name
- * "natively" and the packaged pin "Natively" are one folder on case-insensitive
- * NTFS/APFS), so keys, settings and the meeting DB are shared and the two must
- * never run together. This launcher instead uses "natively-local" next to it.
- *
- * First launch seeds that folder from the real profile (keys, licence, settings,
- * modes, DB, models), skipping caches, so Pro and providers keep working. After
- * that the two profiles are independent. Pass --reseed to replace the local
- * profile with a fresh copy (the old one is renamed aside, never deleted).
+ * Uses the same independent "natively-local" profile as npm start.
+ * The app creates it on first launch without copying installed data.
  *
  * Dev only: Node APIs, arg arrays, no shell. Same main bundle + vite renderer as
  * dev:agent, but no CDP port.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, renameSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { childExitReport } from './devAgentSupport.mjs';
+import { isEntryScript } from './lib/is-entry-script.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// Chromium/GPU caches and live-instance markers: rebuilt on launch, never seeded.
-export const SKIP_ON_SEED = new Set([
-  'Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache',
-  'blob_storage', 'Shared Dictionary', 'VideoDecodeStats', 'DevToolsActivePort',
-  'lifecycle-marker.json', 'SingletonLock', 'SingletonCookie', 'SingletonSocket', 'logs',
-]);
-
-export function profilePaths(platform, env = process.env, home = homedir()) {
+export function localProfilePath(platform, env = process.env, home = homedir()) {
   let base;
   let paths;
   switch (platform) {
@@ -49,28 +35,58 @@ export function profilePaths(platform, env = process.env, home = homedir()) {
     default:
       throw new Error(`Unsupported platform: ${platform}`);
   }
-  return { real: paths.join(base, 'Natively'), local: paths.join(base, 'natively-local') };
+  return paths.join(base, 'natively-local');
 }
 
-export function shouldCopy(real, source) {
-  const top = path.relative(real, source).split(/[\\/]/)[0];
-  return !SKIP_ON_SEED.has(top);
+/**
+ * Prevent duplicate launcher builds before Electron takes its profile lock.
+ *
+ * The lock is a listening socket on a localhost port derived from the profile
+ * path: binding is atomic, the OS releases it when the process exits (crash
+ * included), and it behaves the same on Windows and macOS. A lock FILE had a
+ * window between create and owner write in which a second launch read it as
+ * stale and took it over. A connection to the port gets a banner naming the
+ * profile, so a foreign program on that port is reported, not mistaken for us.
+ * Resolves to a release function.
+ */
+export function profileLockPort(local) {
+  // FNV-1a over the case-folded path (NTFS/APFS are case-insensitive).
+  let h = 0x811c9dc5;
+  for (const ch of path.resolve(local).toLowerCase()) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return 49152 + (h % 16000);
 }
 
-export function seedProfile({ real, local }, { reseed = false, now = Date.now(), log = console.log } = {}) {
-  if (existsSync(local)) {
-    if (!reseed) return 'kept';
-    const aside = `${local}.old-${now}`;
-    renameSync(local, aside);
-    log(`[start:local] previous local profile moved to ${aside}`);
-  }
-  if (!existsSync(real)) {
-    log('[start:local] no installed-app profile to copy; starting with an empty local profile');
-    return 'empty';
-  }
-  log(`[start:local] copying ${real} -> ${local} (one time; close the installed app first)`);
-  cpSync(real, local, { recursive: true, filter: (source) => shouldCopy(real, source) });
-  return 'seeded';
+export function acquireProfileLock(local, { port = profileLockPort(local) } = {}) {
+  const banner = `natively-start-local ${path.resolve(local).toLowerCase()}\n`;
+  return new Promise((resolve, reject) => {
+    const server = createServer((socket) => socket.end(banner));
+    server.once('error', (error) => {
+      if (error?.code !== 'EADDRINUSE') { reject(error); return; }
+      const probe = connect(port, '127.0.0.1');
+      let text = '';
+      probe.setTimeout(2000);
+      probe.on('data', (chunk) => { text += chunk; });
+      probe.on('timeout', () => probe.destroy());
+      probe.on('close', () => {
+        reject(new Error(text === banner
+          ? `start:local is already running on ${local}; close it first`
+          : `port ${port} (the start:local lock for ${local}) is in use by another program`));
+      });
+      probe.on('error', () => { /* reported on close */ });
+    });
+    server.listen({ port, host: '127.0.0.1', exclusive: true }, () => {
+      server.unref();
+      let released = false;
+      resolve(() => {
+        if (released) return;
+        released = true;
+        server.close();
+      });
+    });
+  });
 }
 
 function freePort() {
@@ -102,10 +118,14 @@ function waitForPort(port, timeoutMs = 60_000) {
 }
 
 async function main() {
-  const reseed = process.argv.includes('--reseed');
-  const profile = profilePaths(process.platform);
-  seedProfile(profile, { reseed });
-  console.log(`[start:local] userData=${profile.local}`);
+  if (process.argv.includes('--reseed')) {
+    throw new Error('--reseed has been removed. The installed profile is kept separate.');
+  }
+  const local = localProfilePath(process.platform);
+  // Held for this launcher's lifetime; the OS drops it when we exit.
+  const releaseLock = await acquireProfileLock(local);
+  process.on('exit', releaseLock);
+  console.log(`[start:local] userData=${local}`);
 
   const built = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'build-electron.js')], {
     cwd: ROOT, stdio: 'inherit', shell: false,
@@ -138,17 +158,14 @@ async function main() {
   });
   await waitForPort(rendererPort);
 
-  // --user-data-dir lands before import-time readers (CredentialsManager);
-  // NATIVELY_AGENT_USER_DATA keeps it pinned and skips the single-instance lock
-  // that is per-profile anyway. Both are honoured only when !app.isPackaged.
   const env = {
     ...process.env,
     NODE_ENV: 'development',
     NATIVELY_RENDERER_PORT: String(rendererPort),
-    NATIVELY_AGENT_USER_DATA: profile.local,
   };
   delete env.ELECTRON_RUN_AS_NODE;
-  const app = spawn(electronPath, [ROOT, `--user-data-dir=${profile.local}`], {
+  delete env.NATIVELY_AGENT_USER_DATA;
+  const app = spawn(electronPath, [ROOT], {
     cwd: ROOT, stdio: 'inherit', shell: false, env,
   });
   children.push(app);
@@ -160,7 +177,7 @@ async function main() {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryScript(import.meta.url)) {
   main().catch((error) => {
     console.error('[start:local]', error?.message || error);
     process.exitCode = 1;

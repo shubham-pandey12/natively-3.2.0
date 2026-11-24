@@ -14,10 +14,8 @@
 // the credential files from the rest of the profile. Importing this module
 // first guarantees the pin lands before every import-time reader.
 //
-// Packaged only: a dev instance already resolves to the npm name ("natively"),
-// which is the same case-insensitive folder. The NATIVELY_AGENT_USER_DATA
-// override is applied later, at main.ts module scope (dev only), and must
-// still win in dev.
+// Development must also pin its path here. Electron's default "natively"
+// resolves to the installed app's "Natively" on case-insensitive volumes.
 //
 // Migration safety contract lives in ./migrateUserData.ts — read it before
 // touching this file. Short version: atomic rename, never throws (aborts to the
@@ -29,7 +27,25 @@ import fs from 'node:fs';
 import path from 'path';
 import { runProfileMigration } from './migrateUserData';
 
-if (app && typeof app.isPackaged === 'boolean' && app.isPackaged) {
+if (app && app.isPackaged === false) {
+  const userData = path.resolve(
+    process.env.NATIVELY_AGENT_USER_DATA || path.join(app.getPath('appData'), 'natively-local'),
+  );
+  const temp = path.join(userData, 'temp');
+  fs.mkdirSync(temp, { recursive: true });
+  app.setPath('userData', userData);
+  app.setPath('sessionData', userData);
+  app.setPath('temp', temp);
+  if (process.platform === 'win32') {
+    process.env.TEMP = temp;
+    process.env.TMP = temp;
+  } else {
+    process.env.TMPDIR = temp;
+  }
+  process.env.NATIVELY_EXTENSIONS_ROOT ||= path.join(userData, 'extension-data');
+}
+
+if (app && app.isPackaged === true) {
   const { dir } = runProfileMigration({
     platform: process.platform,
     isPackaged: true,

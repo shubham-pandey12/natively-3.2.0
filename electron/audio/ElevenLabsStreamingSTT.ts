@@ -3,6 +3,7 @@ import WebSocket from 'ws';
 import { safeDetachAndClose } from './wsSafeTeardown';
 import * as fs from 'fs';
 import * as os from 'os';
+import { app } from 'electron';
 import * as path from 'path';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
 import { streamingStttWsOptions } from './dnsHelpers';
@@ -141,7 +142,8 @@ export class ElevenLabsStreamingSTT extends EventEmitter {
         // Open a debug file only in development to avoid disk fill-up in production
         if (process.env.NODE_ENV === 'development') {
             try {
-                const debugPath = path.join(os.homedir(), 'elevenlabs_debug.raw');
+                const debugDir = app?.isPackaged === false ? app.getPath('userData') : os.homedir();
+                const debugPath = path.join(debugDir, 'elevenlabs_debug.raw');
                 this.debugWriteStream = fs.createWriteStream(debugPath);
                 console.log(`[ElevenLabsStreaming] Audio debug stream opened at: ${debugPath}`);
             } catch (e) {

@@ -2730,10 +2730,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                     <SettingsToggle
                                                         checked={openOnLogin}
                                                         label={t('Open Natively when you log in')}
-                                                        onChange={() => {
+                                                        onChange={async () => {
                                                             const newState = !openOnLogin;
-                                                            setOpenOnLogin(newState);
-                                                            window.electronAPI?.setOpenAtLogin(newState);
+                                                            const result = await window.electronAPI?.setOpenAtLogin(newState);
+                                                            if (result?.success) setOpenOnLogin(newState);
                                                         }}
                                                         className={openOnLogin ? 'bg-accent-primary border border-transparent' : 'bg-bg-toggle-switch border border-border-muted'}
                                                     />

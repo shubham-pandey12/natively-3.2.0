@@ -14,7 +14,7 @@ describe('resolveDebugLogPath', () => {
     let documentsRead = false;
     const p = resolveDebugLogPath({
       isPackaged: false,
-      agentUserData: AGENT,
+      userDataDir: AGENT,
       documentsDir: () => { documentsRead = true; return DOCS; },
     });
     assert.equal(p, path.join(AGENT, DEBUG_LOG_FILENAME));
@@ -22,15 +22,14 @@ describe('resolveDebugLogPath', () => {
   });
 
   test('a packaged build ignores the variable and keeps the user log in Documents', () => {
-    const p = resolveDebugLogPath({ isPackaged: true, agentUserData: AGENT, documentsDir: () => DOCS });
+    const p = resolveDebugLogPath({ isPackaged: true, userDataDir: AGENT, documentsDir: () => DOCS });
     assert.equal(p, path.join(DOCS, DEBUG_LOG_FILENAME));
   });
 
-  test('a normal dev launch (no agent dir) is unchanged', () => {
-    for (const agentUserData of [undefined, null, '', '   ']) {
-      const p = resolveDebugLogPath({ isPackaged: false, agentUserData, documentsDir: () => DOCS });
-      assert.equal(p, path.join(DOCS, DEBUG_LOG_FILENAME));
-    }
+  test('a standard dev launch logs in the separate development profile', () => {
+    const userDataDir = path.join(path.sep, 'profiles', 'natively-local');
+    const p = resolveDebugLogPath({ isPackaged: false, userDataDir, documentsDir: () => DOCS });
+    assert.equal(p, path.join(userDataDir, DEBUG_LOG_FILENAME));
   });
 
   test('the file name is the one users are told to send', () => {
