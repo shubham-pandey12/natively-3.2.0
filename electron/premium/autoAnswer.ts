@@ -41,6 +41,7 @@ export type AutoAnswerAccess =
 export interface AutoAnswerQuestion {
     id: string;
     text: string;
+    replacesAutomaticAnswer?: boolean;
     confidence: number;
     answerability: number;
     dialogueAct: string;
@@ -65,6 +66,7 @@ export type AutoAnswerCancelReason =
     | 'interviewer_resumed'
     | 'judge_unavailable'
     | 'transcript_revised'
+    | 'answer_corrected'
     | 'manual_answer'
     | 'dispatch_timeout'
     | 'auto_disabled_or_meeting_ended'
@@ -85,6 +87,8 @@ export type AutoAnswerJudgeRequest = object;
 
 export interface AutoAnswerEngineHost {
     isEnabled(): boolean;
+    correctionsEnabled?(): boolean;
+    setAnswerOutdated?(generationId: number, outdated: boolean): void;
     isMeetingActive(): boolean;
     meetingGeneration(): number;
     engineAccepting(skipCooldown?: boolean): boolean;
@@ -111,7 +115,7 @@ export interface AutoAnswerEngine {
     onModeChanged(): void;
     onMeetingStop(): void;
     onEngineIdle(): void;
-    onAutomaticAnswerProgress(): void;
+    onAutomaticAnswerProgress(generationId?: number): void;
     onProviderEndpoint(): void;
     /** `confirmEndpoint` false: a provider whose finals do not end a turn; the stop only restarts the quiet window. */
     onLocalSpeechEnd(confirmEndpoint?: boolean): void;

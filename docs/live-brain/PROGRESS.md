@@ -9,7 +9,7 @@
 |---|---|---|
 | UI — Settings UI (first) | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Windows settings checks passed. One pre-existing Auto Answer telemetry assertion fails (unrelated). |
 | 0 — Verify facts & baseline | ✅ Done (reviewed) | Research, dev timing, corpus, spike committed. Gemini spike run on Windows (see "Gemini Live spike results"). Pipeline baseline (real meeting) still pending. |
-| 1 — Corrections in pipeline | ☐ Not started | |
+| 1 — Corrections in pipeline | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Gated by the Live Brain switch. Physical S4/S5 check in a real meeting still pending. |
 | 2 — Foundation | ☐ Not started | |
 | 3 — Orchestrator + overlay | ☐ Not started | |
 | 4 — GeminiLiveBrain | ☐ Not started | |
@@ -96,6 +96,24 @@ Findings (measured, single sample — repeat before tuning):
   1. Gemini spike: set `GEMINI_API_KEY` in the terminal, record one interviewer question as mono 16-bit WAV, run
      `node scripts/spikes/gemini-live.mjs question.wav` and `node scripts/spikes/gemini-live.mjs question.wav --auto-vad`. Paste the JSON lines (no key appears in them) to fill Q1 TEXT-mode behaviour and latency.
   2. Pipeline baseline: run Natively in dev with `NATIVELY_PROMPT_DEBUG=1`, hold a short practice meeting with Auto Answer on, then read `answerTimings` from the Prompt Debugger.
+- Requires physical macOS verification.
+
+## Phase 1 — 2026-11-26
+
+- With Live Brain on, a substantive interviewer final during an automatic answer or within 20 seconds of delivery immediately marks the affected visible row outdated. The judge receives the dispatched question and the new speech separately. A positive verdict sends both to the existing answer writer and cancels an active old stream. A silent, incomplete, low-confidence, or unavailable verdict restores the old row. Backchannels leave the stream alone. The regular Auto Answer path still applies with Live Brain off.
+- The renderer uses the existing What to Answer IPC and answer row. It dims a live outdated row, preserves its text in an expandable fold once it stops, and labels the replacement “Updated”. The old generation's late tokens cannot reopen it.
+- Windows automated validation: Electron build and both Electron and renderer type checks passed. Auto Answer had 198 passes and the known `AutoAnswerUsageTelemetry2026_09_27` failure. Library tests had 3,242 passes and 15 skips. Component tests had 1,001 passes and 2 skips. Seven fake-clock correction tests and the renderer generation regression passed. No live latency samples were collected.
+- The same shared transcript and IPC paths apply to Windows and macOS. Requires physical Windows verification and physical macOS verification of the S4/S5 meeting scenarios and overlay presentation.
+
+
+### Phase 1 review — 2026-11-26 (Claude)
+
+- Fix: a self-contained new question asked within the 20 s window (e.g. "What happens if the database goes down?") was dispatched as `<previous question>
+<new question>`, so the answer model would address both. Now a question-shaped utterance without a correction signal is answered on its own words; corrections ("Actually…", "…not allowed") still carry the previous question. Follow-up context still reaches the answer through the transcript window.
+- Added tests: standalone new question answered on its own words; candidate (mic) speech mid-answer never marks, judges or cancels. `LiveBrainCorrections.test.mjs` 9/9.
+- Verified switch-OFF parity by review: every new path is guarded by `correctionsEnabled()` / `replacesAutomaticAnswer`, which is only set when the switch is on.
+- Re-run on Windows: `build:electron`, `typecheck:electron`, `typecheck:ts7` passed; `test:auto-answer` 200/201 (only the known `AutoAnswerUsageTelemetry2026_09_27` line-178 assertion; its later assertions were checked directly and pass); `test:components` 1001 passed, 2 skipped; `test:lib` 3242 passed, 15 skipped.
+- To check in a real meeting (Live Brain on): when a correction cancels an answer that already streamed text, the partial row is kept and folded as "Outdated answer" — confirm it doesn't stay in a streaming state. "Updated" / "Outdated answer" labels are English-only until a translation pass.
 - Requires physical macOS verification.
 
 ## Open risks

@@ -82,6 +82,8 @@ export interface JudgeRequest {
      * judge to infer it from wording.
      */
     candidateParts?: Array<{ speaker?: string; text: string }>;
+    /** The active or recently delivered question, supplied for correction judgments. */
+    previousQuestion?: string;
     modeName?: string | null;
     questionId: string;
     /**
@@ -286,7 +288,7 @@ export function buildJudgePrompt(req: JudgeRequest): string {
     const partsLabelled = parts.some(p => p.speaker != null);
     const candidateBlock = partsLabelled
         ? parts.map(p => `${p.speaker != null ? `OTHERS/${p.speaker}` : 'OTHERS'}: ${p.text}`).join('\n')
-        : req.candidateText;
+        : req.previousQuestion && parts.length ? parts.map(part => part.text).join('\n') : req.candidateText;
     if (candidateBlock.length > JUDGE_CANDIDATE_CHAR_CAP) {
         throw new RangeError('Auto Answer candidate exceeds judge context; use Manual Answer.');
     }
@@ -333,6 +335,9 @@ ${partsLabelled ? 'The candidate itself is split by speaker below; judge the ASK
     const lagging = req.transcriptLagging
         ? `\nThe speaker has STOPPED talking, but speech-to-text has not caught up: the candidate's LAST word may be cut off or missing (e.g. "…how would you partition the ord"). Do not call it incomplete for that alone. Judge the ask from the words that are there; everything else in the rules still applies.\n`
         : '';
+    const correction = req.previousQuestion
+        ? `\n<previous_question>\n${keepTail(req.previousQuestion, JUDGE_ANSWERED_CHAR_CAP)}\n</previous_question>\nThe previous question already has an answer or one in progress. The candidate contains only the latest interviewer speech. Treat the previous question as context, never as a new ask by itself. If the latest speech changes a requirement or premise and requires an updated answer, set is_ask true and action "answer", even when the change is phrased as a statement. A new question directed at the USER can also warrant an answer. A repeat, acknowledgement, or unrelated remark alone does not.\n`
+        : '';
     return `${JUDGE_PROMPT_INTRO}
 ${mode}${diarization}Recent transcript (oldest first):
 ${context || '(none)'}
@@ -340,7 +345,7 @@ ${context || '(none)'}
 <candidate>
 ${candidateBlock}
 </candidate>
-${answered}${addressee}${lagging}
+${answered}${addressee}${lagging}${correction}
 ${JUDGE_PROMPT_RULES}`;
 }
 

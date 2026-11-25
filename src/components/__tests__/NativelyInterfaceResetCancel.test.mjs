@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
-import { decideResetCancel, resolveLiveAnswerBatch } from '../../lib/chatStreamGuard.mjs';
+import { decideResetCancel, resolveLiveAnswerBatch, shouldApplyLiveAnswerDiscard } from '../../lib/chatStreamGuard.mjs';
 
 const ui = readFileSync(new URL('../NativelyInterface.tsx', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const resetHandlers = [...ui.matchAll(/^    resetCancel: (async \(\) => \{[\s\S]*?^    \}),$/gm)]
@@ -71,4 +71,41 @@ test('a late id-less final reaches finalization and Reset/Cancel preserves the o
   await resetCancel();
   assert.deepEqual(effects, [['what_to_answer', 'Late answer'], 'cancel', 'cancel']);
   assert.deepEqual(history, ['Previous answer', 'Typed question', 'Streaming reply']);
+});
+
+test('a correction marks only its generation and seals the discarded draft for the outdated fold', () => {
+  const onQuestion = ui.match(/onWhatToAnswerQuestion\?\.\((\(\{[^\n]*\}\) => \{[\s\S]*?\n      \})\) \?\?/)?.[1];
+  const onDiscard = ui.match(/onIntelligenceSuggestedAnswerDiscard\?\.\((\(data\) => \{[\s\S]*?\n      \})\) \?\?/)?.[1];
+  assert.ok(onQuestion && onDiscard);
+  let rows = [
+    { id: 'earlier', whatToAnswerGeneration: 2, text: 'Another answer' },
+    { id: 'interviewer-answer-3', answerPending: true },
+    { id: 'draft', whatToAnswerGeneration: 3, isStreaming: true, text: 'Old answer' },
+  ];
+  const state = {
+    activeDirectAssistRef: { current: null },
+    legacyIntelligenceTombstonedRef: { current: false },
+    liveAnswerGenIdRef: { current: 3 },
+    liveAnswerFloorRef: { current: null },
+    streamingIntentRef: { current: 'what_to_answer' },
+    streamingTextRef: { current: 'Old answer' },
+    setMessages: (update) => { rows = update(rows); },
+    resolveLiveAnswerBatch,
+    shouldApplyLiveAnswerDiscard,
+    hasOtherLiveRequest: () => false,
+    setIsProcessing: () => {},
+    flushToken: () => { rows = rows.map(row => row.id === 'draft' ? { ...row, isStreaming: false } : row); },
+  };
+  runInNewContext(stripTypeScriptTypes(`
+    const onQuestion = ${onQuestion};
+    onQuestion({ generationId: 3, outdated: true });
+    (${onDiscard})({ generationId: 3, reason: 'answer_corrected' });
+  `), state);
+  assert.equal(rows[0].outdated, undefined);
+  assert.equal(rows[1].answerPending, false);
+  assert.equal(rows[2].outdated, true);
+  assert.equal(rows[2].text, 'Old answer');
+  assert.equal(rows[2].isStreaming, false);
+  assert.equal(resolveLiveAnswerBatch(state.liveAnswerGenIdRef.current, 3, state.liveAnswerFloorRef.current).accept, false);
+  assert.equal(resolveLiveAnswerBatch(state.liveAnswerGenIdRef.current, 4, state.liveAnswerFloorRef.current).accept, true);
 });

@@ -157,7 +157,7 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
-    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean }) => void;
+    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean; outdated?: boolean; updated?: boolean }) => void;
     'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => void;
     // generationId (audit finding #3): stamped on every live token so the renderer
     // can drop a batch from an answer that was already superseded. Optional →
@@ -1468,6 +1468,10 @@ export class IntelligenceEngine extends EventEmitter {
             && generationId === this.currentGenerationId && generationId === this.automaticGenerationId;
     }
 
+    setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void {
+        this.emit('what_to_answer_question', { generationId, outdated });
+    }
+
     /**
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
@@ -1512,7 +1516,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Checked before and after planning because a manual press can overtake it.
      */
     private skipOwnedAutomaticTrigger(trigger: SuggestionTrigger, confidence: number): boolean {
-        if (!trigger.automatic) return false;
+        if (!trigger.automatic || (trigger.replacesAutomaticAnswer && this.spokenAnswer?.automatic)) return false;
         if (!this.spokenTurnOwned(trigger)) return false;
         console.log('[IntelligenceEngine] Automatic trigger skipped: this question already has an answer', {
             manualActive: this.isManualAnswerActive(),
@@ -1558,7 +1562,7 @@ export class IntelligenceEngine extends EventEmitter {
         // If a speculative stream answered (or is answering) this question, reuse it.
         if (this.speculativeText !== null) {
             const expired = Date.now() > this.speculativeTextExpiry;
-            const stale = expired || !trigger.lastQuestion; // empty question — reject conservatively
+            const stale = expired || !trigger.lastQuestion || trigger.replacesAutomaticAnswer;
             if (!stale) {
                 // Keyed reuse (V3 Amendment 6): the controller already verified
                 // identity by questionId or embedding cosine; Jaccard is the fallback.
@@ -1685,7 +1689,7 @@ export class IntelligenceEngine extends EventEmitter {
             // recorded it as answered (forensics 2026-11-13, F-ACC-08 / D3).
             const generationBefore = this.currentGenerationId;
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
-                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt } : {}) });
+                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer } : {}) });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
             await run;
             const outcome = outcomeOut.value;
@@ -2042,6 +2046,7 @@ export class IntelligenceEngine extends EventEmitter {
      */
     async runAutoAnswer(question: {
         id: string; text: string; confidence: number; answerability: number; dialogueAct: string;
+        replacesAutomaticAnswer?: boolean;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
         sourceSegments?: readonly number[];
     }, options: { reuseSpeculative: boolean; context: string; speechStoppedAt?: number }): Promise<AutomaticAnswerResult> {
@@ -2050,6 +2055,7 @@ export class IntelligenceEngine extends EventEmitter {
             lastQuestion: question.text,
             confidence: question.confidence,
             automatic: true,
+            replacesAutomaticAnswer: question.replacesAutomaticAnswer,
             questionId: question.id,
             answerability: question.answerability,
             dialogueAct: question.dialogueAct,
@@ -2216,7 +2222,7 @@ export class IntelligenceEngine extends EventEmitter {
             hasRecentAssistantResponse: this.session.getAssistantResponseHistory().length > 0,
             hasDetectedCodingQuestion: Boolean(detectedCodingQuestion.question),
             now: Date.now(),
-            lastTriggerTime: this.lastTriggerTime,
+            lastTriggerTime: trigger.replacesAutomaticAnswer ? 0 : this.lastTriggerTime,
             cooldownMs: this.triggerCooldown,
             lastTriggerQuestion: this.lastTriggerQuestion ?? undefined,
             automatic: trigger.automatic === true,
@@ -2544,7 +2550,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2620,7 +2626,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2804,7 +2810,8 @@ export class IntelligenceEngine extends EventEmitter {
 
         const automaticQuestion = this.automaticGenerationId === generationId && !isSpeculative ? question?.trim() : undefined;
         if (automaticQuestion) {
-            this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true });
+            this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true,
+                ...(options?.replacesAutomaticAnswer ? { updated: true } : {}) });
         }
         this.setMode('what_to_say');
         // Speculative runs don't stamp lastTriggerTime at start — the cooldown slot

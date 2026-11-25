@@ -67,6 +67,8 @@ export class AutoAnswerDecider {
 
     /** Drop-in for the engine host's `judgeCandidate`. */
     async judge(req: DeciderRequest, signal?: AbortSignal): Promise<string | null> {
+        // The local choice model has no correction prompt or previous-question field.
+        if (req.previousQuestion) return this.deps.llmJudge ? this.deps.llmJudge(req, signal) : null;
         const mode = this.deps.mode();
         // off: the judge hook itself, errors included, so the engine sees exactly what it saw before.
         if (mode === 'off') return this.deps.llmJudge ? this.deps.llmJudge(req, signal) : null;

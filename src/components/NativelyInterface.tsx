@@ -569,6 +569,9 @@ interface Message {
   isStreaming?: boolean;
   answerPending?: boolean;
   answerFailed?: boolean;
+  whatToAnswerGeneration?: number;
+  outdated?: boolean;
+  updated?: boolean;
   hasScreenshot?: boolean;
   screenshotPreview?: string;
   // Every attached screenshot's data-URL preview (screenshotPreview is the first
@@ -1408,7 +1411,20 @@ const MessageRow = React.memo(
             {msg.role === 'system' && msg.note?.kind === 'late' && (
               <ChatNoteLine kind="late" className="mb-1.5">{chatNoteText(msg.note, t)}</ChatNoteLine>
             )}
-            {msg.role === 'system' && msg.hint ? (
+            {msg.updated && <div className="text-[11px] overlay-text-muted">{t('Updated')}</div>}
+            {msg.outdated ? (
+              msg.isStreaming ? (
+                <div className="opacity-60">
+                  <div className="text-[11px] overlay-text-muted">{t('Outdated answer')}</div>
+                  {renderMessageText(msg)}
+                </div>
+              ) : (
+                <details className="opacity-60">
+                  <summary className="cursor-pointer text-[11px] overlay-text-muted">{t('Outdated answer')}</summary>
+                  {renderMessageText(msg)}
+                </details>
+              )
+            ) : msg.role === 'system' && msg.hint ? (
               <ChatHintLine>{t(CHAT_HINTS[msg.hint])}</ChatHintLine>
             ) : msg.role === 'system' && msg.note?.alone ? null
               : msg.role === 'system' && msg.failure && !msg.failure.partial ? null : renderMessageText(msg)}
@@ -6223,6 +6239,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // generation. null = no id adopted yet (id-less items are always accepted →
   // backward compatible with the code-hint / brainstorm streams that omit it).
   const liveAnswerGenIdRef = useRef<number | null>(null);
+  const updatedAnswerGenerationRef = useRef<number | null>(null);
+  const boundAnswerRowRef = useRef<{ id: string; generationId: number } | null>(null);
+  const bindAnswerRow = useCallback((id: string | null, generationId?: number) => {
+    if (!id || generationId === undefined) return;
+    const bound = boundAnswerRowRef.current;
+    if (bound?.id === id && bound.generationId === generationId) return;
+    boundAnswerRowRef.current = { id, generationId };
+    const updated = updatedAnswerGenerationRef.current === generationId;
+    setMessages((prev) => prev.map((m) => m.id === id ? { ...m, whatToAnswerGeneration: generationId, updated } : m));
+  }, []);
   // Newest generation main had minted when the latest legacy press began.
   // Until a newer generation is adopted, an id at or below it is an earlier
   // request's late token/final and must not fill the press's row. Only grows.
@@ -7982,7 +8008,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated }) => {
+        if (typeof outdated === 'boolean') {
+          setMessages((prev) => prev.map((message) => message.whatToAnswerGeneration === generationId
+            ? { ...message, outdated }
+            : message));
+          return;
+        }
         const id = overlayQuestionId ?? `interviewer-answer-${generationId}`;
         if (!question) {
           setMessages((prev) => prev.some((message) => message.id === id && message.answerPending)
@@ -8007,6 +8039,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (!decision.accept) return;
         legacyIntelligenceTombstonedRef.current = false;
         liveAnswerGenIdRef.current = decision.activeId;
+        if (updated) updatedAnswerGenerationRef.current = generationId;
         pinAnswerPanel();
         setMessages((prev) => {
           if (prev.some((message) => message.id === id)) return prev;
@@ -8115,6 +8148,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         }
         const answerText = labelLateAnswer(liveRowId, isStale ? data.question : undefined, data.answer);
         finalizeStreamingByIntent('what_to_answer', answerText);
+        const generationId = (data as { generationId?: number }).generationId;
+        if (generationId !== undefined) {
+          bindAnswerRow(liveRowId ?? (streamingIntentRef.current === 'what_to_answer' ? streamingMsgIdRef.current : null), generationId);
+        }
       }),
     );
 
@@ -8133,6 +8170,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (!shouldApplyLiveAnswerDiscard(liveAnswerGenIdRef.current, data?.generationId)) return;
         if (!resolveLiveAnswerBatch(liveAnswerGenIdRef.current, data?.generationId, liveAnswerFloorRef.current).accept) return;
         if (!hasOtherLiveRequest()) setIsProcessing(false);
+        if (data.reason === 'answer_corrected' && data.generationId !== undefined) {
+          liveAnswerFloorRef.current = Math.max(liveAnswerFloorRef.current ?? 0, data.generationId);
+          liveAnswerGenIdRef.current = null;
+          const questionId = `interviewer-answer-${data.generationId}`;
+          setMessages((prev) => prev.map((message) => message.id === questionId && message.answerPending
+            ? { ...message, answerPending: false }
+            : message));
+          if (streamingIntentRef.current === 'what_to_answer' && streamingTextRef.current.trim()) {
+            flushToken();
+            return;
+          }
+        }
         if (!hasUnrelatedStreamingRow()) {
           if (streamingNodeRef.current) streamingNodeRef.current.innerHTML = '';
           streamingNodeRef.current = null;
@@ -8233,6 +8282,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             liveAnswerGenIdRef.current = decision.activeId;
             if (!decision.accept) continue;
             queueToken('what_to_answer', (it as any).token);
+            bindAnswerRow(streamingMsgIdRef.current, (it as { generationId?: number }).generationId);
           }
         } else if (kind === 'refined_answer') {
           for (const it of items) queueToken((it as any).intent, (it as any).token);
@@ -8422,7 +8472,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       }
       cleanups.forEach((fn) => fn());
     };
-  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent, prepareIntelligenceStreamPlaceholder, hasLiveChatStream]);
+  }, [queueToken, flushToken, applyRollingPartialPreview, flushRollingPartialPreview, pinAnswerPanel, finalizeStreamingByIntent, prepareIntelligenceStreamPlaceholder, hasLiveChatStream, bindAnswerRow]);
 
   // Stable mount-only effect for screenshot listeners.
   // These MUST NOT be inside the [isExpanded] effect — when a screenshot is

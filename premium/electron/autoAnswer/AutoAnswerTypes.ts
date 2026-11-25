@@ -50,6 +50,7 @@ export interface AutoAnswerQuestion {
     /** Meeting-local identity: `${meetingGeneration}-q${sequence}` (V2 §20). Never the text. */
     id: string;
     text: string;
+    replacesAutomaticAnswer?: boolean;
 
     /** 0..1 that the text is a real interviewer question (extractor scale). */
     confidence: number;
@@ -156,6 +157,7 @@ export type AutoAnswerCancelReason =
     | 'interviewer_resumed'
     | 'judge_unavailable'
     | 'transcript_revised'
+    | 'answer_corrected'
     | 'manual_answer'
     | 'dispatch_timeout'
     | 'auto_disabled_or_meeting_ended'

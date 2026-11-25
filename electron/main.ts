@@ -3953,6 +3953,8 @@ export class AppState {
     // Checked per decision, so a licence that lapses or consent that is
     // withdrawn mid-meeting stops the next answer, not just the next toggle.
     isEnabled: () => this.isAutoAnswerActive(),
+    correctionsEnabled: () => this.getLiveBrainEnabled(),
+    setAnswerOutdated: (generationId, outdated) => this.intelligenceManager.setAutomaticAnswerOutdated(generationId, outdated),
     isMeetingActive: () => this.isMeetingActive,
     meetingGeneration: () => this._meetingGeneration,
     engineAccepting: (skipCooldown) => this.intelligenceManager.canAutoAnswer(skipCooldown),
@@ -8947,10 +8949,6 @@ export class AppState {
       return overlay && !overlay.isDestroyed() ? overlay : this.getMainWindow();
     }
 
-    this.intelligenceManager.on('what_to_answer_question', (data) => {
-      this.sendToWindow(answerWindow(), 'intelligence-what-to-answer-question', data);
-    });
-
     // Sprint 9: time-batched IPC token sends.
     //
     // Each LLM streaming token previously fired one webContents.send → one
@@ -9059,7 +9057,12 @@ export class AppState {
       } catch { /* non-fatal */ }
     })
 
-    this.intelligenceManager.on('suggested_answer', (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string) => {
+    this.intelligenceManager.on('what_to_answer_question', (data) => {
+      if (typeof data.outdated === 'boolean') flushBatchesBeforeFinal();
+      this.sendToWindow(answerWindow(), 'intelligence-what-to-answer-question', data);
+    });
+
+    this.intelligenceManager.on('suggested_answer', (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: import('../src/types/whatToSayOutcome').WhatToSayOutcome) => {
       // Phase 4 defense-in-depth (forensic-report §6b): forward the optional
       // generationId the engine emits. Id-less emits (legacy answerLLM path,
       // code-hint, brainstorm) continue to ship without it — the renderer
@@ -9077,7 +9080,9 @@ export class AppState {
       // what it answered (the live "late CGPA answer" report). The renderer
       // uses this stamp to drop or visibly label stale finals.
       this.sendToWindow(win, 'intelligence-suggested-answer', { answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', emittedAt: Date.now(), ...(stopReason ? { stopReason } : {}) })
-
+      if (this.getLiveBrainEnabled() && outcome?.delivered && answer.trim() && this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
+        this.simpleAutoAnswer.onAutomaticAnswerProgress(generationId);
+      }
     })
 
     this.intelligenceManager.on('suggested_answer_token', (token: string, question: string, confidence: number, generationId?: number) => {
@@ -9088,7 +9093,7 @@ export class AppState {
       queueBatch('suggested_answer', { token, question, confidence, generationId });
       this.autoAnswerUsage.answerShown();
       if (this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
-        this.simpleAutoAnswer.onAutomaticAnswerProgress();
+        this.simpleAutoAnswer.onAutomaticAnswerProgress(token.trim() ? generationId : undefined);
       }
     })
 

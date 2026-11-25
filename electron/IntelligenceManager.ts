@@ -280,6 +280,10 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.isAutomaticAnswerGeneration(generationId);
     }
 
+    setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void {
+        this.engine.setAutomaticAnswerOutdated(generationId, outdated);
+    }
+
     /** Stop the AUTOMATIC answer only (never a manual one). See IntelligenceEngine.cancelAutomaticAnswer. */
     cancelAutomaticAnswer(reason: Parameters<IntelligenceEngine['cancelAutomaticAnswer']>[0]): boolean {
         return this.engine.cancelAutomaticAnswer(reason);

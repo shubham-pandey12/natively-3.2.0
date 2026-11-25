@@ -235,6 +235,8 @@ const FILLER = /^(?:u+h+|u+m+|e+r+m*|a+h+|h+m+|m+)(?:[\s,.!-]+(?:u+h+|u+m+|e+r+m
 const CONTINUATION_LEAD = /^(?:and|or|but|also|plus|then|so|because|cause|which|where|when|while|including|with|without|in|on|for|using|like|especially|except|unless|if|whether|that(?!['’])|to|as|how|what|why|who|first(?:ly)?|second(?:ly)?|third(?:ly)?|fourth|fifth|next|finally|lastly|last|another|additionally|bonus|step|part|one|two|three|four|five)\b/i;
 /** A FINAL that opens with an article may state a constraint ("The input is sorted."). An interim only decides whether the call in flight is kept, so it is not held to this. */
 const ARTICLE_LEAD = /^(?:a|an|the)\b/i;
+const CORRECTION_SIGNAL = /^(?:actually|correction|instead|rather|no)\b|\b(?:not allowed|cannot|can't|must not)\b/i;
+const CORRECTION_WINDOW_MS = 20_000;
 /** Opens a task or a constraint ("now implement it", "show me", "use three threads"). */
 const TASK_LEAD = /^(?:(?:ok(?:ay)?|now|alright|so|well|please|just)[,.!\s]+)*(?:write|implement|code|design|build|create|make|explain|describe|tell|walk|show|give|list|name|compare|contrast|solve|calculate|compute|draw|sketch|share|summari[sz]e|define|optimi[sz]e|refactor|debug|fix|prove|estimate|talk|elaborate|expand|clarify|try|start|continue|go|use|assume|imagine|suppose|consider|think|let['’]?s|now|answer|pick|choose)\b/i;
 
@@ -461,6 +463,8 @@ export function isSameUtterance(interim: string, final: string): boolean {
 
 export interface SimpleAutoAnswerHost {
     isEnabled(): boolean;
+    correctionsEnabled?(): boolean;
+    setAnswerOutdated?(generationId: number, outdated: boolean): void;
     isMeetingActive(): boolean;
     meetingGeneration(): number;
     engineAccepting(skipCooldown?: boolean): boolean;
@@ -546,6 +550,8 @@ export const SPECULATION_HOLDS_QUESTION = 0.9;
 
 /** `startedAt`: when the utterance's first interim arrived (its final's arrival when there were none). */
 type PendingPart = { text: string; at: number; sourceAt?: number; startedAt?: number; speaker?: string; glueNext?: boolean; provisional?: boolean };
+type CorrectionTarget = { text: string; visibleGenerationId?: number };
+type PendingCorrection = { target: CorrectionTarget; parts: PendingPart[] };
 
 /**
  * Back-to-back asks (pipeline forensics 2026-11-13, F-CTX-04). When a second
@@ -673,7 +679,7 @@ export class SimpleAutoAnswerEngine {
     private recovery: { key: string; parts?: PendingPart[] } | null = null;
     private recoveryTimer: ClockTimer | null = null;
     /** The automatic answer started for these parts and not settled yet. */
-    private dispatchInFlight: {
+    private dispatchInFlight: (CorrectionTarget & {
         id: string;
         parts: SimpleAutoAnswerEngine['pending'];
         stalled: { text: string; speaker?: string } | null;
@@ -683,8 +689,9 @@ export class SimpleAutoAnswerEngine {
         /** A manual press started while this was in flight (see onManualAnswerStarted). */
         handedOver?: boolean;
         pausedByManual?: number;
-        text: string;
-    } | null = null;
+    }) | null = null;
+    private recentAutomaticAnswer: { target: CorrectionTarget; deliveredAt: number } | null = null;
+    private correction: PendingCorrection | null = null;
     private dispatchWatchdog: ClockTimer | null = null;
     private lastAnsweredText: string | null = null;
     private lastAnsweredAt = 0;
@@ -808,6 +815,8 @@ export class SimpleAutoAnswerEngine {
      * Ids keep counting (a reset would reuse them within the meeting).
      */
     onModeChanged(): void {
+        this.clearCorrection();
+        this.recentAutomaticAnswer = null;
         this.disarm();
         this.clearCatchup();
         this.dropParked();
@@ -827,8 +836,21 @@ export class SimpleAutoAnswerEngine {
     }
     onMeetingStop(): void { this.reset(); }
 
-    onAutomaticAnswerProgress(): void {
-        if (this.dispatchInFlight) this.dispatchInFlight.lastProgressAt = this.clock.now();
+    onAutomaticAnswerProgress(generationId?: number): void {
+        const request = this.dispatchInFlight;
+        if (!request) return;
+        request.lastProgressAt = this.clock.now();
+        if (generationId === undefined || request.visibleGenerationId === generationId) return;
+        request.visibleGenerationId = generationId;
+        if (this.correction?.target === request && this.host.correctionsEnabled?.()) {
+            this.host.setAnswerOutdated?.(generationId, true);
+        }
+    }
+
+    private clearCorrection(): void {
+        const generationId = this.correction?.target.visibleGenerationId;
+        this.correction = null;
+        if (generationId !== undefined) this.host.setAnswerOutdated?.(generationId, false);
     }
 
     private watchDispatch(request: NonNullable<SimpleAutoAnswerEngine['dispatchInFlight']>, onTimeout: () => void): void {
@@ -1001,6 +1023,23 @@ export class SimpleAutoAnswerEngine {
         const now = this.clock.now();
 
         if (segment.speaker === 'interviewer') {
+            const correctionsEnabled = this.host.correctionsEnabled?.() === true;
+            if (!correctionsEnabled && this.correction) this.clearCorrection();
+            const correctingDispatch = this.dispatchInFlight;
+            const correctionTarget = correctionsEnabled && !this.manualActive && !this.manualChats.size
+                ? (correctingDispatch && !correctingDispatch.handedOver && !correctingDispatch.pausedByManual ? correctingDispatch : null)
+                    ?? (this.recentAutomaticAnswer && now - this.recentAutomaticAnswer.deliveredAt < CORRECTION_WINDOW_MS
+                        ? this.recentAutomaticAnswer.target : null)
+                : null;
+            // Fillers cannot replace a promoted interim, join a dispatch, or
+            // invalidate a correction verdict already in flight.
+            if (correctionTarget && text && (USER_BACKCHANNEL.test(text) || FILLER.test(text))) {
+                if (segment.final) {
+                    if (this.awaitingVoiceFinal) this.clearCatchup();
+                    if (this.correction && this.timer === null) this.arm(ENDPOINT_CONFIRM_MS);
+                }
+                return;
+            }
             // Words are arriving: the interviewer really is talking.
             if (text && this.interviewerSpeaking) this.armSpeakingTimer();
             if (!segment.final) {
@@ -1069,7 +1108,7 @@ export class SimpleAutoAnswerEngine {
             }
             const dispatched = this.dispatchInFlight;
             const preceding = this.pending[this.pending.length - 1];
-            const joinsDispatch = dispatched && !dispatched.handedOver && !dispatched.pausedByManual
+            const joinsDispatch = !correctionTarget && dispatched && !dispatched.handedOver && !dispatched.pausedByManual
                 && now - dispatched.startedAt <= LATE_TAIL_JOIN_MS && preceding && dispatched.parts.includes(preceding)
                 && (speaker == null || preceding.speaker == null || speaker === preceding.speaker)
                 && !newAsk && !USER_BACKCHANNEL.test(text) && !FILLER.test(text)
@@ -1088,6 +1127,14 @@ export class SimpleAutoAnswerEngine {
             const part = { text, at: now, sourceAt: segment.timestamp, startedAt, speaker, glueNext };
             this.lastInterviewerFinal = part;
             this.pending.push(part);
+            const target = this.correction?.target ?? correctionTarget;
+            if (target && (!isInertUtterance(text, true) || CORRECTION_SIGNAL.test(text))) {
+                if (!this.correction) {
+                    this.correction = { target, parts: [] };
+                    if (target.visibleGenerationId !== undefined) this.host.setAnswerOutdated?.(target.visibleGenerationId, true);
+                }
+                this.correction.parts.push(part);
+            }
             // Supersede any in-flight verdict: it judged less than this. Inert
             // growth keeps the call alive — its verdict is held for the quiet point.
             this.bumpJudgeSeq('final', !!this.inFlight && this.isInertExtension(this.inFlight.parts));
@@ -1166,6 +1213,23 @@ export class SimpleAutoAnswerEngine {
             || activeParts?.includes(p) || this.recovery?.parts?.includes(p));
         // Finals arrive in time order, so aged-out ones are always a prefix.
         this.judgedParts = Math.max(0, this.judgedParts - (before - this.pending.length));
+        if (this.correction && !this.host.correctionsEnabled?.()) this.clearCorrection();
+        const correction = this.correction;
+        if (correction) {
+            correction.parts = correction.parts.filter(part => this.pending.includes(part));
+            const fresh = joinTranscriptParts(correction.parts);
+            if (!fresh) this.clearCorrection();
+            else {
+                if (early || this.inFlight) return;
+                const candidate = `${correction.target.text}\n${fresh}`;
+                const key = normalizeForCompare(candidate);
+                if (key === this.lastJudgedKey) return;
+                this.lastJudgedKey = key;
+                const id = `${this.host.meetingGeneration()}-q${++this.sequence}`;
+                void this.consult(id, candidate, now, false, correction);
+                return;
+            }
+        }
         if (this.pending.length === 0) return;
         if (activeParts) {
             const answering = this.pending.findIndex(p => !activeParts.includes(p));
@@ -1326,13 +1390,13 @@ export class SimpleAutoAnswerEngine {
         } catch { /* prefetch is an optimisation; never break the pipeline */ }
     }
 
-    private async consult(id: string, candidate: string, committedAt: number, early = false): Promise<void> {
+    private async consult(id: string, candidate: string, committedAt: number, early = false, correction?: PendingCorrection): Promise<void> {
         const seq = this.judgeSeq;
         const generation = this.host.meetingGeneration();
         let timer: ClockTimer | null = null;
         let timedOut = false;
         const turns = this.turnsBefore(committedAt);
-        const parts = this.pending.map(p => ({ speaker: p.speaker, text: p.text }));
+        const parts = (correction?.parts ?? this.pending).map(p => ({ speaker: p.speaker, text: p.text }));
         const snapshot = this.pending.slice();
         const restorePausedAsk = () => {
             const paused = this.detachedManualParts();
@@ -1375,6 +1439,7 @@ export class SimpleAutoAnswerEngine {
                         recentTurns: turns,
                         speakers: turns.map(t => (t.role === 'interviewer' ? this.speakerByTurn.get(normalizeForCompare(t.text)) : undefined)),
                         candidateParts: parts,
+                        ...(correction ? { previousQuestion: correction.target.text } : {}),
                         modeName: this.host.modeName?.() ?? null,
                         questionId: id,
                         lastAnsweredText: this.lastAnsweredText,
@@ -1404,6 +1469,43 @@ export class SimpleAutoAnswerEngine {
         // verdicts were dropped here and the record could not say whether a
         // single one of them had said 'answer'.
         const verdict = outcome === 'verdict' ? parseJudgeVerdict(raw, candidate) : null;
+        if (correction) {
+            if (this.correction !== correction || !this.host.isMeetingActive() || this.host.meetingGeneration() !== generation) return;
+            if (!this.host.correctionsEnabled?.()) {
+                this.clearCorrection();
+                this.lastJudgedKey = '';
+                if (this.timer === null && !this.interviewerSpeaking) this.arm(ENDPOINT_CONFIRM_MS);
+                return;
+            }
+            if (seq !== this.judgeSeq) {
+                this.lastJudgedKey = '';
+                if (this.timer === null && this.earlyTimer === null && !this.interviewerSpeaking) this.arm(ENDPOINT_CONFIRM_MS);
+                return;
+            }
+            const route = verdict && routeForVerdict(verdict);
+            if (route?.route !== 'evaluate' || route.action !== 'answer' || route.answerability <= ANSWER_FLOOR) {
+                this.clearCorrection();
+                this.removePendingParts(correction.parts);
+                return;
+            }
+            this.correction = null; // The previous row remains outdated after a positive verdict.
+            if (this.dispatchInFlight === correction.target) {
+                const previous = this.dispatchInFlight;
+                this.clearDispatch();
+                this.removePendingParts(previous.parts);
+                this.host.cancelAutomaticAnswer?.('answer_corrected');
+            }
+            this.recentAutomaticAnswer = null;
+            // A correction ("Actually, no caching") only makes sense with the question it
+            // changes, so it is answered as previous + new. A self-contained new question
+            // ("What if Redis goes down?") is answered on its own words: gluing the old
+            // question in front made the answer model address both. Follow-up context still
+            // reaches the answer through the transcript window.
+            const fresh = joinTranscriptParts(correction.parts);
+            const standalone = isQuestionShaped(fresh) && !CORRECTION_SIGNAL.test(fresh);
+            this.deliver(id, standalone ? fresh : candidate, route.answerability, route.act, committedAt, true);
+            return;
+        }
         // Superseded: more interviewer speech arrived, the meeting moved on.
         if (seq !== this.judgeSeq || !this.host.isMeetingActive() || this.host.meetingGeneration() !== generation) {
             this.emit({
@@ -1570,7 +1672,7 @@ export class SimpleAutoAnswerEngine {
     }
 
     /** Dispatch now, or retry while the engine is busy — woken early by onEngineIdle. */
-    private deliver(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number): void {
+    private deliver(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number, replacesAutomaticAnswer = false): void {
         if (this.detachedManualParts()) this.manualPausedParts = null;
         this.dropParked();
         const deadline = this.clock.now() + RETRY_TTL_MS;
@@ -1590,6 +1692,10 @@ export class SimpleAutoAnswerEngine {
             this.retryTimer = this.clock.setTimeout(attempt, RETRY_MS);
         };
         const attempt = () => {
+            if (replacesAutomaticAnswer && !this.host.correctionsEnabled?.()) {
+                this.dropParked();
+                return;
+            }
             if (!this.host.isEnabled() || !this.host.isMeetingActive() || this.interviewerSpeaking || this.judgeSeq !== seqAtDeliver) {
                 if (this.parkedAttempt?.attempt === attempt) this.dropParked();
                 return;
@@ -1606,7 +1712,7 @@ export class SimpleAutoAnswerEngine {
                 return;
             }
             const manualBusy = this.manualActive || this.manualChats.size > 0;
-            if (manualBusy || !this.host.engineAccepting(Boolean(this.automaticPark))) {
+            if (manualBusy || !this.host.engineAccepting(replacesAutomaticAnswer || Boolean(this.automaticPark))) {
                 if (this.automaticPark) {
                     parkAutomatic();
                     return;
@@ -1628,6 +1734,7 @@ export class SimpleAutoAnswerEngine {
             const automaticPark = this.automaticPark;
             this.automaticPark = null;
             const q = this.question(id, text, answerability, act, committedAt, parts);
+            if (replacesAutomaticAnswer) q.replacesAutomaticAnswer = true;
             this.manualPausedParts = null;
             // If the engine already has an answer in flight for THIS question
             // (our prefetch, or its own interim speculation keyed by
@@ -1636,7 +1743,7 @@ export class SimpleAutoAnswerEngine {
             const snapshot = this.host.speculativeSnapshot?.();
             // Same id is not enough: the draft must have been written for THIS
             // ask (pipeline forensics 2026-11-13, F-CTX-03/F-CTX-02).
-            const reuseSpeculative = Boolean(snapshot && snapshot.questionId === id && snapshot.text
+            const reuseSpeculative = Boolean(!replacesAutomaticAnswer && snapshot && snapshot.questionId === id && snapshot.text
                 && tokenContainment(text, snapshot.text) >= SPECULATION_HOLDS_QUESTION);
             if (snapshot && snapshot.questionId === id && snapshot.text && !reuseSpeculative) {
                 this.host.log?.(`[AutoAnswer:simple] the prefetched answer for ${id} was drafted for other words: starting over on the question`);
@@ -1695,6 +1802,9 @@ export class SimpleAutoAnswerEngine {
                 // cooldown for it too; answering these words again would put a
                 // second card under the first.
                 if (status === 'completed' || status === 'partial') {
+                    if (request.visibleGenerationId !== undefined) {
+                        this.recentAutomaticAnswer = { target: request, deliveredAt: this.clock.now() };
+                    }
                     this.settleParts(request, text, true);
                     this.armFeedback(id, act, answerability);
                     return;
@@ -1890,6 +2000,8 @@ export class SimpleAutoAnswerEngine {
     }
 
     private pauseForManualAnswer(): void {
+        this.clearCorrection();
+        this.recentAutomaticAnswer = null;
         const request = this.dispatchInFlight;
         if (request && !request.handedOver) {
             this.manualPausedParts ??= request.parts;
@@ -2123,7 +2235,7 @@ export class SimpleAutoAnswerEngine {
         const cancel = this.dispatchInFlight?.parts.includes(this.pending[i]);
         this.pending.splice(i, 1);
         this.judgedParts = Math.min(this.judgedParts, this.pending.length);
-        if (cancel) {
+        if (cancel && !this.host.correctionsEnabled?.()) {
             this.clearDispatch();
             this.host.cancelAutomaticAnswer?.('transcript_revised');
         }
@@ -2171,6 +2283,8 @@ export class SimpleAutoAnswerEngine {
     }
 
     private reset(): void {
+        this.clearCorrection();
+        this.recentAutomaticAnswer = null;
         this.clearDispatch();
         this.disarm();
         this.clearCatchup();

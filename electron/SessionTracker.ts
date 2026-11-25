@@ -81,6 +81,7 @@ export interface TranscriptSegment {
 }
 
 export interface SuggestionTrigger {
+    replacesAutomaticAnswer?: boolean;
     context: string;
     lastQuestion: string;
     /**
