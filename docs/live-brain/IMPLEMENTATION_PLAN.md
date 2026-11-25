@@ -35,6 +35,26 @@ Check `package.json` for exact script names before running; do not invent script
 
 ---
 
+## Phase UI — Settings UI first  *(≈2–3 days)*  ← **do this first (user decision 2026-11-25)**
+
+**Objective:** the user can see and configure Live Brain before the brain exists. Settings only; no runtime behaviour changes.
+
+Tasks:
+1. **General tab switch** per ARCHITECTURE §9a — new "Live Brain" row directly below the Auto Answer row in `src/components/SettingsOverlay.tsx`, identical markup pattern (icon tile, title, "Beta" `LiquidGlassBadge variant="sky"`, description, `SettingsToggle`, optimistic update + rollback). Persist `liveBrainEnabled` (default `false`) via the existing settings store; `appState.getLiveBrainEnabled()/setLiveBrainEnabled()`; IPC `live-brain:get-enabled` / `live-brain:set-enabled` (boolean-only validation); preload `getLiveBrainEnabled` / `setLiveBrainEnabled` with types. Turning on with no usable key for the selected provider → inline message, switch stays off.
+2. **Audio tab "Live Brain Provider" section** per ARCHITECTURE §9b — after the Speech Provider section, built from the same components/styles: provider selector (`gemini-live` default | `openai-realtime` | `pipeline`), per-provider masked key fields saved via `CredentialsManager` (`setLiveBrainGeminiKey`/`setLiveBrainOpenaiKey` + has-key), "Use my AI Providers key" option, model fields (`liveBrainGeminiModel`, `liveBrainOpenaiModel`), instruction variant (`liveBrainPromptVariant`: full | trimmed), **Test connection** button, status line. IPC `live-brain:get-config` (never returns raw keys — `hasKey`, masked suffix, `usingAiProvidersKey`), `live-brain:set-provider`, `live-brain:set-key`, `live-brain:set-options`, `live-brain:test-connection`; preload equivalents; broadcast `credentials-changed`.
+3. **Test connection** in this phase: validate that a key is present and well-formed and return a clear "not available yet — brain arrives in Phase 4" result. Real connection test is added in Phase 4. Do not call external APIs yet.
+4. i18n: wrap new strings with `t(...)` like neighbouring rows.
+5. **No runtime effect:** the switch only persists and broadcasts. Auto Answer and every other behaviour must be unchanged whether the switch is on or off (the brain is wired in Phase 4).
+
+Files: `src/components/SettingsOverlay.tsx`, `electron/preload.ts`, `electron/ipcHandlers.ts`, `electron/main.ts` (AppState getters/setters only), `electron/services/SettingsManager.ts` (if keys are declared there), `electron/services/CredentialsManager.ts`, i18n resource files if the repo uses them.
+Tests: setting defaults to false and persists; IPC rejects non-boolean / unknown provider; `get-config` never returns raw keys; AI-Providers-key reuse resolution; renderer toggle rollback on failure. Manual (agent-browser per CLAUDE.md): General shows "Live Brain" directly under Auto Answer with matching style; Audio shows "Live Brain Provider" after Speech Provider; saving a key shows masked state; Auto Answer behaviour unchanged.
+Acceptance: UI matches Auto Answer / Speech Provider patterns; no raw key reaches the renderer; existing suites green (`test:auto-answer`, `test:lib`).
+Out of scope: any brain, orchestrator, overlay answer changes.
+
+> Phase 2 task 5 (settings) is satisfied by this phase; Phase 2 only adds the remaining foundation pieces.
+
+---
+
 ## Phase 0 — Verify facts & measure baseline  *(≈2–3 days)*
 
 **Objective:** remove guesswork; establish numbers to beat.

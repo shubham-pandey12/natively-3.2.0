@@ -7,6 +7,7 @@
 
 | Phase | Status | Notes |
 |---|---|---|
+| UI — Settings UI (first) | ☐ Not started | General switch + Audio provider section; no runtime effect |
 | 0 — Verify facts & baseline | ☐ Not started | |
 | 1 — Corrections in pipeline | ☐ Not started | |
 | 2 — Foundation | ☐ Not started | |
