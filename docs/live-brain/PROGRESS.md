@@ -10,7 +10,7 @@
 | UI — Settings UI (first) | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Windows settings checks passed. One pre-existing Auto Answer telemetry assertion fails (unrelated). |
 | 0 — Verify facts & baseline | ✅ Done (reviewed) | Research, dev timing, corpus, spike committed. Gemini spike run on Windows (see "Gemini Live spike results"). Pipeline baseline (real meeting) still pending. |
 | 1 — Corrections in pipeline | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Gated by the Live Brain switch. Physical S4/S5 check in a real meeting still pending. |
-| 2 — Foundation | ☐ Not started | |
+| 2 — Foundation | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Contracts, instructions, decide_turn tool, parser, factory, test double. No runtime wiring yet. |
 | 3 — Orchestrator + overlay | ☐ Not started | |
 | 4 — GeminiLiveBrain | ☐ Not started | |
 | 5 — Notebook + Supervisor | ☐ Not started | |
@@ -115,6 +115,23 @@ Findings (measured, single sample — repeat before tuning):
 - Re-run on Windows: `build:electron`, `typecheck:electron`, `typecheck:ts7` passed; `test:auto-answer` 200/201 (only the known `AutoAnswerUsageTelemetry2026_09_27` line-178 assertion; its later assertions were checked directly and pass); `test:components` 1001 passed, 2 skipped; `test:lib` 3242 passed, 15 skipped.
 - To check in a real meeting (Live Brain on): when a correction cancels an answer that already streamed text, the partial row is kept and folded as "Outdated answer" — confirm it doesn't stay in a streaming state. "Updated" / "Outdated answer" labels are English-only until a translation pass.
 - Requires physical macOS verification.
+
+## Phase 2 — 2026-11-26
+
+- Implemented the shared Live Brain and notebook contracts, including the `decision` event and aliases to the existing provider types. The exhaustive factory distinguishes known, unimplemented providers from unknown IDs. The scriptable fake records audio, candidate text, cancellation, and lifecycle calls.
+- The Gemini decider builder has no answer-prompt imports in its composition. The full answer builder uses `UNIVERSAL_WHAT_TO_ANSWER_PROMPT` from the existing `WhatToAnswerLLM` legacy path, plus `MODE_TECHNICAL_INTERVIEW_PROMPT` for Technical Interview or `HUMAN_SPOKEN_ANSWER_CONTRACT` otherwise. The current universal constant does not embed the spoken contract. The explicit composition provides it once, including its nested `SPOKEN_ANSWER_CONTRACT`, without editing existing prompt text.
+- Trimmed keeps `CORE_IDENTITY`, `EXECUTION_CONTRACT`, `CONTEXT_INTELLIGENCE_LAYER`, and `HUMAN_SPOKEN_ANSWER_CONTRACT`. It drops the universal mode's scenario-specific intent, discovery, and closing guidance, shared coding rules, and the dedicated Technical Interview decision and formatting blocks. Both answer variants add the same live protocol and supplied context. Output quality comparisons remain open.
+- `decide_turn` has a provider-neutral JSON schema and a Gemini `functionDeclarations` adapter using `parametersJsonSchema`. Validation checks required text by action, trims it, and caps it at 2,000 characters for answers and 300 for clarifications. The streaming parser reuses `NO_ACTION_SENTINEL` from Prompt System v2 and tests split sentinels, quoting, whitespace, unchanged answer streaming, and literal mid-text sentinels. [Google Live tool use](https://aistudio.google.com/docs/live-api/tools) · [Function declaration schema](https://aistudio.google.com/api-reference/caching#FunctionDeclaration)
+- Windows build and typechecks passed (`build:electron`, `typecheck:electron`, `typecheck:ts7`, `typecheck:premium`). The existing premium build scan compiled the new code. Foundation tests were 12/12, `test:auto-answer` was 200/201 with only the pre-existing `AutoAnswerUsageTelemetry2026_09_27` assertion failing, and `test:lib` was 3,242 passed with 15 skipped.
+- There are no meeting-path imports or provider calls in this phase. Requires physical macOS verification when the provider and meeting integrations are implemented.
+
+
+### Phase 2 review — 2026-11-26 (Claude)
+
+- Fix: `buildAnswerInstructions` chose the Technical Interview prompt by matching the mode **name** against "technical interview". In Natively the mode name is the user's own label (`ModesManager.getActiveMode().name`, e.g. "My Google interview"), so real technical-interview modes would get the generic prompt. It now takes `modeTemplate` (the template id, `'technical-interview'`) and uses that; `modeName` is only shown as context. Test updated, plus a check that the name alone never selects the mode prompt.
+- Checked: nothing outside `premium/electron/liveBrain/` imports it (no runtime effect). Gemini tool shape uses `functionDeclarations[].parametersJsonSchema`; real Gemini acceptance is verified by the Phase 4 spike.
+- Re-run on Windows: `build:electron`, `typecheck:electron`, `typecheck:ts7`, `typecheck:premium` passed; Foundation tests 12/12; `test:auto-answer` 200/201 (known pre-existing failure only).
+- Requires physical macOS verification (when wired into meetings).
 
 ## Open risks
 

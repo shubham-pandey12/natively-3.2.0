@@ -1,0 +1,74 @@
+import type { LiveBrainEvent } from './types';
+
+type DecisionKind = NonNullable<Extract<LiveBrainEvent, { type: 'decision' }>['kind']>;
+
+export type Decision =
+    | { action: 'answer'; question: string; kind?: DecisionKind }
+    | { action: 'ask'; clarification: string; kind?: DecisionKind }
+    | { action: 'wait'; kind?: DecisionKind };
+
+const QUESTION_MAX_LENGTH = 2_000;
+const CLARIFICATION_MAX_LENGTH = 300;
+const ACTIONS = ['answer', 'ask', 'wait'] as const;
+const KINDS = ['new', 'follow_up', 'correction'] as const;
+
+export const DECIDE_TURN_TOOL = {
+    name: 'decide_turn',
+    description: 'Decide what the candidate needs after an interviewer turn.',
+    parameters: {
+        type: 'object',
+        properties: {
+            action: { type: 'string', enum: ACTIONS },
+            question: {
+                type: 'string',
+                description: 'Required for answer. A self-contained question with relevant follow-up context and corrections.',
+                maxLength: QUESTION_MAX_LENGTH,
+            },
+            clarification: {
+                type: 'string',
+                description: 'Required for ask. One short question for the candidate to ask.',
+                maxLength: CLARIFICATION_MAX_LENGTH,
+            },
+            kind: { type: 'string', enum: KINDS },
+        },
+        required: ['action'],
+    },
+} as const;
+
+export function toGeminiDecideTurnTool() {
+    const { name, description, parameters } = DECIDE_TURN_TOOL;
+    return { functionDeclarations: [{ name, description, parametersJsonSchema: parameters }] };
+}
+
+function limitedText(value: unknown, maxLength: number): string {
+    if (typeof value !== 'string') return '';
+    const text = value.trim().slice(0, maxLength);
+    // Avoid splitting an astral character at the UTF-16 cap.
+    return text.replace(/[\uD800-\uDBFF]$/, '').trimEnd();
+}
+
+export function parseDecideTurnArgs(raw: unknown): Decision | null {
+    let value: unknown = raw;
+    if (typeof raw === 'string') {
+        try { value = JSON.parse(raw); } catch { return null; }
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, 'action')) return null;
+
+    const { action, question, clarification, kind } = value as Record<string, unknown>;
+    const parsedKind = KINDS.find(option => option === (typeof kind === 'string' ? kind.trim() : kind));
+    const metadata = parsedKind ? { kind: parsedKind } : {};
+    switch (typeof action === 'string' ? action.trim() : action) {
+        case 'answer': {
+            const text = limitedText(question, QUESTION_MAX_LENGTH);
+            return text ? { action: 'answer', question: text, ...metadata } : null;
+        }
+        case 'ask': {
+            const text = limitedText(clarification, CLARIFICATION_MAX_LENGTH);
+            return text ? { action: 'ask', clarification: text, ...metadata } : null;
+        }
+        case 'wait':
+            return { action: 'wait', ...metadata };
+        default:
+            return null;
+    }
+}
