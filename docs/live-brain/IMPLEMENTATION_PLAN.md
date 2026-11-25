@@ -98,24 +98,21 @@ Risk: delicate timing code — keep changes additive and behind clear conditions
 
 ## Phase 2 — Live Brain foundation  *(≈2–3 days)*
 
-**Objective:** contracts, settings, instructions, parser — no provider yet.
+**Objective:** contracts, instructions, parser, factory, test double — no provider, no runtime wiring. Settings were already delivered in Phase UI.
 
 Tasks:
-1. `premium/electron/liveBrain/types.ts` exactly per ARCHITECTURE §4.
-2. `instructions.ts` per §5 — composes existing prompt constants; produces `full` and `trimmed` variants.
-3. `responseParser.ts` per §6 (streaming sentinel detection).
-4. `index.ts` factory with exhaustive switch (§3).
-5. **Live Brain switch** exactly per ARCHITECTURE §9a:
-   - Settings → **General**, new row directly below the Auto Answer row in `src/components/SettingsOverlay.tsx`, same markup pattern (icon tile, title "Live Brain", "Beta" badge, description, `SettingsToggle`, optimistic update + rollback).
-   - Persist `liveBrainEnabled` (default `false`) in the existing settings store; `appState.getLiveBrainEnabled()/setLiveBrainEnabled()`.
-   - IPC `live-brain:get-enabled` / `live-brain:set-enabled` in `electron/ipcHandlers.ts` (boolean-only validation); preload `getLiveBrainEnabled` / `setLiveBrainEnabled` with types.
-   - Missing key for the selected brain → inline message, switch stays off.
-   - Settings → **Audio**: "Live Brain Provider" section after Speech Provider, per ARCHITECTURE §9b — provider selector (`gemini-live` default | `openai-realtime` | `pipeline`), per-provider masked key fields saved via `CredentialsManager`, "Use my AI Providers key" fallback, model, instruction variant, Test connection (stub until Phase 4), status. Same components/styles as Speech Provider. Raw keys never returned to the renderer.
-   - In this phase the switch only persists and broadcasts; runtime start/stop is wired in Phase 4/5.
-6. A `FakeLiveBrain` for tests.
+1. `premium/electron/liveBrain/types.ts` exactly per ARCHITECTURE §4, **including the `decision` event from §6** (`decisionId`, `action: 'answer'|'ask'|'wait'`, `question?`, `clarification?`, `kind?`, `at`). Reuse `LiveBrainProvider`/`LiveBrainKeyProvider` from `src/types/liveBrainSettings.ts` rather than redefining them.
+2. `instructions.ts` per §5, two builders:
+   - `buildDeciderInstructions(ctx)` — for Gemini Live (D10): live-session preamble, the `decide_turn` protocol (call it at every end of interviewer turn, never speak an answer), clarification rule, correction rule, short profile summary, optional notebook text. Short, no answer-style rules.
+   - `buildAnswerInstructions(ctx, variant)` — for brains that write answers themselves (OpenAI Realtime): composes the **existing** Natively answer prompt constants (import them; never copy prompt text), plus preamble, sentinel protocol (§6), clarification and correction rules, profile context, optional notebook. `variant: 'full' | 'trimmed'`.
+   - Both take their inputs as parameters (profile, mode, notebook text) — no settings/global reads inside.
+3. `decideTurnTool.ts`: the `decide_turn` function declaration (name, description, JSON schema per §4.1) and `parseDecideTurnArgs(raw) → decision | null` that validates and normalises (unknown action → null; `answer` without `question` → null; trims; caps lengths).
+4. `responseParser.ts` per §6 (streaming sentinel detection for text-writing brains and the Gemini transcription-marker fallback).
+5. `index.ts` factory with exhaustive switch (§3). In this phase the three brain ids can return a clear "not implemented yet" brain or throw a typed error — but an **unknown** id must throw.
+6. `__tests__/FakeLiveBrain` test double implementing `LiveBrain` (scriptable events, records calls).
 
-Tests: parser (split sentinels across chunks, whitespace/markdown, no sentinel, mid-text sentinel); instructions include the current answer contract and clarification/correction rules; factory throws on unknown id; `liveBrainEnabled` defaults to false and persists; keys stored via `CredentialsManager` and never returned raw by `live-brain:get-config`; "Use my AI Providers key" resolution order; IPC rejects non-boolean; renderer toggle rollback on failure (agent-browser check of Settings → General per CLAUDE.md).
-Acceptance: unit tests green; flag-off parity; the row appears directly under Auto Answer in General.
+Tests: parser (sentinel split across chunks, whitespace/markdown around it, no sentinel → answer, mid-text sentinel ignored); decide_turn arg parsing (valid answer/ask/wait, missing question, unknown action, oversized strings, non-object input); decider instructions mention decide_turn and the clarification/correction rules and contain no answer-style contract; answer instructions include the existing human spoken answer contract (by import, asserted via a distinctive substring) and differ between full/trimmed; factory throws on unknown id; FakeLiveBrain satisfies the interface.
+Acceptance: unit tests green; no runtime behaviour change (nothing imports `liveBrain/` from the meeting path yet); flag-off parity; existing suites green.
 
 ---
 
