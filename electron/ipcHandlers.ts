@@ -23489,7 +23489,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       const pc = require('./llm/providerPayloadCapture') as typeof import('./llm/providerPayloadCapture');
       const st = pd.getPromptDebugState();
       const n = params?.last ?? 20;
-      const out = { success: true, enabled: pd.isPromptDebugEnabled(), records: st.records.slice(-n), notes: st.notes.slice(-n), adapter: pc.getProviderPayloadCapture().slice(-n) };
+      const out = { success: true, enabled: pd.isPromptDebugEnabled(), records: st.records.slice(-n), notes: st.notes.slice(-n), answerTimings: st.answerTimings.slice(-n), adapter: pc.getProviderPayloadCapture().slice(-n) };
       if (params?.clear) { pd.clearPromptDebugState(); pc.clearProviderPayloadCapture(); }
       return out;
     });

@@ -9,7 +9,7 @@
 import './nativeArchGate';
 import { summarizeRunEnd } from '../src/lib/funnel/runEnd.mjs';
 // Dev-only prompt recorder: must wrap fetch before any SDK client exists (inert unless NATIVELY_PROMPT_DEBUG=1, never when packaged).
-import './llm/promptDebug';
+import { isPromptDebugEnabled } from './llm/promptDebug';
 // Pin the packaged userData to the historical "Natively" folder BEFORE any
 // import-time reader (CredentialsManager resolves its paths at module scope).
 // Must stay above every other import — see utils/pinUserData.ts.
@@ -1652,6 +1652,7 @@ export class AppState {
   public autoStartTrialForMeeting: (() => void) | null = null;
   public autoTrialSettled: (() => boolean) | null = null;
   private _meetingGeneration = 0;
+  private debugInterviewerStop?: { at: number; meetingGeneration: number; capture: SystemAudioCapture };
   // Reads who speaks in a Zoom / Teams desktop call while a meeting runs
   // (services/meetingDetection/desktopCallSpeakers.ts). One per meeting.
   private desktopCallSpeakers: DesktopCallSpeakers | null = null;
@@ -3969,7 +3970,10 @@ export class AppState {
     // skipped): Auto Answer keeps the question until it was shown, retries a
     // failure once, and re-judges a cancelled one with the rest of the speech.
     dispatch: (question, { reuseSpeculative }) => {
-      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative }).catch((error) => {
+      const stop = this.debugInterviewerStop;
+      const speechStoppedAt = stop && stop.meetingGeneration === this._meetingGeneration
+        && stop.capture === this.systemAudioCapture ? stop.at : undefined;
+      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative, speechStoppedAt }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
         return { status: 'failed' as const };
       });
@@ -5301,6 +5305,9 @@ export class AppState {
     });
     capture.on('speech_ended', () => {
       if (this.systemAudioCapture === capture) {
+        if (this.isMeetingActive && isPromptDebugEnabled()) {
+          this.debugInterviewerStop = { at: Date.now(), meetingGeneration: this._meetingGeneration, capture };
+        }
         this.googleSTT?.notifySpeechEnded?.();
         this._sttFailover.system?.notifySpeechEnded();
         // The user's held words (RestSTT, issue #698) go up with the interviewer's.
@@ -5338,6 +5345,7 @@ export class AppState {
       // Auto Answer's stall cap: the interviewer talking again ends the stop
       // it would otherwise promote a frozen interim on.
       if (this.systemAudioCapture === capture && edge?.channel === 'interviewer' && edge.speaking) {
+        this.debugInterviewerStop = undefined;
         this.simpleAutoAnswer.onLocalSpeechStart();
         // The user's held words (RestSTT, issue #698) go up before the
         // interviewer's reply, so the transcript keeps its order.

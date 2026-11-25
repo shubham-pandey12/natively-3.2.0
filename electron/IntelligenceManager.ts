@@ -326,7 +326,7 @@ export class IntelligenceManager extends EventEmitter {
     }
     runAutoAnswer(
         question: Parameters<IntelligenceEngine['runAutoAnswer']>[0],
-        options: { reuseSpeculative: boolean },
+        options: { reuseSpeculative: boolean; speechStoppedAt?: number },
     ): ReturnType<IntelligenceEngine['runAutoAnswer']> {
         return this.engine.runAutoAnswer(question, { ...options, context: this.getFormattedContext(120) });
     }

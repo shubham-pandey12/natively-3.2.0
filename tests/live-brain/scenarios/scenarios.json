@@ -1,0 +1,132 @@
+[
+  {
+    "id": "S1",
+    "title": "Pause inside a question",
+    "steps": [
+      {"atMs": 0, "durationMs": 2400, "speaker": "interviewer", "text": "How would you design a system that can handle"},
+      {"atMs": 3600, "durationMs": 1500, "speaker": "interviewer", "text": "millions of concurrent users?"}
+    ],
+    "expected": ["No answer during the 1.2-second pause.", "One answer after the full question."]
+  },
+  {
+    "id": "S2",
+    "title": "One question with three parts",
+    "steps": [
+      {"atMs": 0, "durationMs": 2800, "speaker": "interviewer", "text": "How would you design a URL shortener?"},
+      {"atMs": 3100, "durationMs": 2300, "speaker": "interviewer", "text": "How does it handle high redirect traffic,"},
+      {"atMs": 5650, "durationMs": 2450, "speaker": "interviewer", "text": "and how would you scale the database as the link count grows?"}
+    ],
+    "expected": ["One answer covers URL creation and lookup, high redirect traffic, and database scaling."]
+  },
+  {
+    "id": "S3",
+    "title": "A follow-up relies on earlier design",
+    "steps": [
+      {"atMs": 0, "durationMs": 3400, "speaker": "interviewer", "text": "Assume redirect requests are ninety percent of traffic. How would you handle hot links?"},
+      {"atMs": 11000, "durationMs": 4400, "speaker": "candidate", "text": "I'd store canonical links in PostgreSQL and cache hot short codes in Redis with a short TTL."},
+      {"atMs": 16600, "durationMs": 1500, "speaker": "interviewer", "text": "Why did you choose Redis?"}
+    ],
+    "expected": ["The follow-up is short and explains the Redis choice for hot, read-heavy redirects without repeating the whole design."]
+  },
+  {
+    "id": "S4",
+    "title": "Correction before the answer",
+    "steps": [
+      {"atMs": 0, "durationMs": 2100, "speaker": "interviewer", "text": "Design a catalog service. Use PostgreSQL."},
+      {"atMs": 2350, "durationMs": 2200, "speaker": "interviewer", "text": "Actually, let's assume MongoDB. How would you model the products?"}
+    ],
+    "expected": ["The answer uses MongoDB as its store and does not propose PostgreSQL."]
+  },
+  {
+    "id": "S5",
+    "title": "Correction during a streamed answer",
+    "steps": [
+      {"atMs": 0, "durationMs": 3500, "speaker": "interviewer", "text": "Design a low-latency product lookup service. You can use a cache. Explain your read path."},
+      {"after": "first_visible_text", "offsetMs": 300, "durationMs": 1700, "speaker": "interviewer", "text": "Actually, caching is not allowed."}
+    ],
+    "expected": ["The original answer is marked outdated.", "A replacement answer explains the read path without caching."]
+  },
+  {
+    "id": "S6",
+    "title": "Candidate speaks over the interviewer",
+    "steps": [
+      {"atMs": 0, "durationMs": 4300, "speaker": "interviewer", "text": "If your search service needs to be available across regions, how will you handle a regional outage?"},
+      {"atMs": 1700, "durationMs": 1900, "speaker": "candidate", "text": "Could we talk about pagination first?"}
+    ],
+    "expected": ["The answer addresses a regional outage.", "The candidate's pagination question triggers no separate answer."]
+  },
+  {
+    "id": "S7",
+    "title": "Factual question in spoken style",
+    "steps": [
+      {"atMs": 0, "durationMs": 2400, "speaker": "interviewer", "text": "What's the difference between horizontal and vertical scaling?"}
+    ],
+    "expected": ["A concise spoken answer distinguishes adding instances from increasing resources on an instance and gives a concrete example."]
+  },
+  {
+    "id": "S8",
+    "title": "Clarification with no reply",
+    "steps": [
+      {"atMs": 0, "durationMs": 1450, "speaker": "interviewer", "text": "Design an e-commerce app."}
+    ],
+    "observeAfterMs": 20000,
+    "expected": ["Ask one material clarification.", "With no reply for roughly 10 seconds after the ask, answer under a stated assumption without asking again."]
+  },
+  {
+    "id": "S9",
+    "title": "A 45-second multipart question",
+    "steps": [
+      {"atMs": 0, "durationMs": 6500, "speaker": "interviewer", "text": "Imagine a delivery marketplace with customers, couriers, and restaurants spread across multiple time zones."},
+      {"atMs": 7600, "durationMs": 7100, "speaker": "interviewer", "text": "At dinner time, a few neighbourhoods generate most of the traffic, and order placement still needs to remain available."},
+      {"atMs": 15900, "durationMs": 7100, "speaker": "interviewer", "text": "The payment provider can time out after charging a customer, and we may not learn the result right away."},
+      {"atMs": 24600, "durationMs": 6800, "speaker": "interviewer", "text": "Drivers can lose connectivity after accepting a delivery. The restaurant still needs to know whether to prepare it."},
+      {"atMs": 32700, "durationMs": 4500, "speaker": "interviewer", "text": "One more constraint. You cannot coordinate all regions with a shared distributed lock."},
+      {"atMs": 38900, "durationMs": 6100, "speaker": "interviewer", "text": "How would you design the order lifecycle, payment retries, and driver reassignment under those constraints?"}
+    ],
+    "expected": ["No premature answer.", "One answer after 45 seconds addresses lifecycle, payment retries and reassignment under the stated constraints."]
+  },
+  {
+    "id": "S10",
+    "title": "A 70-minute design interview",
+    "steps": [
+      {"atMs": 0, "durationMs": 4800, "speaker": "interviewer", "text": "Design a notification service. The policy is email only, with no push or SMS. What architecture would you start with?"},
+      {"atMs": 420000, "durationMs": 3000, "speaker": "interviewer", "text": "How would you store preferences and unsubscribe requests?"},
+      {"atMs": 840000, "durationMs": 3000, "speaker": "interviewer", "text": "How would you buffer the evening spike in traffic?"},
+      {"atMs": 1260000, "durationMs": 3100, "speaker": "interviewer", "text": "Can you guarantee that a recipient sees only one copy of a notification?"},
+      {"atMs": 1680000, "durationMs": 2900, "speaker": "interviewer", "text": "How would you rate-limit a noisy tenant without slowing the others?"},
+      {"atMs": 2100000, "durationMs": 3200, "speaker": "interviewer", "text": "Our email vendor is down. How do queued messages recover safely?"},
+      {"atMs": 2520000, "durationMs": 3200, "speaker": "interviewer", "text": "How do you reconcile late delivery receipts to the original sends?"},
+      {"atMs": 2940000, "durationMs": 3500, "speaker": "interviewer", "text": "What would you monitor to tell a backlog from messages that will never be sent?"},
+      {"atMs": 3360000, "durationMs": 3100, "speaker": "interviewer", "text": "How would a regional outage affect pending notifications?"},
+      {"atMs": 3780000, "durationMs": 3000, "speaker": "interviewer", "text": "How would you migrate an existing tenant without delivering messages twice?"},
+      {"atMs": 4195000, "durationMs": 5000, "speaker": "interviewer", "text": "Given the original delivery-channel restriction, what is our best emergency fallback for urgent notifications?"}
+    ],
+    "expected": ["At the 70-minute mark the answer still respects email-only delivery.", "When evaluating Live Brain, rollovers cause no visible disruption to the intervening answers."]
+  },
+  {
+    "id": "S11",
+    "title": "Transport or quota failure",
+    "steps": [
+      {"atMs": 0, "durationMs": 3100, "speaker": "interviewer", "text": "Design a dashboard that tolerates fifteen minutes of stale data. How do you backfill after an outage?"},
+      {"after": "first_visible_text", "offsetMs": 250, "fault": "selected_failure"},
+      {"after": "first_visible_text", "offsetMs": 11000, "durationMs": 2800, "speaker": "interviewer", "text": "Given our freshness requirement, when should a failed job alert the on-call engineer?"}
+    ],
+    "variants": [
+      {"failure": "network_drop", "durationMs": 10000},
+      {"failure": "socket_kill"},
+      {"failure": "quota_exhausted"}
+    ],
+    "expected": ["The UI does not remain stuck after the fault.", "When evaluating Live Brain, the fallback answers the follow-up and uses the earlier 15-minute freshness requirement."]
+  },
+  {
+    "id": "S12",
+    "title": "Backchannels during a streamed answer",
+    "steps": [
+      {"atMs": 0, "durationMs": 3100, "speaker": "interviewer", "text": "How would you make retries safe in an order API? Walk me through the failure cases."},
+      {"after": "first_visible_text", "offsetMs": 200, "durationMs": 180, "speaker": "interviewer", "text": "Mm-hmm."},
+      {"after": "first_visible_text", "offsetMs": 600, "durationMs": 180, "speaker": "interviewer", "text": "Okay."},
+      {"after": "first_visible_text", "offsetMs": 1100, "durationMs": 170, "speaker": "interviewer", "text": "Right."}
+    ],
+    "expected": ["The original answer continues to completion.", "No filler utterance cancels or replaces the answer."]
+  }
+]

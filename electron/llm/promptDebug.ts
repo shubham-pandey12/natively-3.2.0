@@ -61,13 +61,22 @@ interface WireRecord {
 }
 
 const RING_MAX = 300;
+interface AnswerTiming {
+    generationId: number;
+    speechStoppedAt: number;
+    firstVisibleTextAt: number;
+    speechStopToFirstVisibleTextMs: number;
+    via: 'stream' | 'tail' | 'final' | 'prefetch';
+}
 let installed = false;
 let seq = 0;
 let noteSeq = 0;
 
-function state(): { records: WireRecord[]; notes: Array<PromptCompositionNote & { seq: number; ts: number }> } {
+function state(): { records: WireRecord[]; notes: Array<PromptCompositionNote & { seq: number; ts: number }>; answerTimings: AnswerTiming[] } {
     const g = globalThis as any;
-    return (g.__nativelyPromptDebug ||= { records: [], notes: [] });
+    const st = (g.__nativelyPromptDebug ||= { records: [], notes: [] });
+    st.answerTimings ??= [];
+    return st;
 }
 
 /** True when the recorder is armed for this process. */
@@ -229,15 +238,24 @@ export function notePromptComposition(note: PromptCompositionNote): void {
     persist({ kind: 'composition', ...entry, systemSha: sha(note.system), userSha: sha(note.user) });
 }
 
-export function getPromptDebugState(): { records: WireRecord[]; notes: unknown[] } {
+export function notePromptDebugAnswerTiming(timing: AnswerTiming): void {
+    if (!isPromptDebugEnabled()) return;
+    const entries = state().answerTimings;
+    entries.push(timing);
+    if (entries.length > RING_MAX) entries.shift();
+    setImmediate(() => persist({ kind: 'answer_timing', ...timing }));
+}
+
+export function getPromptDebugState(): { records: WireRecord[]; notes: unknown[]; answerTimings: AnswerTiming[] } {
     const st = state();
-    return { records: st.records.slice(), notes: st.notes.slice() };
+    return { records: st.records.slice(), notes: st.notes.slice(), answerTimings: st.answerTimings.slice() };
 }
 
 export function clearPromptDebugState(): void {
     const st = state();
     st.records.length = 0;
     st.notes.length = 0;
+    st.answerTimings.length = 0;
 }
 
 /** Wrap globalThis.fetch once. Safe to call repeatedly; inert when disabled. */

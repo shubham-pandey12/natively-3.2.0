@@ -63,6 +63,7 @@ import { DynamicAction } from './services/dynamic-actions/DynamicAction';
 import { ScreenContext } from './services/screen/ScreenContextService';
 import { buildPreparedTranscriptContext as assemblePreparedTranscriptContext } from './utils/preparedTranscriptContext';
 import { PiLatencyTrace } from './services/telemetry/PiLatencyTracer';
+import { notePromptDebugAnswerTiming } from './llm/promptDebug';
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 // Context OS — statically imported (PR #427 §3.3). Previously pulled in via
 // 10 synchronous require() calls on the hot answer path, which bypassed the
@@ -704,6 +705,7 @@ export class IntelligenceEngine extends EventEmitter {
     private speculativeRun: { generationId: number; settled: Promise<unknown> } | null = null;
     /** Whether the last revealed prefetch actually reached the screen (empty-after-strip does not). */
     private lastSpeculativeReveal: { generationId: number; visibleGenerationId?: number; shown: boolean } | null = null;
+    private debugSpeechStop?: { generationId: number; at: number };
     /**
      * Registered by a RUNNING speculative stream: called with the adopted
      * generation id the moment the dispatch adopts it, so what has already
@@ -1470,7 +1472,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
      */
-    async handleSuggestionTrigger(trigger: SuggestionTrigger): Promise<AutomaticAnswerResult> {
+    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number): Promise<AutomaticAnswerResult> {
         // An absent confidence is not a low one: the planner substitutes the
         // intent classifier's score. Only an EXPLICIT sub-threshold value skips.
         // Not for an AUTOMATIC trigger: its confidence is the judge's
@@ -1493,7 +1495,7 @@ export class IntelligenceEngine extends EventEmitter {
                 : { status: 'cancelled' }), { once: true });
         });
         try {
-            const result = await Promise.race([this.handleSuggestionTriggerInner(trigger, signal), cancelled]);
+            const result = await Promise.race([this.handleSuggestionTriggerInner(trigger, signal, speechStoppedAt), cancelled]);
             // An automatic answer that was not shown must not hold the trigger
             // cooldown: Auto Answer retries it, or the next question comes.
             if (result.status !== 'completed' && result.status !== 'partial') this.lastTriggerTime = 0;
@@ -1522,7 +1524,7 @@ export class IntelligenceEngine extends EventEmitter {
         return true;
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal): Promise<AutomaticAnswerResult> {
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number): Promise<AutomaticAnswerResult> {
         if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         if (trigger.automatic && this.isManualAnswerActive()) return { status: 'skipped', reason: 'busy' };
         const plannerDecision = await this.planSuggestionTrigger(trigger);
@@ -1600,6 +1602,7 @@ export class IntelligenceEngine extends EventEmitter {
                         }
                         // Unmute the stream NOW: paint what it has, stream the rest.
                         const adoptedGenerationId = this.currentGenerationId;
+                        this.armSpeechStopTiming(adoptedGenerationId, speechStoppedAt);
                         return this.waitForAdoptedAnswer(adoptedGenerationId, signal);
                     }
                     if (finished) {
@@ -1608,6 +1611,7 @@ export class IntelligenceEngine extends EventEmitter {
                             this.emit('what_to_answer_question', { generationId: finished.generationId, question: trigger.lastQuestion });
                         }
                         if (trigger.automatic) this.claimSpokenTurn(this.spokenTurnFor(finished.question, trigger.sourceSegments), true, finished.generationId);
+                        this.armSpeechStopTiming(finished.generationId, speechStoppedAt);
                         this.revealSpeculativeAnswer(finished, trigger.automatic === true);
                         const shown = this.lastSpeculativeReveal?.generationId === finished.generationId && this.lastSpeculativeReveal.shown;
                         return shown ? { status: 'completed' } : { status: 'failed', retryable: true, reason: 'adopted_draft_failed' };
@@ -1681,7 +1685,7 @@ export class IntelligenceEngine extends EventEmitter {
             // recorded it as answered (forensics 2026-11-13, F-ACC-08 / D3).
             const generationBefore = this.currentGenerationId;
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
-                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments } : {}) });
+                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt } : {}) });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
             await run;
             const outcome = outcomeOut.value;
@@ -1963,6 +1967,10 @@ export class IntelligenceEngine extends EventEmitter {
         // same draft. Publish the mapping before its first token is emitted.
         this.lastSpeculativeReveal = { generationId: finished.generationId, visibleGenerationId: generationId, shown: false };
         this.automaticGenerationId = automatic ? generationId : null;
+        if (automatic && !finished.answerIsNotice && this.debugSpeechStop?.generationId === finished.generationId) {
+            this.armSpeechStopTiming(generationId, this.debugSpeechStop.at);
+            this.noteFirstVisibleText(generationId, text, 'prefetch');
+        }
         if (alreadyPainting) {
             console.log(`[IntelligenceEngine] Finishing the adopted prefetch that streamed live (${text.length} chars, gen ${generationId})`);
             const pending = streamed?.pendingBuffer ?? '';
@@ -2036,7 +2044,7 @@ export class IntelligenceEngine extends EventEmitter {
         id: string; text: string; confidence: number; answerability: number; dialogueAct: string;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
         sourceSegments?: readonly number[];
-    }, options: { reuseSpeculative: boolean; context: string }): Promise<AutomaticAnswerResult> {
+    }, options: { reuseSpeculative: boolean; context: string; speechStoppedAt?: number }): Promise<AutomaticAnswerResult> {
         return this.handleSuggestionTrigger({
             context: options.context,
             lastQuestion: question.text,
@@ -2050,6 +2058,25 @@ export class IntelligenceEngine extends EventEmitter {
             candidateGeneration: question.candidateGeneration,
             sourceSegments: question.sourceSegments,
             reuseSpeculative: options.reuseSpeculative,
+        }, options.speechStoppedAt);
+    }
+
+    private armSpeechStopTiming(generationId: number, at?: number): void {
+        if (at !== undefined) this.debugSpeechStop = { generationId, at };
+    }
+
+    private noteFirstVisibleText(generationId: number, text: string, via: 'stream' | 'tail' | 'final' | 'prefetch'): void {
+        const stop = this.debugSpeechStop;
+        if (!stop || stop.generationId !== generationId || generationId !== this.currentGenerationId || !text.trim()) return;
+        this.debugSpeechStop = undefined;
+        const firstVisibleTextAt = Date.now();
+        if (firstVisibleTextAt < stop.at) return;
+        notePromptDebugAnswerTiming({
+            generationId,
+            speechStoppedAt: stop.at,
+            firstVisibleTextAt,
+            speechStopToFirstVisibleTextMs: firstVisibleTextAt - stop.at,
+            via,
         });
     }
 
@@ -2517,7 +2544,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2593,7 +2620,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2741,11 +2768,13 @@ export class IntelligenceEngine extends EventEmitter {
         // must never mint a newer id and overtake this request.
         const generationId = ++this.currentGenerationId;
         if (options?.turnOut) options.turnOut.generationId = generationId;
+        this.armSpeechStopTiming(generationId, options?.speechStoppedAt);
         const showWtaAnswer = (answer: string, answeredQuestion: string, score: number,
             delivered: boolean, sourceLabel?: string, stopReason?: string) => {
             const out = options?.outcomeOut;
             if (out?.value) out.value = { ...out.value, delivered: delivered && Boolean(answer.trim()) && this.currentGenerationId === generationId };
             const outcome = out?.value;
+            if (delivered) this.noteFirstVisibleText(generationId, answer, 'final');
             this.emit('suggested_answer', answer, answeredQuestion, score, generationId, sourceLabel, stopReason, outcome);
         };
         // Stamp the run's identity before any await: a manual press racing in
@@ -5497,6 +5526,7 @@ export class IntelligenceEngine extends EventEmitter {
                     trace.mark('first_visible_text', { via: 'stream' });
                     wtaTrace.lifecycle('streaming');
                 }
+                this.noteFirstVisibleText(generationId, chunk, 'stream');
                 // #3: stamp this request's generationId so a superseded answer's
                 // already-queued tokens can be dropped renderer-side.
                 this.emit('suggested_answer_token', chunk, question || 'inferred', confidence, generationId);
@@ -7789,7 +7819,10 @@ export class IntelligenceEngine extends EventEmitter {
             if (codingGate) {
                 const gatedTail = codingGate.finish();
                 const tail = specStripper ? (specStripper.push(gatedTail) + specStripper.finish()) : gatedTail;
-                if (tail) this.emit('suggested_answer_token', tail, question || 'inferred', confidence, generationId);
+                if (tail) {
+                    this.noteFirstVisibleText(generationId, tail, 'tail');
+                    this.emit('suggested_answer_token', tail, question || 'inferred', confidence, generationId);
+                }
             } else {
                 if (emittedStreamingToken && streamingTokenBuffer.trim()) {
                     this.emit('suggested_answer_token', streamingTokenBuffer, question || 'inferred', confidence, generationId);
@@ -7806,6 +7839,7 @@ export class IntelligenceEngine extends EventEmitter {
                             unpainted = stripPlanningPreamble(fullAnswer).text;
                         } catch { /* paint unmodified */ }
                     }
+                    this.noteFirstVisibleText(generationId, unpainted, 'tail');
                     this.emit('suggested_answer_token', unpainted, question || 'inferred', confidence, generationId);
                 }
             }
@@ -9871,6 +9905,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Reset engine state (cancels any in-flight operations)
      */
     reset(): void {
+        this.debugSpeechStop = undefined;
         this.automaticTrigger?.abort('engine_reset');
         this.speculativeRun = null;
         this.speculativeAdoptHook = null;
