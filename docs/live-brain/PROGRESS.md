@@ -83,6 +83,7 @@ Findings (measured, single sample — repeat before tuning):
 4. Without Natively instructions the answer is generic ("I'd start with a load balancer…"); style is expected to come from the Phase 2 instructions.
 5. **Key format:** the working Gemini key is 53 characters and does not start with `AIza`. The Phase UI format check (`AIza` + 35) would have rejected it — fixed in `electron/services/liveBrainSettings.ts` (now 30–200 chars of `[A-Za-z0-9._-]`) with a regression test.
 6. Free-tier key worked for four sessions back-to-back; quota numbers still unverified.
+7. TEXT output re-checked on the other Gemini Live models (2026-11-26): `gemini-3.1-flash-live-preview` and `gemini-2.5-flash-native-audio-preview-12-2025` reject TEXT with the same 1007 error; `gemini-3.8-live-extended-thinking` refused setup without a thinking level (TEXT untested). No current Gemini Live model tested accepts TEXT output.
 
 ## Phase 0 review — 2026-11-25 (Claude)
 
