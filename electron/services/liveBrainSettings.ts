@@ -11,9 +11,12 @@ function isKeyProvider(value: unknown): value is LiveBrainKeyProvider {
 }
 
 // Local shape check only. Authentication is deferred until provider sessions exist.
+// Gemini: deliberately loose. Classic AI Studio keys are `AIza` + 35 chars, but a
+// working 53-character key without that prefix authenticated against Gemini Live
+// on 2026-11-25 (Phase 0 spike), so a prefix/length rule would reject real keys.
 function isWellFormed(provider: LiveBrainKeyProvider, key: string): boolean {
     return provider === 'gemini-live'
-        ? /^AIza[A-Za-z0-9_-]{35}$/.test(key)
+        ? /^[A-Za-z0-9._-]{30,200}$/.test(key)
         : /^sk-[A-Za-z0-9_-]{16,}$/.test(key);
 }
 

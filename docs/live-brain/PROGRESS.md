@@ -8,7 +8,7 @@
 | Phase | Status | Notes |
 |---|---|---|
 | UI — Settings UI (first) | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Windows settings checks passed. One pre-existing Auto Answer telemetry assertion fails (unrelated). |
-| 0 — Verify facts & baseline | ✅ Done (reviewed) — live numbers pending | Research, dev timing, S1–S12 corpus and spike committed. Gemini spike run and pipeline baseline need the user's key and a real meeting (see "Phase 0 review"). |
+| 0 — Verify facts & baseline | ✅ Done (reviewed) | Research, dev timing, corpus, spike committed. Gemini spike run on Windows (see "Gemini Live spike results"). Pipeline baseline (real meeting) still pending. |
 | 1 — Corrections in pipeline | ☐ Not started | |
 | 2 — Foundation | ☐ Not started | |
 | 3 — Orchestrator + overlay | ☐ Not started | |
@@ -61,6 +61,26 @@
 - The spike was syntax-checked. It was not connected to Gemini because `GEMINI_API_KEY` was unset and no WAV was supplied. Setup results and first-text timings for both modes remain unmeasured. On Windows or macOS with the key in the environment, run `node scripts/spikes/gemini-live.mjs "path/to/interviewer.wav" [model-id]` from the repo. Use an uncompressed mono 16-bit PCM WAV trimmed to one turn. The spike signals manual speech end at WAV EOF, runs TEXT then AUDIO plus transcription, and reports a nonzero exit if either mode produces no text.
 - Windows validation: `npm run build:electron` and `npm run typecheck:electron` passed. `npm run test:auto-answer` had 191 passes and the known `AutoAnswerUsageTelemetry2026_09_27` failure. `npm run test:lib` had 3,242 passes and 15 skips. The compiled timing and adopted-dispatch tests passed 11/11. All 12 scenario entries passed structural validation. The mocked timing interval was 200 ms and is not a live baseline sample.
 - Requires physical macOS verification and physical Windows verification of the native-stop-to-debugger path. The instrumentation uses the existing shared capture callback and does not change the platform capture implementations.
+
+## Gemini Live spike results — 2026-11-25 (Windows, user's free key, `gemini-3.8-live`)
+
+Input: one synthetic spoken question (Windows SAPI voice, 16 kHz mono, ~6 s): "Can you explain how you would design a URL shortener that can handle millions of requests per day?"
+
+| Mode | Turn detection | Setup ready | Speech end → first text | Speech end → done | Result |
+|---|---|---|---|---|---|
+| TEXT | manual | 1.35 s | — | — | **Rejected:** close 1007 "The requested combination of response modalities (TEXT) is not supported by the model." |
+| AUDIO + output transcription | manual (`activityEnd`) | 0.85 s | **0.90 s** | 25.8 s | 390 chars, correct and on topic |
+| TEXT | auto | 1.45 s | — | — | Rejected (same TEXT limitation) |
+| AUDIO + output transcription | **auto VAD** (product behaviour) | 1.55 s | **0.49 s** | 23.5 s | 396 chars, correct and on topic |
+
+Findings (measured, single sample — repeat before tuning):
+
+1. **Q1 resolved:** `gemini-3.8-live` does **not** accept `TEXT`. Live Brain must use `AUDIO` + `outputAudioTranscription`, discard the audio bytes, and display the transcription (ARCHITECTURE §4.1 fallback path becomes the only path for this model).
+2. **First text is fast:** ~0.5 s after the interviewer stops with automatic VAD, ~0.9 s with manual VAD — inside the §11 target (median ≤ 1.5 s).
+3. **The rest of the answer streams at speaking pace:** ~390 characters (~65 words) took ~23–26 s, i.e. ~150 words/minute. The transcription follows the generated speech, so a long system-design answer would take a minute or more to finish appearing. **This is a design-relevant finding** — decide before Phase 4 whether that pace is acceptable (the candidate speaks along at roughly the same speed) or whether long answers need a faster text path. Not decided yet; raised with the user.
+4. Without Natively instructions the answer is generic ("I'd start with a load balancer…"); style is expected to come from the Phase 2 instructions.
+5. **Key format:** the working Gemini key is 53 characters and does not start with `AIza`. The Phase UI format check (`AIza` + 35) would have rejected it — fixed in `electron/services/liveBrainSettings.ts` (now 30–200 chars of `[A-Za-z0-9._-]`) with a regression test.
+6. Free-tier key worked for four sessions back-to-back; quota numbers still unverified.
 
 ## Phase 0 review — 2026-11-25 (Claude)
 

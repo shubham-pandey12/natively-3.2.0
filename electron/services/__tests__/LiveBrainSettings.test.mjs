@@ -65,6 +65,10 @@ test('Live Brain settings persist and IPC resolves keys without exposing them or
         assert.match(invoke('set-enabled', true).message, /doesn't look valid/);
         assert.equal(invoke('get-config').maskedSuffix, null);
         assert.equal(invoke('set-key', { provider: 'gemini-live', apiKey: 'malformed-fake-key' }).success, false);
+        // Real Gemini keys are not all `AIza` + 35: a 53-char key without that prefix
+        // worked against Gemini Live (Phase 0 spike). It must be accepted.
+        assert.equal(invoke('set-key', { provider: 'gemini-live', apiKey: 'AQ.' + 'k'.repeat(50) }).success, true);
+        assert.equal(invoke('set-key', { provider: 'gemini-live', apiKey: '' }).success, true);
 
         const fakeGemini = 'AIza' + 'g'.repeat(31) + 'Fake';
         const fakeDedicated = 'AIza' + 'd'.repeat(31) + 'Demo';
@@ -87,7 +91,7 @@ test('Live Brain settings persist and IPC resolves keys without exposing them or
         assert.equal(invoke('get-config').maskedSuffix, '••••••••Mock');
         // Key writes and the reuse switch broadcast; model, variant, provider and the
         // switch itself do not (credentials-changed reloads other settings screens).
-        assert.equal(first.broadcasts(), 3);
+        assert.equal(first.broadcasts(), 5);
 
         const restarted = fresh();
         assert.equal(restarted.invoke('get-enabled'), true);
