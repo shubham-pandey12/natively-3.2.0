@@ -700,3 +700,15 @@ The operating system running Claude Code is an execution environment, not the sc
 Every change must be designed for Natively's complete supported platform surface: macOS and Windows.
 
 
+
+---
+
+## Active feature: Live Brain (`feat/live-brain`)
+
+Before working on anything Live Brain related (realtime brain, Gemini Live, OpenAI Realtime, interruptions/corrections in Auto Answer, interview notebook, overlay answer replacement), read and follow, in order:
+
+1. `docs/live-brain/ARCHITECTURE.md` — normative spec and user decisions (do not re-open them without asking).
+2. `docs/live-brain/IMPLEMENTATION_PLAN.md` — do only the next unchecked phase; follow its rules.
+3. `docs/live-brain/PROGRESS.md` — update it at the end of every phase.
+
+If code and the spec disagree, stop and ask the user before diverging.

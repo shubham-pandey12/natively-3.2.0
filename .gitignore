@@ -521,6 +521,10 @@ docs/*
 # build-electron.js and the release workflow point here for the client ID.
 !docs/microsoft-calendar-setup.md
 !docs/UNSUPPORTED_APIs.md
+# Live Brain (feat/live-brain): the architecture spec and implementation plan are the
+# contract every agent (Claude, Codex) follows when building the feature.
+!docs/live-brain/
+!docs/live-brain/**
 # Per-release notes are published artifacts (linked from the README), not scratch notes.
 !docs/releases/
 !docs/releases/**
