@@ -1,5 +1,6 @@
 import { createReadStream } from 'node:fs';
 import { open } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
@@ -58,21 +59,23 @@ async function readWav(path) {
 // autoVad: let Gemini's automatic activity detection decide the end of the turn
 // (what the product does) instead of explicit activityStart/activityEnd. The
 // measured time then includes Gemini's own end-of-turn wait.
-async function probe({ apiKey, model, wav, mode, autoVad }) {
+async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
     const start = performance.now();
     let speechEnd;
     let firstText = false;
     let setupReady = false;
     let text = '';
+    let audioBytesSent = 0;
     const controller = new AbortController();
     const log = (event, detail) => console.log(JSON.stringify({
         mode,
+        ...(decider ? { model, probe: 'decide' } : {}),
         vad: autoVad ? 'auto' : 'manual',
         event,
         msSinceConnectStart: Math.round(performance.now() - start),
         ...(speechEnd !== undefined ? { msSinceSpeechEnd: Math.round(performance.now() - speechEnd) } : {}),
         ...detail,
-    }));
+    }).replaceAll(apiKey, '[redacted]').replaceAll(JSON.stringify(apiKey).slice(1, -1), '[redacted]'));
     const socket = new WebSocket(endpoint, {
         headers: { 'x-goog-api-key': apiKey },
         handshakeTimeout: 15_000,
@@ -89,14 +92,13 @@ async function probe({ apiKey, model, wav, mode, autoVad }) {
             signal: controller.signal,
         });
         const audioStart = performance.now();
-        let bytesSent = 0;
         for await (const chunk of audio) {
+            audioBytesSent += chunk.length;
             await send({ realtimeInput: { audio: {
                 data: chunk.toString('base64'),
                 mimeType: `audio/pcm;rate=${wav.sampleRate}`,
             } } });
-            bytesSent += chunk.length;
-            const nextChunkAt = audioStart + bytesSent / (wav.sampleRate * 2) * 1000;
+            const nextChunkAt = audioStart + audioBytesSent / (wav.sampleRate * 2) * 1000;
             await delay(Math.max(0, nextChunkAt - performance.now()), undefined, { signal: controller.signal });
         }
         speechEnd = performance.now();
@@ -116,23 +118,40 @@ async function probe({ apiKey, model, wav, mode, autoVad }) {
     let timeout;
     try {
         return await new Promise((resolve) => {
+            let streamFinished = false;
+            let validPostSpeechDecision = false;
+            let pendingToolResponses = 0;
+            const finishDecisionProbe = () => {
+                if (controller.signal.aborted || !streamFinished || !validPostSpeechDecision || pendingToolResponses) return;
+                log('done', { receivedDecision: true });
+                controller.abort();
+                resolve(true);
+            };
             const fail = (event, detail) => {
                 if (controller.signal.aborted) return;
                 log(event, detail);
                 controller.abort();
                 resolve(false);
             };
-            timeout = setTimeout(() => fail('timeout'), 45_000 + wav.length / (wav.sampleRate * 2) * 1000);
+            timeout = setTimeout(() => fail('timeout'), (decider ? 25_000 : 45_000) + wav.length / (wav.sampleRate * 2) * 1000);
             socket.on('error', () => fail('websocket_error'));
-            // The close reason is Google's error text (e.g. invalid key, unknown model);
-            // it never contains the key. Truncated so a long reason stays readable.
-            socket.on('close', (code, reason) => fail('closed_before_done', { code, reason: String(reason ?? '').slice(0, 200), setupReady }));
+            socket.on('close', (code, reason) => fail('closed_before_done', {
+                code,
+                reason: String(reason ?? '').replaceAll(apiKey, '[redacted]').slice(0, 200),
+                setupReady,
+            }));
             socket.on('open', () => {
                 void send({ setup: {
                     model: `models/${model}`,
                     generationConfig: { responseModalities: [mode] },
                     ...(autoVad ? {} : { realtimeInputConfig: { automaticActivityDetection: { disabled: true } } }),
-                    ...(mode === 'AUDIO' ? { outputAudioTranscription: {} } : {}),
+                    ...(decider
+                        ? {
+                            inputAudioTranscription: {},
+                            systemInstruction: { parts: [{ text: decider.instructions }] },
+                            tools: [decider.tool],
+                        }
+                        : mode === 'AUDIO' ? { outputAudioTranscription: {} } : {}),
                 } }).catch(() => fail('setup_send_error'));
             });
             socket.on('message', (data) => {
@@ -147,7 +166,31 @@ async function probe({ apiKey, model, wav, mode, autoVad }) {
                 if (!setupReady && message.setupComplete !== undefined) {
                     setupReady = true;
                     log('setup_ready');
-                    void stream().catch(() => fail('audio_stream_error'));
+                    void stream().then(() => {
+                        streamFinished = true;
+                        if (decider) finishDecisionProbe();
+                    }).catch(() => fail('audio_stream_error'));
+                }
+                if (decider) {
+                    const calls = message.toolCall?.functionCalls;
+                    if (!Array.isArray(calls) || calls.length === 0) return;
+                    const functionResponses = calls.flatMap(({ id, name, args }) => {
+                        const decision = name === decider.tool.functionDeclarations[0].name ? decider.parseArgs(args) : null;
+                        log('tool_call', {
+                            name, args, decision,
+                            audioMsSent: Math.round(audioBytesSent / (wav.sampleRate * 2) * 1000),
+                        });
+                        if (!id || !name) return [];
+                        if (decision && speechEnd !== undefined) validPostSpeechDecision = true;
+                        return [{ id, name, response: decision ? { ok: true } : { error: 'Invalid decision' } }];
+                    });
+                    if (!functionResponses.length) return;
+                    pendingToolResponses++;
+                    void send({ toolResponse: { functionResponses } }).then(() => {
+                        pendingToolResponses--;
+                        finishDecisionProbe();
+                    }).catch(() => fail('tool_response_send_error'));
+                    return;
                 }
                 const content = message.serverContent;
                 if (!content) return;
@@ -177,10 +220,11 @@ async function probe({ apiKey, model, wav, mode, autoVad }) {
 
 async function main() {
     const args = process.argv.slice(2);
-    const autoVad = args.includes('--auto-vad');
-    const [file, model = defaultModel, extra] = args.filter((arg) => arg !== '--auto-vad');
+    const decide = args.includes('--decide');
+    const autoVad = decide || args.includes('--auto-vad');
+    const [file, model = defaultModel, extra] = args.filter(arg => arg !== '--auto-vad' && arg !== '--decide');
     if (!file || extra || !/^[a-z0-9][a-z0-9.-]*$/.test(model)) {
-        console.error('Usage: node scripts/spikes/gemini-live.mjs <mono 16-bit PCM WAV> [model-id] [--auto-vad]');
+        console.error('Usage: node scripts/spikes/gemini-live.mjs <mono 16-bit PCM WAV> [model-id] [--auto-vad] [--decide]');
         return 1;
     }
     const apiKey = process.env.GEMINI_API_KEY?.trim();
@@ -193,6 +237,23 @@ async function main() {
         console.error('Could not read the WAV. Use a readable, uncompressed mono 16-bit PCM RIFF/WAVE file.');
         return 1;
     }
+    if (decide) {
+        const require = createRequire(import.meta.url);
+        let instructions, tool, parseArgs;
+        try {
+            const dist = '../../dist-electron/premium/electron/liveBrain/';
+            const { buildDeciderInstructions } = require(`${dist}instructions.js`);
+            const { toGeminiDecideTurnTool, parseDecideTurnArgs } = require(`${dist}decideTurnTool.js`);
+            instructions = buildDeciderInstructions({});
+            tool = toGeminiDecideTurnTool();
+            parseArgs = parseDecideTurnArgs;
+        } catch {
+            console.error('Run npm run build:electron before using --decide.');
+            return 1;
+        }
+        const received = await probe({ apiKey, model, wav, mode: 'AUDIO', autoVad, decider: { instructions, tool, parseArgs } });
+        return received ? 0 : 1;
+    }
     let bothProducedText = true;
     for (const mode of ['TEXT', 'AUDIO']) {
         const receivedText = await probe({ apiKey, model, wav, mode, autoVad });
@@ -201,7 +262,7 @@ async function main() {
     return bothProducedText ? 0 : 1;
 }
 
-// Avoid printing SDK/network errors, server close reasons, or credentials.
+// Unexpected exceptions can carry request details. Print a fixed error.
 process.exitCode = await main().catch(() => {
     console.error('Gemini Live spike failed.');
     return 1;

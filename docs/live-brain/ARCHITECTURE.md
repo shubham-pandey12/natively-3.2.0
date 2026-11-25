@@ -28,6 +28,7 @@ It listens to the interviewer continuously, understands like a strong conversati
 | D8 | Keep it simple. Reuse existing infrastructure. No new services, servers, databases, WebRTC, or native modules. |
 | D9 | Everything is behind one setting, **off by default**. With it off, Natively behaves exactly as before. |
 | D10 | **Fast text path (2026-11-25, after the Phase 0 spike).** Gemini Live listens, detects turns, handles interruptions and decides *what to do*; the **answer text is written by a fast text model** through Natively's existing answer path, so the whole answer appears in seconds instead of at speaking pace. See §4.1 and §4.4. |
+| D11 | **Accept the decide_turn tool call (2026-11-26, after the Phase 4 spike).** The tool call arrives 1.3–1.9 s after speech end, slower than the 1.5 s gate. The user accepted it: about 1 s doesn't matter much, and Gemini's merged question handles corrections. The transcription-marker fallback (§4.1) is deferred to Phase 7 tuning. |
 
 ### Non-goals
 
@@ -460,7 +461,7 @@ Fallback order (§9) is automatic and needs no setting: selected provider → Op
 
 | Metric | Target (Gemini Live) |
 |---|---|
-| Interviewer stops → Gemini decision | median ≤ 1.0 s (measured first output ~0.5 s with auto VAD, Phase 0) |
+| Interviewer stops → Gemini decision | median ≤ 2.0 s (decide_turn tool call measured 1.3–1.9 s in the Phase 4 spike; accepted by the user under D11) |
 | Interviewer stops → first visible answer text (decision + text model first token) | median ≤ 2.0 s, p90 ≤ 3.0 s |
 | Interviewer stops → full short answer (~60 words) visible | ≤ 5 s (vs ~25 s at Gemini speaking pace) |
 | `interviewer_speech_started` → "⏸ interviewer speaking" marker | ≤ 300 ms |

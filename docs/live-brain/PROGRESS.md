@@ -12,7 +12,7 @@
 | 1 — Corrections in pipeline | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Gated by the Live Brain switch. Physical S4/S5 check in a real meeting still pending. |
 | 2 — Foundation | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Contracts, instructions, decide_turn tool, parser, factory, test double. No runtime wiring yet. |
 | 3 — Orchestrator + overlay | ✅ Done | Injected ports, fake-clock tests, and offline renderer verification. |
-| 4 — GeminiLiveBrain | ☐ Not started | |
+| 4 — GeminiLiveBrain | Blocked at Step 0 | Five of eight spike runs missed the latency or decision gate. Steps 1–6 await a decision on the transcription-marker fallback. |
 | 5 — Notebook + Supervisor | ☐ Not started | |
 | 6 — OpenAIRealtimeBrain | ☐ Not started | |
 | 7 — Tuning & validation | ☐ Not started | |
@@ -140,6 +140,27 @@ Findings (measured, single sample — repeat before tuning):
 - Text responses use the Phase 2 parser, drop deltas for closed or older response IDs, and use a generation namespace separate from the writer. The overlay adapter reuses the Phase 1 outdated/Updated events and the existing automatic answer card. The new Ask label and interviewer-speaking marker use existing muted styles. No provider or meeting integration was added.
 - Windows automated validation: `build:electron`, `typecheck:electron`, `typecheck:ts7`, and `typecheck:premium` passed. Live Brain tests passed 23/23. Auto Answer had 200 passes and the known `AutoAnswerUsageTelemetry2026_09_27` failure. Library tests had 3,242 passes and 15 skips. Component tests had 1,002 passes and 2 skips.
 - Offline Windows Chromium via agent-browser, using synthetic events and a stub preload bridge, confirmed matching Ask and answer card styles, speaking-marker removal, and the outdated fold. Electron IPC and live audio were not exercised. Requires physical macOS verification when integrated.
+
+## Phase 4 — 2026-11-26
+
+- The standalone `--decide` probe loads the compiled decider instructions, tool declaration, and argument parser. It opens a `gemini-3.8-live` AUDIO session with automatic voice activity detection, discards model audio, logs each tool call and parsed decision, and sends a tool response.
+- Ran each scenario twice on Windows with the same locally synthesized 16 kHz mono PCM WAV for both attempts. The WAVs preserved the scripted pauses. Latency starts at the end of the paced speech WAV and ends at the first `answer` call. Trailing silence remained in the stream for automatic voice activity detection. These timings exclude the text writer and overlay.
+
+| Scenario | Run | Latency | Raw `answer` arguments | Decision check |
+|---|---:|---:|---|---|
+| S1 — mid-question pause | 1 | 1,692 ms | `{"kind":"new","action":"answer","question":"How would you design a system that can handle millions of concurrent users?"}` | Correct question after the pause. Two `wait` calls before speech ended and one extra afterward. |
+| S1 — mid-question pause | 2 | 1,861 ms | `{"question":"How would you approach designing a system capable of handling millions of concurrent users?","action":"answer","kind":"new"}` | Correct question after the pause. Two `wait` calls before speech ended. |
+| S2 — multi-part question | 1 | 1,334 ms | `{"question":"How would you design a URL shortener? How does it handle high redirect traffic? And how would you scale the database as the link count grows?","kind":"new","action":"answer"}` | Correct. All three parts included in one call. |
+| S2 — multi-part question | 2 | 1,307 ms | `{"kind":"new","action":"answer","question":"How would you design a URL shortener, handle high redirect traffic, and scale the database as the link count grows?"}` | Correct question, followed by four extra `wait` calls during trailing silence. |
+| S4 — correction before the answer | 1 | 1,649 ms | `{"kind":"new","question":"Design a catalog service. Use PostgreSQL. Actually, let's assume MongoDB. How would you model the products?","action":"answer"}` | Retained the superseded PostgreSQL instruction alongside MongoDB. One extra `wait` call followed. |
+| S4 — correction before the answer | 2 | 1,700 ms | `{"question":"Design a catalog service and model the products using MongoDB.","kind":"new","action":"answer"}` | Corrected question uses MongoDB. Three extra `wait` calls followed. |
+| S7 — recovery question | 1 | 1,320 ms | `{"action":"answer","question":"What's the difference between horizontal and vertical scaling?"}` | Correct. The parser accepted the omitted optional `kind`. |
+| S7 — recovery question | 2 | 1,325 ms | `{"action":"answer","kind":"new","question":"What's the difference between horizontal and vertical scaling?"}` | Correct. |
+
+- All primary `answer` payloads parsed successfully. The extra calls all had raw arguments `{"action":"wait"}` and parsed as `wait`. Four runs exceeded 1.5 s. The S4 content error was among those four. S2's repeat was under 1.5 s but violated the instruction to call the tool once per interviewer turn. That makes five of eight runs with a latency or decision miss.
+- Stopped at the gate. No brain, writer, reconnect logic, meeting wiring, Settings handshake, or Prompt Debugger integration was added. The existing Auto Answer and Phase 1 corrections remain the active path.
+- Proposed §4.1 fallback for approval: have Gemini speak only `answer`, `wait`, or `ask: <question>` in AUDIO mode. Read the marker through `outputAudioTranscription` and discard the generated audio. Build the full question from `inputAudioTranscription` and Natively's transcript, then use the existing text writer for answers. Benchmark the marker against the same four WAVs before wiring it into meetings.
+- Windows validation: `npm run build:electron`, `node --check scripts/spikes/gemini-live.mjs`, and `git diff --check` passed. All eight `node --env-file=.env scripts/spikes/gemini-live.mjs <wav> --auto-vad --decide` invocations exited 0, which means a parseable decision arrived, independent of the gate. The remaining Phase 4 suites and real meeting tests were not run. Requires physical macOS verification.
 
 ## Open risks
 
