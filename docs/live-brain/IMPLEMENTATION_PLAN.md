@@ -118,15 +118,39 @@ Acceptance: unit tests green; no runtime behaviour change (nothing imports `live
 
 ## Phase 3 — ResponseOrchestrator + overlay  *(≈3–4 days)*
 
-**Objective:** correct on-screen behaviour, driven by `FakeLiveBrain`.
+**Objective:** the single owner of what the screen shows for Live Brain, driven by `FakeLiveBrain` and a fake answer writer. Aligned with D10 (Gemini decides, the existing answer path writes) and reusing Phase 1's outdated/Updated mechanism. No real provider, no meeting wiring yet.
 
 Tasks:
-1. `ResponseOrchestrator.ts` per ARCHITECTURE §7 (generation ids, interviewer-speaking marker, replace-in-place, filler restore, clarification timeout, status line).
-2. Deliver through existing overlay channels; add `ask` kind, `outdated`, `interviewerSpeaking` to the renderer `Message` model. **UI must be identical to Auto Answer** (ARCHITECTURE §7 "UI rule"): reuse the automatic-answer row, styles and delivery; only the minimal "Ask:" label, dimmed outdated row with "Updated" label, and interviewer-speaking marker, all from existing styles. Verify visually against an Auto Answer answer side by side.
-3. Never display text before `response_started`.
+1. `premium/electron/liveBrain/ResponseOrchestrator.ts` per ARCHITECTURE §7, consuming `LiveBrainEvent`s from any brain and talking to the app only through injected ports (no imports of `IntelligenceEngine`/`main.ts`):
+   - `answerWriter.write({ question, replacesAutomaticAnswer }) → { generationId, done: Promise<…> }` and `answerWriter.cancel(reason)` — implemented for real in Phase 4 (AnswerWriter); a fake here.
+   - `overlay.showAsk({ askId, clarification })`, `overlay.setOutdated(generationId, boolean)`, `overlay.setInterviewerSpeaking(generationId, boolean)`.
+   - `clock` (fake-clock friendly).
+   Behaviour:
+   - `decision.answer` → if an answer is current (streaming, or completed < ~20 s ago) mark it outdated and cancel it if still streaming; then `answerWriter.write(question, replacesAutomaticAnswer: true when replacing)`.
+   - `decision.ask` → mark the current answer outdated (if any) and show the clarification; start the clarification timer.
+   - `decision.wait` → clear the interviewer-speaking marker; keep the current answer; never cancel.
+   - `interviewer_speech_started` while an answer is current → set the interviewer-speaking marker (logical latency ≤ 300 ms).
+   - **Clarification timeout:** if an ask is showing and no `interviewer_speech_started` arrives within ~10 s, call `answerWriter.write` with the clarified question plus "The interviewer did not clarify; state a reasonable assumption first." If speech does arrive, cancel the timer (Gemini's next decision handles it).
+   - `response_started / response_delta / response_done` (brains that write text themselves, e.g. OpenAI Realtime): run text through `responseParser` (§6) and map wait/ask/answer the same way; text before `response_started` is never shown; late deltas of a cancelled/older response are dropped; duplicate `response_done` is harmless.
+   - Idempotent `reset()` for meeting start/stop.
+2. **Ask carries its question.** Extend `decide_turn` so `action:"ask"` also fills `question` (the question being clarified): update `DECIDE_TURN_TOOL` descriptions, `parseDecideTurnArgs` (keep optional `question` on ask), `buildDeciderInstructions`, and ARCHITECTURE §4.1. Needed for the clarification timeout.
+3. **Overlay (UI identical to Auto Answer, ARCHITECTURE §7 UI rule):**
+   - Reuse Phase 1's outdated/"Updated" path (`IntelligenceEngine.setAutomaticAnswerOutdated`, `what_to_answer_question { outdated | updated }`, `Message.outdated/updated`). Do not build a second mechanism.
+   - Ask: add an optional `clarification` (and `askId`) field to the existing `what_to_answer_question` event/IPC payload and render it in the **same automatic-answer row style** with an "Ask:" label. No new renderer/component.
+   - Interviewer speaking: optional `interviewerSpeaking: boolean` on the same event; a small marker using existing status/muted styles.
+   - Thin adapter `premium/electron/liveBrain/overlayPort.ts` (or on `IntelligenceManager`) that implements the overlay port by emitting those events — not wired into meetings yet.
+4. Status line: **deferred to Phase 5** (keep this phase small).
 
-Tests (fake clock + FakeLiveBrain): late deltas from cancelled response dropped; duplicate `response_done`; interruption → marker ≤ 300 ms (logical time); `[[NO_ACTION]]` restores previous answer; `[[ASK]]` shows tip; clarification timeout triggers assumption request; renderer helper tests in `src/lib/__tests__/`.
-Acceptance: all orchestrator scenarios pass; overlay renders the new kinds in dev (agent-browser snapshot per CLAUDE.md CDP instructions).
+Tests (fake clock + FakeLiveBrain + fake answer writer + fake overlay port):
+- answer decision → write called once; second answer decision while streaming → previous outdated + cancel + replacement write with `replacesAutomaticAnswer:true`.
+- answer decision 10 s after completion → previous outdated, no cancel; 25 s after → not outdated.
+- ask → clarification shown, previous outdated; timeout at 10 s → assumption write; speech before 10 s → no timeout write.
+- wait → marker cleared, nothing cancelled.
+- interviewer_speech_started during answer → marker set immediately.
+- text-writing brain path: `[[NO_ACTION]]` keeps previous answer; `[[ASK]]` shows tip; late deltas from an old response dropped; duplicate `response_done`; no text shown before `response_started`.
+- parseDecideTurnArgs keeps `question` on ask.
+- Renderer: helper/component tests for the "Ask:" row and interviewer-speaking marker in `src/lib/__tests__/` or `src/components/__tests__/`; flag-off rendering unchanged.
+Acceptance: all orchestrator scenarios pass; with injected events in `npm run dev:agent`, the overlay shows Ask and marker rows in the Auto Answer style (agent-browser snapshot per CLAUDE.md); flag-off parity; existing suites green.
 
 ---
 
