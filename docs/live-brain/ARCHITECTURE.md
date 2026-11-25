@@ -364,6 +364,19 @@ export interface NotebookSnapshot {
 | **Off (default)** | Existing Natively exactly as today — Auto Answer (if its own switch is on), manual answers, Direct Assist, everything unchanged. |
 | **On** | Live Brain owns automatic answering for the meeting (§9). The existing Auto Answer engine's **automatic dispatch is suppressed** to avoid double answers. Manual answer buttons, Direct Assist, transcript, notes and every other feature keep working unchanged. |
 
+**Scope rule (user decision 2026-11-26): Live Brain answers only what the interviewer says out loud.** Everything typed or triggered by hand keeps the default Natively behaviour, unchanged, even while Live Brain is on:
+
+| Input | Handled by |
+|---|---|
+| Interviewer **speech** (system audio) → automatic answer, clarification, interruption/correction | **Live Brain** |
+| Typed questions / chat in the overlay | Default Natively |
+| Direct Assist (typed or screenshot) | Default Natively |
+| Manual "What to answer" hotkey/button press | Default Natively (and it cancels an in-flight Live Brain answer the same way a manual press cancels an Auto Answer today) |
+| Screenshots, screen/DOM context requests | Default Natively |
+| Recap, follow-up questions, notes, coding hints and other modes | Default Natively |
+
+Live Brain never intercepts text input. The candidate's own mic speech is context for Live Brain (`Candidate said: …`), never a trigger.
+
 Rules:
 
 1. **Independent of the Auto Answer switch.** Live Brain does its own automatic answering; the user does not need Auto Answer on. When Live Brain is turned off, Auto Answer's own switch decides again, exactly as before.
