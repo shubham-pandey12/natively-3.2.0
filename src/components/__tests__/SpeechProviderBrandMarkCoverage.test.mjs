@@ -53,24 +53,18 @@ const overlaySrc = readFileSync(SETTINGS_OVERLAY, 'utf8');
 const brandMarkSrc = readFileSync(BRAND_MARK, 'utf8');
 
 /**
- * Slice out the single <ProviderSelect> options array. There is exactly one call
- * site; if that ever stops being true this throws rather than silently scanning
- * the wrong list.
+ * Slice out the options array owned by the speech provider selector.
  */
 function extractSpeechOptions() {
-    // The delimiter matters: a bare '<ProviderSelect' also matches the type
-    // position in `React.FC<ProviderSelectProps>`. Requiring whitespace or '>'
-    // after the name keeps this to real JSX usage.
-    const JSX_USAGE = /<ProviderSelect[\s>]/g;
-    const callSites = [...overlaySrc.matchAll(JSX_USAGE)];
+    // Audio also has a Live Brain provider selector, with separate options.
+    const speechSelectors = [...overlaySrc.matchAll(/<ProviderSelect\s+value=\{sttProvider\}/g)];
     assert.equal(
-        callSites.length,
+        speechSelectors.length,
         1,
-        `Expected exactly 1 <ProviderSelect> call site in SettingsOverlay.tsx, found ${callSites.length}. ` +
-        `If a second selector was added, this guard must be taught which one is the speech provider list.`,
+        'Expected exactly one ProviderSelect bound to sttProvider',
     );
 
-    const start = callSites[0].index;
+    const start = speechSelectors[0].index;
     const optionsStart = overlaySrc.indexOf('options={[', start);
     assert.ok(optionsStart > -1, 'Could not locate the options={[ array of <ProviderSelect>');
 

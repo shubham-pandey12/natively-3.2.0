@@ -10,6 +10,7 @@ import { CREDENTIAL_STORES_RU, CREDENTIAL_STORES_ZH, CREDENTIAL_STORES_JA, CREDE
 import { TRIAL_NOTICE_RU, TRIAL_NOTICE_ZH, TRIAL_NOTICE_JA, TRIAL_NOTICE_ES } from './i18n.trial';
 import { ASSIST_RU, ASSIST_ZH, ASSIST_JA, ASSIST_ES } from './i18n.assist';
 import { AMBIENT_CHAT_RU, AMBIENT_CHAT_ZH, AMBIENT_CHAT_JA, AMBIENT_CHAT_ES } from './i18n.ambientChat';
+import { LIVE_BRAIN_RU, LIVE_BRAIN_ZH, LIVE_BRAIN_JA, LIVE_BRAIN_ES } from './i18n.liveBrain';
 import { STT_STATUS_RU, STT_STATUS_ZH, STT_STATUS_JA, STT_STATUS_ES } from './i18n.sttStatus';
 import { SCREENSHOT_SCREEN_RU, SCREENSHOT_SCREEN_ZH, SCREENSHOT_SCREEN_JA, SCREENSHOT_SCREEN_ES } from './i18n.screenshotScreen';
 import { SCREENSHOT_QUESTION_RU, SCREENSHOT_QUESTION_ZH, SCREENSHOT_QUESTION_JA, SCREENSHOT_QUESTION_ES } from './i18n.screenshotQuestion';
@@ -62,6 +63,7 @@ const RU: Record<string, string> = {
     ...TRIAL_NOTICE_RU,
     ...ASSIST_RU,
     ...AMBIENT_CHAT_RU,
+    ...LIVE_BRAIN_RU,
     ...STT_STATUS_RU,
     ...SCREENSHOT_SCREEN_RU,
     ...SCREENSHOT_QUESTION_RU,
@@ -314,6 +316,7 @@ const ZH: Record<string, string> = {
     ...TRIAL_NOTICE_ZH,
     ...ASSIST_ZH,
     ...AMBIENT_CHAT_ZH,
+    ...LIVE_BRAIN_ZH,
     ...STT_STATUS_ZH,
     ...SCREENSHOT_SCREEN_ZH,
     ...SCREENSHOT_QUESTION_ZH,
@@ -341,6 +344,7 @@ const JA: Record<string, string> = {
     ...TRIAL_NOTICE_JA,
     ...ASSIST_JA,
     ...AMBIENT_CHAT_JA,
+    ...LIVE_BRAIN_JA,
     ...STT_STATUS_JA,
     ...SCREENSHOT_SCREEN_JA,
     ...SCREENSHOT_QUESTION_JA,
@@ -367,6 +371,7 @@ const ES: Record<string, string> = {
     ...TRIAL_NOTICE_ES,
     ...ASSIST_ES,
     ...AMBIENT_CHAT_ES,
+    ...LIVE_BRAIN_ES,
     ...STT_STATUS_ES,
     ...SCREENSHOT_SCREEN_ES,
     ...SCREENSHOT_QUESTION_ES,

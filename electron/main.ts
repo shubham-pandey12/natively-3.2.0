@@ -10815,6 +10815,14 @@ export class AppState {
     return this._autoAnswerEnabled;
   }
 
+  public getLiveBrainEnabled(): boolean {
+    return SettingsManager.getInstance().get('liveBrainEnabled') === true;
+  }
+
+  public setLiveBrainEnabled(enabled: boolean): boolean {
+    return SettingsManager.getInstance().set('liveBrainEnabled', enabled);
+  }
+
   /**
    * Returns whether the value was PERSISTED. SettingsManager.set refuses when
    * the store is degraded (R-15); the in-memory flag is left untouched in that

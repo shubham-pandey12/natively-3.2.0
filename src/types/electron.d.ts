@@ -1,4 +1,5 @@
 import type { WhatToSayOutcome } from './whatToSayOutcome';
+import type { LiveBrainSettingsApi } from './liveBrainSettings';
 import type { AssistCatchUp, AssistDailyBrief, AssistEvent, AssistLiveRecap, AssistMeetingBrief, AssistSender, LiveHelperAction } from './assist'
 // Phase 3 — DynamicActionPayload mirrors electron/services/dynamic-actions/DynamicAction.ts.
 // Kept as a structural interface (not a class import) to preserve the strict main↔renderer
@@ -138,7 +139,7 @@ export interface VisionModelState {
   inconclusive?: boolean
 }
 
-export interface ElectronAPI {
+export interface ElectronAPI extends LiveBrainSettingsApi {
   updateContentDimensions: (dimensions: {
     width: number
     height: number

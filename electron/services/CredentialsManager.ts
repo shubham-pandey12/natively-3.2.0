@@ -101,6 +101,8 @@ export type PreferredModelProvider = 'gemini' | 'groq' | 'openai' | 'claude' | '
 
 export interface StoredCredentials {
     geminiApiKey?: string;
+    liveBrainGeminiKey?: string;
+    liveBrainOpenaiKey?: string;
     groqApiKey?: string;
     openaiApiKey?: string;
     claudeApiKey?: string;
@@ -930,6 +932,32 @@ export class CredentialsManager {
 
     public getGeminiApiKey(): string | undefined {
         return this.storedOrEnv(this.credentials.geminiApiKey, 'GEMINI_API_KEY');
+    }
+
+    public getLiveBrainGeminiKey(): string | undefined {
+        return this.credentials.liveBrainGeminiKey;
+    }
+
+    public getLiveBrainOpenaiKey(): string | undefined {
+        return this.credentials.liveBrainOpenaiKey;
+    }
+
+    public setLiveBrainGeminiKey(key: string): boolean {
+        return this.setLiveBrainKey('liveBrainGeminiKey', key);
+    }
+
+    public setLiveBrainOpenaiKey(key: string): boolean {
+        return this.setLiveBrainKey('liveBrainOpenaiKey', key);
+    }
+
+    private setLiveBrainKey(field: 'liveBrainGeminiKey' | 'liveBrainOpenaiKey', key: string): boolean {
+        if (this.refuseWriteWhileDegraded('set Live Brain key')) return false;
+        const previous = this.credentials[field];
+        this.credentials[field] = key.trim() || undefined;
+        if (this.saveCredentials()) return true;
+        if (previous === undefined) delete this.credentials[field];
+        else this.credentials[field] = previous;
+        return false;
     }
 
     public getGroqApiKey(): string | undefined {

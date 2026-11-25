@@ -4,6 +4,7 @@ import type { SkillUploadPayload } from './services/skills/SkillValidator';
 import type { NativelyUsageResponse, NativelyPlansResponse, NativelyPackKeyState } from '../src/types/nativelyUsage';
 import type { MeetingOutputsApi } from '../src/types/meetingOutputs';
 import type { ConnectorsApi } from '../src/types/connectors';
+import type { LiveBrainSettingsApi } from '../src/types/liveBrainSettings';
 import type { AutoAnswerModelInstall, AutoAnswerModelSavings } from './premium/autoAnswer';
 type AutoAnswerModelState = { install: AutoAnswerModelInstall; savings: AutoAnswerModelSavings; judgeViaNatively?: boolean };
 import { PAGE_CAPTURE_FALLBACK_CHANNEL, PAGE_CAPTURE_STARTED_CHANNEL, type PageCaptureFallbackNotice } from './services/pageCaptureFallback';
@@ -121,7 +122,7 @@ interface MeetingOfferPayload {
   autoStartAt: number | null;
 }
 
-interface ElectronAPI {
+interface ElectronAPI extends LiveBrainSettingsApi {
   updateContentDimensions: (dimensions: { width: number; height: number }) => Promise<void>;
   updateContentDimensionsCentered: (dimensions: {
     width: number;
@@ -3666,6 +3667,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getAutoAnswerEnabled: () => ipcRenderer.invoke('get-auto-answer-enabled'),
   setAutoAnswerEnabled: (enabled: boolean) => ipcRenderer.invoke('set-auto-answer-enabled', enabled),
+  getLiveBrainEnabled: () => ipcRenderer.invoke('live-brain:get-enabled'),
+  setLiveBrainEnabled: (enabled) => ipcRenderer.invoke('live-brain:set-enabled', enabled),
+  getLiveBrainConfig: () => ipcRenderer.invoke('live-brain:get-config'),
+  setLiveBrainProvider: (provider) => ipcRenderer.invoke('live-brain:set-provider', provider),
+  setLiveBrainKey: (payload) => ipcRenderer.invoke('live-brain:set-key', payload),
+  setLiveBrainOptions: (options) => ipcRenderer.invoke('live-brain:set-options', options),
+  testLiveBrainConnection: () => ipcRenderer.invoke('live-brain:test-connection'),
   getAutoAnswerAccess: () => ipcRenderer.invoke('auto-answer:get-access'),
   setAutoAnswerTrainingConsent: (granted: boolean) => ipcRenderer.invoke('auto-answer:set-training-consent', granted),
   onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => {

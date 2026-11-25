@@ -52,6 +52,7 @@ import { BrowserMetadataClassifierService } from './services/browser-context/Bro
 import { autoContextVerdict, buildAutoContextRequest, codingAutoAttachEnabled } from './services/browser-context/autoContextRequest';
 import type { SafeWebsiteMetadata } from './services/browser-context/types';
 import { SettingsManager } from './services/SettingsManager';
+import { registerLiveBrainSettingsIpc } from './services/liveBrainSettings';
 import { RERANK_CANDIDATE_POOL, resolveRerankPoolSize } from './services/modes/rerankPool';
 import { buildRerankProbe } from './services/reranking/rerankProbe';
 import { ProviderStatusRegistry } from './services/ProviderStatusRegistry';
@@ -392,6 +393,13 @@ export function initializeIpcHandlers(appState: AppState): void {
     ipcMain.removeAllListeners(channel);
     ipcMain.on(channel, listener);
   };
+
+  registerLiveBrainSettingsIpc(appState, safeHandle, () => {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+      try { win.webContents.send('credentials-changed'); } catch { /* window closing */ }
+    });
+  });
 
   // System-design diagram artifacts: repair, export, the feature switch and
   // the Phone Mirror render path. One module, registered once here.

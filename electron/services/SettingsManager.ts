@@ -55,6 +55,13 @@ export interface AppSettings {
     // produced only by the What-to-Answer hotkey, exactly as before. The
     // trigger itself lives in AppState.scheduleAutoAnswer().
     autoAnswerEnabled?: boolean;
+    liveBrainEnabled?: boolean;
+    liveBrainProvider?: import('../../src/types/liveBrainSettings').LiveBrainProvider;
+    liveBrainGeminiModel?: string;
+    liveBrainOpenaiModel?: string;
+    liveBrainPromptVariant?: 'full' | 'trimmed';
+    liveBrainReuseGeminiKey?: boolean;
+    liveBrainReuseOpenaiKey?: boolean;
     // Agreement to share the transcripts of meetings where Auto Answer runs, for
     // training the Auto Answer decider (autoAnswerAccess.ts; Evin 2026-11-13).
     // Free users need it to run Auto Answer; for Pro/trial it is an opt-in.

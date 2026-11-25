@@ -35,6 +35,7 @@ import { useShortcuts } from '../hooks/useShortcuts';
 import { isMac, isWindows } from '../utils/platformUtils';
 import { SettingsToggle } from './settings/SettingsToggle';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import type { LiveBrainConfig, LiveBrainSettingsResult } from '../types/liveBrainSettings';
 import {
     clampOverlayOpacity,
     getOverlayAppearance,
@@ -187,7 +188,7 @@ const SttModelList: React.FC<{
 interface CustomSelectProps {
     label: string;
     value: string;
-    options: MediaDeviceInfo[];
+    options: Pick<MediaDeviceInfo, 'deviceId' | 'label'>[];
     onChange: (value: string) => void;
     placeholder?: string;
     /** Greys the control out and blocks the dropdown — used when the active
@@ -447,6 +448,169 @@ const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChang
                     })}
                 </div>
             </SettingsMenu>
+        </div>
+    );
+};
+
+const LiveBrainProviderSettings = () => {
+    const t = useT();
+    const theme = useResolvedTheme();
+    const [config, setConfig] = useState<LiveBrainConfig>();
+    const [keyDraft, setKeyDraft] = useState('');
+    const [modelDraft, setModelDraft] = useState<string>();
+    const [busy, setBusy] = useState(false);
+    const [status, setStatus] = useState('');
+    const api = window.electronAPI;
+
+    const refresh = useCallback(async () => {
+        setConfig(await api.getLiveBrainConfig());
+    }, [api]);
+
+    useEffect(() => {
+        const load = () => void refresh().catch(() => setStatus('Could not load Live Brain settings.'));
+        load();
+        return api?.onCredentialsChanged?.(load);
+    }, [api, refresh]);
+
+    const update = async (action: () => Promise<LiveBrainSettingsResult>, onSaved?: () => void) => {
+        setBusy(true);
+        setStatus('');
+        try {
+            const result = await action();
+            if (result.success) {
+                onSaved?.();
+                await refresh();
+            } else {
+                setStatus(result.message || result.error || 'Could not save Live Brain settings.');
+            }
+        } catch {
+            setStatus('Live Brain settings are unavailable.');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const provider = config?.provider;
+    const name = provider === 'gemini-live' ? t('Gemini Live') : t('OpenAI Realtime');
+    const model = modelDraft ?? config?.model ?? '';
+    return (
+        <div>
+            <h3 className="settings-heading text-text-primary mb-1">{t('Live Brain Provider')}</h3>
+            <div className="space-y-4">
+                {config && (
+                    <>
+                        <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
+                            <label className="text-xs font-medium text-text-secondary block">{t('Live Brain Provider')}</label>
+                            <div className="relative">
+                                <ProviderSelect
+                                    value={config.provider}
+                                    onChange={(value) => {
+                                        if (busy || (value !== 'gemini-live' && value !== 'openai-realtime' && value !== 'pipeline')) return;
+                                        void update(() => api.setLiveBrainProvider(value), () => {
+                                            setKeyDraft('');
+                                            setModelDraft(undefined);
+                                        });
+                                    }}
+                                    options={[
+                                        { id: 'gemini-live', label: t('Gemini Live'), badge: provider === 'gemini-live' && config.hasKey ? 'Saved' : null, desc: t('Uses a Google AI Studio key'), color: 'blue', icon: <BrandMark provider="google" />, neutralTile: true },
+                                        { id: 'openai-realtime', label: t('OpenAI Realtime'), badge: provider === 'openai-realtime' && config.hasKey ? 'Saved' : null, desc: t('Uses an OpenAI API key'), color: 'green', icon: <BrandMark provider="openai" />, neutralTile: true },
+                                        { id: 'pipeline', label: t('Existing pipeline (no extra key)'), badge: null, desc: t('Uses the existing Auto Answer engine'), color: 'blue', icon: <BrandMark provider="natively" />, neutralTile: true },
+                                    ]}
+                                />
+                            </div>
+                        </div>
+                        <div className="aip-root settings-swap-in" data-theme={theme} style={{ ['--aip-card-bg' as string]: 'var(--bg-card)' } as React.CSSProperties}>
+                            <div className="aip-card aip-provider bg-bg-card">
+                                {provider && provider !== 'pipeline' && (
+                                    <>
+                                        <div className="aip-provider-head">
+                                            <span className="aip-tile aip-tile--mark" aria-hidden="true">
+                                                <BrandMark provider={provider === 'gemini-live' ? 'google' : 'openai'} />
+                                            </span>
+                                            <h4 className="aip-card-title truncate min-w-0">{name}</h4>
+                                        </div>
+                                        <div className="aip-provider-row">
+                                            <div className="aip-provider-field">
+                                                <div className="aip-field">
+                                                    <KeyRound size={13} strokeWidth={1.75} className="aip-field-icon" aria-hidden="true" />
+                                                    <input
+                                                        type="password"
+                                                        className="aip-input"
+                                                        value={keyDraft}
+                                                        onChange={(event) => setKeyDraft(event.target.value)}
+                                                        placeholder={config.maskedSuffix ?? t('Enter API key')}
+                                                        aria-label={`${name} ${t('API key')}`}
+                                                        autoComplete="off"
+                                                        spellCheck={false}
+                                                        data-1p-ignore
+                                                        disabled={busy}
+                                                    />
+                                                    <button type="button" className="aip-field-seg" disabled={busy || !keyDraft.trim()}
+                                                        onClick={() => void update(() => api.setLiveBrainKey({ provider, apiKey: keyDraft }), () => setKeyDraft(''))}>
+                                                        {t('Save')}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {config.hasDedicatedKey && (
+                                                <button type="button" className="aip-btn shrink-0" data-icon="true" data-variant="danger-ghost" disabled={busy}
+                                                    title={t('Remove API Key')} aria-label={t('Remove API Key')}
+                                                    onClick={() => void update(() => api.setLiveBrainKey({ provider, apiKey: '' }), () => setKeyDraft(''))}>
+                                                    <Trash2 size={14} strokeWidth={1.75} />
+                                                </button>
+                                            )}
+                                        </div>
+                                        <label className="flex items-center gap-2 text-xs text-text-secondary">
+                                            <input type="checkbox" className="accent-accent-primary" checked={config.useAiProvidersKey} disabled={busy}
+                                                onChange={(event) => {
+                                                    const useAiProvidersKey = event.target.checked;
+                                                    void update(() => api.setLiveBrainOptions({ provider, useAiProvidersKey }));
+                                                }} />
+                                            {t('Use my AI Providers key')}
+                                        </label>
+                                        {config.usingAiProvidersKey && <p className="aip-meta">{t('Using the key from AI Providers.')}</p>}
+                                        <p className="aip-meta">{t('When Live Brain becomes available, interviewer audio will be sent to the selected provider.')}</p>
+                                        <div className="aip-provider-row">
+                                            <div className="aip-provider-field">
+                                                <div className="aip-field">
+                                                    <input type="text" className="aip-input" aria-label={t('Model')} placeholder={t('Model')} value={model}
+                                                        disabled={busy} onChange={(event) => setModelDraft(event.target.value)} />
+                                                    <button type="button" className="aip-field-seg" disabled={busy || model.trim() === config.model}
+                                                        onClick={() => void update(() => api.setLiveBrainOptions({ provider, model }), () => setModelDraft(undefined))}>
+                                                        {t('Save model')}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+                                <CustomSelect
+                                    label={t('Instruction variant')}
+                                    placeholder={t('Choose a variant')}
+                                    value={config.promptVariant ?? ''}
+                                    options={[
+                                        { deviceId: 'full', label: t('Full') },
+                                        { deviceId: 'trimmed', label: t('Trimmed') },
+                                    ]}
+                                    disabled={busy}
+                                    onChange={(promptVariant) => {
+                                        if (promptVariant === 'full' || promptVariant === 'trimmed') {
+                                            void update(() => api.setLiveBrainOptions({ promptVariant }));
+                                        }
+                                    }}
+                                />
+                                <div className="aip-provider-row">
+                                    <button type="button" className="aip-btn shrink-0" disabled={busy}
+                                        onClick={() => void update(() => api.testLiveBrainConnection())}>
+                                        {t('Test connection')}
+                                    </button>
+                                </div>
+                                <style>{AIP_CSS}</style>
+                            </div>
+                        </div>
+                    </>
+                )}
+                {status && <p className="text-xs text-text-secondary" role="status">{t(status)}</p>}
+            </div>
         </div>
     );
 };
@@ -787,6 +951,16 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [exportResult, setExportResult] = useState<string | null>(null);
     const [ambientChatEnabled, setAmbientChatEnabled] = useState(false);
     const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
+    const [liveBrainEnabled, setLiveBrainEnabled] = useState(false);
+    const [liveBrainPending, setLiveBrainPending] = useState(false);
+    const [liveBrainError, setLiveBrainError] = useState('');
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const refresh = () => window.electronAPI?.getLiveBrainEnabled?.().then(setLiveBrainEnabled).catch(() => {});
+        refresh();
+        return window.electronAPI?.onCredentialsChanged?.(refresh);
+    }, [isOpen]);
     // Auto Answer is Pro, or free with transcript sharing (autoAnswerAccess.ts).
     const [autoAnswerAccess, setAutoAnswerAccess] = useState<{ basis: 'pro' | 'sharing' | 'none'; uploads: boolean } | null>(null);
     // False in builds without the premium submodule: the Auto Answer rows are hidden.
@@ -2834,6 +3008,48 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 </div>
                                                 )}
 
+                                                {/* Live Brain */}
+                                                <div className="flex items-center justify-between px-4 py-3">
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
+                                                            <AutoAnswerIcon size={20} />
+                                                        </div>
+                                                        <div>
+                                                            <div className="flex items-center gap-2">
+                                                                <h3 className="settings-title text-text-primary">{t('Live Brain')}</h3>
+                                                                <LiquidGlassBadge variant="sky">{t('Beta')}</LiquidGlassBadge>
+                                                            </div>
+                                                            <p className="text-xs text-text-secondary mt-0.5">{t('Listens to the interviewer in real time and writes answers like a live conversation')}</p>
+                                                            {liveBrainError && <p className="text-xs text-text-secondary mt-0.5" role="alert">{t(liveBrainError)}</p>}
+                                                        </div>
+                                                    </div>
+                                                    <SettingsToggle
+                                                        checked={liveBrainEnabled}
+                                                        label={t('Live Brain')}
+                                                        disabled={liveBrainPending}
+                                                        onChange={async () => {
+                                                            const previous = liveBrainEnabled;
+                                                            const newState = !previous;
+                                                            setLiveBrainError('');
+                                                            setLiveBrainPending(true);
+                                                            setLiveBrainEnabled(newState); // Optimistic update
+                                                            try {
+                                                                const result = await window.electronAPI?.setLiveBrainEnabled?.(newState);
+                                                                if (!result?.success) {
+                                                                    setLiveBrainEnabled(previous);
+                                                                    setLiveBrainError(result?.message || result?.error || 'Could not update Live Brain.');
+                                                                }
+                                                            } catch {
+                                                                setLiveBrainEnabled(previous);
+                                                                setLiveBrainError('Could not update Live Brain.');
+                                                            } finally {
+                                                                setLiveBrainPending(false);
+                                                            }
+                                                        }}
+                                                        className={liveBrainEnabled ? 'bg-accent-primary border border-transparent' : 'bg-bg-toggle-switch border border-border-muted'}
+                                                    />
+                                                </div>
+
                                                 {/* Ambient AI Chat */}
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
@@ -4390,6 +4606,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                         </div>
                                     </div>
 
+
+                                    <LiveBrainProviderSettings />
 
                                     {/* ── Audio Configuration Section ── */}
                                     <div>
