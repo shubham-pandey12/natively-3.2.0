@@ -88,11 +88,11 @@ Tasks:
    - Persist `liveBrainEnabled` (default `false`) in the existing settings store; `appState.getLiveBrainEnabled()/setLiveBrainEnabled()`.
    - IPC `live-brain:get-enabled` / `live-brain:set-enabled` in `electron/ipcHandlers.ts` (boolean-only validation); preload `getLiveBrainEnabled` / `setLiveBrainEnabled` with types.
    - Missing key for the selected brain → inline message, switch stays off.
-   - Settings → **Intelligence**: "Live Brain" section with brain choice (`gemini-live` default | `openai-realtime` | `pipeline`), `geminiModel`, `openaiModel`, `promptVariant`.
+   - Settings → **Audio**: "Live Brain Provider" section after Speech Provider, per ARCHITECTURE §9b — provider selector (`gemini-live` default | `openai-realtime` | `pipeline`), per-provider masked key fields saved via `CredentialsManager`, "Use my AI Providers key" fallback, model, instruction variant, Test connection (stub until Phase 4), status. Same components/styles as Speech Provider. Raw keys never returned to the renderer.
    - In this phase the switch only persists and broadcasts; runtime start/stop is wired in Phase 4/5.
 6. A `FakeLiveBrain` for tests.
 
-Tests: parser (split sentinels across chunks, whitespace/markdown, no sentinel, mid-text sentinel); instructions include the current answer contract and clarification/correction rules; factory throws on unknown id; `liveBrainEnabled` defaults to false and persists; IPC rejects non-boolean; renderer toggle rollback on failure (agent-browser check of Settings → General per CLAUDE.md).
+Tests: parser (split sentinels across chunks, whitespace/markdown, no sentinel, mid-text sentinel); instructions include the current answer contract and clarification/correction rules; factory throws on unknown id; `liveBrainEnabled` defaults to false and persists; keys stored via `CredentialsManager` and never returned raw by `live-brain:get-config`; "Use my AI Providers key" resolution order; IPC rejects non-boolean; renderer toggle rollback on failure (agent-browser check of Settings → General per CLAUDE.md).
 Acceptance: unit tests green; flag-off parity; the row appears directly under Auto Answer in General.
 
 ---

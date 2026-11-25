@@ -311,7 +311,7 @@ export interface NotebookSnapshot {
 - File: `src/components/SettingsOverlay.tsx`, inside the `activeTab === 'general'` block, immediately after the Auto Answer row (the `{autoAnswerAvailable && (...)}` block that renders `<SettingsToggle label={t('Auto Answer')} …/>`).
 - Same layout: icon tile · title **"Live Brain"** · `LiquidGlassBadge variant="sky"` **"Beta"** · one-line description · `SettingsToggle` on the right.
 - Description: *"Listens to the interviewer in real time and writes answers like a live conversation"*.
-- Advanced options (brain choice, model names, instruction variant) live in **Settings → Intelligence** in a "Live Brain" section, mirroring how Auto Answer's model row lives there. The General row has only the on/off switch.
+- The General row has only the on/off switch. Provider, model and API keys live in **Settings → Audio → "Live Brain Provider"** (§9b).
 
 ### Behaviour
 
@@ -325,7 +325,7 @@ Rules:
 1. **Independent of the Auto Answer switch.** Live Brain does its own automatic answering; the user does not need Auto Answer on. When Live Brain is turned off, Auto Answer's own switch decides again, exactly as before.
 2. **Fallback uses the existing engine.** When Live Brain falls back to `PipelineBrain` (§9), it runs the existing Auto Answer path for the rest of the meeting even if the Auto Answer switch is off (the user asked for live answering). If the existing engine is unavailable in this build (`autoAnswerAvailable === false`), fallback shows a status message instead of answering.
 3. **Takes effect immediately.** Turning it on during a meeting starts the BrainSupervisor; turning it off stops it cleanly (cancel in-flight response, close session) and hands automatic answering back to the existing behaviour. No restart required.
-4. **Keys.** No new key fields. Gemini Live uses the existing Gemini API key from Settings → AI Providers; OpenAI Realtime uses the existing OpenAI key. If the chosen brain has no key, turning the switch on shows a short inline message ("Add a Gemini API key in AI Providers") and the switch stays off.
+4. **Keys.** Configured in Settings → Audio → Live Brain Provider (§9b). **Never hardcoded.** If the selected provider has no usable key, turning the switch on shows a short inline message ("Add a Gemini key in Audio → Live Brain Provider") and the switch stays off.
 5. **Not gated by Pro/sharing.** Live Brain is the user's own feature (personal use, D1); it does not reuse `autoAnswerAccess` gating.
 6. **Persisted** like Auto Answer, in the existing settings store, and survives restart.
 
@@ -343,6 +343,48 @@ Validation of the `set` payload in main: boolean only; reject anything else.
 
 ---
 
+## 9b. Live Brain Provider settings (API keys) — Settings → Audio
+
+**API keys are never hardcoded** in source, config files, tests, scripts or docs. They are entered by the user in the app and stored only in the existing secure credential store.
+
+### Where
+
+**Settings → Audio**, a new **"Live Brain Provider"** section placed after the existing **Speech Provider** section, built with the **same UI pattern as Speech Provider** (provider selector + per-provider key field + test/status), reusing the same components and styles.
+
+### What it contains
+
+| Field | Values | Notes |
+|---|---|---|
+| Provider | **Gemini Live** (default) · **OpenAI Realtime** · **Existing pipeline (no extra key)** | Maps to `LiveBrainId`. Exhaustive list; adding a provider later = add a `LiveBrain` + a row here. |
+| API key (per provider) | Google AI Studio key (Gemini Live) · OpenAI API key (OpenAI Realtime) | Masked input, same as Speech Provider keys. Saved via `CredentialsManager`. |
+| "Use my AI Providers key" | checkbox, default **on** when an AI Providers key for that vendor already exists | If the Live Brain key is empty and this is on, use the existing Gemini/OpenAI key from Settings → AI Providers. No duplicate typing needed. |
+| Model | text/select, default chosen in Phase 0 | `liveBrainGeminiModel`, `liveBrainOpenaiModel` (settings store). |
+| Instruction variant | Full · Trimmed | `liveBrainPromptVariant`; default decided in Phase 0/7. |
+| Test connection | button | Opens a short session, reports OK / auth error / quota / unsupported model. No audio sent. |
+| Status | text | Last error (auth, quota, rate limit) in plain words. |
+
+Fallback order (§9) is automatic and needs no setting: selected provider → OpenAI Realtime (only if it has a usable key and is not the failed one) → Existing pipeline.
+
+### Storage & wiring (mirror Speech Provider keys)
+
+| Layer | Speech Provider today (reference) | Live Brain (new, same pattern) |
+|---|---|---|
+| Secret storage | `CredentialsManager.setDeepgramApiKey()` etc. (`electron/services/CredentialsManager.ts`) | `CredentialsManager.setLiveBrainGeminiKey()`, `setLiveBrainOpenaiKey()` (+ getters, has-key checks). Same encryption/fallback as existing keys. |
+| IPC | `safeHandle('set-deepgram-api-key')` (`electron/ipcHandlers.ts` ~15352), `set-stt-provider` | `live-brain:set-provider`, `live-brain:set-key` (`{provider, apiKey}`), `live-brain:get-config` (never returns raw keys — only `hasKey`, masked suffix, `usingAiProvidersKey`), `live-brain:test-connection` |
+| Preload | `setSttProvider`, `setDeepgramApiKey` (`electron/preload.ts`) | `setLiveBrainProvider`, `setLiveBrainKey`, `getLiveBrainConfig`, `testLiveBrainConnection` |
+| Change broadcast | `credentials-changed` to all windows | Same `credentials-changed` event; BrainSupervisor re-reads config at next session start/rollover |
+| Renderer | Speech Provider section in Audio tab | Live Brain Provider section in Audio tab, same components |
+
+### Rules
+
+1. Raw keys never cross to the renderer after saving; the renderer only sees `hasKey` and a masked hint.
+2. Keys are never logged, never written to PROGRESS.md, test fixtures, spike output, or the Prompt Debugger.
+3. Tests use fake keys and mock servers only.
+4. Spike scripts (Phase 0) read the key from an environment variable at runtime, never from a file in the repo.
+5. Clearing a key while Live Brain is running: finish the current response, then fall back per §9.
+
+---
+
 ## 10. Integration points in existing code
 
 | Where | What changes | Constraint |
@@ -352,7 +394,7 @@ Validation of the `set` payload in main: boolean only; reject anything else.
 | `SimpleAutoAnswer.ts` (`joinsDispatch` ~1072, `parkAutomatic` ~1604) | Phase 1 correction fix (benefits everyone). | Full `test:auto-answer` suite must pass. |
 | `IntelligenceEngine.ts` | Expose events needed by `PipelineBrain`; Phase 0 timing mark. | No change to manual/Direct Assist paths. |
 | `src/components/NativelyInterface.tsx` | `ask` kind, `outdated` fold, interviewer-speaking marker, status line. | Small, isolated edits. |
-| Settings (store + UI) | General: "Live Brain" switch below Auto Answer (`liveBrainEnabled`, default false). Intelligence: brain choice, `geminiModel`, `openaiModel`, `promptVariant`. See §9a. | Keys come from existing provider key storage. |
+| Settings (store + UI) | General: "Live Brain" switch below Auto Answer (`liveBrainEnabled`, default false) — §9a. Audio: "Live Brain Provider" section after Speech Provider (provider, keys, model, prompt variant, test) — §9b. | Keys only in `CredentialsManager`; never hardcoded. |
 | `electron/llm/promptDebug.ts` | Record Live Brain instructions and per-response timings when debug is enabled. | Dev-only as today. |
 
 ---
