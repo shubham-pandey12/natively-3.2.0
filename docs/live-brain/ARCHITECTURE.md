@@ -184,7 +184,7 @@ Transport: WebSocket to the Gemini Live API (`BidiGenerateContent`). Key from th
   decide_turn({
     action: "answer" | "ask" | "wait",
     question: string,        // the interviewer's question as understood, self-contained,
-                             //   with corrections/follow-up context folded in (answer only)
+                             //   with corrections/follow-up context folded in (answer or ask)
     clarification?: string,  // one short question for the candidate to ask (ask only)
     kind?: "new" | "follow_up" | "correction"
   })
@@ -290,7 +290,7 @@ Rules:
 3. **Replacement.** When the next response is an **answer** or **ask**, the previous answer becomes `outdated` (folded, still viewable) and the new one becomes current.
 4. **Filler.** If the next response is `[[NO_ACTION]]`, remove the marker and keep the previous answer current.
 5. **Never show speculation.** Only text from a provider response that has started (`response_started`) is displayed.
-6. **Clarification timeout.** If an `ask` is shown and no new interviewer speech arrives within ~10 s, ask the brain for an answer with a stated assumption (Gemini/OpenAI: send a text turn "Interviewer did not clarify; answer with a reasonable assumption and state it." with response requested).
+6. **Clarification timeout.** If an `ask` carries the original question and no new interviewer speech arrives within ~10 s, pass that question to the AnswerWriter with "The interviewer did not clarify; state a reasonable assumption first, then answer." An ask without the original question is shown without an assumption timer.
 7. **Delivery.** Reuse the existing overlay delivery channels (`intelligence-token-batch`, `what-to-answer:*` handshake/replay). New message kinds are added to the existing `Message` model, not a new renderer.
 
 Overlay message kinds: `answer`, `ask`, plus flags `outdated`, `interviewerSpeaking`. Status line: `Listening · Thinking · Answer ready · Reconnecting · Backup brain`.

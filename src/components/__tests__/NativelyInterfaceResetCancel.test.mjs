@@ -109,3 +109,44 @@ test('a correction marks only its generation and seals the discarded draft for t
   assert.equal(resolveLiveAnswerBatch(state.liveAnswerGenIdRef.current, 3, state.liveAnswerFloorRef.current).accept, false);
   assert.equal(resolveLiveAnswerBatch(state.liveAnswerGenIdRef.current, 4, state.liveAnswerFloorRef.current).accept, true);
 });
+
+test('Live Brain asks reuse the answer row and speaking updates only the identified answer', () => {
+  const onQuestion = ui.match(/onWhatToAnswerQuestion\?\.\((\(\{[^\n]*\}\) => \{[\s\S]*?\n      \})\) \?\?/)?.[1];
+  assert.ok(onQuestion);
+  let rows = [
+    { id: 'earlier', role: 'system', whatToAnswerGeneration: 2, text: 'Older answer' },
+    { id: 'current', role: 'system', whatToAnswerGeneration: 3, text: 'Existing answer' },
+  ];
+  const dispatch = runInNewContext(stripTypeScriptTypes(onQuestion), {
+    activeDirectAssistRef: { current: null },
+    legacyIntelligenceTombstonedRef: { current: false },
+    liveAnswerGenIdRef: { current: 3 },
+    liveAnswerFloorRef: { current: null },
+    resolveLiveAnswerBatch,
+    updatedAnswerGenerationRef: { current: null },
+    pinAnswerPanel: () => {},
+    setMessages: (update) => { rows = update(rows); },
+  });
+  dispatch({ generationId: 3, interviewerSpeaking: true });
+  assert.equal(rows[0].interviewerSpeaking, undefined);
+  assert.equal(rows[1].interviewerSpeaking, true);
+  dispatch({ generationId: 3, interviewerSpeaking: false });
+  assert.equal(rows[1].interviewerSpeaking, false);
+
+  dispatch({ askId: 'clarify-writes', clarification: 'How many writes per second?' });
+  dispatch({ askId: 'clarify-writes', clarification: 'How many writes per second?' });
+  const asks = rows.filter(row => row.kind === 'ask');
+  assert.equal(asks.length, 1);
+  assert.equal(asks[0].role, 'system');
+  assert.equal(asks[0].intent, 'what_to_answer');
+  assert.equal(asks[0].text, 'How many writes per second?');
+  assert.match(ui, /msg\.kind === 'ask'.*overlay-text-muted.*t\('Ask:'\)/);
+  assert.match(ui, /msg\.interviewerSpeaking && \([\s\S]*?<div role="status" className="mt-1 text-\[12px\] overlay-text-muted">[\s\S]*?t\('Interviewer speaking'\)/);
+
+  dispatch({ generationId: 4, question: 'Ordinary Auto Answer question', pending: true });
+  assert.equal(rows.at(-1).id, 'interviewer-answer-4');
+  assert.equal(rows.at(-1).role, 'interviewer');
+  assert.equal(rows.at(-1).answerPending, true);
+  assert.equal(rows.at(-1).kind, undefined);
+  assert.equal(rows.at(-1).interviewerSpeaking, undefined);
+});

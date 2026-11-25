@@ -1,3 +1,4 @@
+import type { WhatToAnswerQuestionEvent } from '../src/types/whatToAnswerQuestion';
 import type { WhatToSayOutcome, WhatToSayPressStart } from '../src/types/whatToSayOutcome';
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SkillUploadPayload } from './services/skills/SkillValidator';
@@ -728,7 +729,7 @@ interface ElectronAPI extends LiveBrainSettingsApi {
 
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void;
-  onWhatToAnswerQuestion: (callback: (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean; outdated?: boolean; updated?: boolean }) => void) => () => void;
+  onWhatToAnswerQuestion: (callback: (data: WhatToAnswerQuestionEvent) => void) => () => void;
   onIntelligenceSuggestedAnswer: (
     callback: (data: { answer: string; question: string; confidence: number; sourceLabel?: string; generationId?: number; stopReason?: string }) => void,
   ) => () => void;

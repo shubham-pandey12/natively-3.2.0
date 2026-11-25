@@ -2,6 +2,7 @@
 // LLM mode routing and orchestration.
 // Extracted from IntelligenceManager to decouple LLM logic from state management.
 
+import type { WhatToAnswerQuestionEvent } from '../src/types/whatToAnswerQuestion';
 import type { SessionWriteDecision } from './llm/FinalAnswerGenerationPolicy';
 import type { AutoAnswerCancelReason, AutoAnswerDispatchResult } from './premium/autoAnswer';
 import { DISPATCH_MAX_MS, DISPATCH_STALL_MS } from './llm/automaticAnswerTiming';
@@ -157,7 +158,7 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
-    'what_to_answer_question': (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean; outdated?: boolean; updated?: boolean }) => void;
+    'what_to_answer_question': (data: WhatToAnswerQuestionEvent) => void;
     'suggested_answer': (answer: string, question: string, confidence: number, generationId?: number, sourceLabel?: string, stopReason?: string, outcome?: WhatToSayOutcome) => void;
     // generationId (audit finding #3): stamped on every live token so the renderer
     // can drop a batch from an answer that was already superseded. Optional →

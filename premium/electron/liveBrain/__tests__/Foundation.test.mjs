@@ -90,6 +90,8 @@ test('decide_turn normalizes the three actions and reads serialized JSON', () =>
         { action: 'answer', question: 'Why Redis?', kind: 'follow_up' });
     assert.deepEqual(parseDecideTurnArgs('{"action":"ask","clarification":" Which database? ","kind":"unknown"}'),
         { action: 'ask', clarification: 'Which database?' });
+    assert.deepEqual(parseDecideTurnArgs({ action: 'ask', clarification: 'Which database?', question: ' Design a catalog. ' }),
+        { action: 'ask', clarification: 'Which database?', question: 'Design a catalog.' });
     assert.deepEqual(parseDecideTurnArgs({ action: 'wait', question: 'unused' }), { action: 'wait' });
 });
 
@@ -100,6 +102,7 @@ test('decide_turn rejects incomplete or malformed arguments and caps long text',
     ]) assert.equal(parseDecideTurnArgs(value), null);
     assert.equal(parseDecideTurnArgs({ action: 'answer', question: 'q'.repeat(2500) }).question.length, 2000);
     assert.equal(parseDecideTurnArgs({ action: 'ask', clarification: 'c'.repeat(400) }).clarification.length, 300);
+    assert.equal(parseDecideTurnArgs({ action: 'ask', clarification: 'Which database?', question: 'q'.repeat(2500) }).question.length, 2000);
     assert.equal(parseDecideTurnArgs({ action: 'ask', clarification: 'c'.repeat(299) + '😀' }).clarification.length, 299);
 });
 

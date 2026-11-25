@@ -572,6 +572,9 @@ interface Message {
   whatToAnswerGeneration?: number;
   outdated?: boolean;
   updated?: boolean;
+  kind?: 'ask';
+  interviewerSpeaking?: boolean;
+  liveBrainText?: boolean;
   hasScreenshot?: boolean;
   screenshotPreview?: string;
   // Every attached screenshot's data-URL preview (screenshotPreview is the first
@@ -1412,6 +1415,12 @@ const MessageRow = React.memo(
               <ChatNoteLine kind="late" className="mb-1.5">{chatNoteText(msg.note, t)}</ChatNoteLine>
             )}
             {msg.updated && <div className="text-[11px] overlay-text-muted">{t('Updated')}</div>}
+            {msg.kind === 'ask' && <div className="text-[11px] overlay-text-muted">{t('Ask:')}</div>}
+            {msg.interviewerSpeaking && (
+              <div role="status" className="mt-1 text-[12px] overlay-text-muted">
+                <span aria-hidden="true">⏸ </span>{t('Interviewer speaking')}
+              </div>
+            )}
             {msg.outdated ? (
               msg.isStreaming ? (
                 <div className="opacity-60">
@@ -8008,11 +8017,42 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated }) => {
-        if (typeof outdated === 'boolean') {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, interviewerSpeaking, responseText }) => {
+        if (askId && clarification) {
+          if (activeDirectAssistRef.current) return;
+          const id = `live-brain-ask-${askId}`;
+          pinAnswerPanel();
+          setMessages((prev) => prev.some((message) => message.id === id) ? prev : [
+            ...prev, { id, role: 'system', kind: 'ask', intent: 'what_to_answer', text: clarification },
+          ]);
+          return;
+        }
+        if (generationId === undefined) return;
+        if (typeof outdated === 'boolean' || typeof interviewerSpeaking === 'boolean') {
           setMessages((prev) => prev.map((message) => message.whatToAnswerGeneration === generationId
-            ? { ...message, outdated }
+            ? { ...message,
+                ...(typeof outdated === 'boolean' ? { outdated } : {}),
+                ...(typeof interviewerSpeaking === 'boolean' ? { interviewerSpeaking } : {}),
+              }
             : message));
+          return;
+        }
+        if (responseText) {
+          if (activeDirectAssistRef.current) return;
+          const id = `live-brain-text-${generationId}`;
+          pinAnswerPanel();
+          setMessages((prev) => {
+            const existing = prev.find((message) => message.id === id);
+            const patch = { text: responseText.text, isStreaming: !responseText.done };
+            if (existing) {
+              if (!existing.isStreaming) return prev;
+              return prev.map((message) => message === existing ? { ...message, ...patch } : message);
+            }
+            return [...prev, {
+              id, role: 'system', intent: 'what_to_answer', whatToAnswerGeneration: generationId,
+              liveBrainText: true, updated, ...patch,
+            }];
+          });
           return;
         }
         const id = overlayQuestionId ?? `interviewer-answer-${generationId}`;
@@ -10513,7 +10553,7 @@ Provide only the answer, nothing else.`;
         streamingRenderModeRef.current === 'react-code' &&
         // …or a tilde-fenced diagram, which has no backtick fence at all.
         (msg.isCode || msg.text.includes('```') || hasOpeningMermaidFence(msg.text) || preFenceDiagramStream);
-      if (msg.isStreaming && msg.role === 'system' && !msg.isNegotiationCoaching && !isActiveReactCodeStream) {
+      if (msg.isStreaming && msg.role === 'system' && !msg.liveBrainText && !msg.isNegotiationCoaching && !isActiveReactCodeStream) {
         // React-code pre-fence gap: streamingRenderModeRef already flipped to
         // 'react-code' (the raw arrived text has a fence) but the paced
         // msg.text hasn't caught up to it yet — isActiveReactCodeStream above

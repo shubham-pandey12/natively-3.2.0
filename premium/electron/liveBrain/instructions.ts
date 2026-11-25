@@ -48,7 +48,7 @@ export function buildDeciderInstructions(ctx: DeciderContext): string {
     return `${LIVE_PREAMBLE}
 At every end of an interviewer turn, call decide_turn exactly once. Never speak an answer or a clarification.
 - answer: a real question or request. Put the self-contained question in question, folding in corrections and relevant follow-up context.
-- ask: put the one short clarification in clarification. ${CLARIFICATION_RULE}
+- ask: put the one short clarification in clarification and the self-contained interviewer question it clarifies in question. ${CLARIFICATION_RULE}
 - wait: small talk, filler, or the interviewer has not finished.
 ${CORRECTION_RULE}${contextBlocks(ctx, ctx.profileSummary)}`;
 }

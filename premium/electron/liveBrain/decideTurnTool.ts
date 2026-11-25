@@ -4,7 +4,7 @@ type DecisionKind = NonNullable<Extract<LiveBrainEvent, { type: 'decision' }>['k
 
 export type Decision =
     | { action: 'answer'; question: string; kind?: DecisionKind }
-    | { action: 'ask'; clarification: string; kind?: DecisionKind }
+    | { action: 'ask'; clarification: string; question?: string; kind?: DecisionKind }
     | { action: 'wait'; kind?: DecisionKind };
 
 const QUESTION_MAX_LENGTH = 2_000;
@@ -21,7 +21,7 @@ export const DECIDE_TURN_TOOL = {
             action: { type: 'string', enum: ACTIONS },
             question: {
                 type: 'string',
-                description: 'Required for answer. A self-contained question with relevant follow-up context and corrections.',
+                description: 'For answer and ask, supply the self-contained interviewer question with follow-up context and corrections. Required for answer.',
                 maxLength: QUESTION_MAX_LENGTH,
             },
             clarification: {
@@ -64,7 +64,9 @@ export function parseDecideTurnArgs(raw: unknown): Decision | null {
         }
         case 'ask': {
             const text = limitedText(clarification, CLARIFICATION_MAX_LENGTH);
-            return text ? { action: 'ask', clarification: text, ...metadata } : null;
+            if (!text) return null;
+            const askedQuestion = limitedText(question, QUESTION_MAX_LENGTH);
+            return { action: 'ask', clarification: text, ...(askedQuestion ? { question: askedQuestion } : {}), ...metadata };
         }
         case 'wait':
             return { action: 'wait', ...metadata };

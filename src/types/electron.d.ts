@@ -1,3 +1,4 @@
+import type { WhatToAnswerQuestionEvent } from './whatToAnswerQuestion';
 import type { WhatToSayOutcome } from './whatToSayOutcome';
 import type { LiveBrainSettingsApi } from './liveBrainSettings';
 import type { AssistCatchUp, AssistDailyBrief, AssistEvent, AssistLiveRecap, AssistMeetingBrief, AssistSender, LiveHelperAction } from './assist'
@@ -899,7 +900,7 @@ export interface ElectronAPI extends LiveBrainSettingsApi {
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void
   onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => () => void
-  onWhatToAnswerQuestion: (callback: (data: { generationId: number; question?: string; overlayQuestionId?: string; pending?: boolean; failed?: boolean; outdated?: boolean; updated?: boolean }) => void) => () => void;
+  onWhatToAnswerQuestion: (callback: (data: WhatToAnswerQuestionEvent) => void) => () => void;
   onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; generationId?: number; sourceLabel?: string; emittedAt?: number; stopReason?: string; outcome?: WhatToSayOutcome }) => void) => () => void
   onIntelligenceSuggestedAnswerDiscard: (callback: (data: { reason: string; generationId?: number }) => void) => () => void
   // Verified code execution (background): ✓ badge + corrected message.

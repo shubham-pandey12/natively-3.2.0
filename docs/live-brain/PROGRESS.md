@@ -11,7 +11,7 @@
 | 0 — Verify facts & baseline | ✅ Done (reviewed) | Research, dev timing, corpus, spike committed. Gemini spike run on Windows (see "Gemini Live spike results"). Pipeline baseline (real meeting) still pending. |
 | 1 — Corrections in pipeline | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Gated by the Live Brain switch. Physical S4/S5 check in a real meeting still pending. |
 | 2 — Foundation | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Contracts, instructions, decide_turn tool, parser, factory, test double. No runtime wiring yet. |
-| 3 — Orchestrator + overlay | ☐ Not started | |
+| 3 — Orchestrator + overlay | ✅ Done | Injected ports, fake-clock tests, and offline renderer verification. |
 | 4 — GeminiLiveBrain | ☐ Not started | |
 | 5 — Notebook + Supervisor | ☐ Not started | |
 | 6 — OpenAIRealtimeBrain | ☐ Not started | |
@@ -132,6 +132,14 @@ Findings (measured, single sample — repeat before tuning):
 - Checked: nothing outside `premium/electron/liveBrain/` imports it (no runtime effect). Gemini tool shape uses `functionDeclarations[].parametersJsonSchema`; real Gemini acceptance is verified by the Phase 4 spike.
 - Re-run on Windows: `build:electron`, `typecheck:electron`, `typecheck:ts7`, `typecheck:premium` passed; Foundation tests 12/12; `test:auto-answer` 200/201 (known pre-existing failure only).
 - Requires physical macOS verification (when wired into meetings).
+
+## Phase 3 — 2026-11-26
+
+- Added `ResponseOrchestrator` with injected writer, overlay, and clock ports. It tracks one current answer, folds a replaced answer, cancels an active writer when a new answer takes over, and clears the interviewer-speaking marker on wait. The replacement window is 20 seconds after delivery. The clarification timer is 10 seconds and is cancelled by interviewer speech, another answer, or reset.
+- `decide_turn` now keeps the interviewer question on ask so the timeout can pass it to the writer with an assumption instruction. A questionless ask, including the provider-text ASK sentinel path, still displays its clarification without scheduling an answer.
+- Text responses use the Phase 2 parser, drop deltas for closed or older response IDs, and use a generation namespace separate from the writer. The overlay adapter reuses the Phase 1 outdated/Updated events and the existing automatic answer card. The new Ask label and interviewer-speaking marker use existing muted styles. No provider or meeting integration was added.
+- Windows automated validation: `build:electron`, `typecheck:electron`, `typecheck:ts7`, and `typecheck:premium` passed. Live Brain tests passed 23/23. Auto Answer had 200 passes and the known `AutoAnswerUsageTelemetry2026_09_27` failure. Library tests had 3,242 passes and 15 skips. Component tests had 1,002 passes and 2 skips.
+- Offline Windows Chromium via agent-browser, using synthetic events and a stub preload bridge, confirmed matching Ask and answer card styles, speaking-marker removal, and the outdated fold. Electron IPC and live audio were not exercised. Requires physical macOS verification when integrated.
 
 ## Open risks
 
