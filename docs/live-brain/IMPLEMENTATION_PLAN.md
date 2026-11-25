@@ -75,7 +75,9 @@ Out of scope: any product code for Live Brain.
 
 ## Phase 1 — Corrections replace stale answers in today's pipeline  *(≈3–4 days)*
 
-**Objective:** fix the most visible gap for every user, and make PipelineBrain a good fallback.
+**Objective:** make corrections and interruptions replace stale automatic answers, so PipelineBrain is a good fallback.
+
+**Gating (D9):** the new correction behaviour is active **only while the Live Brain switch is on** (read via `appState.getLiveBrainEnabled()`, injected into the engine — not read from settings inside the engine). With the switch off, Auto Answer behaves exactly as before, byte-for-byte. Making it the default for everyone is a separate, later decision.
 
 Current behaviour (verified): new interviewer speech cancels a streaming automatic answer only via `joinsDispatch` (`SimpleAutoAnswer.ts` ~1072: within 1.5 s, same speaker, continuation-shaped). Corrections like "Actually, caching is not allowed" are parked (`parkAutomatic` ~1604) and the outdated answer stays on screen.
 
