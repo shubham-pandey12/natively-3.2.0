@@ -12,7 +12,7 @@
 | 1 — Corrections in pipeline | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Gated by the Live Brain switch. Physical S4/S5 check in a real meeting still pending. |
 | 2 — Foundation | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Contracts, instructions, decide_turn tool, parser, factory, test double. No runtime wiring yet. |
 | 3 — Orchestrator + overlay | ✅ Done | Injected ports, fake-clock tests, and offline renderer verification. |
-| 4 — GeminiLiveBrain | Blocked at Step 0 | Five of eight spike runs missed the latency or decision gate. Steps 1–6 await a decision on the transcription-marker fallback. |
+| 4 — GeminiLiveBrain | Implemented | D11 accepted `decide_turn`. Steps 1–6 are in place. Live meeting validation and consistent S4 constraint replacement are still open. |
 | 5 — Notebook + Supervisor | ☐ Not started | |
 | 6 — OpenAIRealtimeBrain | ☐ Not started | |
 | 7 — Tuning & validation | ☐ Not started | |
@@ -141,7 +141,7 @@ Findings (measured, single sample — repeat before tuning):
 - Windows automated validation: `build:electron`, `typecheck:electron`, `typecheck:ts7`, and `typecheck:premium` passed. Live Brain tests passed 23/23. Auto Answer had 200 passes and the known `AutoAnswerUsageTelemetry2026_09_27` failure. Library tests had 3,242 passes and 15 skips. Component tests had 1,002 passes and 2 skips.
 - Offline Windows Chromium via agent-browser, using synthetic events and a stub preload bridge, confirmed matching Ask and answer card styles, speaking-marker removal, and the outdated fold. Electron IPC and live audio were not exercised. Requires physical macOS verification when integrated.
 
-## Phase 4 — 2026-11-26
+## Phase 4 spike — 2026-11-26
 
 - The standalone `--decide` probe loads the compiled decider instructions, tool declaration, and argument parser. It opens a `gemini-3.8-live` AUDIO session with automatic voice activity detection, discards model audio, logs each tool call and parsed decision, and sends a tool response.
 - Ran each scenario twice on Windows with the same locally synthesized 16 kHz mono PCM WAV for both attempts. The WAVs preserved the scripted pauses. Latency starts at the end of the paced speech WAV and ends at the first `answer` call. Trailing silence remained in the stream for automatic voice activity detection. These timings exclude the text writer and overlay.
@@ -158,9 +158,22 @@ Findings (measured, single sample — repeat before tuning):
 | S7 — recovery question | 2 | 1,325 ms | `{"action":"answer","kind":"new","question":"What's the difference between horizontal and vertical scaling?"}` | Correct. |
 
 - All primary `answer` payloads parsed successfully. The extra calls all had raw arguments `{"action":"wait"}` and parsed as `wait`. Four runs exceeded 1.5 s. The S4 content error was among those four. S2's repeat was under 1.5 s but violated the instruction to call the tool once per interviewer turn. That makes five of eight runs with a latency or decision miss.
-- Stopped at the gate. No brain, writer, reconnect logic, meeting wiring, Settings handshake, or Prompt Debugger integration was added. The existing Auto Answer and Phase 1 corrections remain the active path.
-- Proposed §4.1 fallback for approval: have Gemini speak only `answer`, `wait`, or `ask: <question>` in AUDIO mode. Read the marker through `outputAudioTranscription` and discard the generated audio. Build the full question from `inputAudioTranscription` and Natively's transcript, then use the existing text writer for answers. Benchmark the marker against the same four WAVs before wiring it into meetings.
-- Windows validation: `npm run build:electron`, `node --check scripts/spikes/gemini-live.mjs`, and `git diff --check` passed. All eight `node --env-file=.env scripts/spikes/gemini-live.mjs <wav> --auto-vad --decide` invocations exited 0, which means a parseable decision arrived, independent of the gate. The remaining Phase 4 suites and real meeting tests were not run. Requires physical macOS verification.
+- Implementation paused at the original gate. D11 (`7b616e07`) then accepted `decide_turn` and revised the target to a median of ≤ 2.0 s. The original eight-run median was 1,491.5 ms. The transcription-marker fallback moved to Phase 7.
+- Windows spike validation: `npm run build:electron`, `node --check scripts/spikes/gemini-live.mjs`, and `git diff --check` passed. All eight `node --env-file=.env scripts/spikes/gemini-live.mjs <wav> --auto-vad --decide` invocations exited 0, which means a parseable decision arrived, independent of the gate.
+
+## Phase 4 — 2026-11-26
+
+- Gemini Live uses AUDIO with auto VAD, input transcription, session resumption and context window compression. The app discards model audio, acknowledges each tool call with a matching ID, and suppresses decisions without intervening interviewer transcription or interruption. Candidate finals append as context-only turns and wait for an active provider turn to finish. `goAway` rolls over the connection using the latest resumable handle. Transient errors back off and retry. Authentication, quota, and exhausted retries go to the existing Auto Answer pipeline with Phase 1 corrections. [Google Live WebSocket reference](https://aistudio.google.com/api-reference/live) · [Session management](https://aistudio.google.com/docs/live-api/session-management)
+- The meeting switch owns routing immediately. Windows WASAPI, Windows Chromium loopback fallback, and macOS CoreAudio/ScreenCaptureKit feed the shared system PCM callback. Only that callback forwards PCM to Gemini. Existing STT still supplies the visible transcript. The old automatic judge is suppressed while Gemini owns the meeting and takes over on failure even if its independent switch is off. Manual and typed paths keep their existing entry points. Settings runs a setup-only Gemini handshake. The dev Prompt Debugger records instructions, decisions, and the capture speech-stop, decision, first visible text, and completion timestamps.
+- S4 was replayed twice on the same Windows WAV and `gemini-3.8-live` after the instruction change. Both commands exited 0. The median was **1,611 ms**. Only one of two questions removed the superseded constraint. The raw spike still records extra waits, and a mock WebSocket test verifies the production duplicate guard acknowledges and drops them.
+
+| S4 rerun | Speech end → first answer | Raw `answer` arguments | Correctness |
+|---|---:|---|---|
+| 1 | 1,556 ms | `{"question":"Design a catalog service, and specifically, how would you model the products assuming we are using MongoDB?","kind":"new","action":"answer"}` | MongoDB replaced PostgreSQL. Three extra `wait` calls followed in silence. |
+| 2 | 1,666 ms | `{"action":"answer","question":"Design a catalog service. Use PostgreSQL. Actually, let's assume MongoDB. How would you model the products?","kind":"new"}` | Both database constraints remained. |
+
+- Windows validation: `npm run build:electron`, `npm run typecheck:electron`, `npm run typecheck:ts7`, and `npm run typecheck:premium` passed. Live Brain, Phase 1 corrections, Settings IPC, and baseline timing tests passed 50/50. `npm run test:auto-answer` passed 200 of 201 with only the known `AutoAnswerUsageTelemetry2026_09_27` “main.ts wires it” assertion failing. `npm run test:lib` passed 3,242 with 15 skipped. `npm run test:components` passed 1,002 with 2 skipped.
+- Windows Electron CDP verified Settings → Audio shows the Live Brain section after Speech Provider and reports the missing key when testing without a key. The mock WebSocket test covers the successful setup-only handshake. The two S4 trials used synthetic speech and exercised the standalone probe. Real meeting S1–S9, physical capture, and end-to-end answer latency still need verification. Requires physical macOS verification.
 
 ## Open risks
 

@@ -61,21 +61,30 @@ interface WireRecord {
 }
 
 const RING_MAX = 300;
-interface AnswerTiming {
+interface PipelineAnswerTiming {
     generationId: number;
     speechStoppedAt: number;
     firstVisibleTextAt: number;
     speechStopToFirstVisibleTextMs: number;
     via: 'stream' | 'tail' | 'final' | 'prefetch';
 }
+type AnswerTiming = PipelineAnswerTiming | {
+    source: 'live-brain';
+    decisionId: string;
+    generationId?: number;
+    speechStoppedAt?: number;
+    decisionAt: number;
+    firstVisibleTextAt?: number;
+    doneAt: number;
+    status: 'completed' | 'cancelled' | 'failed' | 'wait' | 'ask';
+};
 let installed = false;
 let seq = 0;
-let noteSeq = 0;
-
-function state(): { records: WireRecord[]; notes: Array<PromptCompositionNote & { seq: number; ts: number }>; answerTimings: AnswerTiming[] } {
+function state(): { records: WireRecord[]; notes: Array<PromptCompositionNote & { seq: number; ts: number }>; answerTimings: AnswerTiming[]; noteSequence: number } {
     const g = globalThis as any;
     const st = (g.__nativelyPromptDebug ||= { records: [], notes: [] });
     st.answerTimings ??= [];
+    st.noteSequence ??= 0;
     return st;
 }
 
@@ -229,10 +238,19 @@ export function setPromptDebugTurnFacts(facts: Record<string, unknown>): void {
  */
 export function notePromptComposition(note: PromptCompositionNote): void {
     if (!installed) return;
-    const st = state();
     const facts = turnFacts && Date.now() - turnFacts.ts < 30_000 ? turnFacts.facts : undefined;
     turnFacts = null;
-    const entry = { ...note, extra: { ...(note.extra ?? {}), ...(facts ? { turnFacts: facts } : {}) }, seq: ++noteSeq, ts: Date.now() };
+    recordPromptComposition({ ...note, extra: { ...(note.extra ?? {}), ...(facts ? { turnFacts: facts } : {}) } });
+}
+
+/** Live Brain uses a WebSocket and has no HTTP prompt to correlate. */
+export function notePromptDebugLiveBrain(note: PromptCompositionNote): void {
+    if (isPromptDebugEnabled()) recordPromptComposition(note);
+}
+
+function recordPromptComposition(note: PromptCompositionNote): void {
+    const st = state();
+    const entry = { ...note, seq: ++st.noteSequence, ts: Date.now() };
     st.notes.push(entry);
     if (st.notes.length > 50) st.notes.shift();
     persist({ kind: 'composition', ...entry, systemSha: sha(note.system), userSha: sha(note.user) });

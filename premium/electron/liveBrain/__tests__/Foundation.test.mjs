@@ -119,6 +119,10 @@ test('the decider builder is pure and contains turn rules without spoken-answer 
     assert.equal(buildDeciderInstructions({}).includes('Interview notebook:'), false);
 });
 
+test('decider question drops constraints superseded by an interviewer correction', () => {
+    assert.match(buildDeciderInstructions({}), /In question, the interviewer's latest correction replaces earlier conflicting constraints\. Drop the replaced constraint and never carry both\./);
+});
+
 test('answer variants retain the imported voice while trimmed omits scenario rules', () => {
     const context = Object.freeze({ profileContext: 'Has built a queue', modeName: 'My Google interview', modeTemplate: 'technical-interview', notebookText: 'Budget is fixed' });
     const full = buildAnswerInstructions(context, 'full');
@@ -146,7 +150,8 @@ test('answer variants retain the imported voice while trimmed omits scenario rul
 });
 
 test('the exhaustive factory distinguishes known placeholders from unknown ids', () => {
-    for (const id of ['gemini-live', 'openai-realtime', 'pipeline']) {
+    for (const id of ['gemini-live', 'gemini']) assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, 'gemini-live');
+    for (const id of ['openai-realtime', 'pipeline']) {
         assert.throws(() => createLiveBrain(id, {}), error => error instanceof LiveBrainNotImplementedError && error.id === id);
     }
     assert.throws(() => createLiveBrain('future-brain', {}), { message: 'Unsupported live brain: future-brain' });

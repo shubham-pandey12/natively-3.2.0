@@ -8,7 +8,7 @@ import { join } from 'node:path';
 const require = createRequire(import.meta.url);
 const compiled = '../../../dist-electron/electron/services/';
 
-test('Live Brain settings persist and IPC resolves keys without exposing them or connecting', () => {
+test('Live Brain settings persist and only the Gemini handshake receives the resolved key', async () => {
     const userData = mkdtempSync(join(tmpdir(), 'natively-live-brain-'));
     const load = Module._load;
     const originalSettings = globalThis.__nativelySettingsManagerV1__;
@@ -34,15 +34,22 @@ test('Live Brain settings persist and IPC resolves keys without exposing them or
         const credentials = require(`${compiled}CredentialsManager.js`).CredentialsManager.getInstance();
         credentials.init();
         const handlers = new Map();
+        const connections = [];
         let broadcasts = 0;
         require(`${compiled}liveBrainSettings.js`).registerLiveBrainSettingsIpc({
             getLiveBrainEnabled: () => settings.get('liveBrainEnabled') === true,
             setLiveBrainEnabled: (enabled) => settings.set('liveBrainEnabled', enabled),
-        }, (channel, listener) => handlers.set(channel, listener), () => { broadcasts++; });
+        }, (channel, listener) => handlers.set(channel, listener), () => { broadcasts++; }, () => ({
+            async testConnection(options) {
+                connections.push(options);
+                return { success: true, message: 'Connected' };
+            },
+        }));
         return {
             credentials,
             invoke: (channel, payload) => handlers.get(`live-brain:${channel}`)(null, payload),
             broadcasts: () => broadcasts,
+            connections,
         };
     };
 
@@ -83,7 +90,8 @@ test('Live Brain settings persist and IPC resolves keys without exposing them or
         assert.equal(invoke('set-key', { provider: 'gemini-live', apiKey: fakeDedicated }).success, true);
         assert.equal(invoke('get-config').usingAiProvidersKey, false);
         assert.equal(invoke('get-config').maskedSuffix, '••••••••Demo');
-        assert.equal(invoke('test-connection').error, 'not_available_yet');
+        assert.deepEqual(await invoke('test-connection'), { success: true, message: 'Connected' });
+        assert.deepEqual(first.connections, [{ apiKey: fakeDedicated, model: '' }]);
         assert.equal(invoke('set-enabled', true).success, true);
         assert.equal(invoke('set-options', { provider: 'gemini-live', model: 'fake-gemini-model' }).success, true);
         assert.equal(invoke('set-options', { promptVariant: 'trimmed' }).success, true);
@@ -110,6 +118,8 @@ test('Live Brain settings persist and IPC resolves keys without exposing them or
         }
         assert.equal(restarted.invoke('set-key', { provider: 'gemini-live', apiKey: '' }).success, true);
         assert.equal(restarted.invoke('get-config').maskedSuffix, '••••••••Fake');
+        assert.equal((await restarted.invoke('test-connection')).success, true);
+        assert.deepEqual(restarted.connections, [{ apiKey: fakeGemini, model: 'fake-gemini-model' }]);
         assert.equal(restarted.invoke('set-enabled', false).success, true);
         assert.equal(restarted.invoke('set-provider', 'pipeline').success, true);
         assert.equal(restarted.invoke('set-enabled', true).success, true);

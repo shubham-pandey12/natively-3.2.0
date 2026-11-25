@@ -284,6 +284,14 @@ export class IntelligenceManager extends EventEmitter {
         this.engine.setAutomaticAnswerOutdated(generationId, outdated);
     }
 
+    emitLiveBrainQuestion(event: import('../src/types/whatToAnswerQuestion').WhatToAnswerQuestionEvent): void {
+        this.engine.emit('what_to_answer_question', event);
+    }
+
+    runLiveBrainAnswer(request: import('./premium/liveBrain').LiveBrainAnswerRequest): ReturnType<IntelligenceEngine['runLiveBrainAnswer']> {
+        return this.engine.runLiveBrainAnswer(request, this.getFormattedContext(120));
+    }
+
     /** Stop the AUTOMATIC answer only (never a manual one). See IntelligenceEngine.cancelAutomaticAnswer. */
     cancelAutomaticAnswer(reason: Parameters<IntelligenceEngine['cancelAutomaticAnswer']>[0]): boolean {
         return this.engine.cancelAutomaticAnswer(reason);

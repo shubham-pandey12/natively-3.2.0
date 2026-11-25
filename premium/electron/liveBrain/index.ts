@@ -1,4 +1,5 @@
 import type { LiveBrain, LiveBrainId } from './types';
+import { GeminiLiveBrain, type GeminiLiveOptions } from './brains/GeminiLiveBrain';
 
 export class LiveBrainNotImplementedError extends Error {
     constructor(readonly id: LiveBrainId) {
@@ -7,9 +8,11 @@ export class LiveBrainNotImplementedError extends Error {
     }
 }
 
-export function createLiveBrain(id: LiveBrainId, _deps: unknown): LiveBrain {
+export function createLiveBrain(id: LiveBrainId | 'gemini', deps: GeminiLiveOptions): LiveBrain {
     switch (id) {
+        case 'gemini':
         case 'gemini-live':
+            return new GeminiLiveBrain(deps);
         case 'openai-realtime':
         case 'pipeline':
             throw new LiveBrainNotImplementedError(id);

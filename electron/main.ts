@@ -1360,6 +1360,8 @@ import { canDiarize, shouldDiarize, withVoiceEpoch } from "./audio/sttDiarizatio
 // Auto Answer lives in the private premium submodule; without it this is an inert stand-in
 // and Auto Answer is unavailable (electron/premium/autoAnswer.ts).
 import { loadAutoAnswerPremium, type AutoAnswerAccess, type AutoAnswerDecider, type AutoAnswerModelInstaller, type AutoAnswerSavingsLedger, type TrainingUploader } from "./premium/autoAnswer"
+import { LiveBrainRouting, loadLiveBrainPremium } from './premium/liveBrain'
+import { resolveLiveBrainRuntime } from './services/liveBrainSettings'
 import { currentWhisperGlossaryPrompt, nameTerms, setSttContextTerms, setSttDictionaryTerms } from "./audio/sttContextTerms"
 import { getUserDictionary } from "./audio/userDictionary"
 import { LOCAL_STT_PROVIDERS, SttGapRecoveryCoordinator, recoveredLineMayBeAnswered, type RecoveredSegment, type SttSource } from "./audio/sttGapRecovery"
@@ -2874,6 +2876,7 @@ export class AppState {
 
   public setQuitting(value: boolean): void {
     this._isQuitting = value;
+    if (value) this.liveBrainRouting.stop();
   }
 
   /**
@@ -3948,6 +3951,8 @@ export class AppState {
     } catch { return false; }
   }
 
+  private readonly liveBrainRouting = new LiveBrainRouting();
+
   private readonly simpleAutoAnswer = loadAutoAnswerPremium().createEngine({
     // Pro, trial, or a free user who shares training data (autoAnswerAccess.ts).
     // Checked per decision, so a licence that lapses or consent that is
@@ -4293,6 +4298,7 @@ export class AppState {
   /** A manual What-to-Answer started (hotkey / button / accepted offer): the offer card is committed. */
   /** Returns the press id its settle call must carry. */
   public onManualWhatToAnswer(press?: { spoken?: boolean; spokenQuestion?: string }): number {
+    this.liveBrainRouting.activeSession?.cancelAnswer('manual_answer');
     // What streams next is the manual answer, not the automatic one.
     this.autoAnswerUsage.stopAwaitingAnswer();
     const pressId = this.simpleAutoAnswer.onManualAnswerStarted();
@@ -4608,6 +4614,7 @@ export class AppState {
 
       const transcriptAt = Date.now();
       if (!micEcho) {
+        if (speaker === 'user' && segment.isFinal) this.liveBrainRouting.activeSession?.addCandidateText(segment.text, transcriptAt);
         this.intelligenceManager.handleTranscript({
           speaker: speaker,
           ...(speakerId ? { speakerId } : {}),
@@ -5286,6 +5293,9 @@ export class AppState {
         chunk = this.transcriptionPause.gate(chunk);
         this.audioLevelMeter.note('system', this.transcriptionPause.isPaused() ? 0 : audioLevel(chunk));
         this.googleSTT?.write(chunk);
+        // All native system capture paths and the Chromium loopback fallback
+        // deliver mono PCM here. The mic callback never feeds this session.
+        this.liveBrainRouting.activeSession?.acceptAudio('system', chunk, capture.getSampleRate());
         // Gap recovery's ring buffer (sttGapRecovery.ts): a copy, nothing waits.
         if (this.sttGap.isActive()) {
           if (!gapRate) gapRate = capture.getSampleRate();
@@ -5308,7 +5318,9 @@ export class AppState {
     capture.on('speech_ended', () => {
       if (this.systemAudioCapture === capture) {
         if (this.isMeetingActive && isPromptDebugEnabled()) {
-          this.debugInterviewerStop = { at: Date.now(), meetingGeneration: this._meetingGeneration, capture };
+          const at = Date.now();
+          this.debugInterviewerStop = { at, meetingGeneration: this._meetingGeneration, capture };
+          this.liveBrainRouting.activeSession?.noteSpeechStop(at);
         }
         this.googleSTT?.notifySpeechEnded?.();
         this._sttFailover.system?.notifySpeechEnded();
@@ -8140,6 +8152,7 @@ export class AppState {
 
     const meetingGeneration = ++this._meetingGeneration;
     this.isMeetingActive = true;
+    if (this.getLiveBrainEnabled()) this.startMeetingLiveBrain();
     this.autoAnswerUsage.meetingStarted();
     try { this.trainingUploader().meetingStarted(); } catch { /* sharing is never a blocker */ }
     // Auto Answer switched on from before it became Pro-or-sharing (2026-11-13),
@@ -8147,13 +8160,13 @@ export class AppState {
     // is false) and the overlay asks once, at the start of this meeting, to
     // share or upgrade. Nothing is uploaded unless the user agrees.
     try {
-      if (this._autoAnswerEnabled && !this.getAutoAnswerAccess().allowed) {
+      if (!this.liveBrainRouting.enabled && this._autoAnswerEnabled && !this.getAutoAnswerAccess().allowed) {
         setTimeout(() => this._broadcastToAllWindows('auto-answer:access-required', { reason: 'meeting_start' }), 1500);
       }
     } catch { /* a prompt, never a blocker */ }
     // Load the Auto Answer decider before the first question, so that decision
     // is not the one waiting on a ~0.5 s model load (no-op when off or absent).
-    try { if (this.isAutoAnswerActive()) this.autoAnswerDecider().warmUp(); } catch { /* optional */ }
+    if (!this.liveBrainRouting.enabled && this.isAutoAnswerActive()) this.warmAutoAnswerJudge();
     // A Pro pack is sold as meeting hours: report this meeting's time, whatever
     // transcribes it (services/packs/PackMeetingClock.ts). No-op without a
     // Natively API key, and one request per meeting for a key that is not a pack.
@@ -8603,6 +8616,7 @@ export class AppState {
       await this._pendingTeardown?.catch((): void => {});
       return;
     }
+    this.liveBrainRouting.stop();
     this.setMeetingWithoutAudio(false);
 
     this.cancelAutoAnswer();
@@ -9209,6 +9223,7 @@ export class AppState {
 
     this.intelligenceManager.on('manual_answer_started', (id: symbol) => {
       this.simpleAutoAnswer.onManualChatStarted(id);
+      this.liveBrainRouting.activeSession?.cancelAnswer('manual_answer');
       const win = answerWindow()
       this.sendToWindow(win, 'intelligence-manual-started')
     })
@@ -10833,7 +10848,50 @@ export class AppState {
   }
 
   public setLiveBrainEnabled(enabled: boolean): boolean {
-    return SettingsManager.getInstance().set('liveBrainEnabled', enabled);
+    if (!SettingsManager.getInstance().set('liveBrainEnabled', enabled)) return false;
+    if (this.isMeetingActive && !this._endMeetingInFlight) {
+      if (enabled) this.startMeetingLiveBrain();
+      else if (this.liveBrainRouting.enabled) {
+        this.liveBrainRouting.stop();
+        this.cancelAutoAnswer();
+        if (this.isAutoAnswerActive()) this.warmAutoAnswerJudge();
+      }
+    }
+    return true;
+  }
+
+  private startMeetingLiveBrain(): void {
+    if (this.liveBrainRouting.enabled) return;
+    this.cancelAutoAnswer();
+    this.liveBrainRouting.start(onFailure => {
+      const { provider, model, apiKey } = resolveLiveBrainRuntime();
+      if (provider !== 'gemini-live' || !apiKey) return undefined;
+      const name = this.currentUserName();
+      const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
+      const mode = ModesManager.getInstance().getActiveMode()?.name;
+      const profileSummary = [name && `Candidate: ${name}`, mode && `Interview mode: ${mode}`].filter(Boolean).join('\n');
+      return loadLiveBrainPremium()?.createMeeting({
+        apiKey, model, sessionId: crypto.randomUUID(), profileSummary,
+        engine: this.intelligenceManager,
+        emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),
+        onFailure,
+      });
+    }, code => {
+      if (code) console.warn(`[LiveBrain] Gemini session ended (${code}).`);
+      if (this.isAutoAnswerAvailable()) this.warmAutoAnswerJudge();
+      else {
+        try {
+          const { Notification } = require('electron') as typeof import('electron');
+          if (Notification.isSupported()) new Notification({
+            title: 'Live Brain', body: 'The existing Auto Answer pipeline is unavailable in this build.', silent: true,
+          }).show();
+        } catch { /* Notification availability must not affect the meeting. */ }
+      }
+    });
+  }
+
+  private warmAutoAnswerJudge(): void {
+    try { this.autoAnswerDecider().warmUp(); } catch { /* optional */ }
   }
 
   /**
@@ -10859,6 +10917,7 @@ export class AppState {
 
   /** The toggle is on AND the user may run Auto Answer. Everything that acts on Auto Answer asks this. */
   public isAutoAnswerActive(): boolean {
+    if (this.liveBrainRouting.enabled) return this.liveBrainRouting.pipelineOverride(this.isAutoAnswerAvailable()) === true;
     if (!this._autoAnswerEnabled) return false;
     // Asked on every transcript segment: the licence/trial check reads the
     // trial clock (which can write the credential store), so the answer is
@@ -10880,7 +10939,7 @@ export class AppState {
     this._autoAnswerAccessMemo = null;
     // Withdrawn and not Pro: the next decision is already refused by
     // isAutoAnswerActive(); drop anything already armed too.
-    if (!granted && !this.getAutoAnswerAccess().allowed) this.cancelAutoAnswer();
+    if (!granted && !this.liveBrainRouting.enabled && !this.getAutoAnswerAccess().allowed) this.cancelAutoAnswer();
     try { if (!granted) this.trainingUploader().withdraw(); else void this.trainingUploader().flush(); } catch { /* best effort */ }
     console.log(`[AppState] autoAnswerTrainingConsent ${granted ? 'granted' : 'withdrawn'}`);
     return true;
@@ -10895,7 +10954,7 @@ export class AppState {
     this._autoAnswerEnabled = enabled;
     // Drop anything already armed: turning the toggle off mid-meeting must not
     // let one more auto-answer land a second later.
-    if (!enabled) this.cancelAutoAnswer();
+    if (!enabled && !this.liveBrainRouting.enabled) this.cancelAutoAnswer();
     else if (this.isMeetingActive) { try { if (this.isAutoAnswerActive()) this.autoAnswerDecider().warmUp(); } catch { /* optional */ } }
     console.log(`[AppState] autoAnswerEnabled set to ${enabled}`);
     return true;

@@ -479,6 +479,7 @@ const LiveBrainProviderSettings = () => {
             const result = await action();
             if (result.success) {
                 onSaved?.();
+                if (result.message) setStatus(result.message);
                 await refresh();
             } else {
                 setStatus(result.message || result.error || 'Could not save Live Brain settings.');

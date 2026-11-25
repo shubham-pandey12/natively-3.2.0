@@ -1,16 +1,16 @@
 import { CredentialsManager } from './CredentialsManager';
 import { SettingsManager } from './SettingsManager';
 import type { AppState } from '../main';
+import { loadLiveBrainPremium } from '../premium/liveBrain';
 import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
 
 const settingsUnavailable = 'Settings store is unavailable; the change was not saved.';
-const connectionUnavailable = 'Connection testing is not available yet — brain arrives in Phase 4.';
 
 function isKeyProvider(value: unknown): value is LiveBrainKeyProvider {
     return value === 'gemini-live' || value === 'openai-realtime';
 }
 
-// Local shape check only. Authentication is deferred until provider sessions exist.
+// A local shape check is useful before making the provider handshake.
 // Gemini: deliberately loose. Classic AI Studio keys are `AIza` + 35 chars, but a
 // working 53-character key without that prefix authenticated against Gemini Live
 // on 2026-11-25 (Phase 0 spike), so a prefix/length rule would reject real keys.
@@ -23,6 +23,7 @@ function isWellFormed(provider: LiveBrainKeyProvider, key: string): boolean {
 function inspectConfig(settings: SettingsManager, credentials: CredentialsManager): {
     config: LiveBrainConfig;
     keyIsWellFormed: boolean;
+    usableKey?: string;
 } {
     const provider = settings.get('liveBrainProvider') ?? 'gemini-live';
     const promptVariant = settings.get('liveBrainPromptVariant') ?? null;
@@ -48,6 +49,7 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsManage
     const keyIsWellFormed = key !== undefined && isWellFormed(provider, key);
     return {
         keyIsWellFormed,
+        usableKey: keyIsWellFormed ? key : undefined,
         config: {
             provider,
             hasKey: Boolean(key),
@@ -61,10 +63,17 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsManage
     };
 }
 
+/** Main-process only. IPC exposes inspectConfig().config, never usableKey. */
+export function resolveLiveBrainRuntime(): { provider: LiveBrainConfig['provider']; model: string; apiKey?: string } {
+    const { config, usableKey } = inspectConfig(SettingsManager.getInstance(), CredentialsManager.getInstance());
+    return { provider: config.provider, model: config.model, apiKey: usableKey };
+}
+
 export function registerLiveBrainSettingsIpc(
     appState: Pick<AppState, 'getLiveBrainEnabled' | 'setLiveBrainEnabled'>,
     safeHandle: (channel: string, listener: (event: unknown, payload?: unknown) => unknown) => void,
     broadcastChanged: () => void,
+    loadPremium = loadLiveBrainPremium,
 ): void {
     const settings = () => SettingsManager.getInstance();
     const credentials = () => CredentialsManager.getInstance();
@@ -147,11 +156,17 @@ export function registerLiveBrainSettingsIpc(
     });
 
     safeHandle('live-brain:test-connection', () => {
-        const { config: { provider, hasKey }, keyIsWellFormed } = inspect();
+        const { config: { provider, hasKey, model }, usableKey } = inspect();
         if (isKeyProvider(provider)) {
             if (!hasKey) return { success: false, error: 'Add an API key first.' };
-            if (!keyIsWellFormed) return { success: false, error: 'The API key format is invalid.' };
+            if (!usableKey) return { success: false, error: 'The API key format is invalid.' };
+            if (provider === 'gemini-live') {
+                const premium = loadPremium();
+                return premium?.testConnection({ apiKey: usableKey, model })
+                    ?? { success: false, error: 'unavailable', message: 'Gemini Live is unavailable in this build.' };
+            }
         }
-        return { success: false, error: 'not_available_yet', message: connectionUnavailable };
+        const message = provider === 'pipeline' ? 'The existing pipeline needs no separate Live Brain connection.' : 'OpenAI Realtime connection testing is not available yet.';
+        return { success: false, error: 'not_available_yet', message };
     });
 }
