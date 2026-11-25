@@ -131,19 +131,22 @@ Acceptance: all orchestrator scenarios pass; overlay renders the new kinds in de
 
 ---
 
-## Phase 4 — GeminiLiveBrain  *(≈6–8 days)*
+## Phase 4 — GeminiLiveBrain + AnswerWriter (fast text path)  *(≈7–9 days)*
 
-**Objective:** the main brain.
+**Objective:** the main brain, per ARCHITECTURE D10: Gemini Live listens and decides; the existing Natively answer path writes the text fast.
 
 Tasks:
-1. `brains/GeminiLiveBrain.ts` using the protocol facts recorded in Phase 0 (§4.1): setup, audio streaming (resample to required rate via existing resampler utilities), candidate text turns without response, response streaming (TEXT or AUDIO+transcription per Phase 0 decision; audio bytes discarded), interruption mapping, `goAway` → `session_expiring`, error classification (auth/quota/rate_limited/network/protocol).
-2. Reconnect with exponential backoff (reuse the backoff policy style of existing STT providers).
-3. Wire into `main.ts` behind `liveBrainEnabled`: tap interviewer PCM to the brain; send candidate finals; suppress the old engine's automatic dispatch while a non-pipeline brain is active; react to the switch mid-meeting (start/stop immediately, hand automatic answering back to existing behaviour on off) per ARCHITECTURE §9a.
-4. Prompt Debugger: record instructions + per-response timings.
+0. **Spike first (½ day):** extend `scripts/spikes/gemini-live.mjs` with a `--decide` mode that registers the `decide_turn` function tool and the decider instructions, and logs `speech_end → toolCall` latency and the tool arguments. Run it (user's key from `.env` via `node --env-file=.env`) on the S1, S2, S4 and S7 questions. Record results in PROGRESS.md. If tool calls are slow (> ~1.5 s) or unreliable, switch to the transcription-marker fallback (ARCHITECTURE §4.1) and record why.
+1. `brains/GeminiLiveBrain.ts` per ARCHITECTURE §4.1: setup (`AUDIO` + discard audio, `inputAudioTranscription`, auto VAD, session resumption, context compression, `decide_turn` tool), audio streaming (resample to 16 kHz with existing resampler utilities), candidate text turns without response, `toolCall` → `decision` event + `toolResponse`, `interrupted` → `interviewer_speech_started`, `goAway` → `session_expiring`, error classification (auth/quota/rate_limited/network/protocol).
+2. `AnswerWriter.ts` per §4.4: `decision.answer` → existing automatic answer path (`IntelligenceEngine` automatic mode) with the decided question + notebook context, user's selected answer model; cancel the in-flight answer on a newer decision; `ask` shown directly; `wait` no-op. The old Auto Answer judge is bypassed while GeminiLiveBrain is active.
+3. Reconnect with exponential backoff (reuse the backoff policy style of existing STT providers).
+4. Wire into `main.ts` behind `liveBrainEnabled`: tap interviewer PCM to the brain; send candidate finals; suppress the old engine's automatic dispatch while a non-pipeline brain is active; react to the switch mid-meeting per ARCHITECTURE §9a.
+5. Test connection in Settings → Audio becomes real for Gemini (short setup, no audio).
+6. Prompt Debugger: record decider instructions, each decision, and timings (`speechStop → decision → firstAnswerText → done`).
 
-Tests: mock WebSocket server replaying recorded Gemini event sequences (from the Phase 0 spike): normal answer, ask, no-action, interruption, goAway, 429, auth failure, socket drop mid-response.
-Manual: S1–S9 with a real free key on Windows; record latency in PROGRESS.md.
-Acceptance: scenarios pass manually; latency recorded vs ARCHITECTURE §11 targets; flag-off parity.
+Tests: mock WebSocket server replaying recorded Gemini event sequences (from the spikes): answer decision, ask, wait, interruption mid-answer (new decision cancels the old answer), goAway, 429, auth failure, socket drop. AnswerWriter: decision → existing answer path called once with the decided question; newer decision cancels; ask/wait never call the text model.
+Manual: S1–S9 with a real free key on Windows; record latency vs ARCHITECTURE §11.
+Acceptance: scenarios pass manually; full short answer visible ≤ ~5 s; latency recorded; flag-off parity.
 
 ---
 
