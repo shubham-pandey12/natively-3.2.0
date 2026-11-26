@@ -8152,7 +8152,9 @@ export class AppState {
 
     const meetingGeneration = ++this._meetingGeneration;
     this.isMeetingActive = true;
-    if (this.getLiveBrainEnabled()) this.startMeetingLiveBrain();
+    const liveBrainOn = this.getLiveBrainEnabled();
+    console.log(`[LiveBrain] meeting start: Live Brain is ${liveBrainOn ? 'on' : 'off'}`);
+    if (liveBrainOn) this.startMeetingLiveBrain();
     this.autoAnswerUsage.meetingStarted();
     try { this.trainingUploader().meetingStarted(); } catch { /* sharing is never a blocker */ }
     // Auto Answer switched on from before it became Pro-or-sharing (2026-11-13),

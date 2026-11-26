@@ -60,7 +60,13 @@ const coreSmokePremiumExternalPlugin = {
       const target = path.resolve(args.resolveDir, args.path);
       const privateRoot = path.resolve(rootDir, 'premium');
       if (target !== privateRoot && !target.startsWith(privateRoot + path.sep)) return undefined;
-      return { path: args.path, external: true };
+      // The importer is inlined into its entry's bundle (often
+      // dist-electron/electron/main.js), so its own relative path no longer
+      // points at the compiled module: `../../premium/x` from main.js lands on
+      // the TypeScript source in <root>/premium. Point at the compiled copy in
+      // dist-electron/premium by absolute path instead (dev/smoke builds only).
+      const compiled = path.join(outDir, path.relative(rootDir, target)).split(path.sep).join('/');
+      return { path: compiled, external: true };
     });
   },
 };

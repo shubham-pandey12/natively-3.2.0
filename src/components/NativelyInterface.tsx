@@ -1607,7 +1607,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   // The notes window (`?window=notes`) is open: the Notes button shows it.
-  const [conversationContext, setConversationContext] = useState<string>('');
   const [isManualRecording, setIsManualRecording] = useState(false);
   const isRecordingRef = useRef(false); // Ref to track recording state (avoids stale closure)
   // Answer/Stop tail collection — see answerTailWait.mjs. The recording ref
@@ -5605,10 +5604,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, []);
   // ────────────────────────────────────────────────────────────────────────
 
-  // Build conversation context from messages
-  useEffect(() => {
-    setConversationContext(buildConversationContextFromMessages(messages));
-  }, [messages]);
+  // (No mirrored conversation-context state: it was never read, and its
+  // per-message-update setState tipped streaming answers into React's
+  // "Maximum update depth exceeded". Submit paths build it on demand.)
 
   // Listen for settings window visibility changes
   useEffect(() => {
