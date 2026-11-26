@@ -15,7 +15,7 @@
 | 4 — GeminiLiveBrain | Implemented | D11 accepted `decide_turn`. Steps 1–6 are in place. Live meeting validation and consistent S4 constraint replacement are still open. |
 | 4b — Gemini writes the answer (D12) | Implemented | Task 0 accepted. Tasks 1–6 implemented with Gemini 3.1 Flash Live Preview as default. Tuned VAD passed the S1 pause case and exceeded §11's first-word targets. Real meeting and macOS verification remain open. |
 | 5 — Notebook + Supervisor | Implemented | Bounded interview memory, answer-aware rollover, and legacy pipeline fallback. Windows backend live handoff verified. Full app capture, rendered status and physical macOS remain open. |
-| 6 — OpenAI + ElevenLabs Realtime | ☐ Not started (ElevenLabs settings done early) | D13 added ElevenLabs Realtime. Its settings (provider, key, models, reuse, dev `.env`) shipped ahead of the phase in 895b3e8b at the user's request; the brain itself and its spike are still Phase 6. Selecting it today runs the existing pipeline. |
+| 6 — OpenAI + ElevenLabs Realtime | Step 0 complete, awaiting user acceptance | Both models answer from interviewer PCM in audio mode. Text-only sessions yield no answer. The transcript arrives in bursts, barge-in cancels the original turn, and both models missed the filler and clarification sentinels in the sample. Provider implementation is pending. ElevenLabs settings shipped in 895b3e8b. |
 | 7 — Tuning & validation | ☐ Not started | |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
@@ -302,6 +302,66 @@ Windows WASAPI and its Chromium fallback and macOS CoreAudio/ScreenCaptureKit st
 - Tested physically on Windows: a live meeting with interviewer audio through the speakers. 16 answers, all completed. From native speech end to first answer text, the median was 1.15 s; 15 of 16 were 0.77–1.27 s, and one was 2.52 s. The notebook's interviewer turns hold whole questions (for example "Good. Let's pivot. Requirements change again. … What happens?").
 - Observed, not fixed: the notebook's earlier summaries read as generic recaps ("Focused discussion covering 10 topics. Started with: …"), and one began with a mis-transcribed non-English fragment. Needs review in Phase 7 tuning.
 - Requires physical macOS verification.
+
+## Phase 6, Step 0 — ElevenLabs Realtime spike (2026-11-26)
+
+Windows standalone socket probe using the existing `ws` dependency and `buildAnswerInstructions` with the full Technical Interview prompt. The probe read `ELEVENLABS_API_KEY` from the environment populated by `node --env-file=.env`. It sent synthetic interviewer speech only. Audio emitted by the service was discarded.
+
+### Protocol and pricing
+
+- ElevenLabs documents an OpenAI GA Realtime-compatible WebSocket at `wss://api.elevenlabs.io/v1/convai/realtime` for `eleven_realtime_v1_mini` and `eleven_realtime_v1_max`. The documented browser flow sends `xi-api-key` to `POST /v1/convai/realtime/client_secrets` and sends the returned ephemeral value as `Authorization: Bearer <value>` on the socket. This flow worked for both models from Node. Direct `xi-api-key` on the WebSocket with an immediate `session.update` also negotiated both models, and a direct Mini S7 replay produced answer transcript deltas. Direct `session.created` initially reported Mini even when the URL requested Max. `session.updated` confirmed the requested model. Waiting for `session.created` before sending the update timed out on the direct route. Sending the long-lived key as a WebSocket Bearer credential closed with 4001. The public compatibility guide covers the ephemeral browser flow. [Compatibility guide](https://elevenlabs.io/docs/eleven-agents/guides/openai-realtime-compatibility) · [Client secret API](https://elevenlabs.io/docs/api-reference/conversations/create-client-secret)
+- The live audio path accepted `session.update` with `type: "realtime"`, the model, instructions, `output_modalities: ["audio"]`, PCM input at 24 kHz, PCM output with voice `brian`, and `audio.input.turn_detection` set to `semantic_vad` with `eagerness: "low"`, `create_response: true`, and `interrupt_response: true`. The audio append format was base64-encoded mono PCM16 little-endian in `input_audio_buffer.append`, sent every 100 ms. Audio mode emitted `input_audio_buffer.speech_started`, `input_audio_buffer.speech_stopped`, `conversation.item.input_audio_transcription.completed`, `response.created`, `response.output_audio_transcript.delta`, `response.output_audio_transcript.done`, and `response.done`. [Session configuration mapping](https://github.com/elevenlabs/skills/blob/main/realtime/references/session-config.md) · [WebSocket audio reference](https://github.com/elevenlabs/skills/blob/main/realtime/references/browser-audio.md)
+- The negotiated session default was 600 s. Client-secret requests with 60 and 7,200 s were accepted and echoed. A 7,201 s request returned HTTP 422. Timed expiry on an open socket was outside the probe. Published pricing is $0.08 per additional connected minute for both, plus input/output token prices per million of $0.20/$6.00 for Mini and $1.80/$9.00 for Max. The published above-concurrency rate is $0.16 per minute. [API changelog](https://elevenlabs.io/docs/changelog#october-19-2026) · [Realtime API pricing](https://elevenlabs.io/pricing/api)
+
+### Text-only output
+
+Both models echoed `output_modalities: ["text"]` at mint, `session.created`, and `session.updated`. The corpus attempts used a fresh session per model and case. S1, S2, S4, S7, filler, ambiguous, and the initial S2 barge-in turn all timed out without a speech event, input transcript, response event, or error. The barge-in trigger required a first text delta, so the second utterance was never sent in text mode. An S7 retry without automatic VAD returned `input_audio_buffer.committed` and conversation item events but produced no answer after an explicit `response.create` requesting text. Text-only output is therefore not usable with interviewer PCM in the tested flow.
+
+### Audio mode with output transcription
+
+The inputs were synthesized with Windows System.Speech and trimmed at the outer speech edges. The probe sent 300 ms of initial silence, paced the 24 kHz PCM in 100 ms frames, and kept sending silence between turns. S1 used the corpus question with a 1.2 s pause. S2 asked how to design a high-traffic URL shortener and scale its database. S4 asked for a product-catalog data model with PostgreSQL and corrected it to MongoDB after a 350 ms gap. S7 asked the difference between horizontal and vertical scaling. Filler was “Mm-hmm, okay.” The ambiguous prompt was “Design an e-commerce app.” The same fixtures ran in both output modes.
+
+Times are milliseconds from the scheduled end of the replayed speech. First and last text are the first and last nonblank answer transcript deltas. The last delta is the full-text time for completed answers. Cadence is the median gap between nonblank deltas, rounded to milliseconds. The results measure socket delivery.
+
+| Model | Case | First text | Last text | `response.done` | Deltas | Size (min / median / max chars) | Median gap | Words | Observed behavior |
+|---|---|---:|---:|---:|---:|---|---:|---:|---|
+| Mini | S1 | 1,411 | 1,419 | 35,980 | 56 | 1 / 10 / 25 | 0 | 88 | One answer after the full question. |
+| Mini | S2 | 1,421 | 1,435 | 20,289 | 36 | 1 / 9 / 18 | 0 | 57 | Covered the shortener, traffic, and database. |
+| Mini | S4 | 1,648 | 1,734 | 37,514 | 60 | 1 / 9 / 21 | 0 | 92 | Used MongoDB without mentioning PostgreSQL. |
+| Mini | S7 (retry) | 1,137 | 1,140 | 21,614 | 25 | 2 / 12 / 23 | 0 | 50 | Answered both scaling types. |
+| Mini | Filler | 2,095 | 2,095 | 9,351 | 14 | 1 / 8 / 21 | 0 | 24 | Responded without `No action.`. |
+| Mini | Ambiguous | 805 | 854 | 19,692 | 33 | 1 / 10 / 17 | 0 | 54 | Responded without an `Ask:` prefix. |
+| Max | S1 | 3,174 | 4,247 | 37,550 | 25 | 1 / 10 / 134 | 0 | 97 | One answer after the full question. |
+| Max | S2 | 3,506 | 4,426 | 40,884 | 26 | 1 / 11 / 146 | 0 | 111 | Covered the shortener, traffic, and database. |
+| Max | S4 | 3,252 | 3,850 | 40,006 | 29 | 1 / 11 / 148 | 0 | 99 | Used MongoDB without mentioning PostgreSQL. |
+| Max | S7 | 2,248 | 3,062 | 31,624 | 15 | 5 / 12 / 149 | 0 | 78 | Answered both scaling types. |
+| Max | Filler | 3,638 | 3,638 | 5,059 | 5 | 1 / 10 / 14 | 0 | 8 | Responded without `No action.`. |
+| Max | Ambiguous | 2,577 | 3,121 | 31,001 | 9 | 1 / 13 / 161 | 12 | 79 | Responded without an `Ask:` prefix. |
+
+The primary Mini S7 socket timed out before receiving any session events. The retry above completed, as did the initial audio-mode preflight with 1,125 ms to first text and 1,126 ms to last text. For S1, S2, S4, and S7 across the table, first-text median / p90 (nearest rank) were 1,416 / 1,648 ms for Mini and 3,213 / 3,506 ms for Max. Mini's answer deltas spanned 3–86 ms and arrived effectively as one burst per turn. Max sent clustered bursts covering 598–1,073 ms. The wire carries incremental deltas with no need to wait for `response.done`, which arrived much later. The interviewer transcript was reported via `conversation.item.input_audio_transcription.completed`.
+
+### Barge-in
+
+The probe started S7 during S2, about 300 ms after the first answer delta. On the new `input_audio_buffer.speech_started` it sent `response.cancel` for the original response. Both models emitted `output_audio_buffer.cleared`, ended the original with `response.done` status `cancelled`, and completed a new answer covering both scaling types.
+
+| Model | S7 start after first S2 text (ms) | S7 start to speech event (ms) | S7 start to S2 cancellation (ms) | S2 deltas after sending cancel | S7 end to first / last text (ms) |
+|---|---:|---:|---:|---:|---:|
+| Mini | 348 | 395 | 690 | 51 | 1,040 / 1,041 |
+| Max | 305 | 301 | 603 | 2 | 1,148 / 3,061 |
+
+Old response deltas were still arriving between local cancellation and provider completion on both models. The shared client will need to discard them by response ID as soon as cancellation begins. The test had both automatic interruption and explicit cancel enabled, so it does not isolate which caused the provider to cancel.
+
+### Review gate
+
+The tested ElevenLabs path for D13 is audio output with the audio discarded and `response.output_audio_transcript.delta` forwarded as each event arrives. It uses the compatible GA WebSocket events, with burst delivery and missed filler and clarification sentinels in this sample. Step 0 ends here for user acceptance before provider implementation.
+
+### Validation
+
+- **Tested physically on Windows** for the live Node/WebSocket replay with synthetic PCM and the production prompt builder. Native meeting capture and actual overlay rendering were outside this spike.
+- **Build validated on Windows.** `npm run build:electron`, `npx tsc --noEmit -p tsconfig.json`, `npx tsc --noEmit -p tsconfig.node.json`, and `npm run typecheck:premium` passed.
+- `node --test premium/electron/liveBrain/__tests__/ electron/services/__tests__/LiveBrainSettings.test.mjs electron/audio/__tests__/OpenAISttSocketAndQuota2026_09_26.test.mjs electron/audio/__tests__/openaiTranscriptTurnCoalescer.test.mjs` passed all 85 tests. `npm run test:lib` passed 3,242 with 15 skipped.
+- The broader baseline `node --test electron/audio/__tests__/` passed 1,066 with one skipped and three source assertions failing on the unchanged product code. The failures were in `MicEchoNotCountedAsUser2026_11_13.test.mjs`, `Recovered320Audio.test.mjs`, and `SttGapRecovery2026_10_15.test.mjs`.
+- **Reviewed but not executed on macOS. Requires physical macOS verification.** The protocol replay uses shared Node APIs and existing instructions. The commit affects documentation only, with no shared or platform-specific application changes.
 
 ## Open risks
 
