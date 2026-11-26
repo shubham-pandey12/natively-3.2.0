@@ -19,7 +19,7 @@ import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HelpSettings } from './settings/HelpSettings';
-import { AIProvidersSettings, AIP_CSS, AipModelList, AipPassedCheck } from './settings/AIProvidersSettings';
+import { AIProvidersSettings, AIP_CSS, AipModelList, AipPassedCheck, AipSwitch } from './settings/AIProvidersSettings';
 import { SpeechDictionarySettings } from './settings/SpeechDictionarySettings';
 import { RoomSpeakersSettings } from './settings/RoomSpeakersSettings';
 import { FollowMicDeviceSettings } from './settings/FollowMicDeviceSettings';
@@ -35,7 +35,7 @@ import { useShortcuts } from '../hooks/useShortcuts';
 import { isMac, isWindows } from '../utils/platformUtils';
 import { SettingsToggle } from './settings/SettingsToggle';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import type { LiveBrainConfig, LiveBrainSettingsResult } from '../types/liveBrainSettings';
+import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainModel, LiveBrainSettingsResult } from '../types/liveBrainSettings';
 import {
     clampOverlayOpacity,
     getOverlayAppearance,
@@ -452,166 +452,301 @@ const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChang
     );
 };
 
+const LIVE_BRAIN_KEY_URLS: Record<LiveBrainKeyProvider, string> = {
+    'gemini-live': 'https://aistudio.google.com/apikey',
+    'openai-realtime': 'https://platform.openai.com/api-keys',
+};
+
+// Live Brain's provider and key, drawn exactly like the Speech Provider card
+// above it: the ProviderSelect card, then AI Providers' key card (mark, name,
+// Get Key; key field with Save as its inset segment; Test Connection with the
+// Models control beside it; one note line only when something is wrong).
 const LiveBrainProviderSettings = () => {
     const t = useT();
     const theme = useResolvedTheme();
+    const api = window.electronAPI;
     const [config, setConfig] = useState<LiveBrainConfig>();
     const [keyDraft, setKeyDraft] = useState('');
-    const [modelDraft, setModelDraft] = useState<string>();
-    const [busy, setBusy] = useState(false);
-    const [status, setStatus] = useState('');
-    const api = window.electronAPI;
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+    const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [note, setNote] = useState('');
+    const [models, setModels] = useState<LiveBrainModel[]>([]);
+    const [modelsLoading, setModelsLoading] = useState(false);
+    const [modelsFetchedAt, setModelsFetchedAt] = useState<number>();
 
     const refresh = useCallback(async () => {
-        setConfig(await api.getLiveBrainConfig());
-    }, [api]);
+        try { setConfig(await api.getLiveBrainConfig()); }
+        catch { setNote(t('Could not load Live Brain settings.')); }
+    }, [api, t]);
 
     useEffect(() => {
-        const load = () => void refresh().catch(() => setStatus('Could not load Live Brain settings.'));
-        load();
-        return api?.onCredentialsChanged?.(load);
+        void refresh();
+        return api?.onCredentialsChanged?.(() => void refresh());
     }, [api, refresh]);
+    useEffect(() => () => clearTimeout(savedTimer.current), []);
 
-    const update = async (action: () => Promise<LiveBrainSettingsResult>, onSaved?: () => void) => {
-        setBusy(true);
-        setStatus('');
+    const provider = config?.provider;
+    const keyProvider: LiveBrainKeyProvider | null = provider === 'gemini-live' || provider === 'openai-realtime' ? provider : null;
+
+    const loadModels = useCallback(async () => {
+        setModelsLoading(true);
         try {
-            const result = await action();
-            if (result.success) {
-                onSaved?.();
-                if (result.message) setStatus(result.message);
-                await refresh();
-            } else {
-                setStatus(result.message || result.error || 'Could not save Live Brain settings.');
-            }
+            const result = await api.listLiveBrainModels();
+            setModels(result.models);
+            setModelsFetchedAt(Date.now());
+            if (!result.success && result.error) setNote(t(result.error));
         } catch {
-            setStatus('Live Brain settings are unavailable.');
+            setNote(t('Could not load the model list.'));
         } finally {
-            setBusy(false);
+            setModelsLoading(false);
+        }
+    }, [api, t]);
+
+    // The list belongs to the provider and the key in use; reload when either changes.
+    useEffect(() => {
+        setModels([]);
+        if (keyProvider && config?.hasKey) void loadModels();
+    }, [keyProvider, config?.hasKey, config?.keySource, loadModels]);
+
+    const resetFeedback = () => { setNote(''); setTestStatus('idle'); };
+
+    const changeProvider = async (value: string) => {
+        if (value !== 'gemini-live' && value !== 'openai-realtime' && value !== 'pipeline') return;
+        resetFeedback();
+        setKeyDraft('');
+        const result = await api.setLiveBrainProvider(value).catch(() => ({ success: false } as LiveBrainSettingsResult));
+        if (!result.success) setNote(t(result.message || result.error || 'Could not save Live Brain settings.'));
+        await refresh();
+    };
+
+    const saveKey = async (apiKey: string) => {
+        if (!keyProvider) return;
+        resetFeedback();
+        setSaving(true);
+        try {
+            const result = await api.setLiveBrainKey({ provider: keyProvider, apiKey });
+            if (!result.success) {
+                setNote(t(result.message || result.error || 'Could not save the Live Brain API key.'));
+                return;
+            }
+            setKeyDraft('');
+            if (apiKey) {
+                setSaved(true);
+                clearTimeout(savedTimer.current);
+                savedTimer.current = setTimeout(() => setSaved(false), 2000);
+            }
+            await refresh();
+        } catch {
+            setNote(t('Could not save the Live Brain API key.'));
+        } finally {
+            setSaving(false);
         }
     };
 
-    const provider = config?.provider;
-    const name = provider === 'gemini-live' ? t('Gemini Live') : t('OpenAI Realtime');
-    const model = modelDraft ?? config?.model ?? '';
+    const setOption = async (options: Parameters<typeof api.setLiveBrainOptions>[0]) => {
+        resetFeedback();
+        const result = await api.setLiveBrainOptions(options).catch(() => ({ success: false } as LiveBrainSettingsResult));
+        if (!result.success) setNote(t(result.message || result.error || 'Could not save Live Brain settings.'));
+        await refresh();
+    };
+
+    const testConnection = async () => {
+        setNote('');
+        setTestStatus('testing');
+        try {
+            const result = await api.testLiveBrainConnection();
+            setTestStatus(result.success ? 'success' : 'error');
+            if (!result.success) setNote(t(result.message || result.error || 'Connection failed.'));
+        } catch {
+            setTestStatus('error');
+            setNote(t('Connection failed.'));
+        }
+    };
+
+    const name = keyProvider === 'openai-realtime' ? t('OpenAI Realtime') : t('Gemini Live');
+    const vendor = keyProvider === 'openai-realtime' ? 'OpenAI' : 'Gemini';
+    const keySourceLine = config?.keySource === 'dedicated' ? null
+        : config?.keySource === 'env' ? t('Using {vendor} key from .env (development build).').replace('{vendor}', vendor)
+        : config?.keySource === 'ai-providers' ? t('Using your {vendor} key from AI Providers.').replace('{vendor}', vendor)
+        : null;
+    const defaultModel = keyProvider === 'openai-realtime' ? 'gpt-realtime-2.1' : 'gemini-3.8-live';
+    const currentModel = config?.model || defaultModel;
+    const listedModels = models.some(m => m.id === currentModel)
+        ? models : [{ id: currentModel, label: currentModel }, ...models];
+
     return (
         <div>
             <h3 className="settings-heading text-text-primary mb-1">{t('Live Brain Provider')}</h3>
-            <div className="space-y-4">
-                {config && (
-                    <>
-                        <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
-                            <label className="text-xs font-medium text-text-secondary block">{t('Live Brain Provider')}</label>
-                            <div className="relative">
-                                <ProviderSelect
-                                    value={config.provider}
-                                    onChange={(value) => {
-                                        if (busy || (value !== 'gemini-live' && value !== 'openai-realtime' && value !== 'pipeline')) return;
-                                        void update(() => api.setLiveBrainProvider(value), () => {
-                                            setKeyDraft('');
-                                            setModelDraft(undefined);
-                                        });
-                                    }}
-                                    options={[
-                                        { id: 'gemini-live', label: t('Gemini Live'), badge: provider === 'gemini-live' && config.hasKey ? 'Saved' : null, desc: t('Uses a Google AI Studio key'), color: 'blue', icon: <BrandMark provider="google" />, neutralTile: true },
-                                        { id: 'openai-realtime', label: t('OpenAI Realtime'), badge: provider === 'openai-realtime' && config.hasKey ? 'Saved' : null, desc: t('Uses an OpenAI API key'), color: 'green', icon: <BrandMark provider="openai" />, neutralTile: true },
-                                        { id: 'pipeline', label: t('Existing pipeline (no extra key)'), badge: null, desc: t('Uses the existing Auto Answer engine'), color: 'blue', icon: <BrandMark provider="natively" />, neutralTile: true },
-                                    ]}
-                                />
-                            </div>
+            <p className="text-xs text-text-secondary mb-4">{t('Choose the realtime model that listens to the interviewer while Live Brain is on.')}</p>
+            {config && (
+                <div className="space-y-4">
+                    <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
+                        <label className="text-xs font-medium text-text-secondary block">{t('Live Brain Provider')}</label>
+                        <div className="relative">
+                            <ProviderSelect
+                                value={config.provider}
+                                onChange={(value) => void changeProvider(value)}
+                                options={[
+                                    { id: 'gemini-live', label: t('Gemini Live'), badge: provider === 'gemini-live' && config.hasKey ? 'Saved' : null, desc: t('Google Gemini Live API'), color: 'blue', icon: <BrandMark provider="google" />, neutralTile: true },
+                                    { id: 'openai-realtime', label: t('OpenAI Realtime'), badge: provider === 'openai-realtime' && config.hasKey ? 'Saved' : null, desc: t('OpenAI Realtime API'), color: 'green', icon: <BrandMark provider="openai" />, neutralTile: true },
+                                    { id: 'pipeline', label: t('Existing pipeline'), badge: null, desc: t('The Auto Answer engine; no extra key'), color: 'blue', icon: <BrandMark provider="natively" />, neutralTile: true },
+                                ]}
+                            />
                         </div>
-                        <div className="aip-root settings-swap-in" data-theme={theme} style={{ ['--aip-card-bg' as string]: 'var(--bg-card)' } as React.CSSProperties}>
+                    </div>
+
+                    {keyProvider && (
+                        <div key={keyProvider} className="aip-root settings-swap-in" data-theme={theme} style={{ ['--aip-card-bg' as string]: 'var(--bg-card)' } as React.CSSProperties}>
                             <div className="aip-card aip-provider bg-bg-card">
-                                {provider && provider !== 'pipeline' && (
-                                    <>
-                                        <div className="aip-provider-head">
-                                            <span className="aip-tile aip-tile--mark" aria-hidden="true">
-                                                <BrandMark provider={provider === 'gemini-live' ? 'google' : 'openai'} />
-                                            </span>
-                                            <h4 className="aip-card-title truncate min-w-0">{name}</h4>
-                                        </div>
-                                        <div className="aip-provider-row">
-                                            <div className="aip-provider-field">
-                                                <div className="aip-field">
-                                                    <KeyRound size={13} strokeWidth={1.75} className="aip-field-icon" aria-hidden="true" />
-                                                    <input
-                                                        type="password"
-                                                        className="aip-input"
-                                                        value={keyDraft}
-                                                        onChange={(event) => setKeyDraft(event.target.value)}
-                                                        placeholder={config.maskedSuffix ?? t('Enter API key')}
-                                                        aria-label={`${name} ${t('API key')}`}
-                                                        autoComplete="off"
-                                                        spellCheck={false}
-                                                        data-1p-ignore
-                                                        disabled={busy}
-                                                    />
-                                                    <button type="button" className="aip-field-seg" disabled={busy || !keyDraft.trim()}
-                                                        onClick={() => void update(() => api.setLiveBrainKey({ provider, apiKey: keyDraft }), () => setKeyDraft(''))}>
-                                                        {t('Save')}
-                                                    </button>
-                                                </div>
-                                            </div>
-                                            {config.hasDedicatedKey && (
-                                                <button type="button" className="aip-btn shrink-0" data-icon="true" data-variant="danger-ghost" disabled={busy}
-                                                    title={t('Remove API Key')} aria-label={t('Remove API Key')}
-                                                    onClick={() => void update(() => api.setLiveBrainKey({ provider, apiKey: '' }), () => setKeyDraft(''))}>
-                                                    <Trash2 size={14} strokeWidth={1.75} />
-                                                </button>
-                                            )}
-                                        </div>
-                                        <label className="flex items-center gap-2 text-xs text-text-secondary">
-                                            <input type="checkbox" className="accent-accent-primary" checked={config.useAiProvidersKey} disabled={busy}
-                                                onChange={(event) => {
-                                                    const useAiProvidersKey = event.target.checked;
-                                                    void update(() => api.setLiveBrainOptions({ provider, useAiProvidersKey }));
-                                                }} />
-                                            {t('Use my AI Providers key')}
-                                        </label>
-                                        {config.usingAiProvidersKey && <p className="aip-meta">{t('Using the key from AI Providers.')}</p>}
-                                        <p className="aip-meta">{t('When Live Brain becomes available, interviewer audio will be sent to the selected provider.')}</p>
-                                        <div className="aip-provider-row">
-                                            <div className="aip-provider-field">
-                                                <div className="aip-field">
-                                                    <input type="text" className="aip-input" aria-label={t('Model')} placeholder={t('Model')} value={model}
-                                                        disabled={busy} onChange={(event) => setModelDraft(event.target.value)} />
-                                                    <button type="button" className="aip-field-seg" disabled={busy || model.trim() === config.model}
-                                                        onClick={() => void update(() => api.setLiveBrainOptions({ provider, model }), () => setModelDraft(undefined))}>
-                                                        {t('Save model')}
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </>
-                                )}
-                                <CustomSelect
-                                    label={t('Instruction variant')}
-                                    placeholder={t('Choose a variant')}
-                                    value={config.promptVariant ?? ''}
-                                    options={[
-                                        { deviceId: 'full', label: t('Full') },
-                                        { deviceId: 'trimmed', label: t('Trimmed') },
-                                    ]}
-                                    disabled={busy}
-                                    onChange={(promptVariant) => {
-                                        if (promptVariant === 'full' || promptVariant === 'trimmed') {
-                                            void update(() => api.setLiveBrainOptions({ promptVariant }));
-                                        }
-                                    }}
-                                />
-                                <div className="aip-provider-row">
-                                    <button type="button" className="aip-btn shrink-0" disabled={busy}
-                                        onClick={() => void update(() => api.testLiveBrainConnection())}>
-                                        {t('Test connection')}
-                                    </button>
+                                <div className="aip-provider-head">
+                                    <span className="aip-tile aip-tile--mark" aria-hidden="true">
+                                        <BrandMark provider={keyProvider === 'gemini-live' ? 'google' : 'openai'} />
+                                    </span>
+                                    <h4 className="aip-card-title truncate min-w-0">{name}</h4>
+                                    <div className="ml-auto flex items-center gap-2 shrink-0">
+                                        <button
+                                            onClick={() => window.electronAPI?.openExternal(LIVE_BRAIN_KEY_URLS[keyProvider])}
+                                            className="aip-btn"
+                                            data-size="sm"
+                                            data-variant="ghost"
+                                            title={`Get ${vendor} API Key`}
+                                        >
+                                            <span className="uppercase tracking-wide">{t('Get Key')}</span>
+                                            <ExternalLink size={12} strokeWidth={1.75} />
+                                        </button>
+                                    </div>
                                 </div>
+
+                                <div className="aip-provider-row">
+                                    <div className="aip-provider-field">
+                                        <div className="aip-field">
+                                            <KeyRound size={13} strokeWidth={1.75} className="aip-field-icon" aria-hidden="true" />
+                                            <input
+                                                type="password"
+                                                value={keyDraft}
+                                                onChange={(e) => setKeyDraft(e.target.value)}
+                                                onKeyDown={(e) => { if (e.key === 'Enter' && keyDraft.trim() && !saving) void saveKey(keyDraft.trim()); }}
+                                                autoComplete="off"
+                                                spellCheck={false}
+                                                data-1p-ignore
+                                                aria-label={`${name} ${t('API key')}`}
+                                                placeholder={config.hasDedicatedKey ? '••••••••••••' : t('Enter {vendor} API key').replace('{vendor}', vendor)}
+                                                className="aip-input"
+                                            />
+                                            <button
+                                                onClick={() => void saveKey(keyDraft.trim())}
+                                                disabled={saving || !keyDraft.trim()}
+                                                className="aip-field-seg"
+                                                data-tone={saved ? 'ok' : undefined}
+                                            >
+                                                <SizedLabelSwap
+                                                    id={saving ? 'saving' : saved ? 'saved' : 'save'}
+                                                    sizers={[
+                                                        <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Saving...')}</span>,
+                                                        <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Saved')}</span>,
+                                                        t('Save'),
+                                                    ]}
+                                                >
+                                                    {saving
+                                                        ? <span className="inline-flex items-center gap-1.5"><Loader2 size={12} strokeWidth={1.75} className="aip-spinner" />{t('Saving...')}</span>
+                                                        : saved
+                                                            ? <span className="inline-flex items-center gap-1.5"><Check size={12} strokeWidth={2} className="aip-check" />{t('Saved')}</span>
+                                                            : t('Save')}
+                                                </SizedLabelSwap>
+                                            </button>
+                                        </div>
+                                        {config.hasDedicatedKey && (
+                                            <button
+                                                onClick={() => void saveKey('')}
+                                                disabled={saving}
+                                                className="aip-btn shrink-0"
+                                                data-icon="true"
+                                                data-variant="danger-ghost"
+                                                title={t('Remove API Key')}
+                                                aria-label={t('Remove API Key')}
+                                            >
+                                                <Trash2 size={14} strokeWidth={1.75} />
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Only offered while no Live Brain key is saved: a saved key always wins. */}
+                                {!config.hasDedicatedKey && (
+                                    <div className="aip-provider-row">
+                                        <span className="aip-meta">{t('Use my {vendor} key from AI Providers').replace('{vendor}', vendor)}</span>
+                                        <AipSwitch
+                                            className="ml-auto"
+                                            checked={config.useAiProvidersKey}
+                                            onChange={(useAiProvidersKey) => void setOption({ provider: keyProvider, useAiProvidersKey })}
+                                            label={t('Use my {vendor} key from AI Providers').replace('{vendor}', vendor)}
+                                        />
+                                    </div>
+                                )}
+                                {keySourceLine && <p className="aip-meta">{keySourceLine}</p>}
+
+                                <div className="aip-provider-row">
+                                    <button
+                                        onClick={() => void testConnection()}
+                                        disabled={testStatus === 'testing'}
+                                        className="aip-btn shrink-0"
+                                        data-tone={testStatus === 'success' ? 'ok' : testStatus === 'error' ? 'danger' : undefined}
+                                        title={note || t('Test Connection')}
+                                    >
+                                        <SizedLabelSwap
+                                            id={testStatus}
+                                            sizers={[
+                                                t('Test Connection'),
+                                                <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Testing...')}</span>,
+                                                <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Passed')}</span>,
+                                                <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Error')}</span>,
+                                            ]}
+                                        >
+                                            {testStatus === 'testing' ? <span className="inline-flex items-center gap-1.5"><Loader2 size={12} strokeWidth={1.75} className="aip-spinner" />{t('Testing...')}</span> :
+                                                testStatus === 'success' ? <span className="inline-flex items-center gap-1.5"><AipPassedCheck />{t('Passed')}</span> :
+                                                    testStatus === 'error' ? <span className="inline-flex items-center gap-1.5"><AlertCircle size={12} strokeWidth={1.75} />{t('Error')}</span> :
+                                                        t('Test Connection')}
+                                        </SizedLabelSwap>
+                                    </button>
+                                    <AipModelList
+                                        pickOnly
+                                        catalogIsComplete
+                                        models={listedModels}
+                                        enabled={[]}
+                                        onToggle={() => {}}
+                                        onReset={() => {}}
+                                        defaultId={currentModel}
+                                        onSetDefault={(model) => void setOption({ provider: keyProvider, model })}
+                                        refreshing={modelsLoading}
+                                        onRefresh={() => void loadModels()}
+                                        lastFetchedAt={modelsFetchedAt}
+                                    />
+                                </div>
+
+                                {note && <p className="aip-meta aip-danger-fg aip-provider-note settings-swap-in" role="alert">{note}</p>}
                                 <style>{AIP_CSS}</style>
                             </div>
                         </div>
-                    </>
-                )}
-                {status && <p className="text-xs text-text-secondary" role="status">{t(status)}</p>}
-            </div>
+                    )}
+
+                    {!keyProvider && note && <p className="text-xs text-text-secondary" role="alert">{note}</p>}
+
+                    <CustomSelect
+                        label={t('Instruction variant')}
+                        placeholder={t('Choose a variant')}
+                        value={config.promptVariant ?? 'full'}
+                        options={[
+                            { deviceId: 'full', label: t('Full') },
+                            { deviceId: 'trimmed', label: t('Trimmed') },
+                        ]}
+                        onChange={(promptVariant) => {
+                            if (promptVariant === 'full' || promptVariant === 'trimmed') void setOption({ promptVariant });
+                        }}
+                    />
+                </div>
+            )}
         </div>
     );
 };

@@ -9,6 +9,8 @@ export interface LiveBrainConfig {
     maskedSuffix: string | null;
     useAiProvidersKey: boolean;
     usingAiProvidersKey: boolean;
+    /** Where the key in use comes from. 'env' is .env, in development builds only. */
+    keySource: 'dedicated' | 'env' | 'ai-providers' | null;
     model: string;
     promptVariant: PromptVariant | null;
 }
@@ -20,6 +22,9 @@ export type LiveBrainOptions =
 
 export type LiveBrainSettingsResult = { success: boolean; error?: string; message?: string };
 
+export interface LiveBrainModel { id: string; label: string; description?: string }
+export type LiveBrainModelsResult = { success: boolean; models: LiveBrainModel[]; error?: string };
+
 export interface LiveBrainSettingsApi {
     getLiveBrainEnabled(): Promise<boolean>;
     setLiveBrainEnabled(enabled: boolean): Promise<LiveBrainSettingsResult>;
@@ -28,4 +33,5 @@ export interface LiveBrainSettingsApi {
     setLiveBrainKey(payload: { provider: LiveBrainKeyProvider; apiKey: string }): Promise<LiveBrainSettingsResult>;
     setLiveBrainOptions(options: LiveBrainOptions): Promise<LiveBrainSettingsResult>;
     testLiveBrainConnection(): Promise<LiveBrainSettingsResult>;
+    listLiveBrainModels(): Promise<LiveBrainModelsResult>;
 }

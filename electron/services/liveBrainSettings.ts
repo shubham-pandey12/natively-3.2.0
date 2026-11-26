@@ -2,7 +2,7 @@ import { CredentialsManager } from './CredentialsManager';
 import { SettingsManager } from './SettingsManager';
 import type { AppState } from '../main';
 import { loadLiveBrainPremium } from '../premium/liveBrain';
-import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
+import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainModel, LiveBrainModelsResult, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
 
 const settingsUnavailable = 'Settings store is unavailable; the change was not saved.';
 
@@ -49,7 +49,7 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsManage
             keyIsWellFormed: false,
             config: {
                 provider, promptVariant, hasKey: false, hasDedicatedKey: false,
-                maskedSuffix: null, useAiProvidersKey: false, usingAiProvidersKey: false, model: '',
+                maskedSuffix: null, useAiProvidersKey: false, usingAiProvidersKey: false, keySource: null, model: '',
             },
         };
     }
@@ -61,8 +61,10 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsManage
     const aiProvidersKey = (gemini ? geminiApiKey : openaiApiKey)?.trim();
     const useAiProvidersKey = settings.get(gemini ? 'liveBrainReuseGeminiKey' : 'liveBrainReuseOpenaiKey')
         ?? Boolean(aiProvidersKey);
-    const usingAiProvidersKey = !dedicated && useAiProvidersKey && Boolean(aiProvidersKey);
-    const key = dedicated || (usingAiProvidersKey ? aiProvidersKey : undefined);
+    // Order: the Live Brain key, then (development builds only) .env, then the reused AI Providers key.
+    const fromEnv = dedicated ? undefined : envKey(provider);
+    const usingAiProvidersKey = !dedicated && !fromEnv && useAiProvidersKey && Boolean(aiProvidersKey);
+    const key = dedicated || fromEnv || (usingAiProvidersKey ? aiProvidersKey : undefined);
     const keyIsWellFormed = key !== undefined && isWellFormed(provider, key);
     return {
         keyIsWellFormed,
@@ -74,6 +76,7 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsManage
             maskedSuffix: keyIsWellFormed ? `••••••••${key.slice(-4)}` : null,
             useAiProvidersKey,
             usingAiProvidersKey,
+            keySource: dedicated ? 'dedicated' : fromEnv ? 'env' : usingAiProvidersKey ? 'ai-providers' : null,
             model: settings.get(gemini ? 'liveBrainGeminiModel' : 'liveBrainOpenaiModel') ?? '',
             promptVariant,
         },
@@ -172,18 +175,70 @@ export function registerLiveBrainSettingsIpc(
         return { success: false, error: 'Invalid Live Brain options.' };
     });
 
-    safeHandle('live-brain:test-connection', () => {
-        const { config: { provider, hasKey, model }, usableKey } = inspect();
+    safeHandle('live-brain:test-connection', async () => {
+        const { config: { provider, hasKey, model, keySource }, usableKey } = inspect();
         if (isKeyProvider(provider)) {
-            if (!hasKey) return { success: false, error: 'Add an API key first.' };
-            if (!usableKey) return { success: false, error: 'The API key format is invalid.' };
+            if (!hasKey) return { success: false, error: 'no_key', message: 'Add an API key first.' };
+            if (!usableKey) return { success: false, error: 'invalid_key', message: "The API key doesn't look valid." };
             if (provider === 'gemini-live') {
                 const premium = loadPremium();
-                return premium?.testConnection({ apiKey: usableKey, model })
-                    ?? { success: false, error: 'unavailable', message: 'Gemini Live is unavailable in this build.' };
+                const result = await (premium?.testConnection({ apiKey: usableKey, model })
+                    ?? { success: false, error: 'unavailable', message: 'Gemini Live is unavailable in this build.' });
+                // Name the key that was tried: a reused AI Providers key failing
+                // otherwise reads exactly like the Live Brain key failing.
+                if (!result.success && result.error === 'auth' && keySource) {
+                    return { ...result, message: `${result.message} (key from ${KEY_SOURCE_LABEL[keySource]})` };
+                }
+                return result;
             }
         }
         const message = provider === 'pipeline' ? 'The existing pipeline needs no separate Live Brain connection.' : 'OpenAI Realtime connection testing is not available yet.';
         return { success: false, error: 'not_available_yet', message };
     });
+
+    safeHandle('live-brain:list-models', async (): Promise<LiveBrainModelsResult> => {
+        const { config: { provider }, usableKey } = inspect();
+        if (provider === 'openai-realtime') return { success: true, models: OPENAI_REALTIME_MODELS };
+        if (provider !== 'gemini-live') return { success: true, models: [] };
+        if (!usableKey) return { success: false, models: GEMINI_LIVE_FALLBACK_MODELS, error: 'Add an API key to load the model list.' };
+        return listGeminiLiveModels(usableKey);
+    });
+}
+
+const KEY_SOURCE_LABEL: Record<NonNullable<LiveBrainConfig['keySource']>, string> = {
+    dedicated: 'Live Brain', env: '.env', 'ai-providers': 'AI Providers',
+};
+
+const GEMINI_LIVE_FALLBACK_MODELS: LiveBrainModel[] = [
+    { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', description: 'Default' },
+];
+
+const OPENAI_REALTIME_MODELS: LiveBrainModel[] = [
+    { id: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1', description: 'Default' },
+];
+
+/** The models this key can open a Live session with (bidiGenerateContent). */
+export async function listGeminiLiveModels(apiKey: string, fetchImpl: typeof fetch = fetch): Promise<LiveBrainModelsResult> {
+    try {
+        const response = await fetchImpl('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000', {
+            headers: { 'x-goog-api-key': apiKey },
+            signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) {
+            const error = response.status === 400 || response.status === 401 || response.status === 403
+                ? 'Gemini rejected the API key.' : `Gemini returned ${response.status}.`;
+            return { success: false, models: GEMINI_LIVE_FALLBACK_MODELS, error };
+        }
+        const body = await response.json() as { models?: { name?: string; displayName?: string; supportedGenerationMethods?: string[] }[] };
+        const models = (body.models ?? [])
+            .filter(model => model.name && model.supportedGenerationMethods?.includes('bidiGenerateContent'))
+            .map(model => {
+                const id = model.name!.replace(/^models\//, '');
+                return { id, label: model.displayName || id };
+            })
+            .sort((a, b) => a.label.localeCompare(b.label));
+        return { success: true, models: models.length ? models : GEMINI_LIVE_FALLBACK_MODELS };
+    } catch {
+        return { success: false, models: GEMINI_LIVE_FALLBACK_MODELS, error: 'Could not reach Gemini to load the model list.' };
+    }
 }

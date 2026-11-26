@@ -3675,6 +3675,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setLiveBrainKey: (payload) => ipcRenderer.invoke('live-brain:set-key', payload),
   setLiveBrainOptions: (options) => ipcRenderer.invoke('live-brain:set-options', options),
   testLiveBrainConnection: () => ipcRenderer.invoke('live-brain:test-connection'),
+  listLiveBrainModels: () => ipcRenderer.invoke('live-brain:list-models'),
   getAutoAnswerAccess: () => ipcRenderer.invoke('auto-answer:get-access'),
   setAutoAnswerTrainingConsent: (granted: boolean) => ipcRenderer.invoke('auto-answer:set-training-consent', granted),
   onAutoAnswerAccessRequired: (callback: (info: { reason: string }) => void) => {
