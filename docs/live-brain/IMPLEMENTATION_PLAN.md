@@ -207,9 +207,19 @@ Acceptance: S10–S12 pass; no answer gap > ~3 s across rollover/fallback in sim
 
 ---
 
-## Phase 6 — OpenAIRealtimeBrain (optional paid backup)  *(≈3–4 days)*
+## Phase 6 — OpenAIRealtimeBrain + ElevenLabsRealtimeBrain (D13)  *(≈4–6 days)*
 
-Tasks:
+**Objective:** the user can pick Gemini Live, OpenAI Realtime or ElevenLabs Realtime in the Live Brain card, enter that provider's key, choose a model, test the connection, and get the same streamed-answer behaviour (D12) from any of them.
+
+Task 0 — **ElevenLabs spike first** (before product code): from current ElevenLabs docs (record URLs), then a live run with `ELEVENLABS_API_KEY` from `.env` on S1, S2, S4, S7 + filler + ambiguous, for `eleven_realtime_v1_mini` and `eleven_realtime_v1_max`: endpoint/auth, whether `output_modalities:["text"]` works, speech end → first text, full-answer time, transcript cadence, filler/ask behaviour, barge-in. Record in PROGRESS.md and **stop and report** to the user before building.
+
+ElevenLabs tasks (after the spike is accepted):
+- Settings: add `elevenlabs-realtime` to the provider list, key field (CredentialsManager `setLiveBrainElevenlabsKey`), model list (mini/max), dev `.env` key, Test connection — identical card layout to Gemini/OpenAI (ARCHITECTURE §9b). Update `src/types/liveBrainSettings.ts`, IPC validation, preload, and the settings tests.
+- `brains/ElevenLabsRealtimeBrain.ts` as a configuration of the shared Realtime protocol client (§4.5); output mode per the spike.
+- Factory case, fallback order (§9b), meeting wiring identical to Gemini.
+- Tests: mock WebSocket (text deltas or transcript deltas, speech_started cancel, quota/auth), settings (key never returned raw, provider validation), factory.
+
+OpenAI tasks:
 1. Extract reusable socket/backoff/quota/resample helpers from `electron/audio/OpenAIStreamingSTT.ts` into a shared module **without behaviour change** (its existing tests, e.g. `OpenAISttSocketAndQuota2026_09_26`, must stay green).
 2. `brains/OpenAIRealtimeBrain.ts` per §4.2.
 3. Add to fallback chain when an OpenAI key exists.

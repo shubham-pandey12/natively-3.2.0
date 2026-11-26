@@ -31,6 +31,8 @@ It listens to the interviewer continuously, understands like a strong conversati
 | D11 | **SUPERSEDED by D12.** ~~Accept the decide_turn tool call (2026-11-26, after the Phase 4 spike).~~ The tool call arrives 1.3–1.9 s after speech end, slower than the 1.5 s gate. The user accepted it: about 1 s doesn't matter much, and Gemini's merged question handles corrections. The transcription-marker fallback (§4.1) is deferred to Phase 7 tuning. |
 | D12 | **Gemini Live writes the answer itself, streamed in real time (2026-11-26, user decision after the first live tests).** The goal is ChatGPT Voice behaviour: the realtime model listens and answers like a human. Gemini Live answers by itself (no `decide_turn`, no separate text model). Natively discards Gemini's audio (D6 unchanged) and streams **Gemini's output transcription into the overlay word by word as Gemini speaks** — it never waits for the complete answer. First words are expected ~0.5–1 s after the interviewer stops; the full answer arrives at speaking pace (accepted, like ChatGPT Voice). Interruptions use Gemini's own barge-in. Answer style and profile/resume/JD/mode context go into Gemini's session instructions (§5). The AnswerWriter (§4.4) is not used by GeminiLiveBrain. Measured reason D10 was chosen and is now overridden: Phase 0 found `TEXT` output rejected and transcription at speaking pace (~25 s for 65 words). |
 
+| D13 | **ElevenLabs Realtime as a third provider (2026-11-26, user decision).** Live Brain offers **Gemini Live · OpenAI Realtime · ElevenLabs Realtime** (plus the existing pipeline), all working the same way under D12: the realtime model listens and writes the answer itself, streamed into the overlay as it arrives. The user enters an ElevenLabs API key in the Live Brain card like the other two. ElevenLabs states its Realtime API speaks OpenAI's Realtime wire protocol, so OpenAIRealtimeBrain and ElevenLabsRealtimeBrain share one protocol client (§4.2, §4.5). Models: `eleven_realtime_v1_mini` (default) and `eleven_realtime_v1_max`. Text-only output, endpoint, auth and transcript cadence are **unverified** and must be checked in a spike first. |
+
 ### Non-goals
 
 - Text-to-speech, audio playback, voice output of any kind.
@@ -109,6 +111,7 @@ Provider selection uses an exhaustive switch. An unknown provider throws; it is 
 switch (config.brain) {
   case 'gemini-live':     return new GeminiLiveBrain(deps);
   case 'openai-realtime': return new OpenAIRealtimeBrain(deps);
+  case 'elevenlabs-realtime': return new ElevenLabsRealtimeBrain(deps);
   case 'pipeline':        return new PipelineBrain(deps);
   default: { const never: never = config.brain; throw new Error(`Unsupported live brain: ${never}`); }
 }
@@ -221,6 +224,13 @@ Transport: WebSocket to the Gemini Live API (`BidiGenerateContent`). Key from th
 - Reuse from `electron/audio/OpenAIStreamingSTT.ts`: WebSocket setup, auth header, 24 kHz resampling and 100 ms batching, exponential backoff, keepalive, terminal-quota classification (401/403/`insufficient_quota`). Extract shared helpers **without changing STT behaviour**.
 - 60-minute session limit (documented) → rollover at ~50 min.
 - Model name is a setting (OpenAI naming is inconsistent; verify in Phase 0).
+
+### 4.5 ElevenLabsRealtimeBrain (optional, paid, D13)
+
+- **Shares the OpenAI Realtime protocol client with §4.2.** One module implements the OpenAI-Realtime-compatible session (connect, `session.update`, audio append, events, cancel, backoff, error classification); `OpenAIRealtimeBrain` and `ElevenLabsRealtimeBrain` are thin configurations of it (endpoint URL, auth header, model, audio rate). No copy-pasted protocol code.
+- **Output, in order of preference (decided by the spike):** (1) text-only output if ElevenLabs accepts `output_modalities:["text"]` — full answer at text speed; otherwise (2) audio + its response transcript, audio discarded (D6), transcript streamed as `response_delta` like Gemini under D12.
+- Same instructions (§5, answer set), same sentinel handling (§6), same overlay (§7). Candidate text, interruption (`speech_started` → cancel), errors (`auth`/`quota`/`rate_limited`) as in §4.2.
+- **Spike must verify, with source URLs in PROGRESS.md:** WebSocket endpoint and auth header, model ids, accepted output modalities, input audio format/rate, turn-detection options, response transcript event names and cadence, session limit, pricing.
 
 ### 4.3 PipelineBrain (always-available fallback)
 
@@ -431,15 +441,15 @@ Validation of the `set` payload in main: boolean only; reject anything else.
 
 | Field | Values | Notes |
 |---|---|---|
-| Provider | **Gemini Live** (default) · **OpenAI Realtime** · **Existing pipeline (no extra key)** | Maps to `LiveBrainId`. Exhaustive list; adding a provider later = add a `LiveBrain` + a row here. |
-| API key (per provider) | Google AI Studio key (Gemini Live) · OpenAI API key (OpenAI Realtime) | Masked input, same as Speech Provider keys. Saved via `CredentialsManager`. |
+| Provider | **Gemini Live** (default) · **OpenAI Realtime** · **ElevenLabs Realtime** (D13) · **Existing pipeline (no extra key)** | Maps to `LiveBrainId` (`'elevenlabs-realtime'` added). Exhaustive list; adding a provider later = add a `LiveBrain` + a row here. |
+| API key (per provider) | Google AI Studio key (Gemini Live) · OpenAI API key (OpenAI Realtime) · ElevenLabs API key (ElevenLabs Realtime) | Masked input, same as Speech Provider keys. Saved via `CredentialsManager` (`setLiveBrainElevenlabsKey`). "Use my AI Providers key" does not apply to ElevenLabs unless an existing ElevenLabs key is already stored elsewhere in Natively (check during implementation; reuse it if so). Dev builds may read `ELEVENLABS_API_KEY` from `.env`, same rules as the other env keys. |
 | "Use my AI Providers key" | checkbox, default **on** when an AI Providers key for that vendor already exists | If the Live Brain key is empty and this is on, use the existing Gemini/OpenAI key from Settings → AI Providers. No duplicate typing needed. |
-| Model | text/select, default chosen in Phase 0 | `liveBrainGeminiModel`, `liveBrainOpenaiModel` (settings store). |
+| Model | text/select, default chosen in Phase 0 | `liveBrainGeminiModel`, `liveBrainOpenaiModel`, `liveBrainElevenlabsModel` (default `eleven_realtime_v1_mini`; list `eleven_realtime_v1_mini`, `eleven_realtime_v1_max`) (settings store). |
 | Instruction variant | Full · Trimmed | `liveBrainPromptVariant`; default decided in Phase 0/7. |
 | Test connection | button | Opens a short session, reports OK / auth error / quota / unsupported model. No audio sent. |
 | Status | text | Last error (auth, quota, rate limit) in plain words. |
 
-Fallback order (§9) is automatic and needs no setting: selected provider → OpenAI Realtime (only if it has a usable key and is not the failed one) → Existing pipeline.
+Fallback order (§9) is automatic and needs no setting: selected provider → the other realtime providers that have a usable key, in the order Gemini Live, OpenAI Realtime, ElevenLabs Realtime (skipping the failed one) → Existing pipeline.
 
 ### Storage & wiring (mirror Speech Provider keys)
 

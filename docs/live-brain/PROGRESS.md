@@ -15,7 +15,7 @@
 | 4 — GeminiLiveBrain | Implemented | D11 accepted `decide_turn`. Steps 1–6 are in place. Live meeting validation and consistent S4 constraint replacement are still open. |
 | 4b — Gemini writes the answer (D12) | ☐ Next | Replaces the decide_turn + AnswerWriter answer path. Starts with the `--answer` spike. |
 | 5 — Notebook + Supervisor | ☐ Not started | |
-| 6 — OpenAIRealtimeBrain | ☐ Not started | |
+| 6 — OpenAI + ElevenLabs Realtime | ☐ Not started | D13 added ElevenLabs Realtime; starts with an ElevenLabs spike. |
 | 7 — Tuning & validation | ☐ Not started | |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
@@ -46,6 +46,8 @@
 - 2026-11-25 — **Fast text path (D10):** user chose to add a faster text path after the spike showed Gemini transcription arrives at speaking pace. Gemini Live = listener + decider (`decide_turn` tool call); answer text written by the user's selected text model through Natively's existing answer path (AnswerWriter). Phase 4 starts with a tool-call latency spike.
 
 - 2026-11-26 — **D12 replaces D10/D11 (user decision after the first live tests):** the goal is ChatGPT Voice behaviour, so Gemini Live writes the answer itself. Its audio is discarded and its output transcription streams into the overlay word by word as it speaks (never waiting for the full answer). Measured before the switch (2 live runs, Windows): speech end → decision 2.6 / 5.2 s, decision → first text 2.2 / 4.6 s (answer model was codex-cli via Fast Response Mode's Auto tier), first word 4.9 / 9.8 s. The D10 trade-off (a separate model writes the answer, so Gemini stops answering) was not stated clearly when D10 was offered; recorded here so it is not repeated.
+
+- 2026-11-26 — **D13:** user asked to add ElevenLabs Realtime (`eleven_realtime_v1_mini` / `v1_max`) as a third provider, same card, same behaviour as Gemini and OpenAI. ElevenLabs states OpenAI-Realtime wire compatibility, so one shared protocol client. Built in Phase 6 after an ElevenLabs spike; text-only output is unverified.
 
 - 2026-11-26 — **Scope:** Live Brain answers only interviewer speech. Typed questions, Direct Assist, manual "What to answer" presses, screenshots and all other modes keep default Natively behaviour (ARCHITECTURE §9a scope rule).
 
