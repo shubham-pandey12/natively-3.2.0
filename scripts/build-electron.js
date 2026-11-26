@@ -53,10 +53,15 @@ const start = Date.now();
 const coreSmokePremiumExternalPlugin = {
   name: 'core-smoke-premium-external',
   setup(esbuild) {
-    esbuild.onResolve({ filter: /^(?:\.\.\/)+premium(?:\/|$)/ }, (args) => ({
-      path: args.path,
-      external: true,
-    }));
+    esbuild.onResolve({ filter: /^(?:\.\.\/)+premium(?:\/|$)/ }, (args) => {
+      // Only the private submodule (<root>/premium) is external. A core file
+      // such as electron/services/x.ts importing ../premium/y means the core
+      // electron/premium/ shims, which must stay bundled.
+      const target = path.resolve(args.resolveDir, args.path);
+      const privateRoot = path.resolve(rootDir, 'premium');
+      if (target !== privateRoot && !target.startsWith(privateRoot + path.sep)) return undefined;
+      return { path: args.path, external: true };
+    });
   },
 };
 

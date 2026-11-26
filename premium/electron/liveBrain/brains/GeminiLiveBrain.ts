@@ -41,6 +41,16 @@ export class GeminiLiveError extends Error {
 }
 
 function classify(code?: number, detail = ''): LiveBrainErrorCode {
+    const result = classifyQuietly(code, detail);
+    // Google's reason text never contains the key; it is what explains an
+    // "auth" fallback (wrong key, key without Live API access, wrong model).
+    if (code !== undefined && code !== 1000) {
+        console.warn(`[LiveBrain] Gemini closed the session: ${result} (code ${code}) ${detail.replace(/\s+/g, ' ').trim().slice(0, 300)}`);
+    }
+    return result;
+}
+
+function classifyQuietly(code?: number, detail = ''): LiveBrainErrorCode {
     if (/quota|billing|daily limit/i.test(detail)) return 'quota';
     if (code === 401 || code === 403 || /api.key|unauthenticated|permission.denied|invalid credential/i.test(detail)) return 'auth';
     if (code === 429 || code === 1013 || /rate.limit|resource.exhausted/i.test(detail)) return 'rate_limited';
