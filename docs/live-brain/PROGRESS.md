@@ -382,6 +382,101 @@ The tested ElevenLabs path for D13 is audio output with the audio discarded and 
 - **Build validated on Windows.** `npm run build:electron`, both `npx tsc --noEmit -p tsconfig.json` and `npx tsc --noEmit -p tsconfig.node.json`, and `npm run typecheck:premium` passed. `npm run test:lib` passed 3,242 with 15 skipped.
 - The combined Live Brain, Live Brain Settings, and STT test command passed 145 tests. The command was `node --test premium/electron/liveBrain/__tests__/ electron/services/__tests__/LiveBrainSettings.test.mjs electron/audio/__tests__/OpenAISttSocketAndQuota2026_09_26.test.mjs electron/audio/__tests__/openaiTranscriptTurnCoalescer.test.mjs electron/audio/__tests__/SttEndpointLatency2026_09_23.test.mjs electron/audio/__tests__/SttProviderTerminalErrors2026_11_01.test.mjs`. The broader `node --test electron/audio/__tests__/` again passed 1,066 with one skipped and the same three baseline source assertion failures listed under Step 0.
 
+## Phase 7 — Tuning and physical validation (2026-11-26)
+
+### Clarification decision and notebook notes
+
+- The user confirmed that every completed realtime `Ask:` starts the 10-second timer. The same brain answers under an assumption by calling `requestClarificationAnswer` without a transcript prerequisite. The legacy AnswerWriter path still requires the original question. Architecture §7 rule 6 now records both cases. Existing tests cover the realtime timer with no transcript, cancellation when interviewer speech arrives, and the AnswerWriter path with and without the original question.
+- The generic “Focused discussion covering … topics. Started with: …” text comes from `ConversationSummarizer.summarizeNarrative`. The notebook inserted it on every deterministic pass. The formatter copied the first transcript entry directly, so a mis-transcribed opening could appear in the notes even if the LLM returned no result. The original Phase 5 trace does not establish whether refinement subsequently ran or what produced the input fragment.
+- The shared notebook now builds deterministic notes from interviewer requirements and constraints, candidate commitments, facts from both speakers, and resolved clarifications. It keeps structured details ahead of the freeform summary in the bounded notebook and gives the refinement model the recorded evidence with instructions to omit unintelligible fragments. Recent turns remain verbatim for session seeding. Tests cover a missing refinement result, the fallback's evidence selection, and the next refinement's input.
+
+### Windows live replay
+
+The corpus used locally synthesized 16 kHz mono PCM paced in 40 ms frames through the compiled meeting paths. Clause gaps used the offsets in the corpus. Candidate remarks entered as labeled final candidate context, as they do after mic STT. Reported times are milliseconds from the relevant paced speech end to the first visible nonblank text and the last changed text. Provider turn completion can come much later. These replay timings are at the overlay delivery boundary. The ElevenLabs trials used the shipped Mini audio configuration and discarded output audio. Pipeline trials used the existing STT → Auto Answer → What to Answer path with ElevenLabs Scribe and Groq. Deepgram rejected the available key, and Gemini Flash-Lite and OpenAI produced failure notices in initial pipeline runs. S11 injected Gemini transport faults through a local relay to the real service. Pipeline S11 stopped or restarted the real STT adapter at the fault boundary.
+
+#### Gemini and PipelineBrain
+
+| Case | Gemini Full | Gemini Trimmed | PipelineBrain |
+|---|---|---|---|
+| S1 | Pass, 1,788 / 6,192. One answer after the pause. | Pass, 1,761 / 7,842. One answer after the pause. | Pass on retry, 8,485 / 8,852. First attempt showed a timeout at 12,456 ms. |
+| S2 | Fail, 1,717 / 7,259. Covered redirects and sharding, omitted URL creation. | Fail, 1,876 / 6,118. Covered lookup, redirects, and sharding, omitted URL creation. | Pass, 2,792 / 3,171. Covered creation, lookup, redirects, and sharding. |
+| S3 | Pass, 1,991 / 5,436 on the follow-up. Explained Redis and TTL for hot links. | Pass on retry, 2,074 / 4,094 on the follow-up. Explained Redis for heavy read traffic. | Fail, 4,989 / 4,990 on retry. The follow-up answered a career question about the mistranscribed “Reedy's”. The initial run showed a rate-limit notice. |
+| S4 | Pass, 2,339 / 7,044. Modeled products in MongoDB. | Pass, 1,671 / 7,271. Modeled products in MongoDB. | Pass, 5,424 / 5,983. Modeled products in MongoDB. |
+| S5 | Pass, 1,824 / 4,745 for replacement. Old answer folded. | Pass, 1,804 / 5,050 for replacement. Old answer folded. | Fail. The original answer appeared at 4,692 / 5,291 ms, was marked outdated, and got no replacement. Retry also got no replacement and restored the old row. |
+| S6 | Pass, 1,881 / 6,790. One answer about regional failover. | Pass, 1,871 / 5,921. One answer about regional failover. | Pass, 5,526 / 5,750. One answer about regional failover. |
+| S7 | Pass, 1,812 / 5,396. Defined both terms and gave a spoken example. | Pass, 1,832 / 1,832. Defined both terms with examples. Text arrived in one chunk. | Pass, 6,134 / 6,293. Defined both terms with examples. |
+| S8 | Fail, 1,886 / 6,358. Asked questions inside an ordinary answer. | Fail, 1,837 / 1,837. Answered directly. | Fail, 5,876 / 6,416. Answered directly. |
+| S9 | Fail, 1,670 / 7,505 for final answer. Two visible responses during pauses. | Fail, 1,675 / 7,309 for final answer. Two visible responses during pauses. | Fail. Rate-limit notices at 9,141 ms and 9,898 ms on retry after the complete prompt. |
+| S10 | Blocked by Gemini quota at the second question. First answer 1,959 / 8,512. | Context passes at 70 minutes, 1,734 / 6,039. Recommended multiple email providers, preserving the email-only rule. Rollover continuity fails. One of eleven questions went unanswered when the session rolled near the end of the 63-minute question. | Pass on the 70-minute context check, 4,057 / 4,184. Recommended a second email provider and explicitly ruled out SMS and push. Eight of eleven turns produced substantive answers. The remaining turns showed one timeout and two rate-limit notices. This replay began with the first structured-notes build. Tests also cover the final extractor. |
+| S11 | Quota and 10 s drop pass. Follow-up 5,020 / 5,249 and 5,431 / 5,596 on pipeline fallback, respectively. Socket kill fails, 2,603 / 7,436. Gemini reconnected and answered but lost the 15-minute requirement. | Socket kill fails, 1,785 / 6,871. Gemini reconnected and lost the freshness requirement. The network and quota cases switched to pipeline, then showed rate-limit notices at 9,434 and 9,420 ms. | Quick STT restart passes, 5,245 / 5,453 for the follow-up on 15-minute freshness. The 10 s restart fails. Original 7,874 / 8,231, then no follow-up in 35 s despite STT recovery. A terminal STT shutdown modeling exhausted quota failed with no follow-up, as the pipeline sits at the end of the fallback chain. Original 7,270 / 7,777. |
+| S12 | Fail, original 1,886 / 2,330. Cancelled on first backchannel. Replacement 1,692 / 11,200 after the final backchannel. | Inconclusive for interruption, 1,891 / 1,891. One burst completed before the filler began. Filler produced no replacement. | Fail. Timeout notice at 11,942 ms and rate-limit notice at 9,934 ms on retry. Neither trial produced an answer to interrupt. |
+
+No completed S8 turn used the exact `Ask:` prefix in four Full, two Trimmed, or one Mini live samples. In one of the Full probes, the harness called `requestClarificationAnswer` 10,001 ms after the provider completed its initial turn. The same session began a stated-assumption answer 964 ms after the request. That probe exercised the live fallback transport. Fake-clock coverage verifies that one completed `Ask:` triggers one request at 10 seconds, and that interviewer speech cancels the timer. No runtime clarification code changed.
+
+#### Architecture §11 targets and default recommendation
+
+- Across S1/S2/S4/S7, the first-text median and nearest-rank p90 were **1,800 / 2,339 ms Full** and **1,797 / 1,876 ms Trimmed**. Both passed the 2,500 ms p90 budget and missed the 1,500 ms median by about 300 ms. Median full-text times were 6,618 ms Full and 6,695 ms Trimmed. Both protected S1's 1.2-second pause and answered prematurely during S9.
+- Full streamed visible text in 33–49 updates across all four common scenarios. Trimmed streamed 40–48 updates in three of four but delivered all of S7 in one update. Its S12 answer also arrived in one update. On this small sample, **keep Full as the default** for the more consistent streaming cadence. The current default stays in place.
+- The S5 replacement began at **1,824 ms Full** and **1,804 ms Trimmed** after the correction, meeting the 2,000 ms target. The marker followed the provider speech-start event in the same millisecond on both runs. From the correction PCM onset to the marker, wall times were 231 ms Full and 245 ms Trimmed. These measurements stop at the overlay port.
+- The complete Trimmed S10 run crossed seven provider `goAway` boundaries. Reconnecting-to-Listening gaps were 1,032, 793, 798, 1,130, 773, 825, and 719 ms. Two exceeded the 1,000 ms target. The seventh began 206 ms before the 63-minute question ended, and that question received no answer. The final question completed at 70 minutes and retained the original restriction. The existing 70-minute automated simulation passed its seeded-rollover and in-flight answer assertions.
+- The production endpoint settings remain at the approved 1,300 ms and low Gemini sensitivity, and low semantic VAD eagerness for OpenAI and ElevenLabs. S9's late 1.6–1.7 s pauses exceeded the fixed Gemini end-of-speech interval. The measurement identifies a turn-taking gap and does not establish a better setting.
+
+#### ElevenLabs Mini
+
+| Case | Expected result | First / last text (ms) | Observation |
+|---|---|---:|---|
+| S1 | Pass | 1,544 / 1,599 | One answer after the full question. |
+| S2 | Pass with a quality issue | 1,301 / 1,491 | Discussed link creation, redirect cache, and distributed storage. Its assumed write rate was inconsistent with its stated daily volume. |
+| S4 | Fail | 1,840 / 1,841 | Proposed a document model without identifying MongoDB as the store and opened by discussing missing profile context. |
+| S7 | Pass | 1,591 / 1,593 | Added servers versus CPU or RAM on one server. |
+| S8 | Fail | 2,153 / 2,153 | Answered directly. No `Ask:`, so the timer did not start. |
+| S12 | Fail | 1,826 / 1,834 (original only) | First backchannel interrupted the original turn even though its text had already arrived. No replacement was displayed. |
+
+Four comparable standalone cases (S1/S2/S4/S7) gave Mini a first-text median / p90 of 1,568 / 1,840 ms (nearest-rank p90). Mini emitted 20–103 chunks in those cases, generally in one burst. No local filler rule was added.
+
+### Windows packaging and macOS review
+
+- **Tested physically on Windows (dev).** The isolated `npm run dev:agent` launcher showed the Live Brain Audio card with Mini default and Max labeled “slower (~3 s)”. The in-app Test Connection IPC succeeded. Started a meeting, played the S7 fixture through the Windows speaker path, confirmed native WASAPI system capture (48 kHz device to 16 kHz), and observed the scaling answer in the overlay renderer. Ended the meeting and restored the isolated profile's initial Live Brain selection and toggle.
+- `npm run app:build` reached the packaged asset check and found four missing multilingual-e5-small files. `node scripts/download-models.js` retrieved and hash-verified them. The subsequent source asset check passed. The existing NSIS packaging preflight then refused the build because `GOOGLE_CALENDAR_CLIENT_SECRET` was absent. An installer requires that release credential.
+- The existing unpacked Windows x64 build completed and passed `node scripts/verify-packaged-local-assets.mjs --app release/win-unpacked --platform win32`. Its ASAR contains the renderer, main bundle, and premium Live Brain modules and excludes `.env`. The executable reached launcher creation and completed startup with `appPackaged: true`. A separate Electron harness loaded the real Live Brain factory from the ASAR, passed the Mini Test Connection call, and streamed S7 in 29 updates (1,609 / 1,613 ms). The first packaging run encountered a workspace-addon rebuild lock. The final `node scripts/package-app.js --win --dir --x64` run rebuilt both workspace addons successfully, passed the unpacked asset check again, booted, passed the ASAR Test Connection again, and answered S7 in 21 updates (1,599 / 1,602 ms). The installed Settings UI and a meeting through native capture still require an installer run.
+- macOS default and signed configurations share the `dist-electron` inclusion rule. The normal build includes compiled premium modules, and the loader uses bundled or relative compiled imports. The absolute-path core-smoke resolver is development-only. No packaging configuration or native code changed.
+
+### Regression and baseline
+
+`npm run test:ci` stopped at its `npm test` stage on the pre-change commit `b1572188` and again after the Phase 7 change. The baseline had 18,517 passes, 14 failures, and 124 skips. The final run had 18,520 passes, 13 failures, and 122 skips. These 13 failures reproduced before the Phase 7 edits:
+
+1. `MicEchoNotCountedAsUser2026_11_13` — main keeps the echo final out of the session and retrieval.
+2. `Recovered320Audio` — missing and unknown providers remain off while echo reaches display and Auto Answer.
+3. `SttGapRecovery2026_10_15` — main feeds both captures and opens recovery only on retryable cloud outages.
+4. `AutoAnswerAdoptedDispatchReliability2026_11_23` — adopted draft with a tracked promise completes.
+5. `AutoAnswerAdoptedDispatchReliability2026_11_23` — adopted draft without a tracked promise completes.
+6. `PhoneMirrorPhoneActions2026_09_27` — phone expects the desktop What to Answer label.
+7. `StealthShortcutGuard` — shortcut-only tap starts without overlay bounds.
+8. `TelemetryEmissionSites` — production meeting teardown emits `meeting_stop`.
+9. `WhatToAnswerSnapshotWiring` — a newer request aborts the previous provider request at entry.
+10. `WtaActiveCodingProblemSpoken2026_11_15` — critique keeps the active problem.
+11. `WtaActiveCodingProblemSpoken2026_11_15` — follow-up without later discussion names only the problem.
+12. `WtaActiveCodingProblemSpoken2026_11_15` — additional talk keeps the same problem.
+13. `AutoAnswerUsageTelemetry2026_09_27` — main wires usage telemetry to the engine and meeting lifecycle.
+
+The baseline-only `CatalogInstallIntegrity2026_10_09` bundled-embedding check passed after the model assets were installed. The first post-change run had three additional file-level failures while the dev app was building and starting. `EvidenceResolverWiringIdentity2026_07_12`, `LLMHelperNegotiationCoachingGate`, and `PhoneChatRouteOptions` all passed on the subsequent full run with the dev app closed. They also passed on the pre-change run.
+
+Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 skipped, `npm run test:components` passed 1,002 with two skipped, and `npm run test:scripts` passed 356 with three skipped. `npm run test:company-research-spend` passed. `npm run test:intelligence` had 3,296 passes and nine failures, all in `HotkeyTurnsRecorded2026_10_28`. The same nine cases failed with the production source restored to `b1572188`, after which the Phase 7 notebook source was restored:
+
+1. Screenshot Code Hint enters the conversation with its screenshot (line 116).
+2. The problem statement names the hint turn (line 129).
+3. Brainstorm enters the conversation (line 139).
+4. Presses on one queued screenshot give it a stable identity (line 150).
+5. Code Hint and Brainstorm name optimized screenshot copies consistently with What to Answer (line 167).
+6. An empty result keeps the screenshot and drops the canned failure (line 208).
+7. A provider failure keeps the screenshot and omits the failure text from the conversation (line 217).
+8. A press running across meeting start stays in its original conversation (line 250).
+9. Brainstorm retains its screenshot while “explain that” refers to the last answer (line 369).
+
+- **Build validated on Windows.** `npm run build:electron` and `npm run typecheck:premium` passed. `node --test premium/electron/liveBrain/__tests__/ electron/services/__tests__/LiveBrainSettings.test.mjs` passed 84 tests. The unpacked package, asset verification, and native Windows dev replay are described above.
+- The shared changes affect notebook notes and their use during provider rollover and fallback. No platform-specific source, settings defaults, provider transport, capture code, or installer configuration changed. Windows WASAPI and macOS Core Audio/ScreenCaptureKit continue to use the same PCM boundary. A transcript error can still affect the raw recent context or a model response, as seen in S3.
+- **Reviewed but not executed on macOS. Requires physical macOS verification.** **Requires physical Windows verification** for the installed NSIS build when its release credential is available.
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).
