@@ -1,4 +1,4 @@
-export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime';
+export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime';
 export type LiveBrainProvider = LiveBrainKeyProvider | 'pipeline';
 type PromptVariant = 'full' | 'trimmed';
 
@@ -9,7 +9,9 @@ export interface LiveBrainConfig {
     maskedSuffix: string | null;
     useAiProvidersKey: boolean;
     usingAiProvidersKey: boolean;
-    /** Where the key in use comes from. 'env' is .env, in development builds only. */
+    /** Where the key in use comes from. 'env' is .env, in development builds only.
+     *  'ai-providers' is the vendor's existing Natively key (AI Providers for
+     *  Gemini/OpenAI; Speech Provider for ElevenLabs). */
     keySource: 'dedicated' | 'env' | 'ai-providers' | null;
     model: string;
     promptVariant: PromptVariant | null;

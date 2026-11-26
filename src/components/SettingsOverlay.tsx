@@ -455,7 +455,19 @@ const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChang
 const LIVE_BRAIN_KEY_URLS: Record<LiveBrainKeyProvider, string> = {
     'gemini-live': 'https://aistudio.google.com/apikey',
     'openai-realtime': 'https://platform.openai.com/api-keys',
+    'elevenlabs-realtime': 'https://elevenlabs.io/app/settings/api-keys',
 };
+
+// Per-provider display details for the Live Brain key card.
+const LIVE_BRAIN_PROVIDER_UI: Record<LiveBrainKeyProvider, {
+    name: string; vendor: string; mark: 'google' | 'openai' | 'elevenlabs'; defaultModel: string; existingKeyPlace: string;
+}> = {
+    'gemini-live': { name: 'Gemini Live', vendor: 'Gemini', mark: 'google', defaultModel: 'gemini-3.8-live', existingKeyPlace: 'AI Providers' },
+    'openai-realtime': { name: 'OpenAI Realtime', vendor: 'OpenAI', mark: 'openai', defaultModel: 'gpt-realtime-2.1', existingKeyPlace: 'AI Providers' },
+    'elevenlabs-realtime': { name: 'ElevenLabs Realtime', vendor: 'ElevenLabs', mark: 'elevenlabs', defaultModel: 'eleven_realtime_v1_mini', existingKeyPlace: 'Speech Provider' },
+};
+const isLiveBrainKeyProvider = (value: unknown): value is LiveBrainKeyProvider =>
+    typeof value === 'string' && Object.prototype.hasOwnProperty.call(LIVE_BRAIN_PROVIDER_UI, value);
 
 // Live Brain's provider and key, drawn exactly like the Speech Provider card
 // above it: the ProviderSelect card, then AI Providers' key card (mark, name,
@@ -488,7 +500,7 @@ const LiveBrainProviderSettings = () => {
     useEffect(() => () => clearTimeout(savedTimer.current), []);
 
     const provider = config?.provider;
-    const keyProvider: LiveBrainKeyProvider | null = provider === 'gemini-live' || provider === 'openai-realtime' ? provider : null;
+    const keyProvider: LiveBrainKeyProvider | null = isLiveBrainKeyProvider(provider) ? provider : null;
 
     const loadModels = useCallback(async () => {
         setModelsLoading(true);
@@ -513,7 +525,7 @@ const LiveBrainProviderSettings = () => {
     const resetFeedback = () => { setNote(''); setTestStatus('idle'); };
 
     const changeProvider = async (value: string) => {
-        if (value !== 'gemini-live' && value !== 'openai-realtime' && value !== 'pipeline') return;
+        if (!isLiveBrainKeyProvider(value) && value !== 'pipeline') return;
         resetFeedback();
         setKeyDraft('');
         const result = await api.setLiveBrainProvider(value).catch(() => ({ success: false } as LiveBrainSettingsResult));
@@ -565,13 +577,15 @@ const LiveBrainProviderSettings = () => {
         }
     };
 
-    const name = keyProvider === 'openai-realtime' ? t('OpenAI Realtime') : t('Gemini Live');
-    const vendor = keyProvider === 'openai-realtime' ? 'OpenAI' : 'Gemini';
+    const ui = LIVE_BRAIN_PROVIDER_UI[keyProvider ?? 'gemini-live'];
+    const name = t(ui.name);
+    const { vendor } = ui;
+    const reuseLabel = t('Use my {vendor} key from {place}').replace('{vendor}', vendor).replace('{place}', t(ui.existingKeyPlace));
     const keySourceLine = config?.keySource === 'dedicated' ? null
         : config?.keySource === 'env' ? t('Using {vendor} key from .env (development build).').replace('{vendor}', vendor)
-        : config?.keySource === 'ai-providers' ? t('Using your {vendor} key from AI Providers.').replace('{vendor}', vendor)
+        : config?.keySource === 'ai-providers' ? t('Using your {vendor} key from {place}.').replace('{vendor}', vendor).replace('{place}', t(ui.existingKeyPlace))
         : null;
-    const defaultModel = keyProvider === 'openai-realtime' ? 'gpt-realtime-2.1' : 'gemini-3.8-live';
+    const { defaultModel } = ui;
     const currentModel = config?.model || defaultModel;
     const listedModels = models.some(m => m.id === currentModel)
         ? models : [{ id: currentModel, label: currentModel }, ...models];
@@ -591,6 +605,7 @@ const LiveBrainProviderSettings = () => {
                                 options={[
                                     { id: 'gemini-live', label: t('Gemini Live'), badge: provider === 'gemini-live' && config.hasKey ? 'Saved' : null, desc: t('Google Gemini Live API'), color: 'blue', icon: <BrandMark provider="google" />, neutralTile: true },
                                     { id: 'openai-realtime', label: t('OpenAI Realtime'), badge: provider === 'openai-realtime' && config.hasKey ? 'Saved' : null, desc: t('OpenAI Realtime API'), color: 'green', icon: <BrandMark provider="openai" />, neutralTile: true },
+                                    { id: 'elevenlabs-realtime', label: t('ElevenLabs Realtime'), badge: provider === 'elevenlabs-realtime' && config.hasKey ? 'Saved' : null, desc: t('Eleven Realtime v1 API'), color: 'teal', icon: <BrandMark provider="elevenlabs" />, neutralTile: true },
                                     { id: 'pipeline', label: t('Existing pipeline'), badge: null, desc: t('The Auto Answer engine; no extra key'), color: 'blue', icon: <BrandMark provider="natively" />, neutralTile: true },
                                 ]}
                             />
@@ -602,7 +617,7 @@ const LiveBrainProviderSettings = () => {
                             <div className="aip-card aip-provider bg-bg-card">
                                 <div className="aip-provider-head">
                                     <span className="aip-tile aip-tile--mark" aria-hidden="true">
-                                        <BrandMark provider={keyProvider === 'gemini-live' ? 'google' : 'openai'} />
+                                        <BrandMark provider={ui.mark} />
                                     </span>
                                     <h4 className="aip-card-title truncate min-w-0">{name}</h4>
                                     <div className="ml-auto flex items-center gap-2 shrink-0">
@@ -676,12 +691,12 @@ const LiveBrainProviderSettings = () => {
                                 {/* Only offered while no Live Brain key is saved: a saved key always wins. */}
                                 {!config.hasDedicatedKey && (
                                     <div className="aip-provider-row">
-                                        <span className="aip-meta">{t('Use my {vendor} key from AI Providers').replace('{vendor}', vendor)}</span>
+                                        <span className="aip-meta">{reuseLabel}</span>
                                         <AipSwitch
                                             className="ml-auto"
                                             checked={config.useAiProvidersKey}
                                             onChange={(useAiProvidersKey) => void setOption({ provider: keyProvider, useAiProvidersKey })}
-                                            label={t('Use my {vendor} key from AI Providers').replace('{vendor}', vendor)}
+                                            label={reuseLabel}
                                         />
                                     </div>
                                 )}

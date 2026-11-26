@@ -151,7 +151,7 @@ test('answer variants retain the imported voice while trimmed omits scenario rul
 
 test('the exhaustive factory distinguishes known placeholders from unknown ids', () => {
     for (const id of ['gemini-live', 'gemini']) assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, 'gemini-live');
-    for (const id of ['openai-realtime', 'pipeline']) {
+    for (const id of ['openai-realtime', 'elevenlabs-realtime', 'pipeline']) {
         assert.throws(() => createLiveBrain(id, {}), error => error instanceof LiveBrainNotImplementedError && error.id === id);
     }
     assert.throws(() => createLiveBrain('future-brain', {}), { message: 'Unsupported live brain: future-brain' });

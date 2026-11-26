@@ -6,37 +6,88 @@ import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainModel, LiveBrainMo
 
 const settingsUnavailable = 'Settings store is unavailable; the change was not saved.';
 
+type CredentialsReader = Pick<CredentialsManager, 'getLiveBrainGeminiKey' | 'getLiveBrainOpenaiKey' | 'getLiveBrainElevenlabsKey' | 'getAllCredentials' | 'getElevenLabsApiKey'>;
+
+/**
+ * Everything that differs per realtime provider. Exhaustive over
+ * LiveBrainKeyProvider: adding a provider without a row fails typecheck.
+ */
+const PROVIDERS: Record<LiveBrainKeyProvider, {
+    vendor: string;
+    /** A local shape check before any provider handshake. */
+    keyPattern: RegExp;
+    envNames: string[];
+    modelSetting: 'liveBrainGeminiModel' | 'liveBrainOpenaiModel' | 'liveBrainElevenlabsModel';
+    reuseSetting: 'liveBrainReuseGeminiKey' | 'liveBrainReuseOpenaiKey' | 'liveBrainReuseElevenlabsKey';
+    dedicatedKey(credentials: CredentialsReader): string | undefined;
+    /** The vendor key the user already stored elsewhere in Natively. */
+    existingKey(credentials: CredentialsReader): string | undefined;
+    setKey(credentials: CredentialsManager, key: string): boolean;
+}> = {
+    'gemini-live': {
+        vendor: 'Gemini',
+        // Deliberately loose. Classic AI Studio keys are `AIza` + 35 chars, but a
+        // working 53-character key without that prefix authenticated against Gemini
+        // Live on 2026-11-25 (Phase 0 spike), so a prefix/length rule would reject real keys.
+        keyPattern: /^[A-Za-z0-9._-]{30,200}$/,
+        envNames: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+        modelSetting: 'liveBrainGeminiModel',
+        reuseSetting: 'liveBrainReuseGeminiKey',
+        dedicatedKey: c => c.getLiveBrainGeminiKey(),
+        // Match the AI Providers settings screen, which shows stored credentials.
+        existingKey: c => c.getAllCredentials().geminiApiKey,
+        setKey: (c, key) => c.setLiveBrainGeminiKey(key),
+    },
+    'openai-realtime': {
+        vendor: 'OpenAI',
+        keyPattern: /^sk-[A-Za-z0-9_-]{16,}$/,
+        envNames: ['OPENAI_API_KEY'],
+        modelSetting: 'liveBrainOpenaiModel',
+        reuseSetting: 'liveBrainReuseOpenaiKey',
+        dedicatedKey: c => c.getLiveBrainOpenaiKey(),
+        existingKey: c => c.getAllCredentials().openaiApiKey,
+        setKey: (c, key) => c.setLiveBrainOpenaiKey(key),
+    },
+    'elevenlabs-realtime': {
+        vendor: 'ElevenLabs',
+        // ElevenLabs keys have been both `sk_` + hex and bare 32-char hex; loose on purpose.
+        keyPattern: /^[A-Za-z0-9_-]{20,200}$/,
+        envNames: ['ELEVENLABS_API_KEY'],
+        modelSetting: 'liveBrainElevenlabsModel',
+        reuseSetting: 'liveBrainReuseElevenlabsKey',
+        dedicatedKey: c => c.getLiveBrainElevenlabsKey(),
+        // The ElevenLabs key saved for Speech Provider (Scribe).
+        existingKey: c => c.getElevenLabsApiKey(),
+        setKey: (c, key) => c.setLiveBrainElevenlabsKey(key),
+    },
+};
+
 function isKeyProvider(value: unknown): value is LiveBrainKeyProvider {
-    return value === 'gemini-live' || value === 'openai-realtime';
+    return typeof value === 'string' && Object.prototype.hasOwnProperty.call(PROVIDERS, value);
 }
 
-// A local shape check is useful before making the provider handshake.
-// Gemini: deliberately loose. Classic AI Studio keys are `AIza` + 35 chars, but a
-// working 53-character key without that prefix authenticated against Gemini Live
-// on 2026-11-25 (Phase 0 spike), so a prefix/length rule would reject real keys.
 function isWellFormed(provider: LiveBrainKeyProvider, key: string): boolean {
-    return provider === 'gemini-live'
-        ? /^[A-Za-z0-9._-]{30,200}$/.test(key)
-        : /^sk-[A-Za-z0-9_-]{16,}$/.test(key);
+    return PROVIDERS[provider].keyPattern.test(key);
 }
 
 /**
- * Development only: GEMINI_API_KEY / OPENAI_API_KEY from .env (main.ts loads
- * dotenv only when !app.isPackaged). A packaged build never reads the
- * environment, matching CredentialsManager's env-fallback scope.
+ * Development only: GEMINI_API_KEY / OPENAI_API_KEY / ELEVENLABS_API_KEY from
+ * .env (main.ts loads dotenv only when !app.isPackaged). A packaged build never
+ * reads the environment, matching CredentialsManager's env-fallback scope.
  */
 function devEnvKey(provider: LiveBrainKeyProvider): string | undefined {
     try {
         const { app } = require('electron') as typeof import('electron');
         if (!app || app.isPackaged) return undefined;
     } catch { return undefined; }
-    const value = provider === 'gemini-live'
-        ? process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
-        : process.env.OPENAI_API_KEY;
-    return value?.trim() || undefined;
+    for (const name of PROVIDERS[provider].envNames) {
+        const value = process.env[name]?.trim();
+        if (value) return value;
+    }
+    return undefined;
 }
 
-function inspectConfig(settings: SettingsManager, credentials: CredentialsManager,
+function inspectConfig(settings: SettingsManager, credentials: CredentialsReader,
     envKey: (provider: LiveBrainKeyProvider) => string | undefined = devEnvKey): {
     config: LiveBrainConfig;
     keyIsWellFormed: boolean;
@@ -54,13 +105,10 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsManage
         };
     }
 
-    const gemini = provider === 'gemini-live';
-    const dedicated = gemini ? credentials.getLiveBrainGeminiKey() : credentials.getLiveBrainOpenaiKey();
-    // Match the AI Providers settings screen, which shows stored credentials.
-    const { geminiApiKey, openaiApiKey } = credentials.getAllCredentials();
-    const aiProvidersKey = (gemini ? geminiApiKey : openaiApiKey)?.trim();
-    const useAiProvidersKey = settings.get(gemini ? 'liveBrainReuseGeminiKey' : 'liveBrainReuseOpenaiKey')
-        ?? Boolean(aiProvidersKey);
+    const spec = PROVIDERS[provider];
+    const dedicated = spec.dedicatedKey(credentials);
+    const aiProvidersKey = spec.existingKey(credentials)?.trim();
+    const useAiProvidersKey = settings.get(spec.reuseSetting) ?? Boolean(aiProvidersKey);
     // Order: the Live Brain key, then (development builds only) .env, then the reused AI Providers key.
     const fromEnv = dedicated ? undefined : envKey(provider);
     const usingAiProvidersKey = !dedicated && !fromEnv && useAiProvidersKey && Boolean(aiProvidersKey);
@@ -77,7 +125,7 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsManage
             useAiProvidersKey,
             usingAiProvidersKey,
             keySource: dedicated ? 'dedicated' : fromEnv ? 'env' : usingAiProvidersKey ? 'ai-providers' : null,
-            model: settings.get(gemini ? 'liveBrainGeminiModel' : 'liveBrainOpenaiModel') ?? '',
+            model: settings.get(spec.modelSetting) ?? '',
             promptVariant,
         },
     };
@@ -113,7 +161,7 @@ export function registerLiveBrainSettingsIpc(
         if (enabled) {
             const { config: { provider, hasKey }, keyIsWellFormed } = inspect();
             if (isKeyProvider(provider) && !keyIsWellFormed) {
-                const vendor = provider === 'gemini-live' ? 'Gemini' : 'OpenAI';
+                const { vendor } = PROVIDERS[provider];
                 return {
                     success: false,
                     error: 'live_brain_key_required',
@@ -121,7 +169,7 @@ export function registerLiveBrainSettingsIpc(
                     // different fix than a missing one.
                     message: hasKey
                         ? `The ${vendor} key doesn't look valid. Check it in Audio → Live Brain Provider.`
-                        : `Add a ${vendor} key in Audio → Live Brain Provider.`,
+                        : `Add your ${vendor} key in Audio → Live Brain Provider.`,
                 };
             }
         }
@@ -147,10 +195,7 @@ export function registerLiveBrainSettingsIpc(
             return { success: false, error: 'The API key format is invalid.' };
         }
         try {
-            const store = credentials();
-            const persisted = provider === 'gemini-live'
-                ? store.setLiveBrainGeminiKey(key)
-                : store.setLiveBrainOpenaiKey(key);
+            const persisted = PROVIDERS[provider].setKey(credentials(), key);
             return saved(persisted, 'Could not save the Live Brain API key.', true);
         } catch {
             return { success: false, error: 'Could not save the Live Brain API key.' };
@@ -163,12 +208,12 @@ export function registerLiveBrainSettingsIpc(
                 return saved(settings().set('liveBrainPromptVariant', options.promptVariant));
             }
             if ('provider' in options && isKeyProvider(options.provider)) {
-                const gemini = options.provider === 'gemini-live';
+                const spec = PROVIDERS[options.provider];
                 if ('model' in options && typeof options.model === 'string') {
-                    return saved(settings().set(gemini ? 'liveBrainGeminiModel' : 'liveBrainOpenaiModel', options.model.trim()));
+                    return saved(settings().set(spec.modelSetting, options.model.trim()));
                 }
                 if ('useAiProvidersKey' in options && typeof options.useAiProvidersKey === 'boolean') {
-                    return saved(settings().set(gemini ? 'liveBrainReuseGeminiKey' : 'liveBrainReuseOpenaiKey', options.useAiProvidersKey), settingsUnavailable, true);
+                    return saved(settings().set(spec.reuseSetting, options.useAiProvidersKey), settingsUnavailable, true);
                 }
             }
         }
@@ -192,13 +237,16 @@ export function registerLiveBrainSettingsIpc(
                 return result;
             }
         }
-        const message = provider === 'pipeline' ? 'The existing pipeline needs no separate Live Brain connection.' : 'OpenAI Realtime connection testing is not available yet.';
+        const message = provider === 'pipeline' ? 'The existing pipeline needs no separate Live Brain connection.'
+            : provider === 'elevenlabs-realtime' ? 'Key saved. ElevenLabs Realtime connection testing arrives with its brain (Phase 6).'
+            : 'OpenAI Realtime connection testing is not available yet.';
         return { success: false, error: 'not_available_yet', message };
     });
 
     safeHandle('live-brain:list-models', async (): Promise<LiveBrainModelsResult> => {
         const { config: { provider }, usableKey } = inspect();
         if (provider === 'openai-realtime') return { success: true, models: OPENAI_REALTIME_MODELS };
+        if (provider === 'elevenlabs-realtime') return { success: true, models: ELEVENLABS_REALTIME_MODELS };
         if (provider !== 'gemini-live') return { success: true, models: [] };
         if (!usableKey) return { success: false, models: GEMINI_LIVE_FALLBACK_MODELS, error: 'Add an API key to load the model list.' };
         return listGeminiLiveModels(usableKey);
@@ -215,6 +263,12 @@ const GEMINI_LIVE_FALLBACK_MODELS: LiveBrainModel[] = [
 
 const OPENAI_REALTIME_MODELS: LiveBrainModel[] = [
     { id: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1', description: 'Default' },
+];
+
+// Model ids from ElevenLabs' 2026-10-19 changelog; re-check in the Phase 6 spike.
+const ELEVENLABS_REALTIME_MODELS: LiveBrainModel[] = [
+    { id: 'eleven_realtime_v1_mini', label: 'Eleven Realtime v1 Mini', description: 'Default · fastest' },
+    { id: 'eleven_realtime_v1_max', label: 'Eleven Realtime v1 Max', description: 'Reasons before answering' },
 ];
 
 /** The models this key can open a Live session with (bidiGenerateContent). */

@@ -201,6 +201,88 @@ test('in a development build the .env key comes after the Live Brain key and bef
     }
 });
 
+test('ElevenLabs Realtime: own key, Speech Provider key reuse, .env in dev, models, no raw key', async () => {
+    const userData = mkdtempSync(join(tmpdir(), 'natively-live-brain-eleven-'));
+    const load = Module._load;
+    const originalSettings = globalThis.__nativelySettingsManagerV1__;
+    const originalCredentials = globalThis.__nativelyCredentialsManagerV1__;
+    const originalEnv = process.env.ELEVENLABS_API_KEY;
+    delete process.env.ELEVENLABS_API_KEY;
+    Module._load = function (request, ...args) {
+        if (request === 'electron') {
+            return {
+                app: { getPath: () => userData, isReady: () => true, get isPackaged() { return packaged; }, getVersion: () => 'test' },
+                safeStorage: { isEncryptionAvailable: () => false },
+            };
+        }
+        return load.call(this, request, ...args);
+    };
+    try {
+        delete globalThis.__nativelySettingsManagerV1__;
+        delete globalThis.__nativelyCredentialsManagerV1__;
+        for (const module of ['SettingsManager', 'CredentialsManager', 'liveBrainSettings']) {
+            delete require.cache[require.resolve(`${compiled}${module}.js`)];
+        }
+        const credentials = require(`${compiled}CredentialsManager.js`).CredentialsManager.getInstance();
+        credentials.init();
+        const handlers = new Map();
+        const connections = [];
+        let broadcasts = 0;
+        require(`${compiled}liveBrainSettings.js`).registerLiveBrainSettingsIpc({
+            getLiveBrainEnabled: () => false, setLiveBrainEnabled: () => true,
+        }, (channel, listener) => handlers.set(channel, listener), () => { broadcasts++; }, () => ({
+            async testConnection(options) { connections.push(options); return { success: true }; },
+        }));
+        const invoke = (channel, payload) => handlers.get(`live-brain:${channel}`)(null, payload);
+
+        assert.equal(invoke('set-provider', 'elevenlabs-realtime').success, true);
+        assert.equal(invoke('get-config').provider, 'elevenlabs-realtime');
+        assert.equal(invoke('get-config').hasKey, false);
+        assert.match(invoke('set-enabled', true).message, /Add your ElevenLabs key/);
+
+        // The Speech Provider (Scribe) key is the reusable existing ElevenLabs key.
+        const scribeKey = 'sk_' + 's'.repeat(40) + 'Scri';
+        credentials.setElevenLabsApiKey(scribeKey);
+        assert.equal(invoke('get-config').keySource, 'ai-providers');
+        assert.equal(invoke('get-config').maskedSuffix, '••••••••Scri');
+
+        const ownKey = 'sk_' + 'o'.repeat(40) + 'OwnK';
+        assert.equal(invoke('set-key', { provider: 'elevenlabs-realtime', apiKey: 'short' }).success, false);
+        assert.equal(invoke('set-key', { provider: 'elevenlabs-realtime', apiKey: ownKey }).success, true);
+        assert.equal(invoke('get-config').keySource, 'dedicated');
+        assert.equal(invoke('get-config').maskedSuffix, '••••••••OwnK');
+        assert.equal(JSON.stringify(invoke('get-config')).includes(ownKey), false);
+        assert.equal(readFileSync(join(userData, 'credentials.fallback.enc')).includes(Buffer.from(ownKey)), false);
+        // The ElevenLabs key never reaches the Gemini handshake.
+        const tested = await invoke('test-connection');
+        assert.equal(tested.error, 'not_available_yet');
+        assert.equal(connections.length, 0);
+
+        assert.equal(invoke('set-options', { provider: 'elevenlabs-realtime', model: 'eleven_realtime_v1_max' }).success, true);
+        assert.equal(invoke('get-config').model, 'eleven_realtime_v1_max');
+        const models = await invoke('list-models');
+        assert.deepEqual(models.models.map(m => m.id), ['eleven_realtime_v1_mini', 'eleven_realtime_v1_max']);
+
+        // Development builds: .env sits between the Live Brain key and the reused key.
+        packaged = false;
+        const envKey = 'sk_' + 'e'.repeat(40) + 'EnvK';
+        process.env.ELEVENLABS_API_KEY = envKey;
+        assert.equal(invoke('get-config').keySource, 'dedicated');
+        assert.equal(invoke('set-key', { provider: 'elevenlabs-realtime', apiKey: '' }).success, true);
+        assert.equal(invoke('get-config').keySource, 'env');
+        assert.equal(invoke('get-config').maskedSuffix, '••••••••EnvK');
+        assert.ok(broadcasts >= 2);
+    } finally {
+        packaged = true;
+        if (originalEnv === undefined) delete process.env.ELEVENLABS_API_KEY;
+        else process.env.ELEVENLABS_API_KEY = originalEnv;
+        Module._load = load;
+        globalThis.__nativelySettingsManagerV1__ = originalSettings;
+        globalThis.__nativelyCredentialsManagerV1__ = originalCredentials;
+        rmSync(userData, { recursive: true, force: true });
+    }
+});
+
 test('the Gemini model list keeps only Live-capable models', async () => {
     const { listGeminiLiveModels } = require(`${compiled}liveBrainSettings.js`);
     const seen = [];

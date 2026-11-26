@@ -14,6 +14,7 @@ export function createLiveBrain(id: LiveBrainId | 'gemini', deps: GeminiLiveOpti
         case 'gemini-live':
             return new GeminiLiveBrain(deps);
         case 'openai-realtime':
+        case 'elevenlabs-realtime':
         case 'pipeline':
             throw new LiveBrainNotImplementedError(id);
         default: {
