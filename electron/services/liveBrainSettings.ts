@@ -20,7 +20,24 @@ function isWellFormed(provider: LiveBrainKeyProvider, key: string): boolean {
         : /^sk-[A-Za-z0-9_-]{16,}$/.test(key);
 }
 
-function inspectConfig(settings: SettingsManager, credentials: CredentialsManager): {
+/**
+ * Development only: GEMINI_API_KEY / OPENAI_API_KEY from .env (main.ts loads
+ * dotenv only when !app.isPackaged). A packaged build never reads the
+ * environment, matching CredentialsManager's env-fallback scope.
+ */
+function devEnvKey(provider: LiveBrainKeyProvider): string | undefined {
+    try {
+        const { app } = require('electron') as typeof import('electron');
+        if (!app || app.isPackaged) return undefined;
+    } catch { return undefined; }
+    const value = provider === 'gemini-live'
+        ? process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+        : process.env.OPENAI_API_KEY;
+    return value?.trim() || undefined;
+}
+
+function inspectConfig(settings: SettingsManager, credentials: CredentialsManager,
+    envKey: (provider: LiveBrainKeyProvider) => string | undefined = devEnvKey): {
     config: LiveBrainConfig;
     keyIsWellFormed: boolean;
     usableKey?: string;
