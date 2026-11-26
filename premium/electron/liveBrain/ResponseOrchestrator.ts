@@ -15,6 +15,8 @@ export interface LiveBrainOverlayPort {
     showAsk(ask: { askId: string; clarification: string; askStreaming?: boolean }): void;
     setOutdated(generationId: number, outdated: boolean): void;
     setInterviewerSpeaking(generationId: number, speaking: boolean): void;
+    /** D14: the interviewer bubble shown directly above its answer. */
+    showQuestion?(question: { questionId: string; text: string; done: boolean; generationId?: number }): void;
     showText(response: {
         responseId: string;
         generationId: number;
@@ -36,6 +38,8 @@ interface CurrentAnswer {
     completedAt?: number;
     outdated: boolean;
     speaking: boolean;
+    /** D14: the interviewer spoke while this answer's text was still streaming. */
+    cutOff?: boolean;
 }
 
 interface TextResponse {
@@ -45,9 +49,35 @@ interface TextResponse {
     text: string;
     generationId?: number;
     updated: boolean;
+    lastTextAt?: number;
+}
+
+interface QuestionBubble {
+    id: string;
+    /** Finalized transcript pieces of this turn. */
+    base: string;
+    /** The provider's growing partial after `base`. */
+    live: string;
+    /** Still being spoken: more transcript may arrive. */
+    open: boolean;
+    source: 'provider' | 'stt';
+    generationId?: number;
+}
+
+interface AnswerTurn {
+    responseId: string;
+    bubble?: QuestionBubble;
+    generationId?: number;
+    /** The interviewer spoke again, so late transcripts belong to a new turn. */
+    superseded: boolean;
 }
 
 const RECENT_ANSWER_MS = 20_000;
+// D14: text that grew this recently is still streaming. Interviewer speech then
+// cuts the answer off, so its replacement marks it outdated.
+const MID_STREAM_MS = 1_500;
+// An STT final this old is not used as the question of the next answer.
+const STT_QUESTION_MAX_AGE_MS = 8_000;
 const CLARIFICATION_MS = 10_000;
 // The overlay can keep earlier answers when Live Brain is disabled and
 // re-enabled in the same meeting. Never reuse a text generation across sessions.
@@ -58,6 +88,10 @@ export class ResponseOrchestrator<Timer> {
     private response?: TextResponse;
     private readonly seenResponseIds = new Set<string>();
     private clarification?: { timer: Timer };
+    private question?: QuestionBubble;
+    private answerTurn?: AnswerTurn;
+    private sttPending?: { text: string; at: number };
+    private questionSequence = 0;
 
     constructor(private readonly ports: {
         answerWriter?: AnswerWriterPort;
@@ -68,7 +102,12 @@ export class ResponseOrchestrator<Timer> {
 
     handleEvent(event: LiveBrainEvent): void {
         switch (event.type) {
+            case 'interviewer_transcript':
+                this.noteProviderTranscript(event.text, event.final);
+                break;
             case 'interviewer_speech_started':
+                if (this.answerTurn) this.answerTurn.superseded = true;
+                this.noteCutOff();
                 this.clearClarification();
                 if (this.current && this.isRecent(this.current)) this.setSpeaking(this.current, true);
                 break;
@@ -77,11 +116,14 @@ export class ResponseOrchestrator<Timer> {
                 break;
             case 'response_silent':
                 if (this.current) this.setSpeaking(this.current, false);
+                this.closeQuestion();
+                this.answerTurn = undefined;
                 break;
             case 'response_started':
                 if (this.seenResponseIds.has(event.responseId)) return;
                 this.seenResponseIds.add(event.responseId);
                 this.closeTextResponse();
+                this.startAnswerTurn(event.responseId);
                 this.response = { id: event.responseId, parser: createResponseParser(), text: '', updated: false };
                 break;
             case 'response_delta': {
@@ -93,6 +135,8 @@ export class ResponseOrchestrator<Timer> {
             case 'response_done': {
                 const response = this.response;
                 if (response?.id !== event.responseId) return;
+                // Gemini reports the barge-in cancel before the speech start.
+                if (event.status === 'cancelled') this.noteCutOff();
                 if (event.status === 'completed') {
                     this.readTextEvents(response, response.parser.finish());
                     if (!response.kind && this.current) this.setSpeaking(this.current, false);
@@ -103,9 +147,25 @@ export class ResponseOrchestrator<Timer> {
         }
     }
 
+    /** Backup question text from the existing STT (D14). Used only for a turn
+     *  the provider left without a transcript. */
+    noteSttTranscript(text: string, at: number): void {
+        const clean = text.replace(/\s+/g, ' ').trim();
+        if (!clean || this.question?.open) return;
+        const turn = this.answerTurn;
+        if (turn && !turn.bubble && !turn.superseded) {
+            turn.bubble = this.createBubble(clean, 'stt', false, turn.generationId);
+            return;
+        }
+        this.sttPending = { text: clean, at };
+    }
+
     reset(): void {
         this.clearClarification();
         this.closeTextResponse();
+        this.question = undefined;
+        this.answerTurn = undefined;
+        this.sttPending = undefined;
         const previous = this.current;
         this.current = undefined;
         this.seenResponseIds.clear();
@@ -145,7 +205,7 @@ export class ResponseOrchestrator<Timer> {
 
     private showAsk(askId: string, clarification: string, question?: string, askStreaming?: boolean): void {
         this.clearClarification();
-        this.markCurrentOutdated();
+        this.supersedeForNewTurn(false);
         this.ports.overlay.showAsk({ askId, clarification, ...(askStreaming === undefined ? {} : { askStreaming }) });
         if (askStreaming) return;
         const requestAnswer = this.ports.requestClarificationAnswer;
@@ -195,6 +255,28 @@ export class ResponseOrchestrator<Timer> {
         return true;
     }
 
+    private noteCutOff(): void {
+        const current = this.current;
+        const response = this.response;
+        if (current?.source !== 'text' || response?.generationId !== current.generationId) return;
+        if (response.lastTextAt !== undefined && this.ports.clock.now() - response.lastTextAt < MID_STREAM_MS) {
+            current.cutOff = true;
+        }
+    }
+
+    /** D14 chat: a new realtime answer or Ask keeps the previous answer visible.
+     *  Only an answer the interviewer cut off mid-stream is marked outdated.
+     *  `clear` also ends the previous answer as the current one. */
+    private supersedeForNewTurn(clear: boolean): boolean {
+        const previous = this.current;
+        if (previous?.source === 'text' && !previous.cutOff) {
+            this.setSpeaking(previous, false);
+            if (clear) this.current = undefined;
+            return false;
+        }
+        return clear ? this.replaceCurrent() : this.markCurrentOutdated();
+    }
+
     private replaceCurrent(): boolean {
         const replaced = this.markCurrentOutdated();
         const previous = this.current;
@@ -229,6 +311,7 @@ export class ResponseOrchestrator<Timer> {
                 if (event.kind === 'wait' && this.current) this.setSpeaking(this.current, false);
             } else {
                 response.text += event.text;
+                response.lastTextAt = this.ports.clock.now();
             }
         }
         if (!events.some(event => event.type === 'text')) return;
@@ -239,11 +322,93 @@ export class ResponseOrchestrator<Timer> {
         if (response.kind !== 'answer') return;
         if (response.generationId === undefined) {
             this.clearClarification();
-            response.updated = this.replaceCurrent();
+            response.updated = this.supersedeForNewTurn(true);
             response.generationId = nextTextGeneration--;
             this.current = { generationId: response.generationId, source: 'text', outdated: false, speaking: false };
+            const turn = this.answerTurn;
+            if (turn?.responseId === response.id) {
+                turn.generationId = response.generationId;
+                if (turn.bubble) {
+                    turn.bubble.generationId = response.generationId;
+                    this.emitQuestion(turn.bubble);
+                }
+            }
         }
         this.showText(response, false);
+    }
+
+    private noteProviderTranscript(text: string, final: boolean): void {
+        const clean = text.replace(/\s+/g, ' ').trim();
+        if (!clean) return;
+        const open = this.question?.open ? this.question : undefined;
+        if (open) {
+            if (final) { open.base = joinText(open.base, clean); open.live = ''; }
+            else open.live = clean;
+            this.emitQuestion(open);
+            return;
+        }
+        // A provider that transcribes after speech end (OpenAI Whisper) can
+        // deliver the question after its answer started: put it above that answer.
+        const turn = this.answerTurn;
+        if (final && turn && !turn.superseded && turn.bubble?.source !== 'provider') {
+            if (turn.bubble) {
+                turn.bubble.base = clean;
+                turn.bubble.live = '';
+                turn.bubble.source = 'provider';
+                this.emitQuestion(turn.bubble);
+            } else {
+                turn.bubble = this.createBubble(clean, 'provider', false, turn.generationId);
+            }
+            return;
+        }
+        this.sttPending = undefined;
+        this.createBubble(clean, 'provider', true, undefined, !final);
+    }
+
+    /** `open` bubbles keep growing until their answer starts. */
+    private createBubble(text: string, source: QuestionBubble['source'], open: boolean, generationId?: number, partial = false): QuestionBubble {
+        const bubble: QuestionBubble = {
+            id: `q${++this.questionSequence}`,
+            base: partial ? '' : text,
+            live: partial ? text : '',
+            open,
+            source,
+            ...(generationId === undefined ? {} : { generationId }),
+        };
+        this.question = bubble;
+        this.emitQuestion(bubble);
+        return bubble;
+    }
+
+    private startAnswerTurn(responseId: string): void {
+        let bubble = this.question?.open ? this.question : undefined;
+        if (bubble) this.closeQuestion();
+        else {
+            const pending = this.sttPending;
+            if (pending && this.ports.clock.now() - pending.at <= STT_QUESTION_MAX_AGE_MS) {
+                bubble = this.createBubble(pending.text, 'stt', false);
+            }
+        }
+        this.sttPending = undefined;
+        this.answerTurn = { responseId, superseded: false, ...(bubble ? { bubble } : {}) };
+    }
+
+    private closeQuestion(): void {
+        const bubble = this.question;
+        if (!bubble?.open) return;
+        bubble.open = false;
+        bubble.base = joinText(bubble.base, bubble.live);
+        bubble.live = '';
+        this.emitQuestion(bubble);
+    }
+
+    private emitQuestion(bubble: QuestionBubble): void {
+        const text = joinText(bubble.base, bubble.live);
+        if (!text) return;
+        this.ports.overlay.showQuestion?.({
+            questionId: bubble.id, text, done: !bubble.open,
+            ...(bubble.generationId === undefined ? {} : { generationId: bubble.generationId }),
+        });
     }
 
     private closeTextResponse(completed = false): void {
@@ -271,4 +436,8 @@ export class ResponseOrchestrator<Timer> {
             updated: response.updated,
         });
     }
+}
+
+function joinText(a: string, b: string): string {
+    return [a, b].filter(Boolean).join(' ');
 }

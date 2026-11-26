@@ -55,6 +55,8 @@
 
 - 2026-11-26 — **End-of-speech wait kept at 1.3 s (user):** Gemini stays at `silenceDurationMs` 1300 with low end sensitivity, and OpenAI and ElevenLabs keep `semantic_vad` low eagerness. This was chosen over a GPT-like ~0.5 s so that a mid-question pause (corpus S1, 1.2 s) does not trigger an answer. Phase 7 tuning must not shorten it without asking the user.
 
+- 2026-11-26 — **D14, chat-style question → answer (user):** the user asked for ChatGPT-like chat: the interviewer's words stream into a bubble, and the answer appears under it. Chosen after comparing STT-only (A) with the provider transcript (B): B, with the existing STT as backup. B is about as easy because the same model hears the question and writes the answer, so they pair naturally; it streams word by word on Gemini; and it costs nothing extra. This replaces the earlier "skip it" on showing Gemini's transcript in chat.
+
 - 2026-11-26 — **Scope:** Live Brain answers only interviewer speech. Typed questions, Direct Assist, manual "What to answer" presses, screenshots and all other modes keep default Natively behaviour (ARCHITECTURE §9a scope rule).
 
 ## Phase UI — 2026-11-25
@@ -495,6 +497,14 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 - 8 of the 10 answers ended `cancelled`. ElevenLabs keeps its audio turn open for 10–20 s after the text is shown, and the interviewer's next words ("Sure. Next one.") interrupt that turn. On screen a cancelled answer keeps the text it already showed. But `BrainSupervisor` saved only `completed` answers to the notebook, so follow-ups lost those answers. The same applies to Gemini when the interviewer talks before Gemini's audio turn ends.
 - Fix (`BrainSupervisor`): a cancelled answer that already showed text is saved to the notebook like a completed one. An empty cancelled answer and failed answers are still not saved. New test in `BrainSupervisor.test.mjs`. 83 Live Brain tests pass; build, `npx tsc --noEmit -p tsconfig.json` and `npm run typecheck:premium` pass.
 - Not checked: filler and `Ask:` behaviour on screen (the meeting ended before the overlay was read). Requires physical macOS verification.
+
+## D14 chat-style question -> answer (Claude, Windows, 2026-11-26)
+
+- Built: `ResponseOrchestrator` turns the provider's interviewer transcript into one bubble per turn. The bubble streams while the interviewer speaks (Gemini), closes when its answer starts, and is linked to that answer. A transcript that arrives late (OpenAI Whisper) is placed above its answer. When the provider sent no transcript for a turn, the existing STT final fills the bubble (`noteSttTranscript`, wired in `meeting.ts`); a later provider transcript replaces that text, and a stale STT final (> 8 s) is not used. Filler turns get a bubble with no answer. The overlay shows each bubble as the existing `role: 'interviewer'` row (pulsing dot while streaming), via `liveBrainQuestion` on the What to Answer event and `src/lib/liveBrainChat.mjs` (keeps a late bubble above its answer).
+- First live check, Gemini, Windows: all 7 questions appeared as interviewer bubbles in order, each directly above its answer. But answers 2-6 were collapsed as "Outdated answer". The old §7 rule marks the previous answer outdated whenever a new one starts within 20 s, so a quick round of questions hid every answer but the last.
+- Fix (user approved): a realtime text answer stays visible. It is marked outdated only when the interviewer cut it off mid-stream, meaning its text grew within 1.5 s of the interviewer speaking or of a provider cancel (Gemini reports the cancel before the speech start). The same rule applies to an `Ask:`. The pipeline/AnswerWriter paths are unchanged.
+- Tests: 7 new orchestrator tests (bubble streaming and closing, filler, a late transcript, STT backup and replacement, a stale STT final, a finished answer kept visible, a mid-stream cut-off marked outdated) and 3 overlay placement tests. One existing test now includes the interviewer's speech before its replacement. 90 Live Brain tests, 3,245 lib tests and 1,002 component tests pass; `npm run build:electron`, `npx tsc --noEmit -p tsconfig.json`, `npx tsc --noEmit -p electron/tsconfig.json` and `npm run typecheck:premium` pass.
+- Requires a live re-check of the outdated rule, and physical macOS verification.
 
 ## Open risks
 

@@ -330,6 +330,7 @@ import {
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
 import { decideResetCancel, resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent, shouldApplyLiveAnswerDiscard } from '../lib/chatStreamGuard.mjs';
+import { placeLiveBrainQuestion } from '../lib/liveBrainChat.mjs';
 import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
 import { resolveScreenshotPromptText, getScreenshotPresetPrompt } from '../lib/screenshotPrompt';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
@@ -8016,9 +8017,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status, liveBrainQuestion }) => {
         if (status !== undefined) {
           setLiveBrainStatus(status);
+          return;
+        }
+        // D14: chat-style Live Brain. The interviewer's words stream into this
+        // row, and the answer appears directly below it.
+        if (liveBrainQuestion) {
+          if (activeDirectAssistRef.current) return;
+          setMessages((prev) => placeLiveBrainQuestion(prev, liveBrainQuestion));
+          pinAnswerPanel();
           return;
         }
         if (askId && clarification) {

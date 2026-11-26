@@ -161,6 +161,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         observePipelineTranscript(text, final, at) {
             const brain = supervisor.current;
             if (brain instanceof PipelineBrain) brain.interviewerTranscript(text, final, at);
+            // D14: the existing STT is the backup text for the interviewer bubble.
+            else if (brain && final) orchestrator.noteSttTranscript(text, at);
         },
         observePipelineOutput(output) {
             const brain = supervisor.current;

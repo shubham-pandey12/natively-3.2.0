@@ -159,6 +159,8 @@ test('text uses the same replacement state and ignores older, cancelled and dupl
     const done = (responseId, status = 'completed') => h.brain.emit({ type: 'response_done', responseId, status });
     start('r1');
     delta('r1', 'Old answer');
+    // D14: the interviewer cuts r1 off mid-stream, so its replacement marks it outdated.
+    h.brain.emit({ type: 'interviewer_speech_started', at: h.clock.now() });
     start('r2');
     delta('r1', 'late');
     start('r1'); // A duplicate start cannot revive a closed response.
@@ -167,7 +169,7 @@ test('text uses the same replacement state and ignores older, cancelled and dupl
     done('r2', 'cancelled');
     delta('r2', 'late');
     done('r2');
-    assert.deepEqual(h.calls.map(([event, payload]) => [event, typeof payload === 'object' ? payload.text : payload]), [
+    assert.deepEqual(h.calls.filter(([event]) => event !== 'speaking').map(([event, payload]) => [event, typeof payload === 'object' ? payload.text : payload]), [
         ['text', 'Old answer'], ['text', 'Old answer'], ['outdated', h.calls[0][1].generationId],
         ['text', 'New '], ['text', 'New answer'], ['text', 'New answer'],
     ]);
@@ -206,4 +208,139 @@ test('the overlay port uses the existing question channel and delegates Phase 1 
         { askId: 'ask', clarification }, [7, true], { generationId: 7, interviewerSpeaking: false },
         { generationId: -1, responseText: { text: 'Answer', done: true }, updated: true },
     ]);
+});
+
+// D14: chat-style question -> answer bubbles.
+function chatRig() {
+    const clock = new FakeClock();
+    const shown = [];
+    const order = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        overlay: {
+            showAsk: () => {},
+            setOutdated: () => {},
+            setInterviewerSpeaking: () => {},
+            showQuestion: payload => { shown.push(payload); order.push(['question', payload.questionId]); },
+            showText: payload => order.push(['answer', payload.generationId]),
+        },
+    });
+    const send = event => orchestrator.handleEvent({ at: clock.now(), ...event });
+    const latest = id => shown.filter(payload => payload.questionId === id).at(-1);
+    const firstAnswer = () => order.find(([kind]) => kind === 'answer')[1];
+    return { clock, shown, order, orchestrator, send, latest, firstAnswer };
+}
+
+test('D14: the provider transcript streams into one bubble that closes when its answer starts', () => {
+    const h = chatRig();
+    h.send({ type: 'interviewer_speech_started' });
+    h.send({ type: 'interviewer_transcript', text: 'How would', final: false });
+    h.send({ type: 'interviewer_transcript', text: 'How would you design a cache?', final: false });
+    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How would you design a cache?', done: false });
+    h.send({ type: 'interviewer_transcript', text: 'How would you design a cache?', final: true });
+    h.send({ type: 'response_started', responseId: 'r1' });
+    h.send({ type: 'response_delta', responseId: 'r1', text: 'I would use Redis.' });
+    const generationId = h.firstAnswer();
+    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How would you design a cache?', done: true, generationId });
+    const kinds = h.order.map(([kind]) => kind);
+    assert.ok(kinds.indexOf('question') < kinds.indexOf('answer'));
+    assert.equal(new Set(h.shown.map(payload => payload.questionId)).size, 1);
+});
+
+test('D14: the next question starts a new bubble, and a filler turn gets a bubble with no answer', () => {
+    const h = chatRig();
+    h.send({ type: 'interviewer_transcript', text: 'First question?', final: true });
+    h.send({ type: 'response_started', responseId: 'r1' });
+    h.send({ type: 'response_delta', responseId: 'r1', text: 'Answer one.' });
+    h.send({ type: 'response_done', responseId: 'r1', status: 'completed' });
+    h.send({ type: 'interviewer_speech_started' });
+    h.send({ type: 'interviewer_transcript', text: 'Okay.', final: true });
+    h.send({ type: 'response_silent' });
+    assert.deepEqual(h.latest('q2'), { questionId: 'q2', text: 'Okay.', done: true });
+    h.send({ type: 'interviewer_transcript', text: 'Second question?', final: true });
+    assert.equal(h.latest('q3').text, 'Second question?');
+});
+
+test('D14: a transcript that arrives after its answer started is placed above that answer', () => {
+    const h = chatRig();
+    h.send({ type: 'interviewer_speech_started' });
+    h.send({ type: 'response_started', responseId: 'r1' });
+    h.send({ type: 'response_delta', responseId: 'r1', text: 'I would shard by user.' });
+    const generationId = h.firstAnswer();
+    h.send({ type: 'interviewer_transcript', text: 'How do you scale writes?', final: true });
+    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How do you scale writes?', done: true, generationId });
+});
+
+test('D14: the STT final fills a bubble only when the provider sent no transcript; provider text replaces it', () => {
+    const h = chatRig();
+    h.orchestrator.noteSttTranscript('How do you scale reads?', h.clock.now());
+    h.send({ type: 'response_started', responseId: 'r1' });
+    h.send({ type: 'response_delta', responseId: 'r1', text: 'Replicas.' });
+    const generationId = h.firstAnswer();
+    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How do you scale reads?', done: true, generationId });
+    h.send({ type: 'interviewer_transcript', text: 'How would you scale reads?', final: true });
+    assert.equal(h.latest('q1').text, 'How would you scale reads?');
+    assert.equal(new Set(h.shown.map(payload => payload.questionId)).size, 1);
+
+    // With a provider bubble, the STT final for the same turn is ignored.
+    h.send({ type: 'interviewer_speech_started' });
+    h.send({ type: 'interviewer_transcript', text: 'What about writes?', final: false });
+    h.orchestrator.noteSttTranscript('What about rights?', h.clock.now());
+    h.send({ type: 'response_started', responseId: 'r2' });
+    assert.equal(h.latest('q2').text, 'What about writes?');
+    assert.equal(h.shown.some(payload => payload.text === 'What about rights?'), false);
+});
+
+test('D14: a stale STT final is not used as the next question', () => {
+    const h = chatRig();
+    h.orchestrator.noteSttTranscript('Old remark.', h.clock.now());
+    h.clock.advance(9_000);
+    h.send({ type: 'response_started', responseId: 'r1' });
+    assert.equal(h.shown.length, 0);
+});
+
+test('D14: a new question after a finished answer keeps that answer visible (not outdated)', () => {
+    const h = chatRig();
+    const outdated = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock: h.clock,
+        overlay: {
+            showAsk: () => {}, setInterviewerSpeaking: () => {}, showQuestion: () => {},
+            setOutdated: (...args) => outdated.push(args),
+            showText: payload => h.order.push(['answer', payload.generationId, payload.updated]),
+        },
+    });
+    const send = event => orchestrator.handleEvent({ at: h.clock.now(), ...event });
+    send({ type: 'response_started', responseId: 'r1' });
+    send({ type: 'response_delta', responseId: 'r1', text: 'Answer one.' });
+    h.clock.advance(3_000); // the text has finished; the audio turn is still open
+    send({ type: 'interviewer_speech_started' });
+    send({ type: 'response_done', responseId: 'r1', status: 'cancelled' });
+    send({ type: 'response_started', responseId: 'r2' });
+    send({ type: 'response_delta', responseId: 'r2', text: 'Answer two.' });
+    assert.deepEqual(outdated, []);
+    assert.equal(h.order.at(-1)[2], false);
+});
+
+test('D14: an answer cut off while its text was streaming is marked outdated by its replacement', () => {
+    const h = chatRig();
+    const outdated = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock: h.clock,
+        overlay: {
+            showAsk: () => {}, setInterviewerSpeaking: () => {}, showQuestion: () => {},
+            setOutdated: (...args) => outdated.push(args),
+            showText: payload => h.order.push(['answer', payload.generationId, payload.updated]),
+        },
+    });
+    const send = event => orchestrator.handleEvent({ at: h.clock.now(), ...event });
+    send({ type: 'response_started', responseId: 'r1' });
+    send({ type: 'response_delta', responseId: 'r1', text: 'Use PostgreSQL because' });
+    h.clock.advance(300);
+    send({ type: 'response_done', responseId: 'r1', status: 'cancelled' }); // Gemini barge-in order
+    send({ type: 'interviewer_speech_started' });
+    send({ type: 'response_started', responseId: 'r2' });
+    send({ type: 'response_delta', responseId: 'r2', text: 'Use MongoDB.' });
+    assert.equal(outdated.length, 1);
+    assert.equal(h.order.at(-1)[2], true);
 });
