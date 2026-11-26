@@ -272,6 +272,13 @@ Windows validation passed `npm run build:electron`, `node --test premium/electro
 
 Two Windows live smoke tests replayed synthetic WAVs into the compiled meeting/provider and observed 21 and 27 incremental overlay-bound answer updates. The model answered both prompts directly, so the clarification timeout was verified with a fake clock and a mock WebSocket. Real meeting capture and renderer paint remain unverified. Reviewed but not executed on macOS. Requires physical macOS verification.
 
+## Phase 4b review — 2026-11-26 (Claude, Windows)
+
+- Reviewed 34917245: Gemini answers itself, output transcription → overlay, no AnswerWriter/decide_turn on the Gemini path, profile/resume/JD/mode context passed in. Build, 53/53 Live Brain + settings tests, both typechecks passed.
+- **Live meeting bug found and fixed:** first words arrived 8.7 s after speech end. Trace showed Windows system capture delivers ~1,000 ms of audio per second during speech but only ~100 ms per second while the speakers are silent, so Gemini's 1.3 s end-of-speech silence took ~9 s of wall time. Fix in `GeminiLiveBrain`: a 100 ms silence pump pads the stream with zeros whenever it falls > 300 ms behind wall time (≤ 1 s per tick). Shared code; macOS capture may not go sparse, in which case the pump never fires.
+- **After the fix (live meeting, Windows, synthetic interviewer voice through speakers):** native speech end → first answer text **1.0 s**; the whole answer text arrived within ~0.3 s of the first chunk (faster than speaking pace), `response_done` ~20 s later when Gemini's audio turn ended. One run; scenario corpus still to run.
+- Tested physically on Windows. Requires physical macOS verification (capture sparseness on macOS unknown).
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).

@@ -14,6 +14,14 @@ export const GEMINI_AUTOMATIC_ACTIVITY_DETECTION = {
 const BACKOFF_MS = [500, 1_000, 2_000, 4_000];
 const AUDIO_CHUNK_BYTES = 3_200; // 100 ms at 16 kHz mono PCM16.
 const AUDIO_BUFFER_BYTES = AUDIO_CHUNK_BYTES * 20;
+const BYTES_PER_MS = 32; // 16 kHz mono PCM16.
+// System capture goes sparse while the speakers are silent (measured on Windows:
+// ~100 ms of audio per second). Gemini's end-of-speech detector counts silence
+// in AUDIO time, so a sparse stream made it wait ~9 s of wall time for 1.3 s of
+// silence. Keep the stream at real-time pace by filling gaps with zeros.
+const SILENCE_PUMP_MS = 100;
+const SILENCE_FILL_AFTER_MS = 300; // tolerate capture jitter before filling
+const SILENCE_FILL_MAX_MS = 1_000; // per tick, so a stall can't flood the socket
 
 export interface GeminiLiveOptions {
     apiKey: string;
@@ -84,6 +92,9 @@ export class GeminiLiveBrain implements LiveBrain {
     private bufferedAudio: Buffer[] = [];
     private bufferedBytes = 0;
     private bufferedCandidate: string[] = [];
+    private silencePump?: ReturnType<typeof setInterval>;
+    private streamStartedAt = 0;
+    private audioSentMs = 0;
 
     constructor(private readonly options: GeminiLiveOptions) {}
 
@@ -222,7 +233,11 @@ export class GeminiLiveBrain implements LiveBrain {
             this.discardOutput = false;
             this.turnInterrupted = false;
             this.flushCandidate();
+            this.streamStartedAt = Date.now();
+            this.audioSentMs = 0;
             for (const chunk of audio) this.sendAudio(chunk);
+            clearInterval(this.silencePump);
+            this.silencePump = setInterval(() => this.fillSilence(), SILENCE_PUMP_MS);
             this.startup?.ready();
             this.startup = undefined;
             this.emit({ type: 'status', status: 'ready' });
@@ -302,7 +317,20 @@ export class GeminiLiveBrain implements LiveBrain {
         this.emit({ type: 'interviewer_speech_stopped', at });
     }
 
+    private fillSilence(): void {
+        if (this.readyAt === undefined) return;
+        const behind = (Date.now() - this.streamStartedAt) - this.audioSentMs;
+        if (behind <= SILENCE_FILL_AFTER_MS) return;
+        let fill = Math.min(behind - SILENCE_PUMP_MS, SILENCE_FILL_MAX_MS);
+        while (fill > 0) {
+            const ms = Math.min(fill, AUDIO_CHUNK_BYTES / BYTES_PER_MS);
+            this.sendAudio(Buffer.alloc(Math.round(ms) * BYTES_PER_MS));
+            fill -= ms;
+        }
+    }
+
     private sendAudio(audio: Buffer): void {
+        this.audioSentMs += audio.length / BYTES_PER_MS;
         this.send({ realtimeInput: { audio: { data: audio.toString('base64'), mimeType: 'audio/pcm;rate=16000' } } });
     }
 
@@ -352,6 +380,8 @@ export class GeminiLiveBrain implements LiveBrain {
     private disconnect(graceful = false): void {
         clearTimeout(this.setupTimer);
         clearTimeout(this.rolloverTimer);
+        clearInterval(this.silencePump);
+        this.silencePump = undefined;
         this.rolloverTimer = undefined;
         this.readyAt = undefined;
         const socket = this.socket;

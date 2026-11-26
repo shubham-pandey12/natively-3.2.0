@@ -209,3 +209,20 @@ test('Settings connection handshake sends only setup and closes', async t => {
     assert.deepEqual(connections[0].requests.map(message => Object.keys(message)), [['setup']]);
     await until(() => connections[0].socket.readyState === 3);
 });
+
+test('a silent capture is padded with zeros so the audio stream stays at real-time pace', async t => {
+    const { brain, connections } = await rig(t);
+    await brain.start(ctx());
+    const { requests } = connections[0];
+    // No audio pushed at all: the capture went quiet.
+    await delay(900);
+    const sentMs = requests
+        .filter(message => message.realtimeInput)
+        .reduce((ms, message) => ms + Buffer.from(message.realtimeInput.audio.data, 'base64').length / 32, 0);
+    assert.ok(sentMs >= 400 && sentMs <= 1_000, `expected roughly real-time silence, got ${sentMs} ms`);
+    const zeros = requests.filter(message => message.realtimeInput)
+        .every(message => Buffer.from(message.realtimeInput.audio.data, 'base64').every(byte => byte === 0));
+    assert.ok(zeros, 'the fill is silence');
+    // Real audio that keeps pace needs no fill.
+    await brain.stop();
+});
