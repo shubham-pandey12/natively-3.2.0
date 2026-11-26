@@ -98,6 +98,7 @@ export function resolveByoEndpoint(
                 headers: { Authorization: `Bearer ${key}` },
             };
         case 'groq':
+            // Deepgram documents a dedicated Groq BYO provider type.
             if (!key) throw new DeepgramVoiceAgentError('auth', 'Groq API key is missing.');
             return {
                 providerType: 'groq',

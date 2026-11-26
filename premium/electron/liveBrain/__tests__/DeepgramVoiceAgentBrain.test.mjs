@@ -1,18 +1,24 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { WebSocketServer, type WebSocket } from 'ws';
-import { DeepgramVoiceAgentBrain, resolveByoEndpoint } from '../DeepgramVoiceAgentBrain';
-import { buildDeepgramInstructions, buildProviderInstructions, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS } from '../../instructions';
-import { createLiveBrain } from '../../index';
-import { testConnection } from '../../meeting';
-import type { LiveBrainEvent, LiveBrainStartContext } from '../../types';
-import { CONTEXT_INTELLIGENCE_LAYER, CORE_IDENTITY, EXECUTION_CONTRACT, HUMAN_SPOKEN_ANSWER_CONTRACT, MODE_TECHNICAL_INTERVIEW_PROMPT, UNIVERSAL_WHAT_TO_ANSWER_PROMPT } from '../../../../../electron/llm/prompts';
+import { WebSocketServer } from 'ws';
+
+const require = createRequire(import.meta.url);
+const load = name => require(`../../../../dist-electron/premium/electron/liveBrain/${name}.js`);
+const { DeepgramVoiceAgentBrain, resolveByoEndpoint } = load('brains/DeepgramVoiceAgentBrain');
+const { buildDeepgramInstructions, buildProviderInstructions, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS } = load('instructions');
+const { createLiveBrain } = load('index');
+const { testConnection } = load('meeting');
+const {
+    CONTEXT_INTELLIGENCE_LAYER, CORE_IDENTITY, EXECUTION_CONTRACT, HUMAN_SPOKEN_ANSWER_CONTRACT,
+    MODE_TECHNICAL_INTERVIEW_PROMPT, UNIVERSAL_WHAT_TO_ANSWER_PROMPT,
+} = require('../../../../dist-electron/electron/llm/prompts.js');
 
 const apiKey = 'dg_fake_key_for_deepgram_voice_agent_tests_0123456789';
 
-function makeContext(overrides: Partial<LiveBrainStartContext> = {}): LiveBrainStartContext {
+function makeContext(overrides = {}) {
     return {
         sessionId: 'dg-test',
         responseNamespace: 'dg-test:1',
@@ -34,11 +40,11 @@ function makeContext(overrides: Partial<LiveBrainStartContext> = {}): LiveBrainS
     };
 }
 
-function sendJson(socket: WebSocket, payload: Record<string, unknown>): void {
+function sendJson(socket, payload) {
     socket.send(JSON.stringify(payload));
 }
 
-async function until<T>(read: () => T | undefined | false, timeoutMs = 2_000): Promise<T> {
+async function until(read, timeoutMs = 2_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         const value = read();
@@ -48,28 +54,14 @@ async function until<T>(read: () => T | undefined | false, timeoutMs = 2_000): P
     assert.fail('Timed out waiting for DeepgramVoiceAgentBrain condition');
 }
 
-interface RigConnection {
-    socket: WebSocket;
-    jsonMessages: Array<Record<string, unknown>>;
-    binaryFrames: Buffer[];
-}
-
-async function createRig(
-    t: test.TestContext,
-    opts: {
-        onOpen?: (socket: WebSocket, attempt: number) => void;
-        onSettings?: (socket: WebSocket, settings: Record<string, unknown>, attempt: number) => void;
-        onInject?: (socket: WebSocket, msg: Record<string, unknown>) => void;
-        brainOptions?: Partial<ConstructorParameters<typeof DeepgramVoiceAgentBrain>[0]>;
-    } = {},
-) {
+async function createRig(t, opts = {}) {
     const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
     await once(server, 'listening');
-    const connections: RigConnection[] = [];
+    const connections = [];
     server.on('connection', (socket, request) => {
         assert.equal(request.headers.authorization, `Token ${apiKey}`);
         const attempt = connections.length + 1;
-        const entry: RigConnection = { socket, jsonMessages: [], binaryFrames: [] };
+        const entry = { socket, jsonMessages: [], binaryFrames: [] };
         connections.push(entry);
         if (opts.onOpen) {
             opts.onOpen(socket, attempt);
@@ -78,10 +70,10 @@ async function createRig(
         }
         socket.on('message', (data, isBinary) => {
             if (isBinary) {
-                entry.binaryFrames.push(Buffer.from(data as Buffer));
+                entry.binaryFrames.push(Buffer.from(data));
                 return;
             }
-            const parsed = JSON.parse(data.toString()) as Record<string, unknown>;
+            const parsed = JSON.parse(data.toString());
             entry.jsonMessages.push(parsed);
             if (parsed.type === 'Settings') {
                 if (opts.onSettings) opts.onSettings(socket, parsed, attempt);
@@ -101,13 +93,13 @@ async function createRig(
         backoffMs: [],
         ...opts.brainOptions,
     });
-    const events: LiveBrainEvent[] = [];
+    const events = [];
     brain.onEvent(event => events.push(event));
 
     t.after(async () => {
         await brain.stop();
         for (const client of server.clients) client.terminate();
-        await new Promise<void>(resolve => server.close(() => resolve()));
+        await new Promise(resolve => server.close(() => resolve()));
     });
 
     return { brain, events, connections, endpoint };
@@ -126,7 +118,7 @@ test('handshake Welcome -> Settings -> SettingsApplied transitions to ready and 
     await brain.start(makeContext());
 
     assert.equal(events.some(e => e.type === 'status' && e.status === 'ready'), true);
-    const settings = connections[0].jsonMessages.find(m => m.type === 'Settings') as any;
+    const settings = connections[0].jsonMessages.find(m => m.type === 'Settings');
     assert.ok(settings);
     assert.deepEqual(settings.audio, {
         input: { encoding: 'linear16', sample_rate: 16_000 },
@@ -204,7 +196,7 @@ test('BYO endpoint config construction supports OpenAI, Anthropic, Google, Groq,
         ['google', 'AIza-google-1', 'gemini-2.5-flash', 'open_ai', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', 'Authorization', 'Bearer AIza-google-1'],
         ['groq', 'gsk_groq-1', 'qwen/qwen3.8-27b', 'groq', 'https://api.groq.com/openai/v1/chat/completions', 'Authorization', 'Bearer gsk_groq-1'],
         ['openrouter', 'sk-or-1', 'openai/gpt-4o-mini', 'open_ai', 'https://openrouter.ai/api/v1/chat/completions', 'Authorization', 'Bearer sk-or-1'],
-    ] as const;
+    ];
 
     for (const [provider, key, model, expectedType, expectedUrl, hdrKey, hdrVal] of byoCases) {
         const resolved = resolveByoEndpoint(provider, key, model);
@@ -231,7 +223,7 @@ test('BYO endpoint config construction supports OpenAI, Anthropic, Google, Groq,
         },
     });
     await brain.start(makeContext());
-    const settings = connections[0].jsonMessages.find(m => m.type === 'Settings') as any;
+    const settings = connections[0].jsonMessages.find(m => m.type === 'Settings');
     assert.deepEqual(settings.agent.think.endpoint, {
         url: 'https://api.groq.com/openai/v1/chat/completions',
         headers: { Authorization: 'Bearer gsk_test_123' },
@@ -250,9 +242,9 @@ test('compact instructions stay <= 25,000 chars for managed mode and omit heavy 
     assert.ok(!compact.includes(MODE_TECHNICAL_INTERVIEW_PROMPT.trim()));
     assert.ok(buildDeepgramInstructions({ modePrompt: 'Use the active custom mode.' }).includes('Use the active custom mode.'));
 
-    const warnings: string[] = [];
+    const warnings = [];
     const origWarn = console.warn;
-    console.warn = (msg?: unknown) => { warnings.push(String(msg ?? '')); };
+    console.warn = (msg) => { warnings.push(String(msg ?? '')); };
     try {
         const bounded = buildDeepgramInstructions({ profileContext: 'X'.repeat(10_000) });
         assert.ok(bounded.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
@@ -273,14 +265,14 @@ test('401 auth error emits fatal auth error without retries', async t => {
         attempts++;
         sendJson(socket, { type: 'Error', code: 'INVALID_AUTH', description: 'Unauthorized' });
     });
-    const addr = server.address() as { port: number };
+    const addr = server.address();
     const brain = new DeepgramVoiceAgentBrain({ apiKey, endpoint: `ws://127.0.0.1:${addr.port}`, backoffMs: [5, 5, 5] });
-    const events: LiveBrainEvent[] = [];
+    const events = [];
     brain.onEvent(e => events.push(e));
     t.after(async () => {
         await brain.stop();
         for (const c of server.clients) c.terminate();
-        await new Promise<void>(r => server.close(() => r()));
+        await new Promise(r => server.close(() => r()));
     });
 
     await assert.rejects(brain.start(makeContext()), { code: 'auth' });
@@ -298,7 +290,7 @@ test('network failure retries up to 3 times then emits fatal network error', asy
 
     await assert.rejects(brain.start(makeContext()), { code: 'network' });
     assert.equal(connections.length, 4);
-    const errors = events.filter(e => e.type === 'error') as Array<Extract<LiveBrainEvent, { type: 'error' }>>;
+    const errors = events.filter(e => e.type === 'error');
     assert.deepEqual(errors.map(e => [e.code, e.fatal]), [
         ['network', false],
         ['network', false],
@@ -321,7 +313,7 @@ test('refreshes history on a live reconnect and exhausts retries on repeated dro
     await until(() => events.some(event => event.type === 'session_expiring'));
     sendJson(connections[0].socket, { type: 'Error', code: 'INTERNAL_SERVER_ERROR', description: 'Sensitive upstream detail' });
     await until(() => events.filter(event => event.type === 'status' && event.status === 'ready').length === 2);
-    const settings = connections[1].jsonMessages.find(message => message.type === 'Settings') as any;
+    const settings = connections[1].jsonMessages.find(message => message.type === 'Settings');
     assert.deepEqual(settings.agent.context.messages, [
         { type: 'History', role: 'user', content: 'Candidate said: Use email only.' },
     ]);
@@ -354,7 +346,7 @@ test('rollover replays notebook and recentTurns via agent.context.messages and T
             { role: 'assistant', text: 'Use a dedicated email queue.', at: 3 },
         ],
     }));
-    const settings = connections[0].jsonMessages.find(m => m.type === 'Settings') as any;
+    const settings = connections[0].jsonMessages.find(m => m.type === 'Settings');
     assert.deepEqual(settings.agent.context.messages, [
         { type: 'History', role: 'user', content: 'Earlier interview summary: Email only policy.' },
         { type: 'History', role: 'user', content: 'Use email only.' },
@@ -368,13 +360,13 @@ test('rollover replays notebook and recentTurns via agent.context.messages and T
     });
     const ok = await testConnection({ provider: 'deepgram-voice-agent', apiKey, endpoint: rig2.endpoint, setupTimeoutMs: 1_000, thinkTimeoutMs: 1_000 });
     assert.equal(ok.success, true);
-    assert.match(ok.message!, /Deepgram key verified/);
+    assert.match(ok.message, /Deepgram key verified/);
 
     // Test Connection when key succeeds (SettingsApplied) but Think times out
     const rig3 = await createRig(t);
     const badThink = await testConnection({ provider: 'deepgram-voice-agent', apiKey, endpoint: rig3.endpoint, setupTimeoutMs: 1_000, thinkTimeoutMs: 60 });
     assert.equal(badThink.success, false);
-    assert.match(badThink.message!, /Deepgram key valid, but Think model failed/);
+    assert.match(badThink.message, /Deepgram key valid, but Think model failed/);
 
     assert.equal(createLiveBrain('deepgram-voice-agent', { apiKey }).id, 'deepgram-voice-agent');
 });

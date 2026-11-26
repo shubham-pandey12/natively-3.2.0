@@ -25,7 +25,7 @@
 npm run build:electron
 npm run test:auto-answer
 npm run test:lib
-node --test premium/electron/liveBrain/__tests__/        # added in Phase 2+ (after build, per repo convention)
+npm run test:live-brain  # Electron build, Live Brain suite, and settings IPC tests
 npm run typecheck   # if defined; otherwise the project's tsc command
 npm run lint        # if defined
 npm run test:ci     # before marking a phase done when practical
@@ -254,7 +254,7 @@ Tasks:
 3. Transport: implement standalone `premium/electron/liveBrain/brains/DeepgramVoiceAgentBrain.ts` (`wss://agent.deepgram.com/v1/agent/converse`, `Authorization: Token <key>`, Flux Multilingual listening, 16 kHz raw binary PCM with 300 ms sparse-silence fill, 8 s `KeepAlive`, discarded binary output, one response per turn across `ConversationText` chunks, cancellation on `UserStartedSpeaking` and completion on `AgentAudioDone`, ~110 min rollover with `agent.context.messages` history replay, 3x retry backoff).
 4. Factory & supervisor wiring: add `'deepgram-voice-agent'` to `premium/electron/liveBrain/index.ts`, `BrainSupervisor.ts` (rollover + fallback), `meeting.ts`, and `testConnection` (validating both `SettingsApplied` and a short `InjectUserMessage` Think reply).
 5. Settings UI: update `LiveBrainProviderSettings` in `src/components/SettingsOverlay.tsx` with the Deepgram Voice Agent option, key card + STT key reuse toggle, grouped AI Provider + Model pickers (Deepgram-managed & BYO + Custom endpoint, key-transmission notice, and disabled explanation for Codex/Antigravity/local Ollama), and dual-stage Test Connection status.
-6. Tests: create `premium/electron/liveBrain/brains/__tests__/DeepgramVoiceAgentBrain.test.ts` (mock WebSocket handshake, assistant/user `ConversationText`, `UserStartedSpeaking`, binary discard, `KeepAlive`, managed & BYO configs, ≤ 25k prompt assertion, 401 auth failure, 3x retry) and update settings/foundation coverage. Verify `npx tsc --noEmit` and Live Brain tests.
+6. Tests: create `premium/electron/liveBrain/__tests__/DeepgramVoiceAgentBrain.test.mjs` (mock WebSocket handshake, assistant/user `ConversationText`, `UserStartedSpeaking`, binary discard, `KeepAlive`, managed & BYO configs, ≤ 25k prompt assertion, 401 auth failure, 3x retry) and update settings/foundation coverage. Verify `npx tsc --noEmit` and Live Brain tests.
 
 ---
 
