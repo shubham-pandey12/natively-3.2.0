@@ -10866,14 +10866,21 @@ export class AppState {
     if (this.liveBrainRouting.enabled) return;
     this.cancelAutoAnswer();
     this.liveBrainRouting.start(onFailure => {
-      const { provider, model, apiKey } = resolveLiveBrainRuntime();
+      const { provider, model, apiKey, promptVariant } = resolveLiveBrainRuntime();
       if (provider !== 'gemini-live' || !apiKey) return undefined;
       const name = this.currentUserName();
       const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
-      const mode = ModesManager.getInstance().getActiveMode()?.name;
-      const profileSummary = [name && `Candidate: ${name}`, mode && `Interview mode: ${mode}`].filter(Boolean).join('\n');
+      const modes = ModesManager.getInstance();
+      const mode = modes.getActiveMode();
+      const grounding = modes.isProfileIntelligenceAllowedForMode(mode?.id)
+        ? this.getKnowledgeOrchestrator()?.getLiveInterviewProfileContext?.()
+        : '';
+      const profileContext = [name && `Candidate: ${name}`, grounding].filter(Boolean).join('\n\n');
       return loadLiveBrainPremium()?.createMeeting({
-        apiKey, model, sessionId: crypto.randomUUID(), profileSummary,
+        apiKey, model, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
+        profileContext, modeName: mode?.name, modeTemplate: mode?.templateType,
+        modePrompt: modes.getActiveModeSystemPromptSuffix(mode?.id),
+        modeContext: modes.buildActiveModeContextBlock(),
         engine: this.intelligenceManager,
         emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),
         onFailure,

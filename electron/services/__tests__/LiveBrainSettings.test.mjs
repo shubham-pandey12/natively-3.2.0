@@ -302,9 +302,9 @@ test('the Gemini model list keeps only Live-capable models', async () => {
     const rejected = await listGeminiLiveModels('bad', async () => ({ ok: false, status: 403, json: async () => ({}) }));
     assert.equal(rejected.success, false);
     assert.equal(rejected.error, 'Gemini rejected the API key.');
-    assert.deepEqual(rejected.models.map(m => m.id), ['gemini-3.8-live']);
+    assert.deepEqual(rejected.models.map(m => m.id), ['gemini-3.1-flash-live-preview', 'gemini-3.8-live']);
 
     const offline = await listGeminiLiveModels('k', async () => { throw new Error('offline'); });
     assert.equal(offline.success, false);
-    assert.deepEqual(offline.models.map(m => m.id), ['gemini-3.8-live']);
+    assert.deepEqual(offline.models.map(m => m.id), ['gemini-3.1-flash-live-preview', 'gemini-3.8-live']);
 });

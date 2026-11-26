@@ -1,6 +1,7 @@
 export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime';
 export type LiveBrainProvider = LiveBrainKeyProvider | 'pipeline';
-type PromptVariant = 'full' | 'trimmed';
+export type LiveBrainPromptVariant = 'full' | 'trimmed';
+export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 
 export interface LiveBrainConfig {
     provider: LiveBrainProvider;
@@ -14,13 +15,13 @@ export interface LiveBrainConfig {
      *  Gemini/OpenAI; Speech Provider for ElevenLabs). */
     keySource: 'dedicated' | 'env' | 'ai-providers' | null;
     model: string;
-    promptVariant: PromptVariant | null;
+    promptVariant: LiveBrainPromptVariant | null;
 }
 
 export type LiveBrainOptions =
     | { provider: LiveBrainKeyProvider; model: string }
     | { provider: LiveBrainKeyProvider; useAiProvidersKey: boolean }
-    | { promptVariant: PromptVariant };
+    | { promptVariant: LiveBrainPromptVariant };
 
 export type LiveBrainSettingsResult = { success: boolean; error?: string; message?: string };
 

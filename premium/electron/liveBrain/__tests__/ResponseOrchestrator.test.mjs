@@ -132,7 +132,7 @@ test('text before its response starts is ignored and NO_ACTION keeps the prior a
     assert.deepEqual(h.calls.at(-1), ['speaking', 1, true]);
 });
 
-test('a split ASK shows a single complete clarification without leaking it as answer text', async () => {
+test('a split bracket ASK updates the same clarification row without leaking it as answer text', async () => {
     const h = await rig();
     h.decision('answer', { question });
     const emit = event => h.brain.emit({ responseId: 'r1', ...event });
@@ -140,11 +140,16 @@ test('a split ASK shows a single complete clarification without leaking it as an
     emit({ type: 'response_delta', text: '**[[AS' });
     emit({ type: 'response_delta', text: 'K]]** How many ' });
     emit({ type: 'response_delta', text: 'writes per second?' });
-    assert.equal(h.calls.length, 1);
+    assert.deepEqual(h.calls.at(-1), ['ask', { askId: 'r1', clarification, askStreaming: true }]);
     emit({ type: 'response_done', status: 'completed' });
     emit({ type: 'response_done', status: 'completed' });
     h.clock.advance(20_000);
-    assert.deepEqual(h.calls.slice(1), [['outdated', 1, true], ['ask', { askId: 'r1', clarification }]]);
+    assert.deepEqual(h.calls.slice(1), [
+        ['outdated', 1, true],
+        ['ask', { askId: 'r1', clarification: 'How many ', askStreaming: true }],
+        ['ask', { askId: 'r1', clarification, askStreaming: true }],
+        ['ask', { askId: 'r1', clarification, askStreaming: false }],
+    ]);
 });
 
 test('text uses the same replacement state and ignores older, cancelled and duplicate events', async () => {
@@ -163,7 +168,7 @@ test('text uses the same replacement state and ignores older, cancelled and dupl
     delta('r2', 'late');
     done('r2');
     assert.deepEqual(h.calls.map(([event, payload]) => [event, typeof payload === 'object' ? payload.text : payload]), [
-        ['text', 'Old answer'], ['text', 'Old answer'], ['outdated', -1],
+        ['text', 'Old answer'], ['text', 'Old answer'], ['outdated', h.calls[0][1].generationId],
         ['text', 'New '], ['text', 'New answer'], ['text', 'New answer'],
     ]);
     assert.equal(h.calls.at(-1)[1].done, true);

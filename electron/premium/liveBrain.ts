@@ -1,5 +1,5 @@
 import type { WhatToAnswerQuestionEvent } from '../../src/types/whatToAnswerQuestion';
-import type { LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
+import type { LiveBrainPromptVariant, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
 import type { AutoAnswerDispatchResult } from './autoAnswer';
 
 export interface LiveBrainAnswerRequest {
@@ -17,8 +17,13 @@ export interface LiveBrainMeetingOptions {
     sessionId: string;
     apiKey: string;
     model?: string;
-    profileSummary?: string;
-    engine: LiveBrainAnswerEngine & { setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void };
+    promptVariant?: LiveBrainPromptVariant;
+    profileContext?: string;
+    modeName?: string;
+    modeTemplate?: string;
+    modePrompt?: string;
+    modeContext?: string;
+    engine: { setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void };
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
     onFailure(code: string): void;
 }

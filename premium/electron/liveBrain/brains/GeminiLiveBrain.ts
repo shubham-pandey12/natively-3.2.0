@@ -1,11 +1,16 @@
 import WebSocket from 'ws';
-import { parseDecideTurnArgs, toGeminiDecideTurnTool } from '../decideTurnTool';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../../../src/types/liveBrainSettings';
+import { CLARIFICATION_ASSUMPTION } from '../instructions';
 import { toPcm16kMono } from '../interviewerAudio';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainEvent, LiveBrainStartContext } from '../types';
 
 const ENDPOINT = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.8-live';
-const TOOL = toGeminiDecideTurnTool();
+export { DEFAULT_GEMINI_LIVE_MODEL };
+export const GEMINI_AUTOMATIC_ACTIVITY_DETECTION = {
+    endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+    silenceDurationMs: 1_300,
+    prefixPaddingMs: 150,
+} as const;
 const BACKOFF_MS = [500, 1_000, 2_000, 4_000];
 const AUDIO_CHUNK_BYTES = 3_200; // 100 ms at 16 kHz mono PCM16.
 const AUDIO_BUFFER_BYTES = AUDIO_CHUNK_BYTES * 20;
@@ -21,14 +26,15 @@ export interface GeminiLiveOptions {
 interface GeminiMessage {
     setupComplete?: object;
     error?: { code?: number; status?: string; message?: string };
+    voiceActivity?: { type?: string };
     serverContent?: {
         interrupted?: boolean;
         inputTranscription?: { text?: string; finished?: boolean };
         interimInputTranscription?: { text?: string };
+        outputTranscription?: { text?: string };
         turnComplete?: boolean;
         interactionStatus?: string;
     };
-    toolCall?: { functionCalls?: { id?: string; name?: string; args?: unknown }[] };
     sessionResumptionUpdate?: { newHandle?: string; resumable?: boolean };
     goAway?: { timeLeft?: string };
 }
@@ -42,10 +48,8 @@ export class GeminiLiveError extends Error {
 
 function classify(code?: number, detail = ''): LiveBrainErrorCode {
     const result = classifyQuietly(code, detail);
-    // Google's reason text never contains the key; it is what explains an
-    // "auth" fallback (wrong key, key without Live API access, wrong model).
     if (code !== undefined && code !== 1000) {
-        console.warn(`[LiveBrain] Gemini closed the session: ${result} (code ${code}) ${detail.replace(/\s+/g, ' ').trim().slice(0, 300)}`);
+        console.warn(`[LiveBrain] Gemini closed the session: ${result} (code ${code})`);
     }
     return result;
 }
@@ -71,10 +75,12 @@ export class GeminiLiveBrain implements LiveBrain {
     private readyAt?: number;
     private failures = 0;
     private resumeHandle?: string;
-    private speechSinceDecision = false;
     private speaking = false;
     private providerTurnActive = false;
-    private decisionSequence = 0;
+    private responseSequence = 0;
+    private responseId?: string;
+    private discardOutput = false;
+    private turnInterrupted = false;
     private bufferedAudio: Buffer[] = [];
     private bufferedBytes = 0;
     private bufferedCandidate: string[] = [];
@@ -113,7 +119,7 @@ export class GeminiLiveBrain implements LiveBrain {
     addCandidateText(text: string, _at: number): void {
         const candidate = text.trim();
         if (!candidate || !this.context) return;
-        // Client context must not interrupt an active interviewer decision.
+        // Client context must not interrupt an active provider turn.
         if (this.readyAt !== undefined && !this.providerTurnActive) this.sendCandidate(candidate);
         else {
             this.bufferedCandidate.push(candidate);
@@ -121,8 +127,20 @@ export class GeminiLiveBrain implements LiveBrain {
         }
     }
 
-    // Gemini only decides. The orchestrator cancels the separate text writer.
-    cancelResponse(_reason: string): void {}
+    requestClarificationAnswer(): void {
+        if (this.readyAt === undefined || this.providerTurnActive) return;
+        this.flushCandidate();
+        this.providerTurnActive = true;
+        this.sendClientTurn(CLARIFICATION_ASSUMPTION, true);
+    }
+
+    cancelResponse(_reason: string): void {
+        if (!this.providerTurnActive) return;
+        // Gemini owns speech barge-in. A local manual answer suppresses the
+        // old output until Gemini sends its next turn boundary.
+        this.discardOutput = true;
+        this.finishResponse('cancelled');
+    }
 
     async stop(): Promise<void> {
         if (!this.context) return;
@@ -153,12 +171,12 @@ export class GeminiLiveBrain implements LiveBrain {
                 this.send({ setup: {
                     model: model.startsWith('models/') ? model : `models/${model}`,
                     generationConfig: { responseModalities: ['AUDIO'] },
-                    realtimeInputConfig: { automaticActivityDetection: { disabled: false } },
+                    realtimeInputConfig: { automaticActivityDetection: GEMINI_AUTOMATIC_ACTIVITY_DETECTION },
                     systemInstruction: { parts: [{ text: this.context.instructions }] },
                     inputAudioTranscription: {},
+                    outputAudioTranscription: {},
                     sessionResumption: this.resumeHandle ? { handle: this.resumeHandle } : {},
                     contextWindowCompression: { slidingWindow: {} },
-                    tools: [TOOL],
                 } });
             });
             socket.on('message', data => { if (this.socket === socket) this.onMessage(data.toString()); });
@@ -197,12 +215,13 @@ export class GeminiLiveBrain implements LiveBrain {
             const audio = this.bufferedAudio;
             this.bufferedAudio = [];
             this.bufferedBytes = 0;
-            if (!this.resumeHandle) {
-                this.providerTurnActive = false;
-                this.speechSinceDecision = false;
-                this.speaking = false;
-            }
-            if (!this.providerTurnActive) this.flushCandidate();
+            // A reconnect resumes from the last resumable checkpoint, which
+            // cannot contain the previous socket's in-flight generation.
+            this.providerTurnActive = false;
+            this.speaking = false;
+            this.discardOutput = false;
+            this.turnInterrupted = false;
+            this.flushCandidate();
             for (const chunk of audio) this.sendAudio(chunk);
             this.startup?.ready();
             this.startup = undefined;
@@ -213,9 +232,14 @@ export class GeminiLiveBrain implements LiveBrain {
         const content = message.serverContent;
         const interim = content?.interimInputTranscription?.text;
         const transcript = content?.inputTranscription;
-        if (content?.interrupted || (typeof interim === 'string' && interim.trim())
-            || (typeof transcript?.text === 'string' && transcript.text.trim())) {
-            this.speechSinceDecision = true;
+        if (content?.interrupted) {
+            this.turnInterrupted = true;
+            this.discardOutput = true;
+            this.finishResponse('cancelled');
+        }
+        if (content?.interrupted || message.voiceActivity?.type === 'ACTIVITY_START'
+            || (typeof interim === 'string' && interim.trim())
+            || (!this.responseId && typeof transcript?.text === 'string' && transcript.text.trim())) {
             this.providerTurnActive = true;
             if (!this.speaking) this.emit({ type: 'interviewer_speech_started', at });
             this.speaking = true;
@@ -226,12 +250,32 @@ export class GeminiLiveBrain implements LiveBrain {
         if (typeof transcript?.text === 'string' && transcript.text.trim()) {
             this.emit({ type: 'interviewer_transcript', text: transcript.text, final: transcript.finished === true, at });
         }
-        if (this.speaking && (transcript?.finished || (content?.turnComplete && !content.interrupted))) this.stopSpeaking(at);
-        const calls = message.toolCall?.functionCalls;
-        if (Array.isArray(calls)) this.respondToTools(calls, at);
-        if (content?.turnComplete && !content.interrupted && content.interactionStatus !== 'IN_PROGRESS') {
-            this.providerTurnActive = false;
-            this.flushCandidate();
+        const output = content?.outputTranscription?.text;
+        if (this.speaking && !content?.interrupted
+            && (message.voiceActivity?.type === 'ACTIVITY_END' || transcript?.finished
+                || (!this.discardOutput && output) || (content?.turnComplete && !this.turnInterrupted))) {
+            this.stopSpeaking(at);
+        }
+        // modelTurn audio is ignored. The transcription is already incremental.
+        if (!this.discardOutput && typeof output === 'string' && output.length) {
+            this.providerTurnActive = true;
+            this.failures = 0;
+            if (!this.responseId) {
+                this.responseId = `${this.context?.sessionId}:${++this.responseSequence}`;
+                this.emit({ type: 'response_started', responseId: this.responseId, at });
+            }
+            if (this.responseId) this.emit({ type: 'response_delta', responseId: this.responseId, text: output });
+        }
+        if (content?.turnComplete) {
+            const interrupted = this.turnInterrupted;
+            if (this.responseId) this.finishResponse('completed');
+            else if (!interrupted && content.interactionStatus !== 'IN_PROGRESS') this.emit({ type: 'response_silent' });
+            this.discardOutput = false;
+            this.turnInterrupted = false;
+            if (!interrupted && content.interactionStatus !== 'IN_PROGRESS') {
+                this.providerTurnActive = false;
+                this.flushCandidate();
+            }
         }
         const update = message.sessionResumptionUpdate;
         if (update?.resumable && typeof update.newHandle === 'string' && update.newHandle) {
@@ -247,26 +291,10 @@ export class GeminiLiveBrain implements LiveBrain {
         }
     }
 
-    private respondToTools(calls: NonNullable<NonNullable<GeminiMessage['toolCall']>['functionCalls']>, at: number): void {
-        const responses = [];
-        const decisions: LiveBrainEvent[] = [];
-        for (const call of calls) {
-            if (!call || typeof call.id !== 'string' || typeof call.name !== 'string') continue;
-            const { id, name, args } = call;
-            const decision = name === 'decide_turn' ? parseDecideTurnArgs(args) : null;
-            responses.push({ id, name, response: decision ? { ok: true } : { error: 'Invalid decision' } });
-            if (!decision) {
-                console.warn('[LiveBrain] Gemini sent an invalid decision.');
-                continue;
-            }
-            if (!this.speechSinceDecision) continue;
-            this.speechSinceDecision = false;
-            this.failures = 0;
-            if (this.speaking) this.stopSpeaking(at);
-            decisions.push({ type: 'decision', ...decision, at, decisionId: `${this.context?.sessionId}:${++this.decisionSequence}` });
-        }
-        if (responses.length) this.send({ toolResponse: { functionResponses: responses } });
-        for (const decision of decisions) this.emit(decision);
+    private finishResponse(status: 'completed' | 'cancelled' | 'failed'): void {
+        const responseId = this.responseId;
+        this.responseId = undefined;
+        if (responseId) this.emit({ type: 'response_done', responseId, status });
     }
 
     private stopSpeaking(at: number): void {
@@ -279,7 +307,11 @@ export class GeminiLiveBrain implements LiveBrain {
     }
 
     private sendCandidate(text: string): void {
-        this.send({ clientContent: { turns: [{ role: 'user', parts: [{ text: `Candidate said: ${text}` }] }], turnComplete: false } });
+        this.sendClientTurn(`Candidate said: ${text}`, false);
+    }
+
+    private sendClientTurn(text: string, turnComplete: boolean): void {
+        this.send({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete } });
     }
 
     private flushCandidate(): void {
@@ -326,6 +358,9 @@ export class GeminiLiveBrain implements LiveBrain {
         this.socket = undefined;
         if (graceful && socket?.readyState === WebSocket.OPEN) socket.close(1000);
         else socket?.terminate();
+        if (this.responseId) {
+            this.finishResponse(graceful ? 'cancelled' : 'failed');
+        }
     }
 
     private release(graceful = false): void {
@@ -338,8 +373,9 @@ export class GeminiLiveBrain implements LiveBrain {
         this.bufferedCandidate = [];
         this.resumeHandle = undefined;
         this.speaking = false;
-        this.speechSinceDecision = false;
         this.providerTurnActive = false;
+        this.discardOutput = false;
+        this.turnInterrupted = false;
         this.failures = 0;
     }
 

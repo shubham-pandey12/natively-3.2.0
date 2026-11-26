@@ -6,10 +6,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer } from 'ws';
 
 const require = createRequire(import.meta.url);
-const { GeminiLiveBrain } = require('../../../../dist-electron/premium/electron/liveBrain/brains/GeminiLiveBrain.js');
+const { GeminiLiveBrain, GEMINI_AUTOMATIC_ACTIVITY_DETECTION } = require('../../../../dist-electron/premium/electron/liveBrain/brains/GeminiLiveBrain.js');
 const { testConnection } = require('../../../../dist-electron/premium/electron/liveBrain/meeting.js');
-const ctx = () => ({ sessionId: 'mock', instructions: 'Decide after speech.', signal: new AbortController().signal });
-const call = (id, args) => ({ toolCall: { functionCalls: [{ id, name: 'decide_turn', args }] } });
+const ctx = () => ({ sessionId: 'mock', instructions: 'Answer after speech.', signal: new AbortController().signal });
+const output = text => ({ serverContent: { outputTranscription: { text } } });
 const speech = text => ({ serverContent: { inputTranscription: { text, finished: true } } });
 const send = (socket, payload) => socket.send(JSON.stringify(payload));
 
@@ -51,18 +51,17 @@ async function rig(t, options = {}) {
     return { brain, events, connections, endpoint };
 }
 
-test('Gemini setup, audio, candidate context, and tool response use the Live WebSocket protocol', async t => {
+test('Gemini setup enables both transcriptions and streams deltas immediately while discarding audio', async t => {
     const { brain, events, connections } = await rig(t);
     await brain.start(ctx());
     const { socket, requests } = connections[0];
     assert.deepEqual(requests[0].setup, {
         model: 'models/test-model', generationConfig: { responseModalities: ['AUDIO'] },
-        systemInstruction: { parts: [{ text: 'Decide after speech.' }] },
-        realtimeInputConfig: { automaticActivityDetection: { disabled: false } },
-        inputAudioTranscription: {}, sessionResumption: {}, contextWindowCompression: { slidingWindow: {} },
-        tools: [{ functionDeclarations: [{ name: 'decide_turn', description: 'Decide what the candidate needs after an interviewer turn.', parametersJsonSchema: requests[0].setup.tools[0].functionDeclarations[0].parametersJsonSchema }] }],
+        systemInstruction: { parts: [{ text: 'Answer after speech.' }] },
+        realtimeInputConfig: { automaticActivityDetection: GEMINI_AUTOMATIC_ACTIVITY_DETECTION },
+        inputAudioTranscription: {}, outputAudioTranscription: {},
+        sessionResumption: {}, contextWindowCompression: { slidingWindow: {} },
     });
-    assert.deepEqual(requests[0].setup.tools[0].functionDeclarations[0].parametersJsonSchema.required, ['action']);
     brain.pushInterviewerAudio(new Int16Array([100, -200]), 16_000);
     brain.addCandidateText('   I would cache reads.   ', Date.now());
     const audio = await until(() => requests.find(message => message.realtimeInput)?.realtimeInput.audio);
@@ -71,41 +70,58 @@ test('Gemini setup, audio, candidate context, and tool response use the Live Web
     assert.deepEqual(await until(() => requests.find(message => message.clientContent)?.clientContent), {
         turns: [{ role: 'user', parts: [{ text: 'Candidate said: I would cache reads.' }] }], turnComplete: false,
     });
+
     send(socket, speech('What about invalidation?'));
-    send(socket, call('answer', { action: 'answer', question: 'What about invalidation?', kind: 'follow_up' }));
-    assert.deepEqual(await until(() => requests.find(message => message.toolResponse)?.toolResponse.functionResponses), [
-        { id: 'answer', name: 'decide_turn', response: { ok: true } },
+    send(socket, { serverContent: {
+        modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] }, outputTranscription: { text: 'I would' },
+    } });
+    await until(() => events.some(event => event.type === 'response_delta'));
+    assert.deepEqual(events.filter(event => event.type.startsWith('response_')).map(event => [event.type, event.responseId, event.text]), [
+        ['response_started', 'mock:1', undefined], ['response_delta', 'mock:1', 'I would'],
     ]);
-    assert.equal(events.find(event => event.type === 'decision').question, 'What about invalidation?');
+    send(socket, output(' use a TTL.'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.some(event => event.type === 'response_done'));
+    assert.deepEqual(events.filter(event => event.type === 'response_delta').map(event => event.text), ['I would', ' use a TTL.']);
+    assert.deepEqual(events.at(-1), { type: 'response_done', responseId: 'mock:1', status: 'completed' });
     assert.equal(events.find(event => event.type === 'interviewer_transcript').final, true);
-    send(socket, { serverContent: { modelTurn: { parts: [{ inlineData: { data: 'AAAA' } }] }, interrupted: true } });
-    await until(() => events.filter(event => event.type === 'interviewer_speech_started').length === 2);
-    assert.equal(events.some(event => event.type === 'response_delta'), false);
 });
 
-test('invalid and duplicate tool calls receive responses, but only new interviewer speech permits a decision', async t => {
+test('interruption cancels the active generation, discards late chunks and admits the next turn', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, output('First answer'));
+    send(socket, { serverContent: { interrupted: true } });
+    send(socket, output('late old text'));
+    send(socket, { serverContent: { turnComplete: true } });
+    send(socket, speech('Second question'));
+    send(socket, output('Replacement'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.filter(event => event.type === 'response_done').length === 2);
+    assert.deepEqual(events.filter(event => event.type === 'response_delta').map(({ responseId, text }) => [responseId, text]), [
+        ['mock:1', 'First answer'], ['mock:2', 'Replacement'],
+    ]);
+    assert.deepEqual(events.filter(event => event.type === 'response_done').map(({ status }) => status), ['cancelled', 'completed']);
+    const cancelled = events.findIndex(event => event.type === 'response_done' && event.status === 'cancelled');
+    assert.equal(events[cancelled + 1].type, 'interviewer_speech_started');
+});
+
+test('silence emits no answer and clarification follow-up sends a new client turn', async t => {
     const { brain, events, connections } = await rig(t);
     await brain.start(ctx());
     const { socket, requests } = connections[0];
-    send(socket, call('unsolicited', { action: 'wait' }));
-    send(socket, speech('Design a catalog.'));
-    send(socket, call('invalid', { action: 'answer' }));
-    send(socket, call('answer', { action: 'answer', question: 'Design a catalog.' }));
-    brain.addCandidateText('Here is my answer.', Date.now());
-    for (let i = 0; i < 4; i++) send(socket, call(`duplicate-${i}`, { action: 'wait' }));
-    send(socket, { serverContent: { interrupted: true } });
-    send(socket, call('interrupt', { action: 'wait' }));
-    send(socket, speech('Use MongoDB.'));
-    send(socket, call('correction', { action: 'answer', question: 'Design a catalog using MongoDB.', kind: 'correction' }));
-    const replies = await until(() => {
-        const responses = requests.flatMap(message => message.toolResponse?.functionResponses ?? []);
-        return responses.length === 9 && responses;
-    });
-    assert.deepEqual(replies[1].response, { error: 'Invalid decision' });
-    assert.equal(replies.filter(reply => reply.response.ok).length, 8);
-    assert.deepEqual(events.filter(event => event.type === 'decision').map(event => [event.action, event.question]), [
-        ['answer', 'Design a catalog.'], ['wait', undefined], ['answer', 'Design a catalog using MongoDB.'],
-    ]);
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.some(event => event.type === 'response_silent'));
+    assert.equal(events.some(event => event.type === 'response_started'), false);
+    send(socket, output('Ask: What scale?'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.some(event => event.type === 'response_done'));
+    brain.requestClarificationAnswer();
+    const content = await until(() => requests.find(message => message.clientContent)?.clientContent);
+    assert.equal(content.turnComplete, true);
+    assert.match(content.turns[0].parts[0].text, /state a reasonable assumption/);
+    assert.equal(content.turns[0].role, 'user');
 });
 
 test('goAway emits the deadline and reconnects with the resumable handle', async t => {
@@ -124,13 +140,29 @@ test('candidate context waits for Gemini to finish the interviewer turn', async 
     send(socket, speech('How would you handle retries?'));
     await until(() => events.find(event => event.type === 'interviewer_transcript'));
     brain.addCandidateText('I use a retry budget.', Date.now());
-    send(socket, call('answer', { action: 'answer', question: 'How would you handle retries?' }));
-    await until(() => requests.find(message => message.toolResponse));
+    send(socket, output('I would limit retries.'));
+    await until(() => events.find(event => event.type === 'response_delta'));
     assert.equal(requests.some(message => message.clientContent), false);
     send(socket, { serverContent: { turnComplete: true, interactionStatus: 'IDLE' } });
     const clientContent = await until(() => requests.find(message => message.clientContent)?.clientContent);
     assert.equal(clientContent.turnComplete, false);
     assert.equal(clientContent.turns[0].parts[0].text, 'Candidate said: I use a retry budget.');
+});
+
+test('manual cancellation suppresses a pending answer without dropping the next turn', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, speech('First question'));
+    await until(() => events.some(event => event.type === 'interviewer_transcript'));
+    brain.cancelResponse('manual_answer');
+    send(socket, output('Suppressed answer'));
+    send(socket, { serverContent: { turnComplete: true } });
+    send(socket, speech('Second question'));
+    send(socket, output('Current answer'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.some(event => event.type === 'response_done'));
+    assert.deepEqual(events.filter(event => event.type === 'response_delta').map(event => event.text), ['Current answer']);
 });
 
 test('429 backs off before reconnecting and a socket drop backs off again', async t => {

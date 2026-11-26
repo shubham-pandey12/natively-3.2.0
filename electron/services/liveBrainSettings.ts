@@ -2,6 +2,7 @@ import { CredentialsManager } from './CredentialsManager';
 import { SettingsManager } from './SettingsManager';
 import type { AppState } from '../main';
 import { loadLiveBrainPremium } from '../premium/liveBrain';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/types/liveBrainSettings';
 import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainModel, LiveBrainModelsResult, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
 
 const settingsUnavailable = 'Settings store is unavailable; the change was not saved.';
@@ -132,9 +133,9 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
 }
 
 /** Main-process only. IPC exposes inspectConfig().config, never usableKey. */
-export function resolveLiveBrainRuntime(): { provider: LiveBrainConfig['provider']; model: string; apiKey?: string } {
+export function resolveLiveBrainRuntime(): Pick<LiveBrainConfig, 'provider' | 'model' | 'promptVariant'> & { apiKey?: string } {
     const { config, usableKey } = inspectConfig(SettingsManager.getInstance(), CredentialsManager.getInstance());
-    return { provider: config.provider, model: config.model, apiKey: usableKey };
+    return { provider: config.provider, model: config.model, promptVariant: config.promptVariant, apiKey: usableKey };
 }
 
 export function registerLiveBrainSettingsIpc(
@@ -258,7 +259,8 @@ const KEY_SOURCE_LABEL: Record<NonNullable<LiveBrainConfig['keySource']>, string
 };
 
 const GEMINI_LIVE_FALLBACK_MODELS: LiveBrainModel[] = [
-    { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', description: 'Default' },
+    { id: DEFAULT_GEMINI_LIVE_MODEL, label: 'Gemini 3.1 Flash Live Preview', description: 'Default' },
+    { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' },
 ];
 
 const OPENAI_REALTIME_MODELS: LiveBrainModel[] = [

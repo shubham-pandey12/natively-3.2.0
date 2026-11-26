@@ -36,6 +36,7 @@ import { isMac, isWindows } from '../utils/platformUtils';
 import { SettingsToggle } from './settings/SettingsToggle';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainModel, LiveBrainSettingsResult } from '../types/liveBrainSettings';
+import { DEFAULT_GEMINI_LIVE_MODEL } from '../types/liveBrainSettings';
 import {
     clampOverlayOpacity,
     getOverlayAppearance,
@@ -462,7 +463,7 @@ const LIVE_BRAIN_KEY_URLS: Record<LiveBrainKeyProvider, string> = {
 const LIVE_BRAIN_PROVIDER_UI: Record<LiveBrainKeyProvider, {
     name: string; vendor: string; mark: 'google' | 'openai' | 'elevenlabs'; defaultModel: string; existingKeyPlace: string;
 }> = {
-    'gemini-live': { name: 'Gemini Live', vendor: 'Gemini', mark: 'google', defaultModel: 'gemini-3.8-live', existingKeyPlace: 'AI Providers' },
+    'gemini-live': { name: 'Gemini Live', vendor: 'Gemini', mark: 'google', defaultModel: DEFAULT_GEMINI_LIVE_MODEL, existingKeyPlace: 'AI Providers' },
     'openai-realtime': { name: 'OpenAI Realtime', vendor: 'OpenAI', mark: 'openai', defaultModel: 'gpt-realtime-2.1', existingKeyPlace: 'AI Providers' },
     'elevenlabs-realtime': { name: 'ElevenLabs Realtime', vendor: 'ElevenLabs', mark: 'elevenlabs', defaultModel: 'eleven_realtime_v1_mini', existingKeyPlace: 'Speech Provider' },
 };

@@ -70,13 +70,15 @@ interface PipelineAnswerTiming {
 }
 type AnswerTiming = PipelineAnswerTiming | {
     source: 'live-brain';
-    decisionId: string;
-    generationId?: number;
+    brainId: 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'pipeline';
+    responseId: string;
+    model: string;
+    promptVariant: 'full' | 'trimmed';
     speechStoppedAt?: number;
-    decisionAt: number;
-    firstVisibleTextAt?: number;
+    responseStartedAt: number;
+    firstTextAt?: number;
     doneAt: number;
-    status: 'completed' | 'cancelled' | 'failed' | 'wait' | 'ask';
+    status: 'completed' | 'cancelled' | 'failed';
 };
 let installed = false;
 let seq = 0;

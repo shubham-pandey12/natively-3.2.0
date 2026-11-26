@@ -14,25 +14,21 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function rig() {
     const brain = new FakeLiveBrain();
-    const writes = [];
     const questions = [];
     const outdated = [];
     const create = onFailure => createMeeting({
         sessionId: 'fixture', apiKey: 'fake', onFailure,
+        modeName: 'Mock interview', profileContext: 'Candidate built a queue',
         emitQuestion: question => questions.push(question),
         engine: {
-            runLiveBrainAnswer(request) {
-                const pending = Promise.withResolvers();
-                const generationId = writes.length + 1;
-                writes.push({ ...request, generationId, resolve: pending.resolve });
-                request.signal.addEventListener('abort', () => pending.resolve({ status: 'cancelled' }), { once: true });
-                return { generationId, done: pending.promise };
-            },
+            runLiveBrainAnswer() { assert.fail('Gemini writes its own answer'); },
             setAutomaticAnswerOutdated: (...args) => outdated.push(args),
         },
     }, brain);
-    const decide = (action, props = {}) => brain.emit({ type: 'decision', decisionId: `${action}-${writes.length}`, at: Date.now(), action, ...props });
-    return { brain, writes, questions, outdated, create, decide };
+    const start = responseId => brain.emit({ type: 'response_started', responseId, at: Date.now() });
+    const delta = (responseId, text) => brain.emit({ type: 'response_delta', responseId, text });
+    const done = (responseId, status = 'completed') => brain.emit({ type: 'response_done', responseId, status });
+    return { brain, questions, outdated, create, start, delta, done };
 }
 
 test('an answer uses the existing automatic What to Answer path and replacement waits for cancellation', async () => {
@@ -69,22 +65,85 @@ test('an answer uses the existing automatic What to Answer path and replacement 
     assert.equal(await second.done, 'completed');
 });
 
-test('wait keeps a streaming writer, and ask displays a clarification without invoking a writer', () => {
-    const { create, decide, writes, questions } = rig();
+test('incremental Gemini answers replace a cancelled answer and drop late chunks', () => {
+    const { create, brain, start, delta, done, questions, outdated } = rig();
     const session = create(() => assert.fail('Unexpected fallback'));
     session.start();
-    decide('answer', { question: 'Design a catalog.' });
-    decide('wait');
-    decide('ask', { clarification: 'How many products?' });
-    assert.equal(writes.length, 1);
-    assert.equal(writes[0].signal.aborted, false);
-    assert.ok(questions.some(question => question.clarification === 'How many products?'));
+    start('first');
+    delta('first', 'I would');
+    assert.deepEqual(questions.at(-1).responseText, { text: 'I would', done: false });
+    delta('first', ' start here.');
+    const oldGeneration = questions.at(-1).generationId;
+    done('first', 'cancelled');
+    brain.emit({ type: 'interviewer_speech_started', at: Date.now() });
+    assert.deepEqual(questions.at(-1), { generationId: oldGeneration, interviewerSpeaking: true });
+
+    start('replacement');
+    delta('first', 'late old output');
+    delta('replacement', 'Use MongoDB.');
+    assert.deepEqual(outdated, [[oldGeneration, true]]);
+    assert.notEqual(questions.at(-1).generationId, oldGeneration);
+    assert.deepEqual(questions.at(-1).responseText, { text: 'Use MongoDB.', done: false });
+    assert.equal(questions.at(-1).updated, true);
+    done('replacement');
+    assert.deepEqual(questions.at(-1).responseText, { text: 'Use MongoDB.', done: true });
     session.stop();
-    assert.equal(writes[0].signal.reason, 'auto_disabled_or_meeting_ended');
+});
+
+test('spoken filler and silent model turns keep the current answer', () => {
+    const { create, brain, start, delta, done, questions, outdated } = rig();
+    const session = create(() => assert.fail('Unexpected fallback'));
+    session.start();
+    start('answer');
+    delta('answer', 'Use MongoDB.');
+    done('answer');
+    const generationId = questions.at(-1).generationId;
+    brain.emit({ type: 'interviewer_speech_started', at: Date.now() });
+    start('filler');
+    delta('filler', 'No act');
+    delta('filler', 'ion.');
+    done('filler');
+    brain.emit({ type: 'interviewer_speech_started', at: Date.now() });
+    brain.emit({ type: 'response_silent' });
+    assert.deepEqual(questions.slice(2), [true, false, true, false].map(interviewerSpeaking => ({ generationId, interviewerSpeaking })));
+    assert.deepEqual(outdated, []);
+    session.stop();
+});
+
+test('a split spoken ask streams in one row and the timer asks Gemini to continue', t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+    const { create, brain, start, delta, done, questions } = rig();
+    const session = create(() => assert.fail('Unexpected fallback'));
+    session.start();
+    start('ask');
+    delta('ask', 'A');
+    delta('ask', 'sK: How many');
+    assert.deepEqual(questions.at(-1), { askId: 'ask', clarification: 'How many', askStreaming: true });
+    delta('ask', ' users?');
+    done('ask');
+    assert.deepEqual(questions.at(-1), { askId: 'ask', clarification: 'How many users?', askStreaming: false });
+    t.mock.timers.tick(9999);
+    assert.equal(brain.clarificationRequests, 0);
+    t.mock.timers.tick(1);
+    assert.equal(brain.clarificationRequests, 1);
+
+    start('second-ask');
+    delta('second-ask', 'Ask: What scale?');
+    done('second-ask');
+    brain.emit({ type: 'interviewer_speech_started', at: Date.now() });
+    t.mock.timers.tick(10_000);
+    assert.equal(brain.clarificationRequests, 1);
+    start('third-ask');
+    delta('third-ask', 'Ask: What is the read volume?');
+    done('third-ask');
+    session.cancelAnswer('manual_answer');
+    t.mock.timers.tick(10_000);
+    assert.equal(brain.clarificationRequests, 1);
+    session.stop();
 });
 
 test('routing keeps the legacy switch off-path, suppresses it for Gemini and re-enables it on fatal failure', () => {
-    const { brain, create, decide, writes } = rig();
+    const { brain, create, start, delta } = rig();
     const routing = new LiveBrainRouting();
     function canDispatch(legacy = true, available = true) { return routing.pipelineOverride(available) ?? legacy; }
     assert.equal(canDispatch(true), true);
@@ -98,12 +157,13 @@ test('routing keeps the legacy switch off-path, suppresses it for Gemini and re-
     routing.activeSession.addCandidateText('Candidate context.', 10);
     assert.equal(brain.audio.length, 1);
     assert.deepEqual(brain.candidateTurns.map(({ text }) => text), ['Candidate context.']);
-    decide('answer', { question: 'Use the current pipeline?' });
+    start('answer');
+    delta('answer', 'Use the existing pipeline.');
     brain.emit({ type: 'error', code: 'rate_limited', fatal: false });
     assert.equal(canDispatch(true), false);
     brain.emit({ type: 'error', code: 'quota', fatal: true });
     assert.deepEqual(failures, ['quota']);
-    assert.equal(writes[0].signal.aborted, true);
+    assert.equal(brain.stopCalls, 1);
     assert.equal(canDispatch(false), true);
     assert.equal(canDispatch(true, false), false);
     routing.stop();
@@ -113,16 +173,15 @@ test('routing keeps the legacy switch off-path, suppresses it for Gemini and re-
     routing.stop();
 });
 
-test('switching off and manual cancellation abort only the Live Brain writer', () => {
-    const { brain, create, decide, writes } = rig();
+test('switching off stops Gemini and manual cancellation reaches the brain', () => {
+    const { brain, create, start, delta } = rig();
     const routing = new LiveBrainRouting();
     routing.start(create, () => assert.fail('Unexpected fallback'));
-    decide('answer', { question: 'Design a catalog.' });
+    start('answer');
+    delta('answer', 'Design a catalog.');
     routing.activeSession.cancelAnswer('manual_answer');
-    assert.equal(writes[0].signal.reason, 'manual_answer');
-    decide('answer', { question: 'What if we use MongoDB?' });
+    assert.deepEqual(brain.cancellations, ['manual_answer']);
     routing.stop();
-    assert.equal(writes[1].signal.reason, 'auto_disabled_or_meeting_ended');
     assert.equal(brain.stopCalls, 1);
     assert.equal(routing.activeSession, undefined);
 });
@@ -144,7 +203,7 @@ test('capture tap downmixes 48 kHz stereo and resamples non-canonical mono forma
     session.stop();
 });
 
-test('Prompt Debugger carries decider instructions and the speech-to-done timestamps', async t => {
+test('Prompt Debugger captures spoken instructions and timestamps the first displayed text', t => {
     const before = process.env.NATIVELY_PROMPT_DEBUG;
     t.after(() => {
         if (before === undefined) delete process.env.NATIVELY_PROMPT_DEBUG;
@@ -153,21 +212,25 @@ test('Prompt Debugger carries decider instructions and the speech-to-done timest
     });
     process.env.NATIVELY_PROMPT_DEBUG = '1';
     t.mock.timers.enable({ apis: ['Date'], now: 2_000 });
-    const { create, decide, writes } = rig();
+    const { create, start, delta, done } = rig();
     const session = create(() => assert.fail('Unexpected fallback'));
     session.start();
     session.noteSpeechStop(1_000);
-    decide('answer', { question: 'Design a catalog.' });
-    writes[0].onFirstText(2_250);
+    start('timed');
+    delta('timed', 'A');
+    t.mock.timers.setTime(2_250);
+    delta('timed', ' good choice.');
     t.mock.timers.setTime(2_500);
-    writes[0].resolve({ status: 'completed' });
-    await flush();
+    done('timed');
     const { notes, answerTimings } = getPromptDebugState();
-    assert.ok(notes.some(note => note.promptSource === 'decider' && note.system.includes('decide_turn')));
-    assert.ok(notes.some(note => note.promptSource === 'decide_turn' && note.user === 'Design a catalog.'));
+    const note = notes.find(note => note.promptSource === 'answer');
+    assert.match(note.system, /say exactly "No action\."/);
+    assert.match(note.system, /Candidate built a queue/);
+    assert.match(note.system, /Mock interview/);
     assert.deepEqual(answerTimings, [{
-        source: 'live-brain', decisionId: 'answer-0', generationId: 1, speechStoppedAt: 1_000, decisionAt: 2_000,
-        firstVisibleTextAt: 2_250, doneAt: 2_500, status: 'completed',
+        source: 'live-brain', brainId: 'gemini-live', responseId: 'timed', model: 'gemini-3.1-flash-live-preview',
+        promptVariant: 'full', speechStoppedAt: 1_000, responseStartedAt: 2_000, firstTextAt: 2_250,
+        doneAt: 2_500, status: 'completed',
     }]);
     session.stop();
 });

@@ -71,6 +71,22 @@ test('every chunk boundary preserves the decision and clarification text', () =>
     }
 });
 
+test('spoken sentinels survive split chunks, punctuation and case', () => {
+    for (const wait of ['No action', 'NO action.', '“no ACTION!”', '_No action_']) {
+        const parser = createResponseParser();
+        const events = [...Array.from(wait).flatMap(char => parser.push(char)), ...parser.finish()];
+        assert.deepEqual(events, [kind('wait')]);
+    }
+    const parser = createResponseParser();
+    assert.deepEqual(parser.push('“A'), []);
+    assert.deepEqual(parser.push('sK ：” Wh'), [kind('ask'), text('Wh')]);
+    assert.deepEqual(parser.push('ich one?'), [text('ich one?')]);
+    assert.deepEqual(parser.finish(), []);
+    assert.deepEqual(createResponseParser().push('No actionable error.'), [kind('answer'), text('No actionable error.')]);
+    const bounded = createResponseParser();
+    assert.deepEqual(bounded.push('*'.repeat(17)), [kind('answer'), text('*'.repeat(17))]);
+});
+
 test('the decide_turn declaration wraps the provider-neutral JSON schema for Gemini', () => {
     assert.equal(DECIDE_TURN_TOOL.name, 'decide_turn');
     assert.deepEqual(DECIDE_TURN_TOOL.parameters.properties.action.enum, ['answer', 'ask', 'wait']);

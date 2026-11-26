@@ -8015,14 +8015,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, interviewerSpeaking, responseText }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText }) => {
         if (askId && clarification) {
           if (activeDirectAssistRef.current) return;
           const id = `live-brain-ask-${askId}`;
           pinAnswerPanel();
-          setMessages((prev) => prev.some((message) => message.id === id) ? prev : [
-            ...prev, { id, role: 'system', kind: 'ask', intent: 'what_to_answer', text: clarification },
-          ]);
+          setMessages((prev) => {
+            const existing = prev.find((message) => message.id === id);
+            const patch = { text: clarification, isStreaming: askStreaming === true };
+            if (existing) {
+              if (!existing.isStreaming) return prev;
+              return prev.map((message) => message === existing ? { ...message, ...patch } : message);
+            }
+            return [...prev, { id, role: 'system', kind: 'ask', intent: 'what_to_answer', liveBrainText: true, ...patch }];
+          });
           return;
         }
         if (generationId === undefined) return;

@@ -2164,6 +2164,12 @@ export class KnowledgeOrchestrator {
         };
     }
 
+    /** Meeting-scoped profile context for a realtime model that owns the conversation. */
+    getLiveInterviewProfileContext(): string {
+        if (!this.isKnowledgeModeSwitchedOn()) return '';
+        return buildGroundingBlock(this.activeResume, this.activeJD, { includeResume: true, includeJD: true }).block;
+    }
+
     // ============================================
     // Management
     // ============================================

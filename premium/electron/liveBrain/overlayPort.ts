@@ -7,7 +7,7 @@ export function createLiveBrainOverlayPort(bridge: {
     setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void;
 }): LiveBrainOverlayPort {
     return {
-        showAsk: ({ askId, clarification }) => bridge.emitQuestion({ askId, clarification }),
+        showAsk: ask => bridge.emitQuestion(ask),
         setOutdated: (generationId, outdated) => bridge.setAutomaticAnswerOutdated(generationId, outdated),
         setInterviewerSpeaking: (generationId, interviewerSpeaking) => bridge.emitQuestion({ generationId, interviewerSpeaking }),
         showText: ({ generationId, text, done, updated }) => bridge.emitQuestion({

@@ -6,6 +6,7 @@ export class FakeLiveBrain implements LiveBrain {
     readonly candidateTurns: { text: string; at: number }[] = [];
     readonly cancellations: string[] = [];
     stopCalls = 0;
+    clarificationRequests = 0;
 
     private active = false;
     private readonly listeners = new Set<(event: LiveBrainEvent) => void>();
@@ -24,6 +25,10 @@ export class FakeLiveBrain implements LiveBrain {
 
     addCandidateText(text: string, at: number): void {
         this.candidateTurns.push({ text, at });
+    }
+
+    requestClarificationAnswer(): void {
+        this.clarificationRequests++;
     }
 
     cancelResponse(reason: string): void {

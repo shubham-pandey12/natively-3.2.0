@@ -13,7 +13,7 @@
 | 2 — Foundation | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Contracts, instructions, decide_turn tool, parser, factory, test double. No runtime wiring yet. |
 | 3 — Orchestrator + overlay | ✅ Done | Injected ports, fake-clock tests, and offline renderer verification. |
 | 4 — GeminiLiveBrain | Implemented | D11 accepted `decide_turn`. Steps 1–6 are in place. Live meeting validation and consistent S4 constraint replacement are still open. |
-| 4b — Gemini writes the answer (D12) | Task 0 complete | Both models streamed incremental transcription. Both missed the first-word latency gate. |
+| 4b — Gemini writes the answer (D12) | Implemented | Task 0 accepted. Tasks 1–6 implemented with Gemini 3.1 Flash Live Preview as default. Tuned VAD passed the S1 pause case and exceeded §11's first-word targets. Real meeting and macOS verification remain open. |
 | 5 — Notebook + Supervisor | ☐ Not started | |
 | 6 — OpenAI + ElevenLabs Realtime | ☐ Not started (ElevenLabs settings done early) | D13 added ElevenLabs Realtime. Its settings (provider, key, models, reuse, dev `.env`) shipped ahead of the phase in 895b3e8b at the user's request; the brain itself and its spike are still Phase 6. Selecting it today runs the existing pipeline. |
 | 7 — Tuning & validation | ☐ Not started | |
@@ -242,9 +242,35 @@ The medians below use completed standalone answers to S1, S2, S4, and S7, one sa
 
 **First-word latency failed the gate on both.** The first chunk arrived within 1,500 ms in two of four 3.1 answers and three of four 3.8 answers. Both missed §11's median ≤1,000 ms and p90 ≤1,500 ms targets. Neither is recommended for product integration at this gate. If follow-up measurement is approved, start with 3.1 Flash Live Preview because it used the exact `Ask:` prefix and delivered smaller chunks. Its premature S1 answer remains a turn-taking issue.
 
+The user subsequently accepted Task 0 and revised §11 to median ≤1,500 ms and p90 ≤2,500 ms in `bbfd8948`. Gemini 3.1 Flash Live Preview became the Phase 4b default.
+
 Windows validation used the 14 live `--answer` invocations, `node --check scripts/spikes/gemini-live.mjs`, `node --test premium/electron/liveBrain/__tests__/*.test.mjs` (44 passed), and `git diff --check`. The standalone probe uses shared Node APIs and has no platform branch. Reviewed but not executed on macOS. Requires physical macOS verification.
 
 Official protocol references for this run include the [v1beta WebSocket endpoint](https://aistudio.google.com/api-reference/live/bidi-generate-content), [AUDIO and both transcription setup fields](https://aistudio.google.com/docs/live-api/capabilities#audio-transcription), [PCM input](https://aistudio.google.com/docs/live-api/capabilities#audio-formats), [automatic VAD and barge-in](https://aistudio.google.com/docs/live-api/capabilities#interruptions), and the [`outputTranscription`, `interrupted`, and `turnComplete` events](https://aistudio.google.com/api-reference/live#BidiGenerateContentServerContent).
+
+## Phase 4b — Gemini writes the answer (D12)
+
+Gemini uses AUDIO with input and output transcription, session resumption, and context window compression. The shared meeting path discards audio and sends output deltas through the existing What to Answer event path, with the same row rendering as Auto Answer. Spoken and bracket sentinels are recognized before text is displayed. Silence and `No action.` leave the current answer in place. `Ask:` updates one clarification row as text arrives, and the 10-second timeout sends the assumption instruction in a new Gemini client text turn. Gemini barge-in closes the in-flight response and suppresses its remaining chunks until the cancelled turn's boundary. The replacement folds the previous answer and displays as updated. Manual cancellation suppresses the current Gemini response locally until its turn boundary.
+
+The session uses the configured answer-prompt variant (full by default), mode context, and the existing profile/resume/JD grounding builder when Profile Intelligence is enabled and the active mode allows it. That context is captured when the meeting session starts. The Prompt Debugger records the native speech stop when available, response start, first overlay-bound text, completion time, model, variant, and status. The existing writer and `decideTurnTool.ts` with its tests were kept for historical compatibility. The production Gemini meeting path instantiates neither the writer nor the tool. The spike retains `--decide` for comparing older measurements.
+
+### End-of-speech tuning
+
+On Windows, replayed the same SAPI PCM fixtures from Task 0 with `gemini-3.1-flash-live-preview`, using `node --env-file=.env scripts/spikes/gemini-live.mjs <wav> gemini-3.1-flash-live-preview --answer --vad=low,<silenceMs>,150`. All profiles used `END_SENSITIVITY_LOW` and 150 ms prefix padding. Quota errors initially blocked S2, S4, and S7; those nine cases succeeded on retry. Each table cell gives milliseconds from paced speech end to the first nonblank chunk / last chunk / `turnComplete`. P90 uses nearest rank with four runs per setting.
+
+| Silence | S1 | S2 | S4 | S7 | First-chunk median / p90 | S1 pause |
+|---:|---:|---:|---:|---:|---:|---|
+| 900 ms | 1,456 / 3,308 / 8,711 | 2,233 / 8,472 / 25,753 | 1,566 / 4,812 / 12,722 | 1,417 / 6,236 / 19,535 | 1,511 / 2,233 | Premature `Ask: What`; rejected. |
+| **1,300 ms** | **1,805 / 8,587 / 27,498** | **2,717 / 6,724 / 18,108** | **1,776 / 6,702 / 20,868** | **1,816 / 7,025 / 23,222** | **1,810.5 / 2,717** | One turn after the question; selected. |
+| 1,600 ms | 2,131 / 5,930 / 19,983 | 3,158 / 9,038 / 25,529 | 2,057 / 7,068 / 21,325 | 2,071 / 4,055 / 12,414 | 2,101 / 3,158 | One turn after the question. |
+
+The selected setting delivered text incrementally in each trial and was the fastest profile to protect the S1 pause. It missed both accepted §11 targets (median ≤1,500 ms and p90 ≤2,500 ms). These measurements stop at the socket and exclude capture and rendering. [VAD fields and sensitivity](https://aistudio.google.com/api-reference/live#RealtimeInputConfig.AutomaticActivityDetection) · [Output event order and activity signals](https://aistudio.google.com/api-reference/live#BidiGenerateContentServerContent) · [Client text turns](https://aistudio.google.com/api-reference/live#BidiGenerateContentClientContent) · [Resumable checkpoints](https://aistudio.google.com/api-reference/live#SessionResumptionUpdate)
+
+Windows WASAPI and the Chromium loopback fallback share the PCM entry point with macOS CoreAudio and ScreenCaptureKit. The implementation affects the shared Gemini provider, meeting routing, and overlay. Native capture, playback, and packaging modules were outside the change.
+
+Windows validation passed `npm run build:electron`, `node --test premium/electron/liveBrain/__tests__/` (49), `node --test electron/services/__tests__/LiveBrainSettings.test.mjs` (4), both requested `npx tsc --noEmit -p` checks, and `npm run typecheck:premium`. `npm run test:lib` passed 3,242 with 15 skipped. `npm run test:components` passed 1,002 with 2 skipped. `npm run test:auto-answer` passed 200 of 201. The `AutoAnswerUsageTelemetry2026_09_27` assertion at line 178 also fails against the pre-change `main.ts` on HEAD.
+
+Two Windows live smoke tests replayed synthetic WAVs into the compiled meeting/provider and observed 21 and 27 incremental overlay-bound answer updates. The model answered both prompts directly, so the clarification timeout was verified with a fake clock and a mock WebSocket. Real meeting capture and renderer paint remain unverified. Reviewed but not executed on macOS. Requires physical macOS verification.
 
 ## Open risks
 

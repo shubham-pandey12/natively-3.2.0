@@ -59,7 +59,7 @@ async function readWav(path) {
 // autoVad: let Gemini's automatic activity detection decide the end of the turn
 // (what the product does) instead of explicit activityStart/activityEnd. The
 // measured time then includes Gemini's own end-of-turn wait.
-async function probe({ apiKey, model, wav, mode, autoVad, decider, answerInstructions, bargeIn }) {
+async function probe({ apiKey, model, wav, mode, autoVad, decider, answerInstructions, bargeIn, vadConfig }) {
     const start = performance.now();
     let speechEnd;
     let firstText = false;
@@ -169,7 +169,9 @@ async function probe({ apiKey, model, wav, mode, autoVad, decider, answerInstruc
                 void send({ setup: {
                     model: `models/${model}`,
                     generationConfig: { responseModalities: [mode] },
-                    ...(autoVad ? {} : { realtimeInputConfig: { automaticActivityDetection: { disabled: true } } }),
+                    ...((vadConfig || !autoVad) ? {
+                        realtimeInputConfig: { automaticActivityDetection: vadConfig ?? { disabled: true } },
+                    } : {}),
                     ...(decider
                         ? {
                             inputAudioTranscription: {},
@@ -313,13 +315,21 @@ async function main() {
     const args = process.argv.slice(2);
     const decide = args.includes('--decide');
     const answer = args.includes('--answer');
+    const vadArg = args.find(arg => arg.startsWith('--vad='));
+    const vadMatch = vadArg?.match(/^--vad=(low|high),(\d{1,4}),(\d{1,4})$/);
+    const vadConfig = vadMatch && {
+        endOfSpeechSensitivity: `END_SENSITIVITY_${vadMatch[1].toUpperCase()}`,
+        silenceDurationMs: Number(vadMatch[2]),
+        prefixPaddingMs: Number(vadMatch[3]),
+    };
     const autoVad = decide || answer || args.includes('--auto-vad');
     const bargeIndex = args.indexOf('--barge-in');
     const bargeFile = bargeIndex === -1 ? undefined : args.splice(bargeIndex, 2)[1];
-    const [file, model = defaultModel, extra] = args.filter(arg => !['--auto-vad', '--decide', '--answer'].includes(arg));
+    const [file, model = defaultModel, extra] = args.filter(arg => !['--auto-vad', '--decide', '--answer', vadArg].includes(arg));
     if (!file || extra || (decide && answer) || (bargeIndex !== -1 && (!answer || !bargeFile))
+        || (vadArg && (!answer || !vadConfig))
         || !/^[a-z0-9][a-z0-9.-]*$/.test(model)) {
-        console.error('Usage: node scripts/spikes/gemini-live.mjs <mono 16-bit PCM WAV> [model-id] [--auto-vad | --decide | --answer [--barge-in <second WAV>]]');
+        console.error('Usage: node scripts/spikes/gemini-live.mjs <mono 16-bit PCM WAV> [model-id] [--auto-vad | --decide | --answer [--barge-in <second WAV>] [--vad=low|high,silenceMs,prefixMs]]');
         return 1;
     }
     const apiKey = process.env.GEMINI_API_KEY?.trim();
@@ -341,7 +351,7 @@ async function main() {
             console.error('Run npm run build:electron before using --answer.');
             return 1;
         }
-        const completed = await probe({ apiKey, model, wav, mode: 'AUDIO', autoVad, answerInstructions, bargeIn });
+        const completed = await probe({ apiKey, model, wav, mode: 'AUDIO', autoVad, answerInstructions, bargeIn, vadConfig });
         return completed ? 0 : 1;
     }
     if (decide) {

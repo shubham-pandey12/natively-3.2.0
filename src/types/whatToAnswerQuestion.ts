@@ -9,6 +9,7 @@ export type WhatToAnswerQuestionEvent = {
     updated?: boolean;
     askId?: string;
     clarification?: string;
+    askStreaming?: boolean;
     interviewerSpeaking?: boolean;
     responseText?: { text: string; done: boolean };
 } & ({ generationId: number } | { askId: string; clarification: string });

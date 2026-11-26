@@ -9,11 +9,18 @@ export type ResponseParserEvent =
     | { type: 'text'; text: string };
 
 const SENTINELS = [
-    { token: NO_ACTION_SENTINEL, kind: 'wait' },
-    { token: ASK_SENTINEL, kind: 'ask' },
+    { token: NO_ACTION_SENTINEL.toLowerCase(), kind: 'wait' },
+    { token: ASK_SENTINEL.toLowerCase(), kind: 'ask' },
+    { token: 'ask:', kind: 'ask' },
+    { token: 'ask :', kind: 'ask' },
+    { token: 'ask：', kind: 'ask' },
+    { token: 'ask ：', kind: 'ask' },
+    { token: 'no action', kind: 'wait', wordBoundary: true },
 ] as const;
 
 const PREFIX_CHAR = /[\s*_`"'“”‘’>]/u;
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+const PREFIX_LIMIT = 17; // Includes up to four wrapper characters around [[NO_ACTION]].
 const CLOSING_QUOTES: Record<string, string> = { '“': '”', '‘': '’' };
 
 /** Classify the prefix once and stream all subsequent text without scanning it. */
@@ -44,17 +51,16 @@ export function createResponseParser() {
         return emitText(content);
     };
 
-    function push(chunk: string): ResponseParserEvent[] {
-        if (finished || !chunk || kind === 'wait') return [];
-        if (kind === 'answer' || (kind === 'ask' && askPrefix === undefined)) return emitText(chunk);
-        buffered += chunk;
-        if (kind === 'ask') return flushAsk();
-
-        // Inspect at most one sentinel's worth of meaningful characters.
-        // Keep tentative leading formatting verbatim for an ordinary answer.
-        while (prefixLength < buffered.length && PREFIX_CHAR.test(buffered[prefixLength])) prefixLength++;
-        const prefix = buffered.slice(prefixLength, prefixLength + NO_ACTION_SENTINEL.length);
-        const match = SENTINELS.find(({ token }) => prefix.startsWith(token));
+    function classify(atEnd = false): ResponseParserEvent[] {
+        const limit = Math.min(buffered.length, PREFIX_LIMIT);
+        while (prefixLength < limit && PREFIX_CHAR.test(buffered[prefixLength])) prefixLength++;
+        const prefix = buffered.slice(prefixLength, limit).toLowerCase();
+        const match = SENTINELS.find(sentinel => {
+            if (!prefix.startsWith(sentinel.token)) return false;
+            if (!('wordBoundary' in sentinel)) return true;
+            const next = prefix[sentinel.token.length];
+            return next === undefined ? atEnd : !WORD_CHAR.test(next);
+        });
         if (match) {
             kind = match.kind;
             const events: ResponseParserEvent[] = [{ type: 'kind', kind }];
@@ -68,22 +74,30 @@ export function createResponseParser() {
             }
             return events;
         }
-        if (SENTINELS.some(({ token }) => token.startsWith(prefix))) return [];
+        if (!atEnd && buffered.length < PREFIX_LIMIT && SENTINELS.some(({ token }) => token.startsWith(prefix))) return [];
 
-        kind = 'answer';
         const text = buffered;
         buffered = '';
+        if (!text.trim()) {
+            prefixLength = 0;
+            return [];
+        }
+        kind = 'answer';
         return [{ type: 'kind', kind }, ...emitText(text)];
+    }
+
+    function push(chunk: string): ResponseParserEvent[] {
+        if (finished || !chunk || kind === 'wait') return [];
+        if (kind === 'answer' || (kind === 'ask' && askPrefix === undefined)) return emitText(chunk);
+        buffered += chunk;
+        return kind === 'ask' ? flushAsk() : classify();
     }
 
     function finish(): ResponseParserEvent[] {
         if (finished) return [];
         finished = true;
         if (kind === 'ask' && askPrefix !== undefined) return flushAsk(true);
-        const text = buffered;
-        buffered = '';
-        if (kind !== undefined || !text.trim()) return [];
-        return [{ type: 'kind', kind: 'answer' }, ...emitText(text)];
+        return kind === undefined ? classify(true) : [];
     }
 
     return { push, finish };
