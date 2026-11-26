@@ -57,6 +57,8 @@
 
 - 2026-11-26 — **D14, chat-style question → answer (user):** the user asked for ChatGPT-like chat: the interviewer's words stream into a bubble, and the answer appears under it. Chosen after comparing STT-only (A) with the provider transcript (B): B, with the existing STT as backup. B is about as easy because the same model hears the question and writes the answer, so they pair naturally; it streams word by word on Gemini; and it costs nothing extra. This replaces the earlier "skip it" on showing Gemini's transcript in chat.
 
+- 2026-11-26 — **D15, no answers to filler (user):** after the D14 live check showed Gemini repeating its previous answer under a "Mm-hmm." bubble, the user chose both a stronger instruction for all providers and a local safety net that hides an answer under a filler-only bubble. This reverses the earlier "no local filtering" condition for ElevenLabs.
+
 - 2026-11-26 — **Scope:** Live Brain answers only interviewer speech. Typed questions, Direct Assist, manual "What to answer" presses, screenshots and all other modes keep default Natively behaviour (ARCHITECTURE §9a scope rule).
 
 ## Phase UI — 2026-11-25
@@ -505,6 +507,15 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 - Fix (user approved): a realtime text answer stays visible. It is marked outdated only when the interviewer cut it off mid-stream, meaning its text grew within 1.5 s of the interviewer speaking or of a provider cancel (Gemini reports the cancel before the speech start). The same rule applies to an `Ask:`. The pipeline/AnswerWriter paths are unchanged.
 - Tests: 7 new orchestrator tests (bubble streaming and closing, filler, a late transcript, STT backup and replacement, a stale STT final, a finished answer kept visible, a mid-stream cut-off marked outdated) and 3 overlay placement tests. One existing test now includes the interviewer's speech before its replacement. 90 Live Brain tests, 3,245 lib tests and 1,002 component tests pass; `npm run build:electron`, `npx tsc --noEmit -p tsconfig.json`, `npx tsc --noEmit -p electron/tsconfig.json` and `npm run typecheck:premium` pass.
 - Requires a live re-check of the outdated rule, and physical macOS verification.
+
+## D15 filler answers (Claude, Windows, 2026-11-26)
+
+- Cause (D14 live check, Gemini): the interviewer said "Mm-hmm." while Gemini's previous audio turn was still open (~18 s). Gemini's speech detection counted it as an interruption (that answer ended `cancelled`), and Gemini then answered the memory-leak question again under the "Mm-hmm." bubble. The existing "filler -> No action." instruction did not stop it.
+- Fix, both layers:
+  - `FILLER_TURN_RULE` is added to every realtime provider's instructions (Gemini, OpenAI, ElevenLabs). It says a filler-only turn gets exactly `No action.`, and the model must never repeat, continue or rephrase its previous answer because of filler, including right after an interruption.
+  - In `ResponseOrchestrator`, when a turn's interviewer bubble is only filler words (`isFillerOnly`), that turn's answer is not shown and the previous answer stays current. While an `Ask:` is waiting, a short reply ("Yes.") is still answered.
+- Not covered: a filler bubble that arrives only after its answer started (OpenAI's late Whisper transcript) is not filtered, and the hidden answer's text is still saved to the notebook.
+- Tests: the filler word list, a hidden answer under "Mm-hmm." (the next real question is answered normally), a "Yes." after an Ask is answered, and every provider getting the rule. 94 Live Brain tests pass; build and all three typechecks pass. Needs a live check. Requires physical macOS verification.
 
 ## Open risks
 

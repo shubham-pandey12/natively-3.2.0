@@ -344,3 +344,63 @@ test('D14: an answer cut off while its text was streaming is marked outdated by 
     assert.equal(outdated.length, 1);
     assert.equal(h.order.at(-1)[2], true);
 });
+
+// D15: no answer under a filler-only interviewer bubble.
+test('D15: filler-only text is recognised, real questions are not', () => {
+    const { isFillerOnly } = require(`${dist}ResponseOrchestrator.js`);
+    for (const text of ['Mm-hmm.', 'mmhmm', 'Uh-huh.', 'Okay.', 'Okay, right.', 'Yeah, sure.', 'Got it.', 'Thank you.', 'Hmm.']) {
+        assert.equal(isFillerOnly(text), true, text);
+    }
+    for (const text of ['Okay, short one. If Redis goes down?', 'Sure. Quick round. First, how would you scale?', 'Right, but why Redis?', 'Design a URL shortener.']) {
+        assert.equal(isFillerOnly(text), false, text);
+    }
+});
+
+function fillerRig() {
+    const clock = new FakeClock();
+    const texts = [];
+    const asks = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        overlay: {
+            showAsk: payload => asks.push(payload), setOutdated: () => {}, setInterviewerSpeaking: () => {}, showQuestion: () => {},
+            showText: payload => texts.push(payload),
+        },
+    });
+    const send = event => orchestrator.handleEvent({ at: clock.now(), ...event });
+    const turn = (question, responseId, answer) => {
+        send({ type: 'interviewer_speech_started' });
+        send({ type: 'interviewer_transcript', text: question, final: true });
+        send({ type: 'response_started', responseId });
+        send({ type: 'response_delta', responseId, text: answer });
+        send({ type: 'response_done', responseId, status: 'completed' });
+        clock.advance(5_000);
+    };
+    return { texts, asks, turn };
+}
+
+test('D15: an answer under a filler-only bubble is not shown; the previous answer stays current', () => {
+    const h = fillerRig();
+    h.turn('How would you debug a memory leak?', 'r1', 'Take heap snapshots.');
+    h.turn('Mm-hmm.', 'r2', 'I would take a heap snapshot again.');
+    assert.deepEqual(h.texts.map(payload => payload.text).filter((text, i, all) => all.indexOf(text) === i), ['Take heap snapshots.']);
+    h.turn('Next one. Design a URL shortener.', 'r3', 'Use base62 IDs.');
+    assert.equal(h.texts.at(-1).text, 'Use base62 IDs.');
+    assert.equal(h.texts.at(-1).updated, false);
+});
+
+test('D15: a short "Yes" that answers an Ask is still answered', () => {
+    const h = fillerRig();
+    h.turn('Design a cache.', 'r1', 'Ask: Is it read heavy?');
+    assert.equal(h.asks.at(-1).clarification, 'Is it read heavy?');
+    h.turn('Yes.', 'r2', 'Then I would use a read-through cache.');
+    assert.equal(h.texts.at(-1).text, 'Then I would use a read-through cache.');
+});
+
+test('D15: every realtime provider gets the mandatory filler rule', () => {
+    const { buildProviderInstructions, FILLER_TURN_RULE } = require(`${dist}instructions.js`);
+    for (const id of ['gemini-live', 'openai-realtime', 'elevenlabs-realtime']) {
+        assert.ok(buildProviderInstructions({}, 'full', id).includes(FILLER_TURN_RULE), id);
+    }
+    assert.match(FILLER_TURN_RULE, /never repeat, continue, or rephrase your previous answer/);
+});

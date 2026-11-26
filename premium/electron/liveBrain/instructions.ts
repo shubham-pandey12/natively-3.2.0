@@ -39,8 +39,12 @@ export const CLARIFICATION_ASSUMPTION = 'The interviewer did not clarify; state 
 // Keep the language exercised in the ElevenLabs Mini sentinel check.
 const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: If the entire interviewer turn is an acknowledgment or filler (for example, mm-hmm, okay, right), output exactly No action. and stop. Never greet, acknowledge, offer help, or answer filler. If a design question has multiple materially different scopes and no scope was supplied, begin with the exact prefix Ask: followed by a single short question, then stop and wait. Do not answer or assume a scope in that turn.';
 
+// Live check 2026-11-26: a "Mm-hmm." during Gemini's open audio turn counted as
+// an interruption, and Gemini then repeated its previous answer.
+export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), output exactly No action. and nothing else. This also applies right after you were interrupted: never repeat, continue, or rephrase your previous answer because of a filler turn. Answer again only when the interviewer asks a new question or changes a requirement.';
+
 export function buildProviderInstructions(ctx: AnswerContext, variant: 'full' | 'trimmed', id: LiveBrainId): string {
-    const instructions = buildAnswerInstructions(ctx, variant, id === 'openai-realtime' ? 'text' : 'spoken');
+    const instructions = `${buildAnswerInstructions(ctx, variant, id === 'openai-realtime' ? 'text' : 'spoken')}\n\n${FILLER_TURN_RULE}`;
     return id === 'elevenlabs-realtime' ? `${instructions}\n\n${ELEVENLABS_TURN_OUTPUT}` : instructions;
 }
 

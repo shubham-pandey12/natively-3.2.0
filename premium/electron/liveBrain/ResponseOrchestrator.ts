@@ -50,6 +50,8 @@ interface TextResponse {
     generationId?: number;
     updated: boolean;
     lastTextAt?: number;
+    /** D15: the answer to a filler-only interviewer turn, never shown. */
+    suppressed?: boolean;
 }
 
 interface QuestionBubble {
@@ -78,6 +80,15 @@ const RECENT_ANSWER_MS = 20_000;
 const MID_STREAM_MS = 1_500;
 // An STT final this old is not used as the question of the next answer.
 const STT_QUESTION_MAX_AGE_MS = 8_000;
+// D15: an interviewer turn made only of these words is filler. An answer to it
+// is not shown (the model sometimes repeats its previous answer after a filler
+// interrupted its audio turn).
+const FILLER_WORD = String.raw`(?:m+-?h+m+|h+m+|u+h+-?h+u+h+|uh+|um+|okay|ok|right|yeah|yep|yes|sure|got it|i see|alright|all right|cool|nice|good|great|thank you|thanks)`;
+const FILLER_ONLY = new RegExp(String.raw`^(?:${FILLER_WORD}[\s,.!?-]*)+$`, 'i');
+
+export function isFillerOnly(text: string): boolean {
+    return FILLER_ONLY.test(text.trim());
+}
 const CLARIFICATION_MS = 10_000;
 // The overlay can keep earlier answers when Live Brain is disabled and
 // re-enabled in the same meeting. Never reuse a text generation across sessions.
@@ -92,6 +103,8 @@ export class ResponseOrchestrator<Timer> {
     private answerTurn?: AnswerTurn;
     private sttPending?: { text: string; at: number };
     private questionSequence = 0;
+    /** An Ask is waiting for the interviewer: a short "yes" may answer it. */
+    private askPending = false;
 
     constructor(private readonly ports: {
         answerWriter?: AnswerWriterPort;
@@ -166,6 +179,7 @@ export class ResponseOrchestrator<Timer> {
         this.question = undefined;
         this.answerTurn = undefined;
         this.sttPending = undefined;
+        this.askPending = false;
         const previous = this.current;
         this.current = undefined;
         this.seenResponseIds.clear();
@@ -206,6 +220,7 @@ export class ResponseOrchestrator<Timer> {
     private showAsk(askId: string, clarification: string, question?: string, askStreaming?: boolean): void {
         this.clearClarification();
         this.supersedeForNewTurn(false);
+        this.askPending = true;
         this.ports.overlay.showAsk({ askId, clarification, ...(askStreaming === undefined ? {} : { askStreaming }) });
         if (askStreaming) return;
         const requestAnswer = this.ports.requestClarificationAnswer;
@@ -253,6 +268,12 @@ export class ResponseOrchestrator<Timer> {
             this.ports.overlay.setOutdated(previous.generationId, true);
         }
         return true;
+    }
+
+    private isFillerTurn(response: TextResponse): boolean {
+        const bubble = this.answerTurn?.responseId === response.id ? this.answerTurn.bubble : undefined;
+        if (!bubble || this.askPending) return false;
+        return isFillerOnly(joinText(bubble.base, bubble.live));
     }
 
     private noteCutOff(): void {
@@ -319,8 +340,13 @@ export class ResponseOrchestrator<Timer> {
             this.showAsk(response.id, response.text.trimStart(), undefined, true);
             return;
         }
-        if (response.kind !== 'answer') return;
+        if (response.kind !== 'answer' || response.suppressed) return;
+        if (response.generationId === undefined && this.isFillerTurn(response)) {
+            response.suppressed = true;
+            return;
+        }
         if (response.generationId === undefined) {
+            this.askPending = false;
             this.clearClarification();
             response.updated = this.supersedeForNewTurn(true);
             response.generationId = nextTextGeneration--;
