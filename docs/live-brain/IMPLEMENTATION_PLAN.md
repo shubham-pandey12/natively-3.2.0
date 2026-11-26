@@ -156,6 +156,8 @@ Acceptance: all orchestrator scenarios pass; with injected events in `npm run de
 
 ## Phase 4 — GeminiLiveBrain + AnswerWriter (fast text path)  *(≈7–9 days)*
 
+> **Done, then superseded for the answer path by D12 / Phase 4b.** Connection, audio streaming, resumption, errors and meeting wiring stay; the decide_turn + AnswerWriter answer path is replaced.
+
 **Objective:** the main brain, per ARCHITECTURE D10: Gemini Live listens and decides; the existing Natively answer path writes the text fast.
 
 Tasks:
@@ -170,6 +172,24 @@ Tasks:
 Tests: mock WebSocket server replaying recorded Gemini event sequences (from the spikes): answer decision, ask, wait, interruption mid-answer (new decision cancels the old answer), goAway, 429, auth failure, socket drop. AnswerWriter: decision → existing answer path called once with the decided question; newer decision cancels; ask/wait never call the text model.
 Manual: S1–S9 with a real free key on Windows; record latency vs ARCHITECTURE §11.
 Acceptance: scenarios pass manually; full short answer visible ≤ ~5 s; latency recorded; flag-off parity.
+
+---
+
+## Phase 4b — Gemini Live writes the answer, streamed in real time (D12)  *(≈3–4 days)*  ← **next**
+
+**Objective:** ChatGPT-Voice behaviour per ARCHITECTURE D12 and §4.1: Gemini Live answers by itself; its output transcription streams into the overlay word by word as Gemini speaks. No `decide_turn`, no AnswerWriter/text model for GeminiLiveBrain.
+
+Tasks:
+0. **Spike first (½ day), before product code:** extend `scripts/spikes/gemini-live.mjs` with an `--answer` mode: answer instructions (§5), `outputAudioTranscription` on, no tools, audio discarded. On S1, S2, S4, S7 (+ one filler, one ambiguous question) record, per model in the user's list (`gemini-3.1-flash-live-preview`, `gemini-3.8-live` if available): speech end → first transcription chunk; chunk sizes/cadence (must be incremental); speech end → turnComplete; whether filler gets silence / `No action.`; whether ambiguity gets `Ask: …`; behaviour on barge-in. Record in PROGRESS.md. **Stop and report to the user** if transcription is not incremental or first words take > ~1.5 s.
+1. `GeminiLiveBrain.ts`: setup per §4.1 (D12) — `outputAudioTranscription`, answer instructions, no tools. Map output transcription → `response_started` / `response_delta` (immediately) / `response_done`; `interrupted` → `response_done{cancelled}` + `interviewer_speech_started`. Keep audio discarded, resumption, goAway, errors, candidate text as today. Remove the `decide_turn` path from this brain (leave `decideTurnTool.ts` unused or delete it with its tests — say which).
+2. `instructions.ts`: Gemini uses `buildAnswerInstructions` with the spoken sentinel protocol (§6) and the profile/resume/JD/mode context the existing answer path uses (passed in as parameters, from main.ts).
+3. `responseParser.ts`: accept spoken sentinels (`No action`, leading `Ask:`) besides the bracket forms; never hold text longer than needed to decide (≤ ~16 chars).
+4. `meeting.ts` / `ResponseOrchestrator.ts`: use the existing text-writing-brain path (response_* events) for Gemini; overlay rows identical to Auto Answer (§7 UI rule); replace-in-place on barge-in; clarification timeout sends the assumption instruction to Gemini as a client text turn. AnswerWriter is not created for Gemini.
+5. Prompt Debugger timings: `speechStoppedAt → firstTextAt → doneAt`, status, model.
+
+Tests: mock WebSocket replaying recorded sequences: incremental transcription → deltas in order with no buffering; `No action.` / silence → nothing shown; `Ask:` → ask row; `interrupted` mid-answer → cancelled + replacement answer replaces in place; late chunks of a cancelled turn dropped; goAway/429/auth unchanged. Parser: spoken sentinels split across chunks.
+Manual: S1–S9 live on Windows; record first-word and full-answer times vs §11.
+Acceptance: first words median ≤ 1.0 s after speech end; text visibly streams while Gemini speaks; interruptions replace the answer; flag-off parity; existing suites green.
 
 ---
 

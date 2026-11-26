@@ -27,8 +27,9 @@ It listens to the interviewer continuously, understands like a strong conversati
 | D7 | Backup: OpenAI Realtime (optional, paid key) → today's Natively pipeline (always available). |
 | D8 | Keep it simple. Reuse existing infrastructure. No new services, servers, databases, WebRTC, or native modules. |
 | D9 | Everything is behind one setting, **off by default**. With it off, Natively behaves exactly as before. |
-| D10 | **Fast text path (2026-11-25, after the Phase 0 spike).** Gemini Live listens, detects turns, handles interruptions and decides *what to do*; the **answer text is written by a fast text model** through Natively's existing answer path, so the whole answer appears in seconds instead of at speaking pace. See §4.1 and §4.4. |
-| D11 | **Accept the decide_turn tool call (2026-11-26, after the Phase 4 spike).** The tool call arrives 1.3–1.9 s after speech end, slower than the 1.5 s gate. The user accepted it: about 1 s doesn't matter much, and Gemini's merged question handles corrections. The transcription-marker fallback (§4.1) is deferred to Phase 7 tuning. |
+| D10 | **SUPERSEDED by D12.** ~~Fast text path (2026-11-25, after the Phase 0 spike).~~ Gemini Live listens, detects turns, handles interruptions and decides *what to do*; the **answer text is written by a fast text model** through Natively's existing answer path, so the whole answer appears in seconds instead of at speaking pace. See §4.1 and §4.4. |
+| D11 | **SUPERSEDED by D12.** ~~Accept the decide_turn tool call (2026-11-26, after the Phase 4 spike).~~ The tool call arrives 1.3–1.9 s after speech end, slower than the 1.5 s gate. The user accepted it: about 1 s doesn't matter much, and Gemini's merged question handles corrections. The transcription-marker fallback (§4.1) is deferred to Phase 7 tuning. |
+| D12 | **Gemini Live writes the answer itself, streamed in real time (2026-11-26, user decision after the first live tests).** The goal is ChatGPT Voice behaviour: the realtime model listens and answers like a human. Gemini Live answers by itself (no `decide_turn`, no separate text model). Natively discards Gemini's audio (D6 unchanged) and streams **Gemini's output transcription into the overlay word by word as Gemini speaks** — it never waits for the complete answer. First words are expected ~0.5–1 s after the interviewer stops; the full answer arrives at speaking pace (accepted, like ChatGPT Voice). Interruptions use Gemini's own barge-in. Answer style and profile/resume/JD/mode context go into Gemini's session instructions (§5). The AnswerWriter (§4.4) is not used by GeminiLiveBrain. Measured reason D10 was chosen and is now overridden: Phase 0 found `TEXT` output rejected and transcription at speaking pace (~25 s for 65 words). |
 
 ### Non-goals
 
@@ -177,7 +178,18 @@ export interface LiveBrain {
 
 Transport: WebSocket to the Gemini Live API (`BidiGenerateContent`). Key from the user's Google AI Studio key in Natively settings. **All protocol details below must be verified in Phase 0 against current Google docs before implementation; record findings in PROGRESS.md.**
 
-**Role (D10):** Gemini Live is the **listener and decider**, not the answer writer. Measured in Phase 0: `gemini-3.8-live` rejects `TEXT` output, and its transcribed output arrives at speaking pace (~25 s for 65 words) even though the first words come ~0.5 s after the interviewer stops. So Gemini decides fast, and the answer text comes from the AnswerWriter (§4.4).
+**Role (D12, current):** Gemini Live is the **listener and the answer writer**, like ChatGPT Voice.
+
+- **Setup message:** model (setting), `responseModalities: ["AUDIO"]` (the only accepted value), `systemInstruction` = **answer instructions** (§5: existing Natively answer prompt + live preamble + spoken-sentinel protocol + clarification/correction rules + profile/resume/JD/mode context), automatic activity detection enabled, `inputAudioTranscription` enabled (interviewer text for display), **`outputAudioTranscription` enabled (the answer text)**, session resumption enabled, context window compression enabled. **No tools.**
+- **Answer streaming:** the first output-transcription chunk of a model turn → `response_started`; every chunk → `response_delta` immediately (no buffering beyond the sentinel check in §6); `turnComplete` → `response_done{completed}`. The overlay shows the text as Gemini speaks it.
+- **Audio output is always discarded.** Natively never plays it (D6).
+- **Nothing to answer / clarification:** handled by the spoken sentinels in §6, read from the transcription (`responseParser`). If the model emits no transcription for a turn, nothing is shown.
+- **Interruption (barge-in):** Gemini's `interrupted` → `response_done{cancelled}` for the in-flight response and `interviewer_speech_started`; Gemini's next turn is the replacement answer (ResponseOrchestrator replace-in-place, §7).
+- **Candidate text:** unchanged (client content `Candidate said: …`, `turnComplete:false`).
+- Session limit, `goAway`, rollover, errors: unchanged (below).
+- **Must be verified first (spike):** that the selected model emits `outputAudioTranscription` incrementally (word/phrase chunks, not one block at the end), time to first chunk after speech end, and how reliably it follows the spoken sentinels. Record in PROGRESS.md.
+
+**Former role (D10, superseded — kept for history):** Gemini Live is the **listener and decider**, not the answer writer. Measured in Phase 0: `gemini-3.8-live` rejects `TEXT` output, and its transcribed output arrives at speaking pace (~25 s for 65 words) even though the first words come ~0.5 s after the interviewer stops. So Gemini decides fast, and the answer text comes from the AnswerWriter (§4.4).
 
 - **Setup message:** model (setting; default `gemini-3.8-live`), `responseModalities: ["AUDIO"]` (the only accepted value), `systemInstruction` = **decider instructions** (§5), automatic activity detection enabled, `inputAudioTranscription` enabled (interviewer text for display and for the AnswerWriter), session resumption enabled, context window compression enabled, and **one function tool `decide_turn`**.
 - **Decision via tool call (primary):**
@@ -216,6 +228,8 @@ Adapter around today's path: interviewer STT → `SimpleAutoAnswerEngine` → `I
 
 ### 4.4 AnswerWriter (fast text path, D10)
 
+> **Not used by GeminiLiveBrain since D12.** Kept only if another brain needs it; the clarification timeout (§7 rule 6) is the one remaining caller candidate — under D12 it sends the assumption instruction to Gemini as a client text turn instead.
+
 File: `premium/electron/liveBrain/AnswerWriter.ts` — a thin adapter, **not** a new answer engine.
 
 - Triggered by a `decision` with `action:"answer"`. Calls Natively's **existing** answer path (`IntelligenceEngine.runAutoAnswer` / `runWhatShouldISay`, automatic mode) with `question` from the decision, so the answer uses the **current Natively prompts, style, profile/resume/JD/mode context, RAG, length rules and streaming** unchanged (D3). The user's **selected answer model and key** (AI Providers) write it.
@@ -232,7 +246,9 @@ File: `premium/electron/liveBrain/AnswerWriter.ts` — a thin adapter, **not** a
 
 ## 5. Instructions (response style = current Natively)
 
-**With the fast text path (D10) there are two instruction sets:**
+**Under D12, GeminiLiveBrain uses the full single-model instruction set below** (`buildAnswerInstructions`, variant full | trimmed), with one change: the output protocol is the **spoken** sentinel form in §6, because Gemini's text is a transcription of speech. Keep it spoken-answer friendly (the existing `HUMAN_SPOKEN_ANSWER_CONTRACT` already is). The decider instructions are no longer used.
+
+**Former (D10, superseded): two instruction sets:**
 
 - **Decider instructions** (Gemini Live session, sent once): live-session preamble, `decide_turn` protocol, clarification rule, correction rule, profile summary, notebook on rollover. Short; no answer-style rules (Gemini doesn't write the answer).
 - **Answer instructions** (AnswerWriter): **unchanged existing Natively answer prompts** — nothing new to write; D3 is met by reuse.
@@ -255,7 +271,9 @@ Phase 0 compares the full current prompt vs a trimmed variant (same style rules,
 
 ## 6. Output protocol (provider-independent)
 
-**GeminiLiveBrain** uses the `decide_turn` tool call (§4.1), mapped to the same three outcomes below (`wait` → `[[NO_ACTION]]`, `ask` → `[[ASK]]`, `answer` → AnswerWriter). The sentinel text protocol below applies to brains that write answer text themselves (OpenAIRealtimeBrain) and to the Gemini transcription-marker fallback.
+**Under D12, GeminiLiveBrain writes answer text itself, so it uses this protocol through its output transcription.** Because the text is transcribed speech, sentinels must be **speakable words**, not bracket tokens: the model says nothing at all (preferred) or exactly `No action.` for filler/small talk/unfinished questions, and starts with `Ask:` for a clarification. `responseParser` maps `No action` → `[[NO_ACTION]]` and a leading `Ask:` → `[[ASK]]`, case-insensitively, tolerating punctuation; the bracket forms stay accepted for text-writing brains. The exact wording is confirmed in the D12 spike.
+
+**Former (D10):** GeminiLiveBrain used the `decide_turn` tool call (§4.1), mapped to the same three outcomes below (`wait` → `[[NO_ACTION]]`, `ask` → `[[ASK]]`, `answer` → AnswerWriter). The sentinel text protocol below applies to brains that write answer text themselves (OpenAIRealtimeBrain) and to the Gemini transcription-marker fallback.
 
 Add to `LiveBrainEvent` (§4):
 
@@ -461,9 +479,9 @@ Fallback order (§9) is automatic and needs no setting: selected provider → Op
 
 | Metric | Target (Gemini Live) |
 |---|---|
-| Interviewer stops → Gemini decision | median ≤ 2.0 s (decide_turn tool call measured 1.3–1.9 s in the Phase 4 spike; accepted by the user under D11) |
-| Interviewer stops → first visible answer text (decision + text model first token) | median ≤ 2.0 s, p90 ≤ 3.0 s |
-| Interviewer stops → full short answer (~60 words) visible | ≤ 5 s (vs ~25 s at Gemini speaking pace) |
+| Interviewer stops → first visible answer words (D12: Gemini's own output transcription) | median ≤ 1.0 s, p90 ≤ 1.5 s (Phase 0 measured ~0.5 s) |
+| Answer text streaming | word by word as Gemini speaks; never held until the answer is complete |
+| Interviewer stops → full answer visible | speaking pace (accepted under D12, like ChatGPT Voice) — record it, no target |
 | `interviewer_speech_started` → "⏸ interviewer speaking" marker | ≤ 300 ms |
 | Correction → replacement answer first text | ≤ 2.0 s after interviewer stops |
 | Rollover visible gap | ≤ 1 s, and never mid-answer when avoidable |

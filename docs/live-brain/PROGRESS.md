@@ -13,6 +13,7 @@
 | 2 — Foundation | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Contracts, instructions, decide_turn tool, parser, factory, test double. No runtime wiring yet. |
 | 3 — Orchestrator + overlay | ✅ Done | Injected ports, fake-clock tests, and offline renderer verification. |
 | 4 — GeminiLiveBrain | Implemented | D11 accepted `decide_turn`. Steps 1–6 are in place. Live meeting validation and consistent S4 constraint replacement are still open. |
+| 4b — Gemini writes the answer (D12) | ☐ Next | Replaces the decide_turn + AnswerWriter answer path. Starts with the `--answer` spike. |
 | 5 — Notebook + Supervisor | ☐ Not started | |
 | 6 — OpenAIRealtimeBrain | ☐ Not started | |
 | 7 — Tuning & validation | ☐ Not started | |
@@ -43,6 +44,8 @@
 - 2026-11-25 — API keys: never hardcoded. New "Live Brain Provider" section in Settings → Audio (after Speech Provider, same UI pattern): provider selector (Gemini Live / OpenAI Realtime / Existing pipeline), per-provider keys in CredentialsManager, optional reuse of AI Providers keys, model, instruction variant, Test connection.
 
 - 2026-11-25 — **Fast text path (D10):** user chose to add a faster text path after the spike showed Gemini transcription arrives at speaking pace. Gemini Live = listener + decider (`decide_turn` tool call); answer text written by the user's selected text model through Natively's existing answer path (AnswerWriter). Phase 4 starts with a tool-call latency spike.
+
+- 2026-11-26 — **D12 replaces D10/D11 (user decision after the first live tests):** the goal is ChatGPT Voice behaviour, so Gemini Live writes the answer itself. Its audio is discarded and its output transcription streams into the overlay word by word as it speaks (never waiting for the full answer). Measured before the switch (2 live runs, Windows): speech end → decision 2.6 / 5.2 s, decision → first text 2.2 / 4.6 s (answer model was codex-cli via Fast Response Mode's Auto tier), first word 4.9 / 9.8 s. The D10 trade-off (a separate model writes the answer, so Gemini stops answering) was not stated clearly when D10 was offered; recorded here so it is not repeated.
 
 - 2026-11-26 — **Scope:** Live Brain answers only interviewer speech. Typed questions, Direct Assist, manual "What to answer" presses, screenshots and all other modes keep default Natively behaviour (ARCHITECTURE §9a scope rule).
 
