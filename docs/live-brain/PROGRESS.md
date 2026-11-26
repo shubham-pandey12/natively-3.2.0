@@ -18,7 +18,8 @@
 | 6 — OpenAI + ElevenLabs Realtime | Implemented | The user accepted ElevenLabs audio mode. Both providers share the Realtime client and fallback path. ElevenLabs Mini passed a live Windows backend replay. Live OpenAI validation needs a key with access to the configured Realtime model. |
 | 7 — Tuning & validation | ☐ Not started | |
 | 8 — Deepgram Voice Agent (D16) | ✅ Done | Implemented `'deepgram-voice-agent'` with Deepgram-managed and public BYO HTTPS endpoints, 16 kHz raw binary PCM transport, 25k managed prompt cap, grouped Settings picker, and mocked tests. Windows dev live meeting verified after the review fixes. Physical macOS and packaged Deepgram checks remain open. |
-| 9 — Deepgram Flux + My AI Provider (D17) | ✅ Done | Implemented `'deepgram-flux'` standalone `/v2/listen` STT (`flux-general-multi`) routed into Natively's existing `AnswerWriter` / `IntelligenceEngine` streaming answer engine, supporting all configured AI Providers (OpenAI, Claude, Gemini, Groq, OpenRouter, Codex CLI, Antigravity, local Ollama, DeepSeek, NVIDIA NIM, custom). All builds, typechecks, unit/component tests, and Windows side-by-side live benchmarks passed. Physical full-app meeting replay & physical macOS remain open. |
+| 9 — Deepgram Flux + My AI Provider (D17) | ✅ Done | Implemented `'deepgram-flux'` standalone `/v2/listen` STT (`flux-general-multi`) routed into Natively's existing `AnswerWriter` / `IntelligenceEngine` streaming answer engine, supporting all configured AI Providers (OpenAI, Claude, Gemini, Groq, OpenRouter, Codex CLI, Antigravity, local Ollama, DeepSeek, NVIDIA NIM, custom). All builds, typechecks, unit/component tests, and Windows side-by-side live benchmarks passed. The later baseline covers Windows Electron replay. Physical macOS verification remains open. |
+| Baseline 1 — Flux vs GPT Realtime & Gemini Live | ✅ Done | Measured Windows Electron app (`dev:agent` WASAPI loopback) on 6 synthetic interview scenarios across `deepgram-flux` (`codex-cli` and `openai/gpt-4o-mini`) and `gemini-live` (`gemini-3.1-flash-live-preview`). OpenAI Realtime (`gpt-realtime-2.1`) setup was rejected on the available account and no Realtime model appeared in its model list. Documented the filler duplicate, completed-answer fold, and the clarification scenario that could not be reached. Physical macOS verification remains open. |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
 
@@ -587,6 +588,134 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 - Hardened writer ownership so a replaced or cancelled generation cannot update the status or notebook on completion. Cancel the writer during fallback or meeting shutdown, close an interrupted question's partial bubble on reconnect, use the answer writer's clarification for a short follow-up, and pair late Flux transcripts with their existing overlay answer row. Flux requires a valid turn index and uses its PCM timeline to refill sparse audio.
 - Flux Test Connection now targets the selected provider/model directly and requires a valid test reply. Upstream diagnostics stay out of the renderer. The combined connection test used the compiled Flux adapter and Natively's OpenAI adapter against live services and received a reply from gpt-4o-mini. Both compiled Deepgram adapters connected and responded to synthetic audio on Windows. The existing Voice Agent can still emit an early reply on the 1,200 ms paused clip.
 - Windows build and renderer, Electron, and premium type checks passed. Live Brain and Settings had 118 passes. Library tests had 3,246 passes with 15 skips, and component tests had 1,002 passes with two skips. The review covered the shared audio path for Windows and macOS. Reviewed but not executed on macOS. Requires physical macOS verification. Full Electron meeting playback and live Codex CLI, Antigravity, and Ollama runs through the Flux mode remain unverified.
+
+## Baseline Phase 1 — Flux vs GPT Realtime and Gemini Live (Windows, 2026-11-27)
+
+- **Scope & setup:** Runtime behavior left unchanged (`9426e14e`). Replayed trimmed 16 kHz mono PCM WAV clips (`System.Speech` `Microsoft David Desktop` played through Windows `Realtek(R) Audio` speakers via persistent `System.Media.SoundPlayer` into `dev:agent` WASAPI loopback capture, `NATIVELY_E2E=1`, `NATIVELY_PROMPT_DEBUG=1`, `Technical Interview` mode, `promptVariant: full`). `agent-browser` CLI was not installed on `PATH`, so `dev:agent` derived its worktree session ID and Playwright `chromium.connectOverCDP` attached to the isolated `launcher` and `overlay` windows via `agent-browser.json` to observe overlay IPC (`onWhatToAnswerQuestion`, `onIntelligenceTokenBatch`, `onIntelligenceSuggestedAnswer`, `onIntelligenceSuggestedAnswerDiscard`) and `__e2e__:prompt-debug` (`speechStoppedAt` / `firstTextAt`).
+- **Clip inventory (trimmed speech edges, 16 kHz mono):**
+  1. Complete question: `"What is the difference between horizontal and vertical scaling?"` (`3,254`–`3,315 ms` playback)
+  2. 1.2 s mid-question pause: `"How would you design a system that can handle"` (`1,997 ms`) + exact `1,200 ms` zero silence + `"millions of concurrent users?"` (`1,485 ms`) (`5,055`–`5,169 ms` playback)
+  3. `"Mm-hmm"` while streaming: `"How would you make retry safe in an order API?..."` (`7,784`–`7,807 ms` playback), followed immediately at first visible answer text by `"Mm-hmm."` (`1,010`–`1,079 ms` playback)
+  4. Correction while streaming: `"Design a low-latency product lookup service. You can use a cache. Explain your read path and how invalidation works."` (`7,534`–`7,603 ms` playback), followed immediately at first visible answer text by `"Actually, caching is not allowed."` (`2,439`–`2,516 ms` playback)
+  5. Follow-up: `"How would you design a collaborative note-taking app that syncs across devices?"` (`3,943`–`3,968 ms` playback), followed after answer completion by `"What if it needs to work offline?"` (`1,907`–`2,003 ms` playback)
+  6. Clarification `"Yes"`: `"Design an e-commerce app."` (`1,570`–`1,627 ms` playback), with `"Yes."` (`416 ms` WAV) queued if `Ask:` appeared
+
+### Replay and evidence
+
+The Windows run used a local scratch harness at
+`$env:USERPROFILE/.gemini/antigravity/brain/73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e/scratch`.
+It contains `replay_baseline.mjs`, `player_loop.ps1`, and `clips/`. These local
+artifacts are outside Git. The replay uses the baseline’s CDP observation
+method and produces JSON summaries, including `results_flux_codex.json`,
+`results_flux_codex_s4.json`, `results_flux_openai_real.json`,
+`results_gemini_live.json`, and `results_gemini_live_s2_s3.json`. The
+`results_flux_openai.json` earlier run used a misconfigured model selection
+and is excluded.
+
+~~~powershell
+# Run from the repository root in two terminals.
+$env:NATIVELY_E2E = '1'
+$env:NATIVELY_PROMPT_DEBUG = '1'
+npm run dev:agent
+
+# Second terminal, after the isolated app is ready.
+$baseline = Join-Path $env:USERPROFILE '.gemini/antigravity/brain/73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e/scratch'
+$runner = Join-Path $baseline 'replay_baseline.mjs'
+node $runner --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli
+node $runner --provider deepgram-flux --use-env-openai --ai-provider openai --ai-model gpt-4o-mini
+node $runner --provider gemini-live
+~~~
+
+Run with `--only 3` to isolate filler or `--only 5` for the follow-up. Confirm
+the expected provider/model in the isolated profile before capturing new results.
+
+### Full Electron App Measurements (Windows WASAPI loopback)
+
+First-text times are milliseconds from `SoundPlayer.PlaySync()` completion to the first nonblank answer-text IPC event observed in the overlay renderer. They use clip playback end as the speech-end reference and do not measure DOM paint. The Flux `EndOfTurn` time is the main-process `interviewer_speech_stopped` timestamp recorded as `speechStoppedAt` in Prompt Debugger. Completion follows each adapter’s overlay event. Gemini’s audio turn can finish well after its text, so completion times across providers measure different boundaries.
+
+#### 1. Deepgram Flux + Codex CLI (`flux-general-multi` + `codex-cli`)
+Runs: `n=1` per scenario (plus 1 S1 smoke pre-run and 1 S4 corrected-harness re-run; S4's initial run stopped early at +1.8 s into Answer 2 because the harness completion check matched Answer 1's `final` before `generationId` filtering was added — excluded from S4 replacement latency).
+
+| Scenario | Speech end → EndOfTurn | EndOfTurn → 1st text | Speech end → 1st text | Speech end → done | Right question answered once? | Premature / duplicate / stale / incorrect |
+|---|---:|---:|---:|---:|---|---|
+| 1. Complete question (`n=1`, plus smoke `n=1`) | `2,737 ms` (smoke: `1,697 ms`) | `2,393 ms` (smoke: `1,909 ms`) | `5,130 ms` (smoke: `3,606 ms`) | `6,036 ms` (smoke: `4,647 ms`) | Yes (`52` chunks) | None |
+| 2. 1.2 s pause in middle (`n=1`) | `2,534 ms` | `6,383 ms` | `8,917 ms` | `13,577 ms` | Yes (`281` chunks) | None; pause held cleanly |
+| 3. `"Mm-hmm"` mid-stream (`n=1`) | `2,897 ms` (Q1) | `6,946 ms` (Q1) | `9,843 ms` (Q1) | `15,408 ms` (Q1) | Q1 answered once (`311` chunks); `"Mm-hmm."` started +107 ms after 1st text while streaming (`15,408 - 9,843 = 5,565 ms` stream), transcribed `"Mhmm."`, triggered no answer | **Stale/filler bubble leak:** `"Mhmm."` appeared as `q2` chat bubble (`ResponseOrchestrator` first partial `"M"` bypassed `isFillerOnly`) |
+| 4. Correction mid-stream (`n=1` clean; `n=1` harness-aborted) | Q1: `2,490` / `2,001 ms`; Corr: **`2,412 ms`** | Q1: `4,489` / `6,961 ms`; Corr: **`4,646 ms`** | Q1: `6,979` / `8,962 ms`; Corr end → 1st replacement: **`7,058 ms`** | Corr end → done: **`8,263 ms`** (`67` chunks) | Yes; Q1 (`258` chunks) cancelled (`answer_corrected`) mid-stream, replacement removed caching | Q1 marked outdated (`outdatedAt` set) as expected |
+| 5. Follow-up `"What if it needs to work offline?"` (`n=1`) | Base: `1,963 ms`; FU: `1,122 ms` | Base: `5,238 ms`; FU: `4,336 ms` | Base: `7,201 ms`; FU: `5,458 ms` | Base: `12,966 ms`; FU: `9,255 ms` | Yes; follow-up addressed local offline queue + CRDT sync (`209` chunks) | **Unwanted outdated fold:** completed base answer (`gid: 17`) marked `outdated` when FU started (20 s `RECENT_ANSWER_MS` rule) |
+| 6. `"Yes"` after clarification (`n=1`) | `2,595 ms` | `7,967 ms` | `10,562 ms` | `16,260 ms` | Prompt answered directly (`gotAsk=false`); `"Yes"` not reached | The answer used an assumption and no clarification arrived |
+
+#### 2. Deepgram Flux + OpenAI (`flux-general-multi` + `gpt-4o-mini`)
+Runs: `n=1` per scenario (using the configured OpenAI API key with `setProviderPreferredModel('openai', 'gpt-4o-mini')` + `setModel('gpt-4o-mini')`; earlier harness misconfiguration runs that passed `'openai'` as model ID and hit 404/fallback were discarded and re-run cleanly).
+
+| Scenario | Speech end → EndOfTurn | EndOfTurn → 1st text | Speech end → 1st text | Speech end → done | Right question answered once? | Premature / duplicate / stale / incorrect |
+|---|---:|---:|---:|---:|---|---|
+| 1. Complete question (`n=1`) | `1,815 ms` | `1,266 ms` | `3,081 ms` | `3,850 ms` | Yes (`66` chunks) | None |
+| 2. 1.2 s pause in middle (`n=1`) | `3,294 ms` | `1,635 ms` | `4,929 ms` | `8,028 ms` | Yes (`250` chunks) | None; pause held cleanly |
+| 3. `"Mm-hmm"` mid-stream (`n=1`) | Q1: `2,876 ms`; Filler: `2,436 ms` | Q1: `3,170 ms`; Dup: `2,146 ms` | Q1: `6,046 ms` | Q1: `8,665 ms`; Dup: `5,375 ms` | **No — duplicate answer** (`"Mm-hmm."` started +55 ms after 1st text while Q1 streamed) | **Bug reproduced:** Flux transcribed `"Mm-hmm."` as `"MM."`; `isFillerOnly("MM.")` returned `false`, marked Q1 outdated, showed `"MM."` bubble, and streamed duplicate Answer 2 (`91` chunks) |
+| 4. Correction mid-stream (`n=1`) | Q1: `2,048 ms`; Corr: **`2,806 ms`** | Q1: `1,561 ms`; Corr: **`2,668 ms`** | Q1: `3,609 ms`; Corr end → 1st replacement: **`5,474 ms`** | Corr end → done: **`6,724 ms`** (`98` chunks) | Yes; Q1 (`311` chunks) cancelled (`answer_corrected`) mid-stream, replacement removed caching | Q1 marked outdated as expected |
+| 5. Follow-up `"What if it needs to work offline?"` (`n=1`) | Base: `2,659 ms`; FU: `1,378 ms` | Base: `1,242 ms`; FU: `1,161 ms` | Base: `3,901 ms`; FU: `2,539 ms` | Base: `6,634 ms`; FU: `3,958 ms` | Yes; follow-up addressed local storage + reconnect sync (`82` chunks) | **Unwanted outdated fold:** completed base answer (`gid: 112`) marked `outdated` when FU started (20 s rule) |
+| 6. `"Yes"` after clarification (`n=1`) | `3,103 ms` | `2,372 ms` | `5,475 ms` | `8,986 ms` | Prompt answered directly (`gotAsk=false`); `"Yes"` not reached | The answer used an assumption and no clarification arrived |
+
+#### 3. Gemini Live (`gemini-3.1-flash-live-preview`, `promptVariant: full`)
+Runs: `n=1` for S1/S4/S5/S6; `n=2` for S2 & S3 (S2 run 1 timed out at 25 s before `turnComplete`; run 2 waited 40 s and completed cleanly).
+
+| Scenario | Speech end → 1st text | Speech end → done | Right question answered once? | Premature / duplicate / stale / incorrect |
+|---|---:|---:|---|---|
+| 1. Complete question (`n=1`) | `1,788 ms` (`1,735 ms` main) | `12,260 ms` (`25` chunks) | Yes | None |
+| 2. 1.2 s pause in middle (`n=2`) | `1,925 ms` (run 1); `1,799 ms` (run 2) | `>25,000 ms` timeout (run 1, `57` chunks); `23,185 ms` (run 2, `44` chunks) | Yes | None; pause held cleanly |
+| 3. `"Mm-hmm"` mid-stream (`n=2`) | Q1: `3,106 ms` (run 1), `2,498 ms` (run 2) | Q1: `3,191 ms` (run 1, `2` chunks), `2,498 ms` (run 2, `2` chunks) | Q1 answered once; Gemini emitted no answer for filler (`"Mm-hmm."` arrived 57–68 ms after `responseText.done` burst) | **Filler bubble leak:** Gemini transcribed `"Mm-hmm."` as `"mm"` (run 1) and `"M.M."` (run 2), both missed by `isFillerOnly` so `q2` bubbles appeared in chat |
+| 4. Correction mid-stream (`n=1`) | Q1: `1,732 ms`; Corr end → 1st replacement: **`2,065 ms`** | Corr end → done: **`17,688 ms`** (`33` chunks) | Yes; Q1 (`12` chunks) barged in / cancelled (`92eaf573...:1:1`), replacement used DB indexing without cache | Q1 marked outdated as expected |
+| 5. Follow-up `"What if it needs to work offline?"` (`n=1`) | Base: `1,954 ms`; FU: `1,978 ms` | Base: `1,954 ms` (`2` chunks); FU: `17,346 ms` (`36` chunks) | Answered both in context; Base kept visible (`outdated: false`) | **Incorrect/leaked preamble on Base:** Answer 1 began verbatim with `"Current turn is empty. Transcript is empty. Notes are missing. Job description is missing. Candidate profile is missing. No previous context."` |
+| 6. `"Yes"` after clarification (`n=1`) | `2,041 ms` | `17,372 ms` (`33` chunks) | Prompt answered directly (`gotAsk=false`); `"Yes"` not reached | Answered with stated assumptions instead of emitting `Ask:` |
+
+#### 4. OpenAI Realtime (`gpt-realtime-2.1`) — Blocked live + lower-level test results
+- **Live Electron app / API blocker:** `window.electronAPI.testLiveBrainConnection()` with `openai-realtime` and the available OpenAI API key failed with `error: "unsupported"` (`"OpenAI Realtime does not support the selected model or session configuration."`). A direct probe to `GET https://api.openai.com/v1/models` returned HTTP `200` with `8` accessible models (`gpt-4.1`, `gpt-4o-mini`, `gpt-4o-mini-transcribe`, `gpt-5-nano`, `gpt-5.6-luna`, `gpt-6-luna`, `gpt-transcribe`, `whisper-1`) and `0` Realtime models (`realtimeModels: []`). These observations are consistent with missing model access on the available account. They do not establish model availability for other accounts or rule out an unsupported session setting.
+- **Lower-level mocked WebSocket & unit coverage (separate from Electron app tests):**
+  - `npm run test:live-brain`: **`118` passed, `0` failed** (`DeepgramFluxBrain.test.mjs` `6/6`, `RealtimeBrain.test.mjs` `13/13` covering OpenAI Realtime & ElevenLabs mock WebSocket streaming, `speech_started` cancel, late-delta drop, auth/quota/rate-limit handling, `GeminiLiveBrain.test.mjs` `21/21`, `ResponseOrchestrator.test.mjs` `25/25` covering `Ask:` -> `"Yes."` and filler suppression, `BrainSupervisor.test.mjs` `7/7`, `Meeting.test.mjs` `10/10`, plus `Foundation.test.mjs` and `LiveBrainSettings.test.mjs`).
+
+### Product Bugs / Deficiencies Documented (No Runtime Changes Made)
+
+1. **Filler `"Mm-hmm"` variants (`"MM."`, `"mm"`, `"M.M."`, and 1-char `"M"` partial) bypass `isFillerOnly` (`ResponseOrchestrator.ts`):**
+   - `FILLER_WORD` (`m+-?h+m+`) requires `'h'`, so Flux `"MM."` and Gemini `"mm"` / `"M.M."` do not match. On Flux + OpenAI S3, `"MM."` marked the completed Q1 outdated and triggered a duplicate Answer 2 (`generationId: 106`). Flux also displayed `"Mhmm."` in the Codex CLI run. That final transcript matches the filler rule. An earlier partial such as `"M"` would cause the bubble to persist under the current code. The saved summary retains the final transcript and a partial count, so it cannot confirm the exact partial.
+   - **Reproduction:** Start a `deepgram-flux` + `openai` (`gpt-4o-mini`) meeting in `dev:agent`, play `s3_question.wav`, and play `s3_mmhmm.wav` on first visible text; observe `q2: "MM."` and duplicate `generationId`.
+2. **Flux follow-up after completed answer marks base answer `outdated` (`ResponseOrchestrator.ts` `handleDecision`):**
+   - Because `handleDecision` calls `replaceCurrent()` (which applies `RECENT_ANSWER_MS = 20_000`) instead of `supersedeForNewTurn(true)` (D14 mid-stream cutoff rule), completed answers within 20 s of a follow-up (S5 on both Codex CLI and OpenAI) get folded as `Outdated answer`.
+   - **Reproduction:** In `deepgram-flux`, play `s5_base.wav`, wait for `final` completion, then play `s5_followup.wav` within 20 s; observe `outdated: true` on the base answer.
+3. **Scenario 6 `"Yes"` after `Ask:` not reachable via `"Design an e-commerce app."` on Flux + V3 or Gemini Live:**
+   - `IntelligenceEngine.ts:1708` passes `promptInstruction: 'If a clarification is essential before answering, start the reply with Ask:...'`, while the V3 turn policy prefers stated assumptions. That conflict is a plausible contributor for the Flux routes. None of the two Flux runs or the one Gemini Live run emitted Ask, and the replay therefore never played "Yes." This scenario does not establish a clarification failure or its cause.
+4. **Gemini Live S5 base answer leaked internal context-absence preamble** (`"Current turn is empty. Transcript is empty. Notes are missing..."` before answering).
+
+### Cross-platform & Build Validation
+
+- **Tested physically on Windows:** `dev:agent` Windows Electron app with WASAPI loopback (`Realtek(R) Audio`) for `deepgram-flux` (`codex-cli` and `openai/gpt-4o-mini`) and `gemini-live` (`gemini-3.1-flash-live-preview`).
+- **Build & automated checks validated on Windows:** `npm run test:live-brain` (`118/118`), `npm run build:electron`, `npm run typecheck:electron`, `npm run typecheck:premium`, `npm run typecheck:ts7`, `npm run test:lib`, and `npm run test:components`.
+- **Reviewed but not executed on macOS. Requires physical macOS verification.** OpenAI Realtime still needs an account and session configuration that accept `gpt-realtime-2.1`.
+
+
+### Independent baseline review
+
+- Recomputed first-text, turn-confirmation, correction, and completion timings
+  from the saved Windows Electron summaries. Verified the paused WAV is
+  16 kHz mono PCM16 and contains 1,200 ms of digital silence. This review
+  checked the saved renderer IPC evidence without repeating the full-app run.
+- Reproduced the duplicate after `"MM."`, the partial-to-filler bubble, and
+  the completed-answer fold with events sent through the compiled
+  `ResponseOrchestrator` and a stub writer. These are Phase 3 findings and
+  the baseline leaves the product code as-is.
+- A separate live transport check with the compiled Flux adapter transcribed
+  the filler clip as `"mm."` and the correction correctly. The 1,200 ms
+  paused clip yielded one confirmed question with four seconds of trailing
+  silence supplied as PCM. An earlier standalone attempt that relied on
+  sparse silence had no final within its 3.5-second wait. These are
+  transport observations and do not replace the full-app timings.
+- Independently checked the configured OpenAI credential. The model list
+  returned HTTP 200 with eight models and no Realtime model, and the app
+  adapter’s live Realtime connection probe returned `unsupported`.
+- Independently passed `npm run test:live-brain` (118), `npm run test:lib`
+  (3,246 passed, 15 skipped), `npm run test:components` (1,002 passed, two
+  skipped), `npm run typecheck:electron`, `npm run typecheck:premium`,
+  `npm run typecheck:ts7`, and `git diff --check`.
 
 ## Open risks
 

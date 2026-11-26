@@ -272,6 +272,35 @@ Tasks:
 
 ---
 
+## Baseline & Tuning Plan (Post-Phase 9)
+
+### Baseline Phase 1 — Baseline Flux against GPT Realtime and Gemini Live
+
+**Objective:** measure current Windows Electron app behavior (no runtime code changes) across **Deepgram Flux + My AI Provider**, **OpenAI Realtime**, and **Gemini Live** using the same synthetic interview clips before making further tuning or behavior changes.
+
+Tasks:
+1. Synthesize and silence-trim mono 16 kHz PCM WAV interview clips covering:
+   - (1) A complete question.
+   - (2) A question with a 1.2-second pause in the middle.
+   - (3) `"Mm-hmm"` while an answer is streaming.
+   - (4) A meaningful correction while an answer is streaming.
+   - (5) A follow-up (`"What if it needs to work offline?"`).
+   - (6) `"Yes"` after the assistant asks a clarification.
+2. Replay the clips through the Windows Electron app (`npm run dev:agent` with WASAPI loopback speaker capture, `NATIVELY_E2E=1`, `NATIVELY_PROMPT_DEBUG=1`) for every provider/model whose credentials and model access permit live execution; record exact blockers and separate lower-level test results for any blocked provider.
+3. Measure and record per run: provider/model, `speech end -> first visible text` (and for Flux separately: `speech end -> confirmed EndOfTurn` and `EndOfTurn -> first visible text`), `correction end -> first replacement text`, whether the right question was answered once, premature/duplicate/stale/incorrect answers, run counts (`n`), and exact reproduction steps for any product bugs found.
+4. Keep runtime behavior unchanged, record results in `PROGRESS.md`, and leave changes in the working tree for review.
+
+**Acceptance:** record comparable results for the routes available in the dev app, identify any provider-access or scenario blockers, and keep live Electron measurements separate from transport and mocked tests.
+
+### Later phases
+
+2. **Confirmed release of early drafts.** Draft on `EagerEndOfTurn`, cancel on `TurnResumed`, and release only on the matching confirmed turn. Keep the existing confirmed-turn answer as fallback. Measure first-text latency and discarded drafts.
+3. **Interruptions and corrections.** Keep the current answer visible through filler and completed answers visible on ordinary follow-ups. Verify a correction replaces an active stream without stale output.
+4. **Follow-up and clarification context.** Ground pronoun references and short responses in the relevant previous question, answer, or pending clarification. Verify that corrections preserve other constraints.
+5. **Comparison and regressions.** Repeat this corpus. Compare first-text timing, replacement timing, and incorrect or duplicate answers. Check both Deepgram modes and record platform and provider coverage.
+
+---
+
 ## Test corpus (Phase 0 creates; all phases use)
 
 | ID | Scenario | Expected |
