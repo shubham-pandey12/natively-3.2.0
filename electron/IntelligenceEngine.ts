@@ -1704,7 +1704,7 @@ export class IntelligenceEngine extends EventEmitter {
             // recorded it as answered (forensics 2026-11-13, F-ACC-08 / D3).
             const generationBefore = this.currentGenerationId;
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
-                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain } : {}) });
+                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain, ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {}) } : {}) });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
             await run;
             const outcome = outcomeOut.value;
@@ -2064,7 +2064,7 @@ export class IntelligenceEngine extends EventEmitter {
         replacesAutomaticAnswer?: boolean;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
         sourceSegments?: readonly number[];
-    }, options: { reuseSpeculative: boolean; context: string; speechStoppedAt?: number }): Promise<AutomaticAnswerResult> {
+    }, options: { reuseSpeculative: boolean; context: string; speechStoppedAt?: number; liveBrainNotebook?: string }): Promise<AutomaticAnswerResult> {
         return this.handleSuggestionTrigger({
             context: options.context,
             lastQuestion: question.text,
@@ -2079,6 +2079,7 @@ export class IntelligenceEngine extends EventEmitter {
             candidateGeneration: question.candidateGeneration,
             sourceSegments: question.sourceSegments,
             reuseSpeculative: options.reuseSpeculative,
+            ...(options.liveBrainNotebook ? { liveBrainNotebook: options.liveBrainNotebook } : {}),
         }, options.speechStoppedAt);
     }
 
@@ -2595,7 +2596,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2671,7 +2672,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -3080,7 +3081,8 @@ export class IntelligenceEngine extends EventEmitter {
                     if (!isSpeculative) showWtaAnswer(noKeyMsg, question || 'inferred', confidence, false);
                     return noKeyMsg;
                 }
-                const context = this.session.getFormattedContext(180);
+                const transcript = this.session.getFormattedContext(180);
+                const context = options?.liveBrainNotebook ? `${options.liveBrainNotebook}\n\n${transcript}` : transcript;
                 const answer = await this.answerLLM.generate(question || '', context);
                 if (isWtaSuperseded()) {
                     recordWtaCancellation();
@@ -5356,7 +5358,8 @@ export class IntelligenceEngine extends EventEmitter {
                         console.log(`[IntelligenceEngine] WTA V3 prompt in effect: answerability=${_v3.answerability} evidence=${_v3.evidenceCount} fallback=${_v3.fallbackUsed}`);
                     }
                     return _v3 ? {
-                        system: _v3.system, user: _v3.user,
+                        system: _v3.system,
+                        user: options?.liveBrainNotebook ? `${options.liveBrainNotebook}\n\n${_v3.user}` : _v3.user,
                         // T4: the evidence this prompt was composed from. The
                         // post-stream doc-grounded validator uses THIS rather
                         // than a fresh legacy retrieval — see the validator's
@@ -5425,7 +5428,8 @@ export class IntelligenceEngine extends EventEmitter {
             // session transcript and usage, and fed to the NEXT turn as
             // prior_assistant_responses evidence.
             const wtaTruncation: { truncated: boolean; reason?: string } = { truncated: false };
-            const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise, requestSnapshot, whatToAnswerCancellationToken.signal, wtaTruncation);
+            const answerTranscript = options?.liveBrainNotebook ? `${options.liveBrainNotebook}\n\n${preparedTranscript}` : preparedTranscript;
+            const stream = this.whatToAnswerLLM.generateStream(answerTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise, requestSnapshot, whatToAnswerCancellationToken.signal, wtaTruncation);
             let streamAborted = false;
             let emittedStreamingToken = false;
             let streamingTokenBuffer = '';

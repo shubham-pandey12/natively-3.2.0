@@ -14,12 +14,18 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function rig() {
     const brain = new FakeLiveBrain();
+    const startBrain = brain.start.bind(brain);
+    brain.start = context => {
+        const started = startBrain(context);
+        brain.emit({ type: 'status', status: 'ready' });
+        return started;
+    };
     const questions = [];
     const outdated = [];
     const create = onFailure => createMeeting({
         sessionId: 'fixture', apiKey: 'fake', onFailure,
         modeName: 'Mock interview', profileContext: 'Candidate built a queue',
-        emitQuestion: question => questions.push(question),
+        emitQuestion: question => { if (question.liveBrainStatus === undefined) questions.push(question); },
         engine: {
             runLiveBrainAnswer() { assert.fail('Gemini writes its own answer'); },
             setAutomaticAnswerOutdated: (...args) => outdated.push(args),
@@ -171,6 +177,39 @@ test('routing keeps the legacy switch off-path, suppresses it for Gemini and re-
     routing.start(() => undefined, () => {}); // Explicit pipeline or no usable Gemini key.
     assert.equal(canDispatch(false), true);
     routing.stop();
+});
+
+test('supervised fallback forwards the notebook through the existing Auto Answer dispatch', async () => {
+    const { brain } = rig();
+    const overlay = [];
+    const engine = Object.create(IntelligenceEngine.prototype);
+    engine.setAutomaticAnswerOutdated = () => {};
+    engine.handleSuggestionTrigger = async trigger => {
+        assert.equal(trigger.automatic, true);
+        assert.equal(trigger.replacesAutomaticAnswer, true);
+        assert.match(trigger.liveBrainNotebook, /email only/);
+        return { status: 'completed' };
+    };
+    const routing = new LiveBrainRouting();
+    routing.start(onFailure => createMeeting({
+        sessionId: 'supervised-fixture', apiKey: 'fake', engine, onFailure,
+        pipeline: { activate() {}, cancel() {} }, emitQuestion: event => overlay.push(event),
+    }, brain), () => assert.fail('The supervisor owns fallback'));
+    assert.equal(routing.pipelineOverride(true), false);
+    brain.emit({ type: 'interviewer_transcript', text: 'Notifications must use email only.', final: true, at: Date.now() });
+    brain.emit({ type: 'error', fatal: true, code: 'auth' });
+    assert.equal(routing.pipelineOverride(true), true);
+    const session = routing.activeSession;
+    const followUp = 'What would you use during an outage?';
+    session.observePipelineTranscript(followUp, true, Date.now());
+    await engine.runAutoAnswer({ text: followUp, replacesAutomaticAnswer: true }, {
+        context: 'Existing transcript', liveBrainNotebook: session.pipelineContext(), reuseSpeculative: false,
+    });
+    session.observePipelineOutput({ type: 'answer', generationId: 1, text: 'Keep retrying email from the queue.' });
+    assert.equal(overlay.some(event => event.responseText), false); // legacy events already paint these rows
+    assert.ok(overlay.some(event => event.liveBrainStatus === 'Backup brain'));
+    routing.stop();
+    assert.equal(routing.pipelineOverride(true), undefined);
 });
 
 test('switching off stops Gemini and manual cancellation reaches the brain', () => {

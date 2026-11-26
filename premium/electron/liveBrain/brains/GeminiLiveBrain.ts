@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { DEFAULT_GEMINI_LIVE_MODEL } from '../../../../src/types/liveBrainSettings';
 import { CLARIFICATION_ASSUMPTION } from '../instructions';
+import type { ResponseClock } from '../ResponseOrchestrator';
 import { toPcm16kMono } from '../interviewerAudio';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainEvent, LiveBrainStartContext } from '../types';
 
@@ -22,6 +23,8 @@ const BYTES_PER_MS = 32; // 16 kHz mono PCM16.
 const SILENCE_PUMP_MS = 100;
 const SILENCE_FILL_AFTER_MS = 300; // tolerate capture jitter before filling
 const SILENCE_FILL_MAX_MS = 1_000; // per tick, so a stall can't flood the socket
+const ROLLOVER_MARGIN_MS = 1_000;
+const MIN_DEFERRED_ROLLOVER_MS = 1_500;
 
 export interface GeminiLiveOptions {
     apiKey: string;
@@ -29,6 +32,7 @@ export interface GeminiLiveOptions {
     endpoint?: string;
     setupTimeoutMs?: number;
     backoffMs?: readonly number[];
+    rolloverClock?: ResponseClock<ReturnType<typeof setTimeout>>;
 }
 
 interface GeminiMessage {
@@ -79,6 +83,8 @@ export class GeminiLiveBrain implements LiveBrain {
     private setupTimer?: ReturnType<typeof setTimeout>;
     private reconnectTimer?: ReturnType<typeof setTimeout>;
     private rolloverTimer?: ReturnType<typeof setTimeout>;
+    private rolloverAt?: number;
+    private resuming = false;
     private startup?: { ready(): void; fail(error: GeminiLiveError): void };
     private readyAt?: number;
     private failures = 0;
@@ -95,8 +101,11 @@ export class GeminiLiveBrain implements LiveBrain {
     private silencePump?: ReturnType<typeof setInterval>;
     private streamStartedAt = 0;
     private audioSentMs = 0;
+    private readonly rolloverClock;
 
-    constructor(private readonly options: GeminiLiveOptions) {}
+    constructor(private readonly options: GeminiLiveOptions) {
+        this.rolloverClock = options.rolloverClock ?? { now: Date.now, setTimeout, clearTimeout };
+    }
 
     onEvent(listener: (event: LiveBrainEvent) => void): () => void {
         this.listeners.add(listener);
@@ -145,6 +154,10 @@ export class GeminiLiveBrain implements LiveBrain {
         this.sendClientTurn(CLARIFICATION_ASSUMPTION, true);
     }
 
+    addHistoryContext(history: string): void {
+        if (this.readyAt !== undefined && !this.providerTurnActive && history.trim()) this.sendClientTurn(history, false);
+    }
+
     cancelResponse(_reason: string): void {
         if (!this.providerTurnActive) return;
         // Gemini owns speech barge-in. A local manual answer suppresses the
@@ -179,6 +192,7 @@ export class GeminiLiveBrain implements LiveBrain {
             socket.on('open', () => {
                 if (this.socket !== socket || !this.context) return;
                 const model = this.options.model?.trim() || DEFAULT_GEMINI_LIVE_MODEL;
+                this.resuming = Boolean(this.resumeHandle);
                 this.send({ setup: {
                     model: model.startsWith('models/') ? model : `models/${model}`,
                     generationConfig: { responseModalities: ['AUDIO'] },
@@ -223,6 +237,7 @@ export class GeminiLiveBrain implements LiveBrain {
         if (message.setupComplete && this.readyAt === undefined) {
             clearTimeout(this.setupTimer);
             this.readyAt = Date.now();
+            this.resuming = false;
             const audio = this.bufferedAudio;
             this.bufferedAudio = [];
             this.bufferedBytes = 0;
@@ -263,7 +278,7 @@ export class GeminiLiveBrain implements LiveBrain {
             this.emit({ type: 'interviewer_transcript', text: interim, final: false, at });
         }
         if (typeof transcript?.text === 'string' && transcript.text.trim()) {
-            this.emit({ type: 'interviewer_transcript', text: transcript.text, final: transcript.finished === true, at });
+            this.emit({ type: 'interviewer_transcript', text: transcript.text, final: transcript.finished !== false, at });
         }
         const output = content?.outputTranscription?.text;
         if (this.speaking && !content?.interrupted
@@ -276,7 +291,8 @@ export class GeminiLiveBrain implements LiveBrain {
             this.providerTurnActive = true;
             this.failures = 0;
             if (!this.responseId) {
-                this.responseId = `${this.context?.sessionId}:${++this.responseSequence}`;
+                const namespace = this.context?.responseNamespace ?? this.context?.sessionId;
+                this.responseId = `${namespace}:${++this.responseSequence}`;
                 this.emit({ type: 'response_started', responseId: this.responseId, at });
             }
             if (this.responseId) this.emit({ type: 'response_delta', responseId: this.responseId, text: output });
@@ -292,17 +308,24 @@ export class GeminiLiveBrain implements LiveBrain {
                 this.flushCandidate();
             }
         }
+        if ((content?.turnComplete || content?.interrupted) && this.rolloverAt !== undefined && this.resumeHandle) {
+            this.rollover();
+            return;
+        }
         const update = message.sessionResumptionUpdate;
         if (update?.resumable && typeof update.newHandle === 'string' && update.newHandle) {
             this.resumeHandle = update.newHandle;
-            if (this.rolloverTimer) { this.rollover(); return; }
+            if (this.rolloverAt !== undefined && !this.responseId) { this.rollover(); return; }
         }
         if (message.goAway) {
             const seconds = Number(String(message.goAway.timeLeft ?? '').replace(/s$/, ''));
             const inMs = Number.isFinite(seconds) ? Math.max(0, seconds * 1_000) : 0;
-            this.emit({ type: 'session_expiring', inMs });
-            if (this.resumeHandle) this.rollover();
-            else if (!this.rolloverTimer) this.rolloverTimer = setTimeout(() => this.rollover(), Math.max(0, inMs - 500));
+            this.emit({ type: 'session_expiring', inMs, ...(this.resumeHandle ? {} : { resumable: false }) });
+            if (this.resumeHandle) this.scheduleRollover(inMs);
+            else if (!this.rolloverTimer) {
+                this.rolloverAt = this.rolloverClock.now() + Math.max(0, inMs - 500);
+                this.rolloverTimer = this.rolloverClock.setTimeout(() => this.rollover(), Math.max(0, inMs - 500));
+            }
         }
     }
 
@@ -361,10 +384,11 @@ export class GeminiLiveBrain implements LiveBrain {
         const delay = (this.options.backoffMs ?? BACKOFF_MS)[this.failures++];
         const fatal = code === 'auth' || code === 'quota' || delay === undefined;
         if (fatal) {
+            const detail = this.resuming && code !== 'auth' && code !== 'quota' ? 'session_resumption_failed' : undefined;
             this.release();
             this.startup?.fail(new GeminiLiveError(code));
             this.startup = undefined;
-            this.emit({ type: 'error', code, fatal: true });
+            this.emit({ type: 'error', code, fatal: true, ...(detail ? { detail } : {}) });
             return;
         }
         this.reconnectTimer = setTimeout(() => { this.reconnectTimer = undefined; this.connect(); }, delay);
@@ -377,12 +401,31 @@ export class GeminiLiveBrain implements LiveBrain {
         this.connect();
     }
 
+    requestSessionRollover(inMs: number): boolean {
+        if (!this.resumeHandle || this.readyAt === undefined) return false;
+        this.scheduleRollover(inMs);
+        return true;
+    }
+
+    private scheduleRollover(inMs: number): void {
+        if (!this.responseId || inMs < MIN_DEFERRED_ROLLOVER_MS) {
+            this.rollover();
+            return;
+        }
+        const at = this.rolloverClock.now() + inMs - ROLLOVER_MARGIN_MS;
+        if (this.rolloverAt !== undefined && this.rolloverAt <= at) return;
+        if (this.rolloverTimer !== undefined) this.rolloverClock.clearTimeout(this.rolloverTimer);
+        this.rolloverAt = at;
+        this.rolloverTimer = this.rolloverClock.setTimeout(() => this.rollover(), at - this.rolloverClock.now());
+    }
+
     private disconnect(graceful = false): void {
         clearTimeout(this.setupTimer);
-        clearTimeout(this.rolloverTimer);
+        if (this.rolloverTimer !== undefined) this.rolloverClock.clearTimeout(this.rolloverTimer);
         clearInterval(this.silencePump);
         this.silencePump = undefined;
         this.rolloverTimer = undefined;
+        this.rolloverAt = undefined;
         this.readyAt = undefined;
         const socket = this.socket;
         this.socket = undefined;
@@ -402,6 +445,7 @@ export class GeminiLiveBrain implements LiveBrain {
         this.bufferedBytes = 0;
         this.bufferedCandidate = [];
         this.resumeHandle = undefined;
+        this.resuming = false;
         this.speaking = false;
         this.providerTurnActive = false;
         this.discardOutput = false;

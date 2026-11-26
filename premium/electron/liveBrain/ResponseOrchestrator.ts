@@ -116,6 +116,11 @@ export class ResponseOrchestrator<Timer> {
         }
     }
 
+    replaceWithExternalAnswer(): void {
+        this.clearClarification();
+        this.replaceCurrent();
+    }
+
     private handleDecision(event: Extract<LiveBrainEvent, { type: 'decision' }>): void {
         switch (event.action) {
             case 'answer': {

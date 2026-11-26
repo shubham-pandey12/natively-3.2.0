@@ -89,12 +89,13 @@ function devEnvKey(provider: LiveBrainKeyProvider): string | undefined {
 }
 
 function inspectConfig(settings: SettingsManager, credentials: CredentialsReader,
-    envKey: (provider: LiveBrainKeyProvider) => string | undefined = devEnvKey): {
+    envKey: (provider: LiveBrainKeyProvider) => string | undefined = devEnvKey,
+    forProvider?: LiveBrainKeyProvider): {
     config: LiveBrainConfig;
     keyIsWellFormed: boolean;
     usableKey?: string;
 } {
-    const provider = settings.get('liveBrainProvider') ?? 'gemini-live';
+    const provider = forProvider ?? settings.get('liveBrainProvider') ?? 'gemini-live';
     const promptVariant = settings.get('liveBrainPromptVariant') ?? null;
     if (!isKeyProvider(provider)) {
         return {
@@ -133,8 +134,11 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
 }
 
 /** Main-process only. IPC exposes inspectConfig().config, never usableKey. */
-export function resolveLiveBrainRuntime(): Pick<LiveBrainConfig, 'provider' | 'model' | 'promptVariant'> & { apiKey?: string } {
-    const { config, usableKey } = inspectConfig(SettingsManager.getInstance(), CredentialsManager.getInstance());
+export function resolveLiveBrainRuntime(forProvider?: LiveBrainKeyProvider): Pick<LiveBrainConfig, 'provider' | 'model' | 'promptVariant'> & { apiKey?: string } {
+    const { config, usableKey } = inspectConfig(SettingsManager.getInstance(), CredentialsManager.getInstance(), devEnvKey, forProvider);
+    if (config.provider !== 'pipeline' && !isKeyProvider(config.provider)) {
+        throw new Error(`Unsupported live brain: ${String(config.provider)}`);
+    }
     return { provider: config.provider, model: config.model, promptVariant: config.promptVariant, apiKey: usableKey };
 }
 

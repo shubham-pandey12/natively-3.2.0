@@ -2122,6 +2122,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   const [rollingTranscript, setRollingTranscript] = useState(''); // For interviewer rolling text bar
   const [isInterviewerSpeaking, setIsInterviewerSpeaking] = useState(false); // Track if actively speaking
+  const [liveBrainStatus, setLiveBrainStatus] = useState<import('../types/whatToAnswerQuestion').LiveBrainStatus | null>(null);
   // Debounce partial STT ticks so answer/solution rows are not drowned in re-renders.
   const rollingPartialDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRollingPartialRef = useRef<string | null>(null);
@@ -8015,7 +8016,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status }) => {
+        if (status !== undefined) {
+          setLiveBrainStatus(status);
+          return;
+        }
         if (askId && clarification) {
           if (activeDirectAssistRef.current) return;
           const id = `live-brain-ask-${askId}`;
@@ -13150,6 +13155,9 @@ Provide only the answer, nothing else.`;
                       the faintest things on the glass and modern panels.
                       The fill stays `bg-emerald-500/10` in both: the glass and
                       modern recipes in index.css select on that class. */}
+                  {liveBrainStatus && (
+                    <div role="status" className="mt-1 text-[12px] overlay-text-muted">{t(liveBrainStatus)}</div>
+                  )}
                   {isManualRecording && (
                     <div className="ov-listening-in flex flex-col items-end gap-1">
                       {/* Live transcription preview */}

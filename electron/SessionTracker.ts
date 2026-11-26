@@ -81,6 +81,7 @@ export interface TranscriptSegment {
 }
 
 export interface SuggestionTrigger {
+    liveBrainNotebook?: string;
     replacesAutomaticAnswer?: boolean;
     context: string;
     lastQuestion: string;

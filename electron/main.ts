@@ -3980,7 +3980,10 @@ export class AppState {
       const stop = this.debugInterviewerStop;
       const speechStoppedAt = stop && stop.meetingGeneration === this._meetingGeneration
         && stop.capture === this.systemAudioCapture ? stop.at : undefined;
-      return this.intelligenceManager.runAutoAnswer(question, { reuseSpeculative, speechStoppedAt }).catch((error) => {
+      const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
+      return this.intelligenceManager.runAutoAnswer(question, notebook
+        ? { reuseSpeculative: false, speechStoppedAt, liveBrainNotebook: notebook }
+        : { reuseSpeculative, speechStoppedAt }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
         return { status: 'failed' as const };
       });
@@ -3991,7 +3994,9 @@ export class AppState {
     // the judge is still deciding.
     noteCandidate: (id, gen) => this.intelligenceManager.noteAutoAnswerCandidate(id, gen),
     speculativeSnapshot: () => this.intelligenceManager.getSpeculativeSnapshot(),
-    prefetchAnswer: (id, text) => this.intelligenceManager.prefetchAutoAnswer(id, text),
+    prefetchAnswer: (id, text) => {
+      if (!this.liveBrainRouting.activeSession?.pipelineContext?.()) this.intelligenceManager.prefetchAutoAnswer(id, text);
+    },
     // The retrieval query's embedding, started when the interviewer stops rather
     // than when the final lands (~0.7 s later). Filler words are stripped as the
     // orchestrator strips them from the question, so the texts line up.
@@ -4613,6 +4618,7 @@ export class AppState {
       if (micEcho) console.log(`[STT] mic final repeats the interviewer (${segment.text.length} chars): not counted as the user`);
 
       const transcriptAt = Date.now();
+      if (speaker === 'interviewer') this.liveBrainRouting.activeSession?.observePipelineTranscript?.(segment.text, segment.isFinal, transcriptAt);
       if (!micEcho) {
         if (speaker === 'user' && segment.isFinal) this.liveBrainRouting.activeSession?.addCandidateText(segment.text, transcriptAt);
         this.intelligenceManager.handleTranscript({
@@ -5317,10 +5323,11 @@ export class AppState {
     });
     capture.on('speech_ended', () => {
       if (this.systemAudioCapture === capture) {
-        if (this.isMeetingActive && isPromptDebugEnabled()) {
+        const liveBrain = this.liveBrainRouting.activeSession;
+        if (this.isMeetingActive && (liveBrain || isPromptDebugEnabled())) {
           const at = Date.now();
-          this.debugInterviewerStop = { at, meetingGeneration: this._meetingGeneration, capture };
-          this.liveBrainRouting.activeSession?.noteSpeechStop(at);
+          if (isPromptDebugEnabled()) this.debugInterviewerStop = { at, meetingGeneration: this._meetingGeneration, capture };
+          liveBrain?.noteSpeechStop(at);
         }
         this.googleSTT?.notifySpeechEnded?.();
         this._sttFailover.system?.notifySpeechEnded();
@@ -9096,6 +9103,11 @@ export class AppState {
       // what it answered (the live "late CGPA answer" report). The renderer
       // uses this stamp to drop or visibly label stale finals.
       this.sendToWindow(win, 'intelligence-suggested-answer', { answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', emittedAt: Date.now(), ...(stopReason ? { stopReason } : {}) })
+      if (typeof generationId === 'number' && this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
+        this.liveBrainRouting.activeSession?.observePipelineOutput?.({
+          type: outcome?.delivered === false ? 'failed' : 'answer', generationId, text: answer,
+        });
+      }
       if (this.getLiveBrainEnabled() && outcome?.delivered && answer.trim() && this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
         this.simpleAutoAnswer.onAutomaticAnswerProgress(generationId);
       }
@@ -9109,6 +9121,7 @@ export class AppState {
       queueBatch('suggested_answer', { token, question, confidence, generationId });
       this.autoAnswerUsage.answerShown();
       if (this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
+        if (typeof generationId === 'number') this.liveBrainRouting.activeSession?.observePipelineOutput?.({ type: 'token', generationId, text: token });
         this.simpleAutoAnswer.onAutomaticAnswerProgress(token.trim() ? generationId : undefined);
       }
     })
@@ -9122,6 +9135,7 @@ export class AppState {
     // The generation id rides along so the overlay ignores a late discard from
     // a replaced run instead of clearing the newer answer (F-CTX-09, 2026-11-13).
     this.intelligenceManager.on('suggested_answer_discard', (reason: string, generationId?: number) => {
+      if (typeof generationId === 'number') this.liveBrainRouting.activeSession?.observePipelineOutput?.({ type: 'discard', generationId });
       this.autoAnswerUsage.stopAwaitingAnswer();
       flushBatchesBeforeFinal();
       const win = answerWindow()
@@ -10865,28 +10879,7 @@ export class AppState {
   private startMeetingLiveBrain(): void {
     if (this.liveBrainRouting.enabled) return;
     this.cancelAutoAnswer();
-    this.liveBrainRouting.start(onFailure => {
-      const { provider, model, apiKey, promptVariant } = resolveLiveBrainRuntime();
-      if (provider !== 'gemini-live' || !apiKey) return undefined;
-      const name = this.currentUserName();
-      const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
-      const modes = ModesManager.getInstance();
-      const mode = modes.getActiveMode();
-      const grounding = modes.isProfileIntelligenceAllowedForMode(mode?.id)
-        ? this.getKnowledgeOrchestrator()?.getLiveInterviewProfileContext?.()
-        : '';
-      const profileContext = [name && `Candidate: ${name}`, grounding].filter(Boolean).join('\n\n');
-      return loadLiveBrainPremium()?.createMeeting({
-        apiKey, model, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
-        profileContext, modeName: mode?.name, modeTemplate: mode?.templateType,
-        modePrompt: modes.getActiveModeSystemPromptSuffix(mode?.id),
-        modeContext: modes.buildActiveModeContextBlock(),
-        engine: this.intelligenceManager,
-        emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),
-        onFailure,
-      });
-    }, code => {
-      if (code) console.warn(`[LiveBrain] Gemini session ended (${code}).`);
+    const activatePipeline = () => {
       if (this.isAutoAnswerAvailable()) this.warmAutoAnswerJudge();
       else {
         try {
@@ -10896,6 +10889,35 @@ export class AppState {
           }).show();
         } catch { /* Notification availability must not affect the meeting. */ }
       }
+    };
+    this.liveBrainRouting.start(onFailure => {
+      const { provider, model, apiKey, promptVariant } = resolveLiveBrainRuntime();
+      const name = this.currentUserName();
+      const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
+      const modes = ModesManager.getInstance();
+      const mode = modes.getActiveMode();
+      const grounding = modes.isProfileIntelligenceAllowedForMode(mode?.id)
+        ? this.getKnowledgeOrchestrator()?.getLiveInterviewProfileContext?.()
+        : '';
+      const profileContext = [name && `Candidate: ${name}`, grounding].filter(Boolean).join('\n\n');
+      return loadLiveBrainPremium()?.createMeeting({
+        provider, apiKey, model, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
+        resolveProvider: resolveLiveBrainRuntime,
+        profileContext, modeName: mode?.name, modeTemplate: mode?.templateType,
+        modePrompt: modes.getActiveModeSystemPromptSuffix(mode?.id),
+        modeContext: modes.buildActiveModeContextBlock(),
+        engine: this.intelligenceManager,
+        emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),
+        summarize: (prompt, signal) => this.processingHelper.getLLMHelper().summarizeLiveInterview(prompt, signal),
+        pipeline: {
+          activate: activatePipeline,
+          cancel: () => { this.intelligenceManager.cancelAutomaticAnswer('manual_answer'); },
+        },
+        onFailure,
+      });
+    }, code => {
+      if (code) console.warn(`[LiveBrain] Gemini session ended (${code}).`);
+      activatePipeline();
     });
   }
 

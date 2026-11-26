@@ -1,5 +1,5 @@
 import type { WhatToAnswerQuestionEvent } from '../../src/types/whatToAnswerQuestion';
-import type { LiveBrainPromptVariant, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
+import type { LiveBrainKeyProvider, LiveBrainPromptVariant, LiveBrainProvider, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
 import type { AutoAnswerDispatchResult } from './autoAnswer';
 
 export interface LiveBrainAnswerRequest {
@@ -15,7 +15,9 @@ export interface LiveBrainAnswerEngine {
 
 export interface LiveBrainMeetingOptions {
     sessionId: string;
-    apiKey: string;
+    apiKey?: string;
+    provider?: LiveBrainProvider;
+    resolveProvider?(provider: LiveBrainKeyProvider): { apiKey?: string; model: string };
     model?: string;
     promptVariant?: LiveBrainPromptVariant;
     profileContext?: string;
@@ -24,6 +26,8 @@ export interface LiveBrainMeetingOptions {
     modePrompt?: string;
     modeContext?: string;
     engine: { setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void };
+    pipeline?: { activate(): void; cancel(): void };
+    summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
     onFailure(code: string): void;
 }
@@ -34,6 +38,10 @@ export interface LiveBrainMeetingSession {
     acceptAudio(channel: 'system' | 'mic', pcm: Buffer, sampleRate: number, channels?: number): void;
     addCandidateText(text: string, at: number): void;
     noteSpeechStop(at: number): void;
+    isPipeline?(): boolean;
+    pipelineContext?(): string;
+    observePipelineTranscript?(text: string, final: boolean, at: number): void;
+    observePipelineOutput?(output: { generationId: number; type: 'token' | 'answer' | 'discard' | 'failed'; text?: string }): void;
     cancelAnswer(reason: 'manual_answer'): void;
 }
 
@@ -47,7 +55,7 @@ export class LiveBrainRouting {
 
     pipelineOverride(available: boolean): boolean | undefined {
         if (this.owner === 'off') return undefined;
-        return this.owner === 'pipeline' && available;
+        return available && (this.owner === 'pipeline' || this.session?.isPipeline?.() === true);
     }
 
     start(create: (onFailure: (code: string) => void) => LiveBrainMeetingSession | undefined, onFallback: (code?: string) => void): void {
@@ -66,7 +74,11 @@ export class LiveBrainRouting {
             this.session = session;
             this.owner = 'gemini';
             session.start();
-        } catch {
+        } catch (error) {
+            if (error instanceof Error && error.message.startsWith('Unsupported live brain:')) {
+                this.stop();
+                throw error;
+            }
             fallback('protocol');
         }
     }

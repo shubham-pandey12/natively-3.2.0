@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer } from 'ws';
+import { FakeClock } from '../../autoAnswer/__tests__/fakeClock.mjs';
 
 const require = createRequire(import.meta.url);
 const { GeminiLiveBrain, GEMINI_AUTOMATIC_ACTIVITY_DETECTION } = require('../../../../dist-electron/premium/electron/liveBrain/brains/GeminiLiveBrain.js');
@@ -12,12 +13,13 @@ const ctx = () => ({ sessionId: 'mock', instructions: 'Answer after speech.', si
 const output = text => ({ serverContent: { outputTranscription: { text } } });
 const speech = text => ({ serverContent: { inputTranscription: { text, finished: true } } });
 const send = (socket, payload) => socket.send(JSON.stringify(payload));
+const realSetTimeout = setTimeout;
 
 async function until(read) {
     for (let i = 0; i < 200; i++) {
         const value = read();
         if (value) return value;
-        await delay(5);
+        await new Promise(resolve => realSetTimeout(resolve, 5));
     }
     assert.fail('Expected a transport event');
 }
@@ -40,7 +42,7 @@ async function rig(t, options = {}) {
         });
     });
     const endpoint = `ws://127.0.0.1:${server.address().port}`;
-    const brain = new GeminiLiveBrain({ apiKey: 'fake-gemini-key-for-tests', model: 'test-model', endpoint, backoffMs: options.backoffMs ?? [10, 20] });
+    const brain = new GeminiLiveBrain({ apiKey: 'fake-gemini-key-for-tests', model: 'test-model', endpoint, backoffMs: options.backoffMs ?? [10, 20], rolloverClock: options.rolloverClock });
     const events = [];
     brain.onEvent(event => events.push(event));
     t.after(async () => {
@@ -107,6 +109,21 @@ test('interruption cancels the active generation, discards late chunks and admit
     assert.equal(events[cancelled + 1].type, 'interviewer_speech_started');
 });
 
+test('interviewer backchannel transcripts alone do not cancel or replace Gemini output', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, output('Use an idempotency key'));
+    for (const text of ['Mm-hmm.', 'Okay.', 'Right.']) send(socket, speech(text));
+    send(socket, output(' for every write.'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.some(event => event.type === 'response_done'));
+    assert.deepEqual(events.filter(event => event.type === 'response_delta').map(event => event.text), [
+        'Use an idempotency key', ' for every write.',
+    ]);
+    assert.deepEqual(events.filter(event => event.type === 'response_done').map(event => event.status), ['completed']);
+});
+
 test('silence emits no answer and clarification follow-up sends a new client turn', async t => {
     const { brain, events, connections } = await rig(t);
     await brain.start(ctx());
@@ -132,6 +149,70 @@ test('goAway emits the deadline and reconnects with the resumable handle', async
     assert.deepEqual((await until(() => connections[1]?.requests[0]?.setup)).sessionResumption, { handle: 'fake-handle' });
     assert.deepEqual(events.find(event => event.type === 'session_expiring'), { type: 'session_expiring', inMs: 30_250 });
 });
+
+test('goAway waits for a streaming answer to complete and restarts silence fill on the resumed socket', async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 10_000 });
+    const { brain, events, connections } = await rig(t, { rolloverClock: new FakeClock() });
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, { sessionResumptionUpdate: { resumable: true, newHandle: 'handle' } });
+    send(socket, output('First'));
+    send(socket, { goAway: { timeLeft: '20s' } });
+    await until(() => events.some(event => event.type === 'session_expiring'));
+    assert.equal(connections.length, 1);
+    send(socket, output(' answer'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.filter(event => event.type === 'status' && event.status === 'ready').length === 2);
+    assert.equal(events.find(event => event.type === 'response_done').status, 'completed');
+    assert.equal(connections[1].requests[0].setup.sessionResumption.handle, 'handle');
+    t.mock.timers.tick(500);
+    const filled = await until(() => connections[1].requests.find(message => message.realtimeInput?.audio));
+    assert.ok(Buffer.from(filled.realtimeInput.audio.data, 'base64').every(byte => byte === 0));
+});
+
+test('goAway cancels a continuing answer one second before the deadline', async t => {
+    const clock = new FakeClock();
+    const { brain, events, connections } = await rig(t, { rolloverClock: clock });
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, { sessionResumptionUpdate: { resumable: true, newHandle: 'handle' } });
+    send(socket, output('Still answering'));
+    send(socket, { goAway: { timeLeft: '5s' } });
+    await until(() => events.some(event => event.type === 'session_expiring'));
+    clock.advance(3_999);
+    assert.equal(connections.length, 1);
+    assert.ok(!events.some(event => event.type === 'response_done'));
+    clock.advance(1);
+    await until(() => connections[1]?.requests[0]?.setup);
+    assert.equal(events.find(event => event.type === 'response_done').status, 'cancelled');
+});
+
+test('goAway uses an interruption as the next rollover boundary', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, { sessionResumptionUpdate: { resumable: true, newHandle: 'handle' } });
+    send(socket, output('First answer'));
+    send(socket, { goAway: { timeLeft: '20s' } });
+    await until(() => events.some(event => event.type === 'session_expiring'));
+    assert.equal(connections.length, 1);
+    send(socket, { serverContent: { interrupted: true } });
+    await until(() => connections[1]?.requests[0]?.setup);
+    assert.equal(events.find(event => event.type === 'response_done').status, 'cancelled');
+});
+
+for (const notice of [{ timeLeft: '1.4s' }, {}]) {
+    test(`goAway with ${notice.timeLeft ?? 'no deadline'} rolls immediately even during an answer`, async t => {
+        const { brain, events, connections } = await rig(t);
+        await brain.start(ctx());
+        const { socket } = connections[0];
+        send(socket, { sessionResumptionUpdate: { resumable: true, newHandle: 'handle' } });
+        send(socket, output('In progress'));
+        send(socket, { goAway: notice });
+        await until(() => connections[1]?.requests[0]?.setup);
+        assert.equal(events.find(event => event.type === 'response_done').status, 'cancelled');
+    });
+}
 
 test('candidate context waits for Gemini to finish the interviewer turn', async t => {
     const { brain, events, connections } = await rig(t);

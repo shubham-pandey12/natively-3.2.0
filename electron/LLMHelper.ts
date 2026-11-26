@@ -6160,6 +6160,11 @@ let isMultimodal = !!(imagePaths?.length);
     return null;
   }
 
+  summarizeLiveInterview(message: string, signal: AbortSignal): Promise<string | null> {
+    const modelId = this.fastModelId || (this.client ? GEMINI_FLASH_LITE_MODEL : undefined);
+    return this.callFastModel(message, { modelId, signal, timeoutMs: 8_000 });
+  }
+
   private async callFastModel(
     message: string,
     opts: { signal?: AbortSignal; timeoutMs?: number; json?: boolean; modelId?: string } = {},

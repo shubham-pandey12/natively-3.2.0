@@ -5,6 +5,7 @@ export type LiveBrainId = LiveBrainProvider;
 
 export interface LiveBrainStartContext {
     sessionId: string;
+    responseNamespace?: string;
     instructions: string;
     notebook: NotebookSnapshot;
     recentTurns: ConversationTurn[];
@@ -33,9 +34,9 @@ export type LiveBrainEvent =
     }
     | { type: 'response_started'; responseId: string; at: number }
     | { type: 'response_delta'; responseId: string; text: string }
-    | { type: 'response_done'; responseId: string; status: 'completed' | 'cancelled' | 'failed' }
+    | { type: 'response_done'; responseId: string; status: 'completed' | 'cancelled' | 'failed'; finalText?: string }
     | { type: 'response_silent' }
-    | { type: 'session_expiring'; inMs: number }
+    | { type: 'session_expiring'; inMs: number; resumable?: false }
     | { type: 'error'; code: LiveBrainErrorCode; fatal: boolean; detail?: string };
 
 export type LiveBrainErrorCode =
@@ -50,6 +51,8 @@ export interface LiveBrain {
     addCandidateText(text: string, at: number): void;
     /** Ask a text-writing provider to continue the interview with a stated assumption. */
     requestClarificationAnswer?(): void;
+    requestSessionRollover?(inMs: number): boolean;
+    addHistoryContext?(history: string): void;
     /** Ask the provider to cancel the in-flight response. Safe to repeat. */
     cancelResponse(reason: string): void;
     stop(): Promise<void>;

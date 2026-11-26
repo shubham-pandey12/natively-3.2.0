@@ -125,10 +125,11 @@ switch (config.brain) {
 // premium/electron/liveBrain/types.ts  (normative shape; names may be refined in Phase 2,
 // but any change must be reflected here)
 
-export type LiveBrainId = 'gemini-live' | 'openai-realtime' | 'pipeline';
+export type LiveBrainId = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'pipeline';
 
 export interface LiveBrainStartContext {
   sessionId: string;              // one per meeting; reset on new meeting
+  responseNamespace?: string;     // unique per brain instance within the meeting
   instructions: string;           // from instructions.ts (§5)
   notebook: NotebookSnapshot;     // empty at meeting start; filled on rollover/fallback
   recentTurns: ConversationTurn[];// last ~3–5 min verbatim, for rollover/fallback seeding
@@ -148,8 +149,9 @@ export type LiveBrainEvent =
   | { type: 'interviewer_transcript'; text: string; final: boolean; at: number } // display only
   | { type: 'response_started'; responseId: string; at: number }
   | { type: 'response_delta'; responseId: string; text: string }
-  | { type: 'response_done'; responseId: string; status: 'completed' | 'cancelled' | 'failed' }
-  | { type: 'session_expiring'; inMs: number }               // provider goAway / time limit
+  | { type: 'response_done'; responseId: string; status: 'completed' | 'cancelled' | 'failed'; finalText?: string }
+  | { type: 'response_silent' }
+  | { type: 'session_expiring'; inMs: number; resumable?: false } // provider goAway / time limit
   | { type: 'error'; code: LiveBrainErrorCode; fatal: boolean; detail?: string };
 
 export type LiveBrainErrorCode =
@@ -162,6 +164,9 @@ export interface LiveBrain {
   pushInterviewerAudio(pcm: Int16Array, sampleRate: number): void;
   /** Final candidate (mic) utterance, added as labelled context — never as interviewer audio. */
   addCandidateText(text: string, at: number): void;
+  requestClarificationAnswer?(): void;
+  requestSessionRollover?(inMs: number): boolean; // true when the provider owns resumption
+  addHistoryContext?(history: string): void;       // append context without asking for an answer
   /** Ask the provider to stop the in-flight response (if any). Idempotent. */
   cancelResponse(reason: string): void;
   stop(): Promise<void>;
@@ -366,10 +371,11 @@ export interface NotebookSnapshot {
 
 ## 9. BrainSupervisor (reliability)
 
-- **Selection:** setting `liveBrain.brain` = `gemini-live` (default when enabled) | `openai-realtime` | `pipeline`.
-- **Fallback chain:** configured brain → `openai-realtime` (only if an OpenAI key exists and it is not the failed brain) → `pipeline`. Fallback triggers: fatal error, `auth`/`quota`, repeated `rate_limited`, no `response_started` within ~6 s of `interviewer_speech_stopped` twice in a row, socket closed and reconnect failed.
+- **Selection:** the Live Brain provider setting (§9b), with Gemini Live as default.
+- **Fallback chain:** follow §9b and skip realtime providers without an implemented brain. Fallback triggers: fatal error, `auth`/`quota`, exhausted `rate_limited` backoff, no `response_started` within ~6 s of `interviewer_speech_stopped` twice in a row, socket closed and reconnect failed.
 - **Rollover:** at ~13–14 min (Gemini) / ~50 min (OpenAI), or on `session_expiring`: open the new session in parallel, seed with instructions + notebook + recent turns, switch when `ready`, prefer switching while no response is streaming, then stop the old session. Use provider session resumption when available; notebook seeding is the safety net.
-- **Recovery:** after falling back, retry the preferred brain at the next rollover point (not mid-answer).
+- **Gemini resumption:** with a resume handle, Gemini's transport owns `goAway`. It rolls immediately when idle or when the deadline is missing or under 1.5 s. During an answer it waits for `turnComplete` or `interrupted`, up to one second before the deadline. The supervisor prepares a notebook-seeded session when no handle is available and retries with a seeded session if resumption fails.
+- **Recovery:** Phase 5 retries the preferred brain at the next meeting. A mid-meeting retry may be added at a natural boundary.
 - **Audio continuity:** while switching, buffer interviewer audio (≤ 10 s) and replay into the new session.
 - **Meeting lifecycle:** start with meeting start, stop on meeting end via the same path that ends Auto Answer today (`auto_disabled_or_meeting_ended`).
 
