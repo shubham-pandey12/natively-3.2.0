@@ -477,6 +477,18 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 - The shared changes affect notebook notes and their use during provider rollover and fallback. No platform-specific source, settings defaults, provider transport, capture code, or installer configuration changed. Windows WASAPI and macOS Core Audio/ScreenCaptureKit continue to use the same PCM boundary. A transcript error can still affect the raw recent context or a model response, as seen in S3.
 - **Reviewed but not executed on macOS. Requires physical macOS verification.** **Requires physical Windows verification** for the installed NSIS build when its release credential is available.
 
+## Phase 7 review fix: Gemini rollover no longer loses a question (Claude, Windows)
+
+- Cause (S10, 63-minute question): on `goAway` with a resume handle, `scheduleRollover` rolled over immediately whenever no answer was streaming, including while the interviewer was mid-question. The old socket took the first part of the question with it, and the new session heard only the last ~206 ms, so it never answered. The same gap existed between speech end and the first answer text, and after an `interrupted` (the interviewer talking again).
+- Fix (`GeminiLiveBrain`):
+  - A rollover now waits while the provider turn is busy: interviewer speaking, waiting for the answer, or answer streaming. It runs at the next idle `turnComplete`; `interrupted` is no longer a rollover point.
+  - It still rolls one second before the deadline. If the deadline lands mid-question, the last 10 s of interviewer audio (ARCHITECTURE §9) is replayed into the new session.
+  - A streaming answer cut by the deadline is cancelled, as before. Idle rollovers stay immediate.
+  - Resumption, backoff, silence fill and late-delta dropping are unchanged.
+- Tests: the interruption test now expects the rollover after the new interviewer turn completes. New tests cover a goAway mid-question (waits for the turn) and a deadline mid-question (the question audio reaches the new session). 82 Live Brain tests and 4 Settings tests pass; `npm run build:electron`, `npx tsc --noEmit -p tsconfig.json` and `npm run typecheck:premium` pass.
+- Not fixed: two of seven reconnect gaps exceeded 1 s (1,032 and 1,130 ms). That is setup time to Google, not lost audio, because audio is buffered during the reconnect.
+- Not re-run live: the 70-minute replay. Requires physical macOS verification.
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).

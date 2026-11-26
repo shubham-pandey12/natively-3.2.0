@@ -15,6 +15,10 @@ export const GEMINI_AUTOMATIC_ACTIVITY_DETECTION = {
 const BACKOFF_MS = [500, 1_000, 2_000, 4_000];
 const AUDIO_CHUNK_BYTES = 3_200; // 100 ms at 16 kHz mono PCM16.
 const AUDIO_BUFFER_BYTES = AUDIO_CHUNK_BYTES * 20;
+// Last 10 s of interviewer audio (ARCHITECTURE §9). Replayed into the new
+// session when a server deadline forces a rollover mid-question, so the
+// question is not lost with the old socket.
+const REPLAY_BUFFER_BYTES = AUDIO_CHUNK_BYTES * 100;
 const BYTES_PER_MS = 32; // 16 kHz mono PCM16.
 // System capture goes sparse while the speakers are silent (measured on Windows:
 // ~100 ms of audio per second). Gemini's end-of-speech detector counts silence
@@ -98,6 +102,9 @@ export class GeminiLiveBrain implements LiveBrain {
     private turnInterrupted = false;
     private bufferedAudio: Buffer[] = [];
     private bufferedBytes = 0;
+    private bufferLimit = AUDIO_BUFFER_BYTES;
+    private recentAudio: Buffer[] = [];
+    private recentBytes = 0;
     private bufferedCandidate: string[] = [];
     private silencePump?: ReturnType<typeof setInterval>;
     private streamStartedAt = 0;
@@ -128,11 +135,12 @@ export class GeminiLiveBrain implements LiveBrain {
         const audio = toPcm16kMono(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength), sampleRate, 1);
         for (let offset = 0; offset < audio.length; offset += AUDIO_CHUNK_BYTES) {
             const chunk = audio.subarray(offset, offset + AUDIO_CHUNK_BYTES);
+            this.rememberAudio(chunk);
             if (this.readyAt !== undefined) this.sendAudio(chunk);
             else {
                 this.bufferedAudio.push(chunk);
                 this.bufferedBytes += chunk.length;
-                while (this.bufferedBytes > AUDIO_BUFFER_BYTES) this.bufferedBytes -= this.bufferedAudio.shift()!.length;
+                while (this.bufferedBytes > this.bufferLimit) this.bufferedBytes -= this.bufferedAudio.shift()!.length;
             }
         }
     }
@@ -242,6 +250,7 @@ export class GeminiLiveBrain implements LiveBrain {
             const audio = this.bufferedAudio;
             this.bufferedAudio = [];
             this.bufferedBytes = 0;
+            this.bufferLimit = AUDIO_BUFFER_BYTES;
             // A reconnect resumes from the last resumable checkpoint, which
             // cannot contain the previous socket's in-flight generation.
             this.providerTurnActive = false;
@@ -318,14 +327,16 @@ export class GeminiLiveBrain implements LiveBrain {
                 this.flushCandidate();
             }
         }
-        if ((content?.turnComplete || content?.interrupted) && this.rolloverAt !== undefined && this.resumeHandle) {
+        // A deferred rollover runs at the first idle point. After `interrupted`
+        // the interviewer is speaking again, so keep waiting for that turn.
+        if (content?.turnComplete && this.rolloverAt !== undefined && this.resumeHandle && !this.isBusy()) {
             this.rollover();
             return;
         }
         const update = message.sessionResumptionUpdate;
         if (update?.resumable && typeof update.newHandle === 'string' && update.newHandle) {
             this.resumeHandle = update.newHandle;
-            if (this.rolloverAt !== undefined && !this.responseId) { this.rollover(); return; }
+            if (this.rolloverAt !== undefined && !this.isBusy()) { this.rollover(); return; }
         }
         if (message.goAway) {
             const seconds = Number(String(message.goAway.timeLeft ?? '').replace(/s$/, ''));
@@ -406,9 +417,30 @@ export class GeminiLiveBrain implements LiveBrain {
         if (this.context) this.emit({ type: 'status', status: 'degraded' });
     }
 
-    private rollover(): void {
+    /** Rolls the socket over. `replay` re-sends the recent interviewer audio
+     *  because the old session took part of an unanswered question with it. */
+    private rollover(replay = false): void {
+        const recent = replay ? this.recentAudio.slice() : [];
         this.disconnect(true);
+        if (recent.length) {
+            const bytes = recent.reduce((sum, chunk) => sum + chunk.length, 0);
+            this.bufferedAudio = recent;
+            this.bufferedBytes = bytes;
+            this.bufferLimit = bytes + AUDIO_BUFFER_BYTES;
+        }
         this.connect();
+    }
+
+    /** The interviewer is mid-question, Gemini has not answered yet, or an
+     *  answer is streaming: a rollover now would lose that turn. */
+    private isBusy(): boolean {
+        return this.speaking || this.providerTurnActive || this.responseId !== undefined;
+    }
+
+    private rememberAudio(chunk: Buffer): void {
+        this.recentAudio.push(chunk);
+        this.recentBytes += chunk.length;
+        while (this.recentBytes > REPLAY_BUFFER_BYTES) this.recentBytes -= this.recentAudio.shift()!.length;
     }
 
     private flushInputTranscript(at: number): void {
@@ -424,15 +456,21 @@ export class GeminiLiveBrain implements LiveBrain {
     }
 
     private scheduleRollover(inMs: number): void {
-        if (!this.responseId || inMs < MIN_DEFERRED_ROLLOVER_MS) {
+        if (!this.isBusy()) {
             this.rollover();
+            return;
+        }
+        if (inMs < MIN_DEFERRED_ROLLOVER_MS) {
+            this.rollover(this.responseId === undefined);
             return;
         }
         const at = this.rolloverClock.now() + inMs - ROLLOVER_MARGIN_MS;
         if (this.rolloverAt !== undefined && this.rolloverAt <= at) return;
         if (this.rolloverTimer !== undefined) this.rolloverClock.clearTimeout(this.rolloverTimer);
         this.rolloverAt = at;
-        this.rolloverTimer = this.rolloverClock.setTimeout(() => this.rollover(), at - this.rolloverClock.now());
+        // At the deadline an unanswered question is replayed; a streaming
+        // answer is cancelled, as before (its question was already answered).
+        this.rolloverTimer = this.rolloverClock.setTimeout(() => this.rollover(this.responseId === undefined), at - this.rolloverClock.now());
     }
 
     private disconnect(graceful = false): void {
@@ -459,6 +497,9 @@ export class GeminiLiveBrain implements LiveBrain {
         this.disconnect(graceful);
         this.bufferedAudio = [];
         this.bufferedBytes = 0;
+        this.bufferLimit = AUDIO_BUFFER_BYTES;
+        this.recentAudio = [];
+        this.recentBytes = 0;
         this.bufferedCandidate = [];
         this.resumeHandle = undefined;
         this.resuming = false;

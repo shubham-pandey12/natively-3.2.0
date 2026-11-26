@@ -187,7 +187,7 @@ test('goAway cancels a continuing answer one second before the deadline', async 
     assert.equal(events.find(event => event.type === 'response_done').status, 'cancelled');
 });
 
-test('goAway uses an interruption as the next rollover boundary', async t => {
+test('goAway after an interruption waits for the new interviewer turn to finish', async t => {
     const { brain, events, connections } = await rig(t);
     await brain.start(ctx());
     const { socket } = connections[0];
@@ -195,10 +195,59 @@ test('goAway uses an interruption as the next rollover boundary', async t => {
     send(socket, output('First answer'));
     send(socket, { goAway: { timeLeft: '20s' } });
     await until(() => events.some(event => event.type === 'session_expiring'));
-    assert.equal(connections.length, 1);
     send(socket, { serverContent: { interrupted: true } });
-    await until(() => connections[1]?.requests[0]?.setup);
+    await until(() => events.some(event => event.type === 'response_done'));
     assert.equal(events.find(event => event.type === 'response_done').status, 'cancelled');
+    // Gemini closes the interrupted turn, but the interviewer is talking again:
+    // rolling now would lose the new question.
+    send(socket, { serverContent: { turnComplete: true } });
+    send(socket, speech('Actually, what about writes?'));
+    await delay(50);
+    assert.equal(connections.length, 1);
+    send(socket, output('For writes I would'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => connections[1]?.requests[0]?.setup);
+    assert.equal(events.filter(event => event.type === 'response_done').at(-1).status, 'completed');
+});
+
+test('goAway while the interviewer is mid-question waits for the turn instead of rolling over', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, { sessionResumptionUpdate: { resumable: true, newHandle: 'handle' } });
+    send(socket, { serverContent: { inputTranscription: { text: 'How would you design' } } });
+    await until(() => events.some(event => event.type === 'interviewer_speech_started'));
+    send(socket, { goAway: { timeLeft: '20s' } });
+    await until(() => events.some(event => event.type === 'session_expiring'));
+    await delay(50);
+    assert.equal(connections.length, 1);
+    send(socket, output('I would start'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => connections[1]?.requests[0]?.setup);
+    assert.equal(events.find(event => event.type === 'response_done').status, 'completed');
+});
+
+test('a deadline rollover mid-question replays the recent interviewer audio into the new session', async t => {
+    const clock = new FakeClock();
+    const { brain, events, connections } = await rig(t, { rolloverClock: clock });
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, { sessionResumptionUpdate: { resumable: true, newHandle: 'handle' } });
+    send(socket, { serverContent: { inputTranscription: { text: 'How would you design' } } });
+    await until(() => events.some(event => event.type === 'interviewer_speech_started'));
+    const question = new Int16Array(16_000).fill(1234); // 1 s of the question
+    brain.pushInterviewerAudio(question, 16_000);
+    send(socket, { goAway: { timeLeft: '5s' } });
+    await until(() => events.some(event => event.type === 'session_expiring'));
+    clock.advance(4_000);
+    await until(() => connections[1]?.requests[0]?.setup);
+    const replayed = await until(() => {
+        const audio = connections[1].requests.filter(message => message.realtimeInput?.audio)
+            .map(message => Buffer.from(message.realtimeInput.audio.data, 'base64'));
+        const bytes = audio.reduce((sum, chunk) => sum + chunk.length, 0);
+        return bytes >= question.byteLength ? audio : undefined;
+    });
+    assert.ok(replayed.some(chunk => chunk.readInt16LE(0) === 1234), 'the question audio reaches the new session');
 });
 
 for (const notice of [{ timeLeft: '1.4s' }, {}]) {
