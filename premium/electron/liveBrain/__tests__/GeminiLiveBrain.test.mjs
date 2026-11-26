@@ -86,7 +86,7 @@ test('Gemini setup enables both transcriptions and streams deltas immediately wh
     await until(() => events.some(event => event.type === 'response_done'));
     assert.deepEqual(events.filter(event => event.type === 'response_delta').map(event => event.text), ['I would', ' use a TTL.']);
     assert.deepEqual(events.at(-1), { type: 'response_done', responseId: 'mock:1', status: 'completed' });
-    assert.equal(events.find(event => event.type === 'interviewer_transcript').final, true);
+    assert.deepEqual(events.filter(event => event.type === 'interviewer_transcript' && event.final).map(event => event.text), ['What about invalidation?']);
 });
 
 test('interruption cancels the active generation, discards late chunks and admits the next turn', async t => {
@@ -306,4 +306,23 @@ test('a silent capture is padded with zeros so the audio stream stays at real-ti
     assert.ok(zeros, 'the fill is silence');
     // Real audio that keeps pace needs no fill.
     await brain.stop();
+});
+
+test('fragmented interviewer transcription becomes one final turn when Gemini starts answering', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    for (const piece of ['How would', ' you design', ' a cache?']) send(socket, { serverContent: { inputTranscription: { text: piece } } });
+    await until(() => events.filter(event => event.type === 'interviewer_transcript').length === 3);
+    assert.equal(events.some(event => event.type === 'interviewer_transcript' && event.final), false);
+    assert.equal(events.filter(event => event.type === 'interviewer_transcript').at(-1).text, 'How would you design a cache?');
+    send(socket, output('I would use'));
+    await until(() => events.some(event => event.type === 'response_started'));
+    const finals = events.filter(event => event.type === 'interviewer_transcript' && event.final);
+    assert.deepEqual(finals.map(event => event.text), ['How would you design a cache?']);
+    const finalIndex = events.indexOf(finals[0]);
+    assert.ok(finalIndex < events.findIndex(event => event.type === 'response_started'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.some(event => event.type === 'response_done'));
+    assert.equal(events.filter(event => event.type === 'interviewer_transcript' && event.final).length, 1);
 });

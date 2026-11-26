@@ -85,6 +85,7 @@ export class GeminiLiveBrain implements LiveBrain {
     private rolloverTimer?: ReturnType<typeof setTimeout>;
     private rolloverAt?: number;
     private resuming = false;
+    private inputTranscript = '';
     private startup?: { ready(): void; fail(error: GeminiLiveError): void };
     private readyAt?: number;
     private failures = 0;
@@ -277,9 +278,16 @@ export class GeminiLiveBrain implements LiveBrain {
         if (typeof interim === 'string' && interim.trim()) {
             this.emit({ type: 'interviewer_transcript', text: interim, final: false, at });
         }
-        if (typeof transcript?.text === 'string' && transcript.text.trim()) {
-            this.emit({ type: 'interviewer_transcript', text: transcript.text, final: transcript.finished !== false, at });
+        // Gemini sends the interviewer's words as small pieces, usually without
+        // `finished`. Join them and emit one final turn per question, so the
+        // notebook records "How would you design a cache?" and not " a cache?".
+        if (typeof transcript?.text === 'string' && transcript.text) {
+            this.inputTranscript += transcript.text;
+            if (this.inputTranscript.trim()) {
+                this.emit({ type: 'interviewer_transcript', text: this.inputTranscript.replace(/\s+/g, ' ').trim(), final: false, at });
+            }
         }
+        if (transcript?.finished === true) this.flushInputTranscript(at);
         const output = content?.outputTranscription?.text;
         if (this.speaking && !content?.interrupted
             && (message.voiceActivity?.type === 'ACTIVITY_END' || transcript?.finished
@@ -291,6 +299,7 @@ export class GeminiLiveBrain implements LiveBrain {
             this.providerTurnActive = true;
             this.failures = 0;
             if (!this.responseId) {
+                this.flushInputTranscript(at);
                 const namespace = this.context?.responseNamespace ?? this.context?.sessionId;
                 this.responseId = `${namespace}:${++this.responseSequence}`;
                 this.emit({ type: 'response_started', responseId: this.responseId, at });
@@ -298,6 +307,7 @@ export class GeminiLiveBrain implements LiveBrain {
             if (this.responseId) this.emit({ type: 'response_delta', responseId: this.responseId, text: output });
         }
         if (content?.turnComplete) {
+            this.flushInputTranscript(at);
             const interrupted = this.turnInterrupted;
             if (this.responseId) this.finishResponse('completed');
             else if (!interrupted && content.interactionStatus !== 'IN_PROGRESS') this.emit({ type: 'response_silent' });
@@ -401,6 +411,12 @@ export class GeminiLiveBrain implements LiveBrain {
         this.connect();
     }
 
+    private flushInputTranscript(at: number): void {
+        const text = this.inputTranscript.replace(/\s+/g, ' ').trim();
+        this.inputTranscript = '';
+        if (text) this.emit({ type: 'interviewer_transcript', text, final: true, at });
+    }
+
     requestSessionRollover(inMs: number): boolean {
         if (!this.resumeHandle || this.readyAt === undefined) return false;
         this.scheduleRollover(inMs);
@@ -446,6 +462,7 @@ export class GeminiLiveBrain implements LiveBrain {
         this.bufferedCandidate = [];
         this.resumeHandle = undefined;
         this.resuming = false;
+        this.inputTranscript = '';
         this.speaking = false;
         this.providerTurnActive = false;
         this.discardOutput = false;

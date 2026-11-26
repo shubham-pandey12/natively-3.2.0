@@ -294,6 +294,15 @@ Windows validation passed `npm run build:electron`, `node --test premium/electro
 
 Windows WASAPI and its Chromium fallback and macOS CoreAudio/ScreenCaptureKit still deliver PCM through the shared capture callback. No native backend or packaging changes. Reviewed but not executed on macOS. Requires physical macOS verification.
 
+### Phase 5 review fix: one notebook turn per interviewer question
+
+- Found in review: Phase 5 treated every Gemini `inputTranscription` piece without `finished: false` as final. Gemini sends the interviewer's words as small pieces that usually lack `finished`, so each piece became its own notebook turn. Question detection kept only the piece with the "?" (" a cache?"), and the pieces pushed real turns out of the notebook's bounded history.
+- Fix (`GeminiLiveBrain`): pieces are joined and emitted as a growing non-final transcript. One final turn is emitted when Gemini starts answering, at `turnComplete`, or on `finished: true`, so it always comes before `response_started`. The buffer clears on disconnect. New test: three pieces become exactly one final turn, "How would you design a cache?", before the answer starts.
+- Validation: `npm run build:electron`, `node --test premium/electron/liveBrain/__tests__/` (64), `LiveBrainSettings.test.mjs` (4), `npx tsc --noEmit -p tsconfig.json`.
+- Tested physically on Windows: a live meeting with interviewer audio through the speakers. 16 answers, all completed. From native speech end to first answer text, the median was 1.15 s; 15 of 16 were 0.77–1.27 s, and one was 2.52 s. The notebook's interviewer turns hold whole questions (for example "Good. Let's pivot. Requirements change again. … What happens?").
+- Observed, not fixed: the notebook's earlier summaries read as generic recaps ("Focused discussion covering 10 topics. Started with: …"), and one began with a mis-transcribed non-English fragment. Needs review in Phase 7 tuning.
+- Requires physical macOS verification.
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).
