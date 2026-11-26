@@ -1,6 +1,24 @@
 import type { WhatToAnswerQuestionEvent } from '../../src/types/whatToAnswerQuestion';
-import type { LiveBrainKeyProvider, LiveBrainPromptVariant, LiveBrainProvider, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
+import type {
+    DeepgramManagedProvider,
+    DeepgramThinkMode,
+    LiveBrainKeyProvider,
+    LiveBrainPromptVariant,
+    LiveBrainProvider,
+    LiveBrainSettingsResult,
+} from '../../src/types/liveBrainSettings';
 import type { AutoAnswerDispatchResult } from './autoAnswer';
+
+export interface DeepgramThinkConfig {
+    thinkMode: DeepgramThinkMode;
+    managedProvider: DeepgramManagedProvider;
+    managedModel: string;
+    byoKeyProvider?: string;
+    byoApiKey?: string;
+    byoModel?: string;
+    byoCustomUrl?: string;
+    byoCustomHeader?: string;
+}
 
 export interface LiveBrainAnswerRequest {
     question: string;
@@ -17,8 +35,9 @@ export interface LiveBrainMeetingOptions {
     sessionId: string;
     apiKey?: string;
     provider?: LiveBrainProvider;
-    resolveProvider?(provider: LiveBrainKeyProvider): { apiKey?: string; model: string };
+    resolveProvider?(provider: LiveBrainKeyProvider): { apiKey?: string; model: string; deepgramThink?: DeepgramThinkConfig };
     model?: string;
+    deepgramThink?: DeepgramThinkConfig;
     promptVariant?: LiveBrainPromptVariant;
     profileContext?: string;
     modeName?: string;
@@ -93,7 +112,7 @@ export class LiveBrainRouting {
 
 interface LiveBrainPremium {
     createMeeting(options: LiveBrainMeetingOptions): LiveBrainMeetingSession;
-    testConnection(options: { apiKey: string; model?: string; provider?: LiveBrainKeyProvider }): Promise<LiveBrainSettingsResult>;
+    testConnection(options: { apiKey: string; model?: string; provider?: LiveBrainKeyProvider; deepgramThink?: DeepgramThinkConfig }): Promise<LiveBrainSettingsResult>;
 }
 
 export function loadLiveBrainPremium(): LiveBrainPremium | null {

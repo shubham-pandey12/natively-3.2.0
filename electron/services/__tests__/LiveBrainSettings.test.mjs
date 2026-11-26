@@ -312,3 +312,97 @@ test('the Gemini model list keeps only Live-capable models', async () => {
     assert.equal(offline.success, false);
     assert.deepEqual(offline.models.map(m => m.id), ['gemini-3.1-flash-live-preview', 'gemini-3.8-live']);
 });
+
+test('Deepgram Voice Agent settings reuse STT key, configure managed & BYO Think, and never expose raw keys', async () => {
+    const userData = mkdtempSync(join(tmpdir(), 'natively-live-brain-dg-'));
+    const load = Module._load;
+    const originalSettings = globalThis.__nativelySettingsManagerV1__;
+    const originalCredentials = globalThis.__nativelyCredentialsManagerV1__;
+    Module._load = function (request, ...args) {
+        if (request === 'electron') {
+            return {
+                app: { getPath: () => userData, isReady: () => true, get isPackaged() { return true; }, getVersion: () => 'test' },
+                safeStorage: { isEncryptionAvailable: () => false },
+            };
+        }
+        return load.call(this, request, ...args);
+    };
+    try {
+        delete globalThis.__nativelySettingsManagerV1__;
+        delete globalThis.__nativelyCredentialsManagerV1__;
+        for (const module of ['SettingsManager', 'CredentialsManager', 'liveBrainSettings']) {
+            delete require.cache[require.resolve(`${compiled}${module}.js`)];
+        }
+        const settings = require(`${compiled}SettingsManager.js`).SettingsManager.getInstance();
+        const credentials = require(`${compiled}CredentialsManager.js`).CredentialsManager.getInstance();
+        credentials.init();
+        const handlers = new Map();
+        const connections = [];
+        const { registerLiveBrainSettingsIpc, resolveLiveBrainRuntime } = require(`${compiled}liveBrainSettings.js`);
+        settings.set('liveBrainDeepgramByoCustomHeader', 'Authorization: Bearer legacy-secret');
+        registerLiveBrainSettingsIpc({
+            getLiveBrainEnabled: () => settings.get('liveBrainEnabled') === true,
+            setLiveBrainEnabled: (enabled) => settings.set('liveBrainEnabled', enabled),
+        }, (channel, listener) => handlers.set(channel, listener), () => {}, () => ({
+            async testConnection(options) { connections.push(options); return { success: true, message: 'OK' }; },
+        }));
+        const invoke = (channel, payload) => handlers.get(`live-brain:${channel}`)(null, payload);
+
+        assert.equal(readFileSync(join(userData, 'settings.json'), 'utf8').includes('legacy-secret'), false);
+        assert.equal(invoke('set-provider', 'deepgram-voice-agent').success, true);
+        const sttKey = 'dg_' + 's'.repeat(36) + 'SttK';
+        credentials.setDeepgramApiKey(sttKey);
+        const cfg1 = invoke('get-config');
+        assert.equal(cfg1.keySource, 'ai-providers');
+        assert.equal(cfg1.maskedSuffix, '••••••••SttK');
+        assert.equal(cfg1.deepgram.thinkMode, 'managed');
+        assert.equal(cfg1.deepgram.managedProvider, 'open_ai');
+        assert.equal(cfg1.deepgram.managedModel, 'gpt-4o-mini');
+
+        assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', managedProvider: 'anthropic' }).success, true);
+        assert.equal(invoke('get-config').deepgram.managedModel, 'claude-haiku-4-5');
+
+        const byoKey = 'sk-' + 'b'.repeat(20) + 'ByoK';
+        credentials.setOpenaiApiKey(byoKey);
+        assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', thinkMode: 'byo', byoKeyProvider: 'openai' }).success, true);
+        assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', byoCustomUrl: 'http://127.0.0.1:11434' }).success, false);
+        assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', byoCustomUrl: 'https://llm.example.com/v1/chat/completions', byoCustomHeader: 'Authorization: Bearer secret-hdr' }).success, true);
+
+        const cfg2 = invoke('get-config');
+        assert.equal(cfg2.deepgram.byoHasCustomHeader, true);
+        assert.equal(JSON.stringify(cfg2).includes(sttKey), false);
+        assert.equal(JSON.stringify(cfg2).includes(byoKey), false);
+        assert.equal(JSON.stringify(cfg2).includes('secret-hdr'), false);
+
+        const runtime = resolveLiveBrainRuntime('deepgram-voice-agent');
+        assert.equal(runtime.apiKey, sttKey);
+        assert.equal(runtime.deepgramThink.byoApiKey, byoKey);
+        await invoke('test-connection');
+        assert.equal(connections[0].deepgramThink.byoApiKey, byoKey);
+        const save = options => invoke('set-options', { provider: 'deepgram-voice-agent', ...options });
+        assert.equal(readFileSync(join(userData, 'settings.json'), 'utf8').includes('secret-hdr'), false);
+        assert.equal(save({ byoKeyProvider: 'custom', byoModel: 'custom-model' }).success, true);
+        assert.equal(resolveLiveBrainRuntime().model, 'custom-model');
+        assert.equal(resolveLiveBrainRuntime().deepgramThink.byoCustomHeader, 'Authorization: Bearer secret-hdr');
+        assert.equal(save({ byoCustomUrl: 'https://another.example.com/v1/chat/completions' }).success, true);
+        assert.equal(resolveLiveBrainRuntime().deepgramThink.byoCustomHeader, undefined);
+        assert.equal(save({ byoCustomHeader: 'X-API-Key: replacement' }).success, true);
+        assert.equal(save({ byoCustomHeader: '' }).success, true);
+        assert.equal(invoke('get-config').deepgram.byoHasCustomHeader, false);
+
+        credentials.saveCurlProvider({
+            id: 'current-gateway',
+            name: 'Current gateway',
+            curlCommand: `curl https://gateway.example.com/v1/chat/completions -H "Authorization: Bearer cURL-secret" -H "Content-Type: application/json" -d '{"model":"gateway-model","messages":[{"role":"user","content":"{{USER_PROMPT}}"}],"stream":true}'`,
+        });
+        assert.ok(invoke('get-config').deepgram.byoOptions.some(option => option.id === 'custom:current-gateway'));
+        assert.equal(save({ byoKeyProvider: 'custom:current-gateway' }).success, true);
+        assert.equal(resolveLiveBrainRuntime().model, 'gateway-model');
+        assert.equal(resolveLiveBrainRuntime().deepgramThink.byoCustomHeader, 'Authorization: Bearer cURL-secret');
+    } finally {
+        Module._load = load;
+        globalThis.__nativelySettingsManagerV1__ = originalSettings;
+        globalThis.__nativelyCredentialsManagerV1__ = originalCredentials;
+        rmSync(userData, { recursive: true, force: true });
+    }
+});

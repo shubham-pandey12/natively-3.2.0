@@ -26,6 +26,7 @@
 // imports it right after the native-arch gate.
 
 import * as crypto from 'crypto';
+import type { LiveBrainProvider } from '../../src/types/liveBrainSettings';
 
 export interface PromptCompositionNote {
     surface: string;
@@ -70,7 +71,7 @@ interface PipelineAnswerTiming {
 }
 type AnswerTiming = PipelineAnswerTiming | {
     source: 'live-brain';
-    brainId: 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'pipeline';
+    brainId: LiveBrainProvider;
     responseId: string;
     model: string;
     promptVariant: 'full' | 'trimmed';

@@ -17,6 +17,7 @@
 | 5 — Notebook + Supervisor | Implemented | Bounded interview memory, answer-aware rollover, and legacy pipeline fallback. Windows backend live handoff verified. Full app capture, rendered status and physical macOS remain open. |
 | 6 — OpenAI + ElevenLabs Realtime | Implemented | The user accepted ElevenLabs audio mode. Both providers share the Realtime client and fallback path. ElevenLabs Mini passed a live Windows backend replay. Live OpenAI validation needs a key with access to the configured Realtime model. |
 | 7 — Tuning & validation | ☐ Not started | |
+| 8 — Deepgram Voice Agent (D16) | ✅ Done | Implemented `'deepgram-voice-agent'` with Deepgram-managed and public BYO HTTPS endpoints, 16 kHz raw binary PCM transport, 25k managed prompt cap, grouped Settings picker, and mocked tests. Windows dev live meeting verified after the review fixes. Physical macOS and packaged Deepgram checks remain open. |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
 
@@ -60,6 +61,8 @@
 - 2026-11-26 — **D15, no answers to filler (user):** after the D14 live check showed Gemini repeating its previous answer under a "Mm-hmm." bubble, the user chose both a stronger instruction for all providers and a local safety net that hides an answer under a filler-only bubble. This reverses the earlier "no local filtering" condition for ElevenLabs.
 
 - 2026-11-26 — **Scope:** Live Brain answers only interviewer speech. Typed questions, Direct Assist, manual "What to answer" presses, screenshots and all other modes keep default Natively behaviour (ARCHITECTURE §9a scope rule).
+
+- 2026-11-26 — **D16, Deepgram Voice Agent (user):** add `deepgram-voice-agent` (`DeepgramVoiceAgentBrain`, standalone) with Deepgram-managed (`open_ai`, `anthropic`, `google`, `nvidia`, ≤ 25k prompt) and BYO HTTPS endpoint modes (reusing saved AI Provider keys; Codex, Antigravity, and local Ollama excluded as unreachable by Deepgram). 16 kHz raw binary PCM, 8 s KeepAlive, discarded output audio, ~110 min rollover via `agent.context.messages`.
 
 ## Phase UI — 2026-11-25
 
@@ -519,6 +522,31 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 
 - Live check (Gemini, Windows): "Mhm." between two questions got no answer; both real questions were answered normally (about 1.1 s to first text). Gemini started a turn after the filler, but no text from it was shown. The logs do not show whether the instruction or the safety net stopped it.
 - Follow-up (user request): filler-only speech no longer gets a bubble in the chat either. `emitQuestion` skips a bubble until its text is more than filler, unless an Ask is waiting. The transcript strip at the top is unchanged. Two new tests (filler that grows into a question, "Yes." after an Ask), and the D14 filler test now expects no bubble. 96 Live Brain tests pass; build, `npx tsc --noEmit -p tsconfig.json` and `npm run typecheck:premium` pass. Requires physical macOS verification.
+
+## Phase 8 — Deepgram Voice Agent (D16) (Windows, 2026-11-27)
+
+- **Built**:
+  - **Settings & credentials (`src/types/liveBrainSettings.ts`, `SettingsManager.ts`, `CredentialsManager.ts`, `electron/services/liveBrainSettings.ts`, `electron/premium/liveBrain.ts`, `electron/main.ts`)**: Added `'deepgram-voice-agent'` provider with optional Speech Provider Deepgram key reuse, `'managed'` vs `'byo'` Think configuration, public HTTPS validation (`isPublicHttpsUrl`) excluding Codex, Antigravity, local Ollama (`localhost`/`127.0.0.1`), and private/localhost gateways, plus existing AI Provider key reuse (`openai`, `anthropic`, `google`, `groq`, `openrouter`, and public saved `customProviders`). Raw keys and custom auth headers remain stripped before IPC responses.
+  - **Runtime (`premium/electron/liveBrain/brains/DeepgramVoiceAgentBrain.ts`, `instructions.ts`, `BrainSupervisor.ts`, `index.ts`, `meeting.ts`)**: Standalone `DeepgramVoiceAgentBrain` connecting to `wss://agent.deepgram.com/v1/agent/converse` (`Authorization: Token <key>`), resampling PCM to 16 kHz (`linear16`) raw binary WebSocket frames with 300 ms sparse-silence fill and 8 s `KeepAlive`. Handles `Welcome`, `Settings`, `SettingsApplied`, `ConversationText`, `UserStartedSpeaking`, `AgentAudioDone`, `Warning`, `Error`, and `Close`; discards returned binary TTS frames; enforces `DEEPGRAM_MAX_MANAGED_PROMPT_CHARS` (`25_000`) for managed mode while leaving BYO unlimited; seeds `agent.context.messages` on rollover (`110 * 60_000` ms) from notebook/recent turns; verifies both `SettingsApplied` and an `InjectUserMessage` reply during `Test Connection`.
+  - **UI (`src/components/SettingsOverlay.tsx`)**: Added `'deepgram-voice-agent'` card, custom in-DOM grouped dropdown (`DeepgramThinkSelect` — `"Deepgram-managed"` and `"Your AI Providers"` + Custom endpoint, avoiding native `<select>` popups), custom URL/auth header inputs, BYO transmission notice, and Codex/Antigravity/local Ollama unavailability explanation.
+- **Live Deepgram protocol findings incorporated**:
+  - Deepgram's `/v1/agent/settings/think/models` and live `SettingsApplied` rejected `gemini-2.0-flash` and `llama-3.3-70b-instruct` (`INVALID_SETTINGS`), so managed model lists use verified working IDs (`gemini-2.5-flash`, `nvidia/nemotron-3.5-lightning-30b-a3b`, etc.).
+  - BYO `Settings` requires `agent.think.provider` alongside `endpoint`; Anthropic BYO rejects a custom `anthropic-version` header; Google's `/v1beta/openai/chat/completions` BYO route uses `Authorization: Bearer`.
+- **Verification**:
+  - `npm run build:electron`, `npx tsc --noEmit`, `npm run typecheck:electron`, and `npm run typecheck:premium` passed.
+  - `node --test premium/electron/liveBrain/__tests__/ dist-electron/premium/electron/liveBrain/brains/__tests__/DeepgramVoiceAgentBrain.test.js electron/services/__tests__/LiveBrainSettings.test.mjs`: 109 passed, 0 failed (8 `DeepgramVoiceAgentBrain` tests, 5 `LiveBrainSettings` tests, 96 existing/updated Live Brain tests).
+  - `npm run test:lib`: 3,245 passed, 15 skipped, 0 failed (including `NoNativePopups2026_09_27.test.mjs`).
+  - `npm run test:components`: 1,002 passed, 2 skipped, 0 failed.
+  - Full-app live meeting replay with Deepgram Voice Agent and **physical macOS verification** remain open (`Reviewed but not executed on macOS. Requires physical macOS verification.`).
+
+## Phase 8 review fixes (Windows, 2026-11-27)
+
+- The Deepgram adapter now keeps a single response across assistant text chunks, cancels it when the interviewer interrupts, and rejects late text before the next interviewer turn. It handles provider session expiry and transient server failures, reloads the notebook on reconnect, and applies bounded history that arrived while a standby session was starting. A settings acknowledgement no longer resets the reconnect budget.
+- BYO headers and their URLs are now stored together in encrypted credentials. Startup removes the old plaintext header without reusing it. Changing the destination clears the prior header unless a new one is supplied, and Settings has a remove action. The picker imports compatible cURL providers from both stores and saves a model choice per BYO provider. The selected model is also used for timing attribution. Stale Test Connection results are discarded and upstream diagnostic text stays out of the renderer.
+- The first managed Nova replay split the input into separate turns and began answering before the question ended. The full Voice Agent now uses Flux Multilingual for listening. In one paced replay on the final adapter, Flux kept the paused question together, the first text arrived 3,450 ms after the question clip, and the correction cancelled the original response. The first replacement text arrived 5,402 ms after the correction clip. Its text arrived in multiple chunks, and the probe ended before the provider completed that long spoken reply. These single-run transport measurements are above the existing ElevenLabs Mini first-text baseline and are not a provider latency distribution.
+- **Tested physically on Windows (dev).** The isolated application had Deepgram selected through the Audio settings card. Test Connection verified the key and Think reply. Started a meeting, played a synthetic scaling question through the system speakers, and observed the recognized question, answer text, and Answer ready state in the overlay. The meeting was ended and the isolated profile's original Live Brain setting and provider were restored.
+- **Build validated on Windows.** `npm run build:electron`, `npm run typecheck:electron`, `npm run typecheck:premium`, and `npx tsc --noEmit -p tsconfig.json` passed. The focused Live Brain, Deepgram adapter and settings command listed above passed 110 tests. `npm run test:lib` passed 3,245 tests with 15 skips, and `npm run test:components` passed 1,002 tests with two skips.
+- **Reviewed but not executed on macOS. Requires physical macOS verification.** Windows and macOS use the same shared adapter and settings code. No native capture or packaging code changed. The installed Windows app and live BYO provider sessions still require verification. Candidate remarks remain notebook context for session seeding.
 
 ## Open risks
 

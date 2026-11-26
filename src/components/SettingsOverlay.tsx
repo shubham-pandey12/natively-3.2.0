@@ -35,8 +35,19 @@ import { useShortcuts } from '../hooks/useShortcuts';
 import { isMac, isWindows } from '../utils/platformUtils';
 import { SettingsToggle } from './settings/SettingsToggle';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainModel, LiveBrainSettingsResult } from '../types/liveBrainSettings';
-import { DEFAULT_ELEVENLABS_REALTIME_MODEL, DEFAULT_GEMINI_LIVE_MODEL, DEFAULT_OPENAI_REALTIME_MODEL } from '../types/liveBrainSettings';
+import type {
+    DeepgramManagedProvider,
+    LiveBrainConfig,
+    LiveBrainKeyProvider,
+    LiveBrainModel,
+    LiveBrainSettingsResult,
+} from '../types/liveBrainSettings';
+import {
+    DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
+    DEFAULT_ELEVENLABS_REALTIME_MODEL,
+    DEFAULT_GEMINI_LIVE_MODEL,
+    DEFAULT_OPENAI_REALTIME_MODEL,
+} from '../types/liveBrainSettings';
 import {
     clampOverlayOpacity,
     getOverlayAppearance,
@@ -457,18 +468,132 @@ const LIVE_BRAIN_KEY_URLS: Record<LiveBrainKeyProvider, string> = {
     'gemini-live': 'https://aistudio.google.com/apikey',
     'openai-realtime': 'https://platform.openai.com/api-keys',
     'elevenlabs-realtime': 'https://elevenlabs.io/app/settings/api-keys',
+    'deepgram-voice-agent': 'https://console.deepgram.com',
 };
 
 // Per-provider display details for the Live Brain key card.
 const LIVE_BRAIN_PROVIDER_UI: Record<LiveBrainKeyProvider, {
-    name: string; vendor: string; mark: 'google' | 'openai' | 'elevenlabs'; defaultModel: string; existingKeyPlace: string;
+    name: string; vendor: string; mark: 'google' | 'openai' | 'elevenlabs' | 'deepgram'; defaultModel: string; existingKeyPlace: string;
 }> = {
     'gemini-live': { name: 'Gemini Live', vendor: 'Gemini', mark: 'google', defaultModel: DEFAULT_GEMINI_LIVE_MODEL, existingKeyPlace: 'AI Providers' },
     'openai-realtime': { name: 'OpenAI Realtime', vendor: 'OpenAI', mark: 'openai', defaultModel: DEFAULT_OPENAI_REALTIME_MODEL, existingKeyPlace: 'AI Providers' },
     'elevenlabs-realtime': { name: 'ElevenLabs Realtime', vendor: 'ElevenLabs', mark: 'elevenlabs', defaultModel: DEFAULT_ELEVENLABS_REALTIME_MODEL, existingKeyPlace: 'Speech Provider' },
+    'deepgram-voice-agent': { name: 'Deepgram Voice Agent', vendor: 'Deepgram', mark: 'deepgram', defaultModel: DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL, existingKeyPlace: 'Speech Provider' },
 };
+const DEEPGRAM_MANAGED_PROVIDER_LABELS: Record<DeepgramManagedProvider, string> = {
+    open_ai: 'OpenAI (via Deepgram)',
+    anthropic: 'Anthropic (via Deepgram)',
+    google: 'Google (via Deepgram)',
+    nvidia: 'NVIDIA (via Deepgram)',
+};
+const DEEPGRAM_UNAVAILABLE_TOOLTIP =
+    'Not available — Deepgram needs a publicly reachable endpoint. Codex and Antigravity are Natively-internal; local Ollama is not accessible from Deepgram\'s servers.';
 const isLiveBrainKeyProvider = (value: unknown): value is LiveBrainKeyProvider =>
     typeof value === 'string' && Object.prototype.hasOwnProperty.call(LIVE_BRAIN_PROVIDER_UI, value);
+
+interface DeepgramThinkSelectProps {
+    id?: string;
+    value: string;
+    configuredByo: NonNullable<LiveBrainConfig['deepgram']>['byoOptions'];
+    onSelect: (value: string) => void;
+}
+
+/** Custom in-DOM grouped dropdown for Deepgram Think providers (no native <select> popup). */
+const DeepgramThinkSelect: React.FC<DeepgramThinkSelectProps> = ({ id, value, configuredByo, onSelect }) => {
+    const t = useT();
+    const [open, setOpen] = useState(false);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const triggerRef = useRef<HTMLButtonElement>(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const handleOutside = (event: MouseEvent) => {
+            if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+                setOpen(false);
+            }
+        };
+        const handleKey = (event: KeyboardEvent) => {
+            if (event.key !== 'Escape') return;
+            event.stopPropagation();
+            setOpen(false);
+            triggerRef.current?.focus();
+        };
+        document.addEventListener('mousedown', handleOutside);
+        document.addEventListener('keydown', handleKey, true);
+        return () => {
+            document.removeEventListener('mousedown', handleOutside);
+            document.removeEventListener('keydown', handleKey, true);
+        };
+    }, [open]);
+
+    const managedOptions = (Object.keys(DEEPGRAM_MANAGED_PROVIDER_LABELS) as DeepgramManagedProvider[]).map((mp) => ({
+        value: `managed:${mp}`,
+        label: t(DEEPGRAM_MANAGED_PROVIDER_LABELS[mp]),
+    }));
+    const byoMenuOptions = [
+        ...configuredByo.map((opt) => ({
+            value: `byo:${opt.id}`,
+            label: `${opt.label}${opt.defaultModel ? ` (${opt.defaultModel})` : ''}`,
+        })),
+        { value: 'byo:custom', label: t('Custom endpoint') },
+    ];
+    const selectedLabel =
+        [...managedOptions, ...byoMenuOptions].find((opt) => opt.value === value)?.label ?? t('Configure Think provider');
+
+    const renderGroup = (heading: string, items: Array<{ value: string; label: string }>) => (
+        <div role="group" aria-label={heading} className="space-y-0.5">
+            <div className="px-2.5 pt-1.5 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-text-secondary/70">
+                {heading}
+            </div>
+            {items.map((item) => {
+                const selected = item.value === value;
+                return (
+                    <button
+                        key={item.value}
+                        type="button"
+                        role="option"
+                        aria-selected={selected}
+                        onClick={() => {
+                            onSelect(item.value);
+                            setOpen(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-1.5 text-xs rounded-md flex items-center justify-between gap-2 transition-colors ${
+                            selected
+                                ? 'bg-bg-input text-text-primary'
+                                : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'
+                        }`}
+                    >
+                        <span className="truncate">{item.label}</span>
+                        {selected && <Check size={12} className="text-accent-primary shrink-0" />}
+                    </button>
+                );
+            })}
+        </div>
+    );
+
+    return (
+        <div ref={containerRef} className="relative flex-1 min-w-0">
+            <button
+                id={id}
+                ref={triggerRef}
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={open}
+                onClick={() => setOpen((prev) => !prev)}
+                className="aip-field w-full px-2.5 py-1.5 text-xs text-text-primary bg-bg-input flex items-center justify-between gap-2 hover:bg-bg-elevated transition-colors"
+            >
+                <span className="truncate">{selectedLabel}</span>
+                <ChevronDown size={13} className={`text-text-secondary shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+            </button>
+            <SettingsMenu open={open} origin="top" className="absolute top-full left-0 w-full mt-1 bg-bg-elevated border border-border-subtle rounded-lg shadow-xl z-50 max-h-64 overflow-y-auto">
+                <div role="listbox" className="p-1 space-y-1">
+                    {renderGroup(t('Deepgram-managed'), managedOptions)}
+                    {renderGroup(t('Your AI Providers'), byoMenuOptions)}
+                </div>
+            </SettingsMenu>
+        </div>
+    );
+};
 
 // Live Brain's provider and key, drawn exactly like the Speech Provider card
 // above it: the ProviderSelect card, then AI Providers' key card (mark, name,
@@ -484,54 +609,104 @@ const LiveBrainProviderSettings = () => {
     const [saved, setSaved] = useState(false);
     const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [testDetail, setTestDetail] = useState('');
     const [note, setNote] = useState('');
     const [models, setModels] = useState<LiveBrainModel[]>([]);
     const [modelsLoading, setModelsLoading] = useState(false);
     const [modelsFetchedAt, setModelsFetchedAt] = useState<number>();
+    const [customUrlDraft, setCustomUrlDraft] = useState('');
+    const [customHeaderDraft, setCustomHeaderDraft] = useState('');
+    const [byoModelDraft, setByoModelDraft] = useState('');
+    const feedbackVersion = useRef(0);
+    const refreshVersion = useRef(0);
+    const pendingOptionChanges = useRef(0);
+    const [optionsSaving, setOptionsSaving] = useState(false);
+    const modelsVersion = useRef(0);
 
     const refresh = useCallback(async () => {
-        try { setConfig(await api.getLiveBrainConfig()); }
-        catch { setNote(t('Could not load Live Brain settings.')); }
+        const version = ++refreshVersion.current;
+        try {
+            const loaded = await api.getLiveBrainConfig();
+            if (version === refreshVersion.current) setConfig(loaded);
+        } catch {
+            if (version === refreshVersion.current) setNote(t('Could not load Live Brain settings.'));
+        }
     }, [api, t]);
 
     useEffect(() => {
         void refresh();
-        return api?.onCredentialsChanged?.(() => void refresh());
+        return api?.onCredentialsChanged?.(() => {
+            ++feedbackVersion.current;
+            setTestStatus('idle');
+            setTestDetail('');
+            void refresh();
+        });
     }, [api, refresh]);
-    useEffect(() => () => clearTimeout(savedTimer.current), []);
+    useEffect(() => () => {
+        clearTimeout(savedTimer.current);
+        ++feedbackVersion.current;
+        ++refreshVersion.current;
+    }, []);
 
     const provider = config?.provider;
     const keyProvider: LiveBrainKeyProvider | null = isLiveBrainKeyProvider(provider) ? provider : null;
 
+    useEffect(() => setCustomUrlDraft(config?.deepgram?.byoCustomUrl ?? ''), [config?.deepgram?.byoCustomUrl]);
+    useEffect(() => setByoModelDraft(config?.deepgram?.byoModel ?? ''),
+        [config?.deepgram?.byoKeyProvider, config?.deepgram?.byoModel]);
+
     const loadModels = useCallback(async () => {
+        const version = ++modelsVersion.current;
         setModelsLoading(true);
         try {
             const result = await api.listLiveBrainModels();
+            if (version !== modelsVersion.current) return;
             setModels(result.models);
             setModelsFetchedAt(Date.now());
             if (!result.success && result.error) setNote(t(result.error));
         } catch {
-            setNote(t('Could not load the model list.'));
+            if (version === modelsVersion.current) setNote(t('Could not load the model list.'));
         } finally {
-            setModelsLoading(false);
+            if (version === modelsVersion.current) setModelsLoading(false);
         }
     }, [api, t]);
 
     // The list belongs to the provider and the key in use; reload when either changes.
     useEffect(() => {
         setModels([]);
-        if (keyProvider && config?.hasKey) void loadModels();
-    }, [keyProvider, config?.hasKey, config?.keySource, loadModels]);
+        if (keyProvider && (config?.hasKey || keyProvider === 'deepgram-voice-agent')) void loadModels();
+        else setModelsLoading(false);
+        return () => { ++modelsVersion.current; };
+    }, [keyProvider, config?.hasKey, config?.keySource, config?.deepgram?.managedProvider, config?.deepgram?.thinkMode, loadModels]);
 
-    const resetFeedback = () => { setNote(''); setTestStatus('idle'); };
+    const resetFeedback = () => {
+        ++feedbackVersion.current;
+        ++modelsVersion.current;
+        setModelsLoading(false);
+        setNote('');
+        setTestStatus('idle');
+        setTestDetail('');
+    };
+
+    const saveOptionChange = async (persist: () => Promise<LiveBrainSettingsResult>) => {
+        resetFeedback();
+        ++pendingOptionChanges.current;
+        setOptionsSaving(true);
+        try {
+            const result = await persist().catch(() => ({ success: false } as LiveBrainSettingsResult));
+            if (!result.success) setNote(t(result.message || result.error || 'Could not save Live Brain settings.'));
+            await refresh();
+            return result.success;
+        } finally {
+            if (--pendingOptionChanges.current === 0) setOptionsSaving(false);
+        }
+    };
 
     const changeProvider = async (value: string) => {
         if (!isLiveBrainKeyProvider(value) && value !== 'pipeline') return;
-        resetFeedback();
         setKeyDraft('');
-        const result = await api.setLiveBrainProvider(value).catch(() => ({ success: false } as LiveBrainSettingsResult));
-        if (!result.success) setNote(t(result.message || result.error || 'Could not save Live Brain settings.'));
-        await refresh();
+        setCustomHeaderDraft('');
+        await saveOptionChange(() => api.setLiveBrainProvider(value));
     };
 
     const saveKey = async (apiKey: string) => {
@@ -558,21 +733,23 @@ const LiveBrainProviderSettings = () => {
         }
     };
 
-    const setOption = async (options: Parameters<typeof api.setLiveBrainOptions>[0]) => {
-        resetFeedback();
-        const result = await api.setLiveBrainOptions(options).catch(() => ({ success: false } as LiveBrainSettingsResult));
-        if (!result.success) setNote(t(result.message || result.error || 'Could not save Live Brain settings.'));
-        await refresh();
-    };
+    const setOption = (options: Parameters<typeof api.setLiveBrainOptions>[0]) =>
+        saveOptionChange(() => api.setLiveBrainOptions(options));
 
     const testConnection = async () => {
+        if (pendingOptionChanges.current || saving) return;
+        const version = ++feedbackVersion.current;
         setNote('');
+        setTestDetail('');
         setTestStatus('testing');
         try {
             const result = await api.testLiveBrainConnection();
+            if (version !== feedbackVersion.current) return;
             setTestStatus(result.success ? 'success' : 'error');
-            if (!result.success) setNote(t(result.message || result.error || 'Connection failed.'));
+            if (result.success) setTestDetail(result.message ? t(result.message) : '');
+            else setNote(t(result.message || result.error || 'Connection failed.'));
         } catch {
+            if (version !== feedbackVersion.current) return;
             setTestStatus('error');
             setNote(t('Connection failed.'));
         }
@@ -607,6 +784,7 @@ const LiveBrainProviderSettings = () => {
                                     { id: 'gemini-live', label: t('Gemini Live'), badge: provider === 'gemini-live' && config.hasKey ? 'Saved' : null, desc: t('Google Gemini Live API'), color: 'blue', icon: <BrandMark provider="google" />, neutralTile: true },
                                     { id: 'openai-realtime', label: t('OpenAI Realtime'), badge: provider === 'openai-realtime' && config.hasKey ? 'Saved' : null, desc: t('OpenAI Realtime API'), color: 'green', icon: <BrandMark provider="openai" />, neutralTile: true },
                                     { id: 'elevenlabs-realtime', label: t('ElevenLabs Realtime'), badge: provider === 'elevenlabs-realtime' && config.hasKey ? 'Saved' : null, desc: t('Eleven Realtime v1 API'), color: 'teal', icon: <BrandMark provider="elevenlabs" />, neutralTile: true },
+                                    { id: 'deepgram-voice-agent', label: t('Deepgram Voice Agent'), badge: provider === 'deepgram-voice-agent' && config.hasKey ? 'Saved' : null, desc: t('Deepgram Voice Agent API'), color: 'purple', icon: <BrandMark provider="deepgram" />, neutralTile: true },
                                     { id: 'pipeline', label: t('Existing pipeline'), badge: null, desc: t('The Auto Answer engine; no extra key'), color: 'blue', icon: <BrandMark provider="natively" />, neutralTile: true },
                                 ]}
                             />
@@ -706,7 +884,7 @@ const LiveBrainProviderSettings = () => {
                                 <div className="aip-provider-row">
                                     <button
                                         onClick={() => void testConnection()}
-                                        disabled={testStatus === 'testing'}
+                                        disabled={testStatus === 'testing' || optionsSaving || saving}
                                         className="aip-btn shrink-0"
                                         data-tone={testStatus === 'success' ? 'ok' : testStatus === 'error' ? 'danger' : undefined}
                                         title={note || t('Test Connection')}
@@ -726,21 +904,146 @@ const LiveBrainProviderSettings = () => {
                                                         t('Test Connection')}
                                         </SizedLabelSwap>
                                     </button>
-                                    <AipModelList
-                                        pickOnly
-                                        catalogIsComplete
-                                        models={listedModels}
-                                        enabled={[]}
-                                        onToggle={() => {}}
-                                        onReset={() => {}}
-                                        defaultId={currentModel}
-                                        onSetDefault={(model) => void setOption({ provider: keyProvider, model })}
-                                        refreshing={modelsLoading}
-                                        onRefresh={() => void loadModels()}
-                                        lastFetchedAt={modelsFetchedAt}
-                                    />
+                                    {(keyProvider !== 'deepgram-voice-agent' || config.deepgram?.thinkMode !== 'byo') && (
+                                        <AipModelList
+                                            pickOnly
+                                            catalogIsComplete
+                                            models={listedModels}
+                                            enabled={[]}
+                                            onToggle={() => {}}
+                                            onReset={() => {}}
+                                            defaultId={currentModel}
+                                            onSetDefault={(model) => void setOption(
+                                                keyProvider === 'deepgram-voice-agent'
+                                                    ? { provider: 'deepgram-voice-agent', managedModel: model }
+                                                    : { provider: keyProvider, model },
+                                            )}
+                                            refreshing={modelsLoading}
+                                            onRefresh={() => void loadModels()}
+                                            lastFetchedAt={modelsFetchedAt}
+                                        />
+                                    )}
                                 </div>
 
+                                {keyProvider === 'deepgram-voice-agent' && config.deepgram && (() => {
+                                    const dg = config.deepgram;
+                                    const thinkSelectValue = dg.thinkMode === 'byo'
+                                        ? `byo:${dg.byoKeyProvider}`
+                                        : `managed:${dg.managedProvider}`;
+                                    const configuredByo = dg.byoOptions.filter(o => o.configured && o.id !== 'custom');
+                                    const selectedByo = dg.byoOptions.find(o => o.id === dg.byoKeyProvider);
+                                    return (
+                                        <div className="space-y-3 pt-1">
+                                            <div className="aip-provider-row">
+                                                <label htmlFor="deepgram-think-provider" className="aip-meta shrink-0">{t('AI Provider')}</label>
+                                                <DeepgramThinkSelect
+                                                    id="deepgram-think-provider"
+                                                    value={thinkSelectValue}
+                                                    configuredByo={configuredByo}
+                                                    onSelect={(val) => {
+                                                        if (val.startsWith('managed:')) {
+                                                            const mp = val.slice('managed:'.length) as DeepgramManagedProvider;
+                                                            void setOption({ provider: 'deepgram-voice-agent', thinkMode: 'managed', managedProvider: mp });
+                                                        } else if (val.startsWith('byo:')) {
+                                                            const byoId = val.slice('byo:'.length);
+                                                            void setOption({ provider: 'deepgram-voice-agent', thinkMode: 'byo', byoKeyProvider: byoId });
+                                                        }
+                                                    }}
+                                                />
+                                            </div>
+                                            <p
+                                                className="aip-meta"
+                                                title={t(DEEPGRAM_UNAVAILABLE_TOOLTIP)}
+                                            >
+                                                {t('Unavailable: Codex, Antigravity, local Ollama')} — {t(DEEPGRAM_UNAVAILABLE_TOOLTIP)}
+                                            </p>
+                                            {dg.thinkMode === 'byo' && (
+                                                <div className="space-y-2">
+                                                    <div className="aip-provider-row">
+                                                        <label htmlFor="deepgram-byo-model" className="aip-meta shrink-0">{t('Model')}</label>
+                                                        <input
+                                                            id="deepgram-byo-model"
+                                                            value={byoModelDraft}
+                                                            onChange={event => setByoModelDraft(event.target.value)}
+                                                            placeholder={t('Model ID')}
+                                                            className="aip-field aip-input px-2.5 py-1.5 text-xs flex-1"
+                                                        />
+                                                        <button
+                                                            type="button"
+                                                            disabled={byoModelDraft.trim() === (dg.byoModel ?? '')}
+                                                            onClick={() => void setOption({ provider: 'deepgram-voice-agent', byoModel: byoModelDraft })}
+                                                            className="aip-btn shrink-0"
+                                                            data-size="sm"
+                                                        >
+                                                            {t('Save')}
+                                                        </button>
+                                                    </div>
+                                                    {selectedByo && dg.byoKeyProvider !== 'custom' && (
+                                                        <p className="aip-meta">
+                                                            {t('Your {provider} API key is transmitted to Deepgram\'s servers to authenticate the think model request.').replace('{provider}', selectedByo.label)}
+                                                        </p>
+                                                    )}
+                                                    {dg.byoKeyProvider === 'custom' && (
+                                                        <div className="space-y-2">
+                                                            <div className="aip-provider-row">
+                                                                <input
+                                                                    type="url"
+                                                                    value={customUrlDraft}
+                                                                    onChange={(e) => setCustomUrlDraft(e.target.value)}
+                                                                    placeholder="https://example.com/v1/chat/completions"
+                                                                    aria-label={t('Custom endpoint URL')}
+                                                                    className="aip-field aip-input px-2.5 py-1.5 text-xs flex-1"
+                                                                />
+                                                            </div>
+                                                            <div className="aip-provider-row">
+                                                                <input
+                                                                    type="password"
+                                                                    value={customHeaderDraft}
+                                                                    onChange={(e) => setCustomHeaderDraft(e.target.value)}
+                                                                    placeholder={dg.byoHasCustomHeader ? '••••••••••••' : 'Authorization: Bearer ...'}
+                                                                    aria-label={t('Custom auth header')}
+                                                                    className="aip-field aip-input px-2.5 py-1.5 text-xs flex-1"
+                                                                    autoComplete="off"
+                                                                />
+                                                                <button
+                                                                    onClick={() => void setOption({
+                                                                        provider: 'deepgram-voice-agent',
+                                                                        byoCustomUrl: customUrlDraft.trim(),
+                                                                        ...(customHeaderDraft.trim() ? { byoCustomHeader: customHeaderDraft.trim() } : {}),
+                                                                    }).then(saved => { if (saved) setCustomHeaderDraft(''); })}
+                                                                    className="aip-btn shrink-0"
+                                                                    data-size="sm"
+                                                                >
+                                                                    {t('Save')}
+                                                                </button>
+                                                            </div>
+                                                            {dg.byoHasCustomHeader && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => void setOption({
+                                                                        provider: 'deepgram-voice-agent', byoCustomHeader: '',
+                                                                    }).then(saved => { if (saved) setCustomHeaderDraft(''); })}
+                                                                    className="aip-btn"
+                                                                    data-size="sm"
+                                                                >
+                                                                    {t('Remove saved auth header')}
+                                                                </button>
+                                                            )}
+                                                            {dg.byoHasCustomHeader && customUrlDraft.trim() !== dg.byoCustomUrl && (
+                                                                <p className="aip-meta">{t('Changing the endpoint clears the saved auth header. Enter a header for the new endpoint if it requires one.')}</p>
+                                                            )}
+                                                            <p className="aip-meta">
+                                                                {t('Your custom endpoint auth header is transmitted to Deepgram\'s servers to authenticate the think model request.')}
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
+
+                                {testDetail && testStatus === 'success' && <p className="aip-meta settings-swap-in" role="status">{testDetail}</p>}
                                 {note && <p className="aip-meta aip-danger-fg aip-provider-note settings-swap-in" role="alert">{note}</p>}
                                 <style>{AIP_CSS}</style>
                             </div>

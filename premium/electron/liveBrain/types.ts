@@ -9,6 +9,7 @@ export interface LiveBrainStartContext {
     instructions: string;
     notebook: NotebookSnapshot;
     recentTurns: ConversationTurn[];
+    refreshContext?(): Pick<LiveBrainStartContext, 'instructions' | 'notebook' | 'recentTurns'>;
     signal: AbortSignal;
 }
 

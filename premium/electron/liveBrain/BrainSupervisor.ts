@@ -3,8 +3,13 @@ import { createResponseParser } from './responseParser';
 import type { ResponseClock } from './ResponseOrchestrator';
 import type { ConversationTurn, LiveBrain, LiveBrainEvent, LiveBrainId, LiveBrainStartContext } from './types';
 
-const REALTIME = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime'] as const;
-const ROLLOVER_MS = { 'gemini-live': 13.5 * 60_000, 'openai-realtime': 50 * 60_000, 'elevenlabs-realtime': 8.5 * 60_000 };
+const REALTIME = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent'] as const;
+const ROLLOVER_MS = {
+    'gemini-live': 13.5 * 60_000,
+    'openai-realtime': 50 * 60_000,
+    'elevenlabs-realtime': 8.5 * 60_000,
+    'deepgram-voice-agent': 110 * 60_000,
+};
 const MAX_AUDIO_SAMPLES = 160_000; // 10 s of 16 kHz PCM
 const MAX_RESPONSE_CHARS = 16_000; // notebook only; the overlay receives the entire stream
 const NO_RESPONSE_MS = 6_000;
@@ -148,14 +153,24 @@ export class BrainSupervisor<Timer> {
 
     private launch(lease: Lease): void {
         const { notebook } = this.options;
-        const snapshot = notebook.snapshot();
-        const recentTurns = notebook.recentTurns();
-        if (lease === this.standby) lease.seeded = recentTurns;
+        const refreshContext = () => {
+            const recentTurns = notebook.recentTurns();
+            const instructions = this.options.instructions(lease.brain.id);
+            return {
+                notebook: notebook.snapshot(), recentTurns,
+                // Deepgram seeds its history separately in agent.context.messages.
+                instructions: lease.brain.id === 'deepgram-voice-agent'
+                    ? instructions
+                    : [instructions, notebook.renderNotebook(), renderRecentTurns(recentTurns)].filter(Boolean).join('\n\n'),
+            };
+        };
+        const initial = refreshContext();
+        if (lease === this.standby) lease.seeded = initial.recentTurns;
         else this.quoteAfter = this.options.clock.now();
         const ctx: LiveBrainStartContext = {
             sessionId: this.options.sessionId, responseNamespace: `${this.options.sessionId}:${++this.connectionSequence}`,
-            signal: lease.controller.signal, notebook: snapshot, recentTurns,
-            instructions: [this.options.instructions(lease.brain.id), notebook.renderNotebook(), renderRecentTurns(recentTurns)].filter(Boolean).join('\n\n'),
+            signal: lease.controller.signal, ...initial,
+            ...(lease.brain.id === 'deepgram-voice-agent' ? { refreshContext } : {}),
         };
         lease.unsubscribe = lease.brain.onEvent(event => this.onEvent(lease, event));
         void lease.brain.start(ctx).then(() => {

@@ -60,10 +60,19 @@ export interface AppSettings {
     liveBrainGeminiModel?: string;
     liveBrainOpenaiModel?: string;
     liveBrainElevenlabsModel?: string;
+    liveBrainDeepgramThinkMode?: 'managed' | 'byo';
+    liveBrainDeepgramManagedProvider?: 'open_ai' | 'anthropic' | 'google' | 'nvidia';
+    liveBrainDeepgramManagedModel?: string;
+    liveBrainDeepgramByoKeyProvider?: string;
+    liveBrainDeepgramByoCustomUrl?: string;
+    /** Legacy plaintext header, removed when Live Brain IPC initializes. */
+    liveBrainDeepgramByoCustomHeader?: string;
+    liveBrainDeepgramByoModels?: Record<string, string>;
     liveBrainPromptVariant?: 'full' | 'trimmed';
     liveBrainReuseGeminiKey?: boolean;
     liveBrainReuseOpenaiKey?: boolean;
     liveBrainReuseElevenlabsKey?: boolean;
+    liveBrainReuseDeepgramKey?: boolean;
     // Agreement to share the transcripts of meetings where Auto Answer runs, for
     // training the Auto Answer decider (autoAnswerAccess.ts; Evin 2026-11-13).
     // Free users need it to run Auto Answer; for Pro/trial it is an opt-in.
@@ -484,29 +493,28 @@ export class SettingsManager {
      * was unchanged, so the setting silently reverted on restart.
      */
     public set<K extends keyof AppSettings>(key: K, value: AppSettings[K]): boolean {
+        return this.setValues({ [key]: value } as Partial<AppSettings>);
+    }
+
+    public setValues(values: Partial<AppSettings>): boolean {
         // R-15: when the store is degraded, saveSettings() refuses. Mutating
         // in-memory first left the process believing the write succeeded while
         // disk still held the old value — and roughly fifteen IPC handlers report
         // success to the renderer off this call. Refuse before mutating so memory
         // and disk cannot disagree.
         if (this.settingsUnreadable) {
-            console.warn(`[SettingsManager] Refusing to set "${String(key)}": the settings store is degraded this session (see the quarantine warning at startup).`);
+            console.warn(`[SettingsManager] Refusing to set "${Object.keys(values).join(', ')}": the settings store is degraded this session (see the quarantine warning at startup).`);
             return false;
         }
-        const hadPreviousValue = Object.prototype.hasOwnProperty.call(this.settings, key);
-        const previousValue = this.settings[key];
-        this.settings[key] = value;
+        const previous = this.settings;
+        this.settings = { ...previous, ...values };
         if (this.saveSettings()) return true;
 
         // A write can fail even when the store loaded successfully (for example,
         // a locked Windows profile, antivirus holding the destination, or a full
         // disk). Keep the live process aligned with the last durable value so IPC
         // callers never broadcast a change that will disappear on restart.
-        if (hadPreviousValue) {
-            this.settings[key] = previousValue;
-        } else {
-            delete this.settings[key];
-        }
+        this.settings = previous;
         return false;
     }
 

@@ -7,7 +7,7 @@ const dist = '../../../../dist-electron/';
 const load = (name) => require(`${dist}premium/electron/liveBrain/${name}.js`);
 const { createResponseParser, NO_ACTION_SENTINEL, ASK_SENTINEL } = load('responseParser');
 const { DECIDE_TURN_TOOL, toGeminiDecideTurnTool, parseDecideTurnArgs } = load('decideTurnTool');
-const { buildDeciderInstructions, buildAnswerInstructions } = load('instructions');
+const { buildDeciderInstructions, buildAnswerInstructions, buildDeepgramInstructions } = load('instructions');
 const { createLiveBrain } = load('index');
 const { FakeLiveBrain } = load('__tests__/FakeLiveBrain');
 const {
@@ -168,9 +168,10 @@ test('answer variants retain the imported voice while trimmed omits scenario rul
 test('the exhaustive factory constructs each known provider and rejects unknown ids', () => {
     for (const id of ['gemini-live', 'gemini']) assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, 'gemini-live');
     assert.equal(createLiveBrain('pipeline', {}).id, 'pipeline');
-    for (const id of ['openai-realtime', 'elevenlabs-realtime']) {
+    for (const id of ['openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent']) {
         assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, id);
     }
+    assert.ok(buildDeepgramInstructions({ modeTemplate: 'technical-interview' }).length <= 25_000);
     assert.throws(() => createLiveBrain('future-brain', {}), { message: 'Unsupported live brain: future-brain' });
 });
 

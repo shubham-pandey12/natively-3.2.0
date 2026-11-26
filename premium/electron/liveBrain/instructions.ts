@@ -6,6 +6,7 @@ import {
     MODE_TECHNICAL_INTERVIEW_PROMPT,
     UNIVERSAL_WHAT_TO_ANSWER_PROMPT,
 } from '../../../electron/llm/prompts';
+import type { DeepgramThinkMode } from '../../../src/types/liveBrainSettings';
 import { ASK_SENTINEL, NO_ACTION_SENTINEL } from './responseParser';
 import type { LiveBrainId } from './types';
 
@@ -43,7 +44,47 @@ const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: If the entire interviewer
 // an interruption, and Gemini then repeated its previous answer.
 export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), output exactly No action. and nothing else. This also applies right after you were interrupted: never repeat, continue, or rephrase your previous answer because of a filler turn. Answer again only when the interviewer asks a new question or changes a requirement.';
 
-export function buildProviderInstructions(ctx: AnswerContext, variant: 'full' | 'trimmed', id: LiveBrainId): string {
+export const DEEPGRAM_MAX_MANAGED_PROMPT_CHARS = 25_000;
+
+export function buildDeepgramInstructions(ctx: AnswerContext): string {
+    const base = [CORE_IDENTITY, EXECUTION_CONTRACT, HUMAN_SPOKEN_ANSWER_CONTRACT]
+        .map(block => block.trim())
+        .filter(Boolean)
+        .join('\n\n');
+    const protocol = `Speak only what the candidate should say next, without reading formatting aloud.
+For filler, small talk, or an unfinished interviewer question, say nothing or say exactly "No action."
+For a clarification, start with "Ask:" and say only the clarification question.
+Otherwise, speak the answer directly without a sentinel.
+${CLARIFICATION_RULE} If the interviewer moves on without clarifying, answer with a stated assumption.
+${CORRECTION_RULE}
+If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.`;
+    const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${protocol}\n\n${FILLER_TURN_RULE}`;
+    const modeContext = ctx.modeContext?.trim();
+    const modePrompt = ctx.modePrompt?.trim();
+    const extra = [modePrompt, contextBlocks(ctx, ctx.profileContext).trim(), modeContext]
+        .filter(Boolean).map(block => `\n\n${block}`).join('');
+    const full = `${core}${extra}`;
+    if (full.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) return full;
+    console.warn(`[LiveBrain] Deepgram managed prompt length (${full.length}) exceeds ${DEEPGRAM_MAX_MANAGED_PROMPT_CHARS} chars; trimming runtime context.`);
+    const budget = Math.max(0, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - core.length);
+    if (core.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) {
+        return `${core}${extra.slice(0, budget)}`;
+    }
+    return core.slice(0, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+}
+
+export function buildProviderInstructions(
+    ctx: AnswerContext,
+    variant: 'full' | 'trimmed',
+    id: LiveBrainId,
+    deepgramThinkMode?: DeepgramThinkMode,
+): string {
+    if (id === 'deepgram-voice-agent') {
+        if (deepgramThinkMode === 'byo') {
+            return `${buildAnswerInstructions(ctx, 'trimmed', 'spoken')}\n\n${FILLER_TURN_RULE}`;
+        }
+        return buildDeepgramInstructions(ctx);
+    }
     const instructions = `${buildAnswerInstructions(ctx, variant, id === 'openai-realtime' ? 'text' : 'spoken')}\n\n${FILLER_TURN_RULE}`;
     return id === 'elevenlabs-realtime' ? `${instructions}\n\n${ELEVENLABS_TURN_OUTPUT}` : instructions;
 }

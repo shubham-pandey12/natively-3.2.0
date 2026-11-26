@@ -1,6 +1,13 @@
 import { notePromptDebugLiveBrain, isPromptDebugEnabled, notePromptDebugAnswerTiming } from '../../../electron/llm/promptDebug';
-import type { LiveBrainMeetingOptions, LiveBrainMeetingSession } from '../../../electron/premium/liveBrain';
-import { DEFAULT_ELEVENLABS_REALTIME_MODEL, DEFAULT_OPENAI_REALTIME_MODEL, type LiveBrainKeyProvider, type LiveBrainSettingsResult } from '../../../src/types/liveBrainSettings';
+import type { DeepgramThinkConfig, LiveBrainMeetingOptions, LiveBrainMeetingSession } from '../../../electron/premium/liveBrain';
+import {
+    DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
+    DEFAULT_ELEVENLABS_REALTIME_MODEL,
+    DEFAULT_OPENAI_REALTIME_MODEL,
+    type LiveBrainKeyProvider,
+    type LiveBrainSettingsResult,
+} from '../../../src/types/liveBrainSettings';
+import { DeepgramVoiceAgentBrain, DeepgramVoiceAgentError } from './brains/DeepgramVoiceAgentBrain';
 import { DEFAULT_GEMINI_LIVE_MODEL, GeminiLiveBrain, GeminiLiveError, type GeminiLiveOptions } from './brains/GeminiLiveBrain';
 import { RealtimeBrainError } from './brains/RealtimeBrain';
 import { createLiveBrain } from './index';
@@ -18,6 +25,7 @@ const DEFAULT_MODELS: Record<LiveBrain['id'], string> = {
     'gemini-live': DEFAULT_GEMINI_LIVE_MODEL,
     'openai-realtime': DEFAULT_OPENAI_REALTIME_MODEL,
     'elevenlabs-realtime': DEFAULT_ELEVENLABS_REALTIME_MODEL,
+    'deepgram-voice-agent': DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     pipeline: 'pipeline',
 };
 
@@ -31,7 +39,13 @@ function startContext(sessionId: string, instructions: string, signal: AbortSign
 export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: LiveBrain): LiveBrainMeetingSession {
     const preferred = options.provider ?? 'gemini-live';
     const promptVariant = options.promptVariant ?? 'full';
-    const instructions = (id: LiveBrain['id']) => buildProviderInstructions(options, promptVariant, id);
+    const instructions = (id: LiveBrain['id']) => {
+        if (id === 'deepgram-voice-agent') {
+            const dg = options.resolveProvider?.('deepgram-voice-agent')?.deepgramThink ?? options.deepgramThink;
+            return buildProviderInstructions(options, promptVariant, id, dg?.thinkMode);
+        }
+        return buildProviderInstructions(options, promptVariant, id);
+    };
     const clock = { now: Date.now, setTimeout, clearTimeout };
     const debug = isPromptDebugEnabled();
     let speechStoppedAt: number | undefined;
@@ -85,7 +99,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 return { brain, model };
             }
             if (!config?.apiKey) return undefined;
-            return { brain: createLiveBrain(id, { apiKey: config.apiKey, model }), model };
+            const deepgramThink = id === 'deepgram-voice-agent'
+                ? (config.deepgramThink ?? options.deepgramThink)
+                : undefined;
+            return { brain: createLiveBrain(id, { apiKey: config.apiKey, model, ...(deepgramThink ? { deepgramThink } : {}) }), model };
         },
         onSwitch: data => {
             diagnostic('brain-switch', data);
@@ -185,9 +202,14 @@ const connectionError: Record<LiveBrainErrorCode, string> = {
     unsupported: 'This Gemini Live configuration is unsupported.',
 };
 
-export async function testConnection(options: GeminiLiveOptions & { provider?: LiveBrainKeyProvider }): Promise<LiveBrainSettingsResult> {
+export async function testConnection(
+    options: GeminiLiveOptions & { provider?: LiveBrainKeyProvider; deepgramThink?: DeepgramThinkConfig; thinkTimeoutMs?: number },
+): Promise<LiveBrainSettingsResult> {
     const provider = options.provider ?? 'gemini-live';
     const config = { ...options, setupTimeoutMs: options.setupTimeoutMs ?? 5_000, backoffMs: [] };
+    if (provider === 'deepgram-voice-agent') {
+        return testDeepgramConnection(config);
+    }
     const brain = provider === 'gemini-live' ? new GeminiLiveBrain(config) : createLiveBrain(provider, config);
     const name = provider === 'gemini-live' ? 'Gemini Live' : provider === 'openai-realtime' ? 'OpenAI Realtime' : 'ElevenLabs Realtime';
     try {
@@ -197,6 +219,53 @@ export async function testConnection(options: GeminiLiveOptions & { provider?: L
         const code = error instanceof GeminiLiveError || error instanceof RealtimeBrainError ? error.code : 'protocol';
         const message = provider === 'gemini-live' ? connectionError[code] : realtimeConnectionError(code, name);
         return { success: false, error: code, message };
+    } finally {
+        await brain.stop();
+    }
+}
+
+async function testDeepgramConnection(
+    options: GeminiLiveOptions & { deepgramThink?: DeepgramThinkConfig; thinkTimeoutMs?: number },
+): Promise<LiveBrainSettingsResult> {
+    const brain = new DeepgramVoiceAgentBrain(options);
+    const instructions = 'Reply with exactly OK to the test message.';
+    try {
+        await brain.start(startContext('connection-test', instructions, new AbortController().signal));
+    } catch (error) {
+        await brain.stop();
+        const code = error instanceof DeepgramVoiceAgentError ? error.code : 'protocol';
+        return { success: false, error: code, message: `Deepgram connection failed: ${realtimeConnectionError(code, 'Deepgram Voice Agent')}` };
+    }
+    try {
+        const reply = await new Promise<{ ok: true } | { ok: false; code: LiveBrainErrorCode; detail?: string }>(resolve => {
+            let settled = false;
+            const finish = (res: { ok: true } | { ok: false; code: LiveBrainErrorCode; detail?: string }) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                unsubscribe();
+                resolve(res);
+            };
+            const timer = setTimeout(
+                () => finish({ ok: false, code: 'timeout', detail: 'Think model did not reply in time.' }),
+                options.thinkTimeoutMs ?? 8_000,
+            );
+            const unsubscribe = brain.onEvent(event => {
+                if (event.type === 'response_delta' && /^ok[.!]?$/i.test(event.text.trim())) finish({ ok: true });
+                else if (event.type === 'error') finish({ ok: false, code: event.code, detail: realtimeConnectionError(event.code, 'Deepgram Think') });
+            });
+            if (!brain.injectUserMessage('Reply with OK.')) {
+                finish({ ok: false, code: 'protocol', detail: 'Could not send test prompt.' });
+            }
+        });
+        if (!reply.ok) {
+            return {
+                success: false,
+                error: reply.code,
+                message: `Deepgram key valid, but Think model failed${reply.detail ? `: ${reply.detail}` : '.'}`,
+            };
+        }
+        return { success: true, message: 'Deepgram key verified · Think model replied.' };
     } finally {
         await brain.stop();
     }

@@ -104,6 +104,8 @@ export interface StoredCredentials {
     liveBrainGeminiKey?: string;
     liveBrainOpenaiKey?: string;
     liveBrainElevenlabsKey?: string;
+    liveBrainDeepgramKey?: string;
+    liveBrainDeepgramEndpoint?: { url: string; authHeader?: string };
     groqApiKey?: string;
     openaiApiKey?: string;
     claudeApiKey?: string;
@@ -947,6 +949,23 @@ export class CredentialsManager {
         return this.credentials.liveBrainElevenlabsKey;
     }
 
+    public getLiveBrainDeepgramEndpoint(): StoredCredentials['liveBrainDeepgramEndpoint'] {
+        return this.credentials.liveBrainDeepgramEndpoint;
+    }
+
+    public setLiveBrainDeepgramEndpoint(url: string, authHeader?: string): boolean {
+        if (this.refuseWriteWhileDegraded('set Deepgram endpoint')) return false;
+        const previous = this.credentials.liveBrainDeepgramEndpoint;
+        this.credentials.liveBrainDeepgramEndpoint = { url, authHeader };
+        if (this.saveCredentials()) return true;
+        this.credentials.liveBrainDeepgramEndpoint = previous;
+        return false;
+    }
+
+    public getLiveBrainDeepgramKey(): string | undefined {
+        return this.credentials.liveBrainDeepgramKey;
+    }
+
     public setLiveBrainGeminiKey(key: string): boolean {
         return this.setLiveBrainKey('liveBrainGeminiKey', key);
     }
@@ -959,7 +978,11 @@ export class CredentialsManager {
         return this.setLiveBrainKey('liveBrainElevenlabsKey', key);
     }
 
-    private setLiveBrainKey(field: 'liveBrainGeminiKey' | 'liveBrainOpenaiKey' | 'liveBrainElevenlabsKey', key: string): boolean {
+    public setLiveBrainDeepgramKey(key: string): boolean {
+        return this.setLiveBrainKey('liveBrainDeepgramKey', key);
+    }
+
+    private setLiveBrainKey(field: 'liveBrainGeminiKey' | 'liveBrainOpenaiKey' | 'liveBrainElevenlabsKey' | 'liveBrainDeepgramKey', key: string): boolean {
         if (this.refuseWriteWhileDegraded('set Live Brain key')) return false;
         const previous = this.credentials[field];
         this.credentials[field] = key.trim() || undefined;

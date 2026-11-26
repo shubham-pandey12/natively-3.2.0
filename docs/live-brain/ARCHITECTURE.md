@@ -34,6 +34,7 @@ It listens to the interviewer continuously, understands like a strong conversati
 | D13 | **ElevenLabs Realtime as a third provider (2026-11-26, user decision).** Live Brain offers **Gemini Live · OpenAI Realtime · ElevenLabs Realtime** (plus the existing pipeline), all working the same way under D12: the realtime model listens and writes the answer itself, streamed into the overlay as it arrives. The user enters an ElevenLabs API key in the Live Brain card like the other two. OpenAIRealtimeBrain and ElevenLabsRealtimeBrain share one protocol client (§4.2, §4.5). The user accepted audio mode with its streamed transcript and discarded audio after the Phase 6 spike. Models: `eleven_realtime_v1_mini` (default) and `eleven_realtime_v1_max` (labelled “slower (~3 s)”). |
 | D14 | **Chat-style question → answer (2026-11-26, user decision).** In the overlay, each interviewer question is shown as an interviewer bubble directly above its Live Brain answer, like ChatGPT. The bubble text comes from the realtime provider's own input transcript: it streams while the interviewer speaks on Gemini, and arrives as one block after speech end on OpenAI (Whisper). When the provider gives no transcript for a turn, the existing STT final (Groq today) fills the bubble. Uses the existing `role: 'interviewer'` overlay row; the rolling transcript strip at the top is unchanged. Filler turns get a bubble with no answer. **Outdated rule (changes §7 replace-in-place for realtime text answers):** every answer stays visible, like a chat. A new answer marks the previous one outdated only when the interviewer cut it off while its text was still streaming (text grew within the last 1.5 s when the interviewer spoke or the provider cancelled). A later correction ("Actually, use MongoDB") appears as a new question and answer below. The pipeline/AnswerWriter paths keep the old 20 s rule. Supersedes the earlier "skip it" on showing the Gemini transcript in chat, and extends the §7 "same overlay UI as Auto Answer" rule with this one row. |
 | D15 | **Filler turns never get an answer (2026-11-26, user decision).** Both layers: (1) every realtime provider's instructions end with a mandatory filler rule (filler-only turn -> exactly `No action.`; never repeat, continue or rephrase the previous answer after being interrupted by filler); (2) a local safety net in ResponseOrchestrator: when the interviewer bubble of a turn is only filler words (mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you...), that turn's answer is not shown, and the previous answer stays current. Exception: while an `Ask:` is waiting, a short reply such as "Yes." is answered. Filler-only speech also gets no interviewer bubble in the chat (user request after the live check). A bubble appears once its text is more than filler ("Okay, short one..."), and a short reply to a waiting Ask is shown. The rolling transcript strip at the top still shows everything. Reverses the earlier ElevenLabs condition "no local filtering". |
+| D16 | **Deepgram Voice Agent as a fourth realtime provider (2026-11-26, user decision).** Add `deepgram-voice-agent` as an optional Live Brain provider (`DeepgramVoiceAgentBrain`, standalone implementation — not extending `RealtimeBrain`). Two think modes: (A) Deepgram-managed (`open_ai`, `anthropic`, `google`, `nvidia`) — only the Deepgram key is needed, 25,000-char prompt cap (`buildDeepgramInstructions`); (B) BYO endpoint — user's existing AI Provider key sent in `agent.think.endpoint.headers` (no Deepgram prompt cap; `agent.think.provider` still required by the Deepgram schema). Provider+model picker in the Live Brain card; selection sent in `agent.think` on session open. Codex, Antigravity, and local Ollama (`localhost`/`127.0.0.1`) are excluded because Deepgram's servers cannot reach private/localhost endpoints. Listening uses Flux Multilingual inside the Voice Agent session. Audio: 16 kHz `linear16` PCM raw binary WebSocket frames (output audio discarded per D6). `KeepAlive` every 8 s; rollover at ~110 min (`agent.context.messages` seeded from `InterviewNotebook`). |
 
 ### Non-goals
 
@@ -111,10 +112,11 @@ Provider selection uses an exhaustive switch. An unknown provider throws; it is 
 
 ```ts
 switch (config.brain) {
-  case 'gemini-live':     return new GeminiLiveBrain(deps);
-  case 'openai-realtime': return new OpenAIRealtimeBrain(deps);
-  case 'elevenlabs-realtime': return new ElevenLabsRealtimeBrain(deps);
-  case 'pipeline':        return new PipelineBrain(deps);
+  case 'gemini-live':          return new GeminiLiveBrain(deps);
+  case 'openai-realtime':      return new OpenAIRealtimeBrain(deps);
+  case 'elevenlabs-realtime':  return new ElevenLabsRealtimeBrain(deps);
+  case 'deepgram-voice-agent': return new DeepgramVoiceAgentBrain(deps);
+  case 'pipeline':             return new PipelineBrain(deps);
   default: { const never: never = config.brain; throw new Error(`Unsupported live brain: ${never}`); }
 }
 ```
@@ -127,7 +129,7 @@ switch (config.brain) {
 // premium/electron/liveBrain/types.ts  (normative shape; names may be refined in Phase 2,
 // but any change must be reflected here)
 
-export type LiveBrainId = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'pipeline';
+export type LiveBrainId = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'deepgram-voice-agent' | 'pipeline';
 
 export interface LiveBrainStartContext {
   sessionId: string;              // one per meeting; reset on new meeting
@@ -238,6 +240,23 @@ Transport: WebSocket to the Gemini Live API (`BidiGenerateContent`). Key from th
 - Desktop connects to `wss://api.elevenlabs.io/v1/convai/realtime` with `xi-api-key` and sends `session.update` on socket open. The update selects the model and `output_modalities:["audio"]`, with mono PCM16 input at 24 kHz, semantic VAD, and PCM output using voice `brian`. Ready follows `session.updated`. The default session limit is 600 seconds. Schedule notebook-seeded rollover at 8.5 minutes.
 - The Phase 6 spike found that both models accepted the text-only configuration and timed out without an answer from interviewer PCM. Forward every `response.output_audio_transcript.delta` as it arrives and discard the underlying audio (D6). Audio-mode transcript events arrived in bursts. Drop any deltas for the interrupted response as soon as cancellation starts.
 - Reuse the answer instructions and spoken sentinel parser (§5, §6), overlay (§7), candidate context, and error handling (§4.2). ElevenLabs adds a stronger instruction for `No action.` and `Ask:`. Mini returned `No action.` in one follow-up filler check, after both models answered filler in the initial spike. Mini still omitted `Ask:` for the ambiguous prompt in the follow-up. Sentinel compliance varies by turn. [Spike and follow-up results](PROGRESS.md#phase-6-step-0--elevenlabs-realtime-spike-2026-11-26)
+
+### 4.6 DeepgramVoiceAgentBrain (optional, paid, D16)
+
+- **Standalone implementation** (`brains/DeepgramVoiceAgentBrain.ts`) — does not extend `RealtimeBrain`.
+- **Transport & Auth:** WebSocket `wss://agent.deepgram.com/v1/agent/converse` with header `Authorization: Token <deepgram_key>`. Handshake: wait for `Welcome`, send `Settings`, become ready on `SettingsApplied`.
+- **Audio I/O:** 16 kHz mono `linear16` PCM sent as raw binary WebSocket frames (640 bytes / 20 ms target, with sparse-silence fill after 300 ms). `audio.output` requests `linear16` at 16 kHz (`container: 'none'`); all incoming binary TTS frames are discarded immediately (D6). Send `{"type":"KeepAlive"}` every 8 s to prevent idle timeout.
+- **Listening:** `agent.listen.provider` selects `flux-general-multi` with `version: "v2"` for model-based turn detection inside Voice Agent.
+- **Think configuration (two modes):**
+  - **Managed (`'managed'`):** `agent.think.provider` uses Deepgram-managed models (`open_ai`, `anthropic`, `google`, `nvidia`) with only the Deepgram API key. `agent.think.prompt` uses `buildDeepgramInstructions(ctx)` (enforced ≤ 25,000 chars).
+  - **BYO (`'byo'`):** `agent.think.endpoint` points to a publicly reachable HTTPS endpoint (`openai`, `anthropic`, `google`, `groq`, `openrouter`, or user-entered custom URL) with the user's saved AI Provider key in `headers` (Deepgram also requires `agent.think.provider` alongside `endpoint`). Prompt uses `buildAnswerInstructions(ctx, 'trimmed', 'spoken')` (no 25k Deepgram cap). BYO model overrides are saved per Think provider. Custom URL and authorization are saved as a single encrypted record. Saving a different URL without a new header clears the old header. Codex, Antigravity, and local Ollama (`localhost`/`127.0.0.1`) are excluded because Deepgram's cloud servers cannot reach Natively-internal or localhost endpoints.
+- **Events & cancellation:**
+  - User `ConversationText` emits a final interviewer transcript and speech-stop event. A synthetic clarification instruction stays out of the interviewer chat when echoed by the provider.
+  - Assistant `ConversationText` opens one response per turn and adds subsequent statements as deltas. `AgentAudioDone` completes that response. An audio completion with no text can signal silence for an uninterrupted turn.
+  - `UserStartedSpeaking` marks interviewer speech and cancels any active local response. Ignore assistant text until a new interviewer transcript or a deliberate text injection starts another turn. Ignore a stale audio completion before the replacement's first text.
+  - On the maximum-session warning, prepare a fresh session. Retry transient errors up to three times without meaningful recovery. A successful setup alone does not replenish the budget. Pass sanitized diagnostics to the renderer.
+- **Candidate remarks & rollover:** Deepgram cannot inject silent user context mid-session (`InjectUserMessage` triggers a reply; `UpdatePrompt` replaces the prompt). Candidate remarks are stored in `InterviewNotebook` and replayed via `agent.context.messages` (`History` items) on reconnect/rollover. Every reconnect re-reads the notebook. On a standby handoff, bounded context that arrived after standby creation is applied via `UpdatePrompt`. Max session length is 2 hours; supervisor rolls over at ~110 min.
+- **Clarification timeout:** `requestClarificationAnswer()` sends `InjectUserMessage` with `CLARIFICATION_ASSUMPTION`.
 
 ### 4.3 PipelineBrain (always-available fallback)
 
@@ -449,15 +468,15 @@ Validation of the `set` payload in main: boolean only; reject anything else.
 
 | Field | Values | Notes |
 |---|---|---|
-| Provider | **Gemini Live** (default) · **OpenAI Realtime** · **ElevenLabs Realtime** (D13) · **Existing pipeline (no extra key)** | Maps to `LiveBrainId` (`'elevenlabs-realtime'` added). Exhaustive list; adding a provider later = add a `LiveBrain` + a row here. |
-| API key (per provider) | Google AI Studio key (Gemini Live) · OpenAI API key (OpenAI Realtime) · ElevenLabs API key (ElevenLabs Realtime) | Masked input, same as Speech Provider keys. Saved via `CredentialsManager` (`setLiveBrainElevenlabsKey`). "Use my AI Providers key" does not apply to ElevenLabs unless an existing ElevenLabs key is already stored elsewhere in Natively (check during implementation; reuse it if so). Dev builds may read `ELEVENLABS_API_KEY` from `.env`, same rules as the other env keys. |
-| "Use my AI Providers key" | checkbox, default **on** when an AI Providers key for that vendor already exists | If the Live Brain key is empty and this is on, use the existing Gemini/OpenAI key from Settings → AI Providers. No duplicate typing needed. |
-| Model | text/select, default chosen in Phase 0 | `liveBrainGeminiModel`, `liveBrainOpenaiModel`, `liveBrainElevenlabsModel` (default `eleven_realtime_v1_mini`; list `eleven_realtime_v1_mini`, `eleven_realtime_v1_max`) (settings store). |
+| Provider | **Gemini Live** (default) · **OpenAI Realtime** · **ElevenLabs Realtime** (D13) · **Deepgram Voice Agent** (D16) · **Existing pipeline (no extra key)** | Maps to `LiveBrainId` (`'elevenlabs-realtime'`, `'deepgram-voice-agent'` added). Exhaustive list; adding a provider later = add a `LiveBrain` + a row here. |
+| API key (per provider) | Google AI Studio key (Gemini Live) · OpenAI API key (OpenAI Realtime) · ElevenLabs API key (ElevenLabs Realtime) · Deepgram API key (Deepgram Voice Agent) | Masked input, same as Speech Provider keys. Saved via `CredentialsManager` (`setLiveBrainElevenlabsKey`, `setLiveBrainDeepgramKey`). "Use my AI Providers key" reuses the stored Deepgram Speech Provider key when enabled for Deepgram Voice Agent. Dev builds may read `DEFAULT_DEEPGRAM_KEY` / `DEEPGRAM_API_KEY` from `.env`, same rules as the other env keys. |
+| "Use my AI Providers key" | checkbox, default **on** when an AI Providers key for that vendor already exists | If the Live Brain key is empty and this is on, use the existing Gemini/OpenAI/ElevenLabs/Deepgram key from Settings. No duplicate typing needed. |
+| Model | text/select, default chosen in Phase 0 | `liveBrainGeminiModel`, `liveBrainOpenaiModel`, `liveBrainElevenlabsModel` (default `eleven_realtime_v1_mini`), and Deepgram Voice Agent Think config (`liveBrainDeepgramThinkMode`, `liveBrainDeepgramManagedProvider`, `liveBrainDeepgramManagedModel`, `liveBrainDeepgramByoKeyProvider`, `liveBrainDeepgramByoCustomUrl`, `liveBrainDeepgramByoCustomHeader`) (settings store). |
 | Instruction variant | Full · Trimmed | `liveBrainPromptVariant`; default decided in Phase 0/7. |
-| Test connection | button | Opens a short session, reports OK / auth error / quota / unsupported model. No audio sent. |
+| Test connection | button | Opens a short session, reports OK / auth error / quota / unsupported model. Deepgram Voice Agent also verifies the configured Think model with `InjectUserMessage`. |
 | Status | text | Last error (auth, quota, rate limit) in plain words. |
 
-Fallback order (§9) is automatic and needs no setting: selected provider → the other realtime providers that have a usable key, in the order Gemini Live, OpenAI Realtime, ElevenLabs Realtime (skipping the failed one) → Existing pipeline.
+Fallback order (§9) is automatic and needs no setting: selected provider → the other realtime providers that have a usable key, in the order Gemini Live, OpenAI Realtime, ElevenLabs Realtime, Deepgram Voice Agent (skipping the failed one) → Existing pipeline.
 
 ### Storage & wiring (mirror Speech Provider keys)
 

@@ -10891,7 +10891,7 @@ export class AppState {
       }
     };
     this.liveBrainRouting.start(onFailure => {
-      const { provider, model, apiKey, promptVariant } = resolveLiveBrainRuntime();
+      const { provider, model, apiKey, promptVariant, deepgramThink } = resolveLiveBrainRuntime();
       const name = this.currentUserName();
       const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
       const modes = ModesManager.getInstance();
@@ -10901,7 +10901,7 @@ export class AppState {
         : '';
       const profileContext = [name && `Candidate: ${name}`, grounding].filter(Boolean).join('\n\n');
       return loadLiveBrainPremium()?.createMeeting({
-        provider, apiKey, model, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
+        provider, apiKey, model, deepgramThink, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
         resolveProvider: resolveLiveBrainRuntime,
         profileContext, modeName: mode?.name, modeTemplate: mode?.templateType,
         modePrompt: modes.getActiveModeSystemPromptSuffix(mode?.id),

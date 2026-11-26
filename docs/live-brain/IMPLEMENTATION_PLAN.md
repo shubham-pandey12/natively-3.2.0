@@ -244,6 +244,20 @@ Acceptance: targets met or gaps documented with numbers; completion report with 
 
 ---
 
+## Phase 8 — Deepgram Voice Agent provider (D16)
+
+**Objective:** add `deepgram-voice-agent` as an optional Live Brain provider supporting both Deepgram-managed Think models and BYO compatible HTTPS endpoints.
+
+Tasks:
+1. Settings & credentials: add `'deepgram-voice-agent'` to `LiveBrainKeyProvider`, `SettingsManager` Think fields (`liveBrainDeepgramThinkMode`, `liveBrainDeepgramManagedProvider`, `liveBrainDeepgramManagedModel`, `liveBrainDeepgramByoKeyProvider`, `liveBrainDeepgramByoModels`, `liveBrainReuseDeepgramKey`), `CredentialsManager` (`liveBrainDeepgramKey` and the encrypted custom endpoint and auth header), and `PROVIDERS` / BYO config resolution in `electron/services/liveBrainSettings.ts` (reusing Natively's existing AI Provider keys without re-entry).
+2. Instructions: add `buildDeepgramInstructions(ctx)` in `premium/electron/liveBrain/instructions.ts` (≤ 25,000 chars for managed mode, asserting length) and handle `'deepgram-voice-agent'` in `buildProviderInstructions`.
+3. Transport: implement standalone `premium/electron/liveBrain/brains/DeepgramVoiceAgentBrain.ts` (`wss://agent.deepgram.com/v1/agent/converse`, `Authorization: Token <key>`, Flux Multilingual listening, 16 kHz raw binary PCM with 300 ms sparse-silence fill, 8 s `KeepAlive`, discarded binary output, one response per turn across `ConversationText` chunks, cancellation on `UserStartedSpeaking` and completion on `AgentAudioDone`, ~110 min rollover with `agent.context.messages` history replay, 3x retry backoff).
+4. Factory & supervisor wiring: add `'deepgram-voice-agent'` to `premium/electron/liveBrain/index.ts`, `BrainSupervisor.ts` (rollover + fallback), `meeting.ts`, and `testConnection` (validating both `SettingsApplied` and a short `InjectUserMessage` Think reply).
+5. Settings UI: update `LiveBrainProviderSettings` in `src/components/SettingsOverlay.tsx` with the Deepgram Voice Agent option, key card + STT key reuse toggle, grouped AI Provider + Model pickers (Deepgram-managed & BYO + Custom endpoint, key-transmission notice, and disabled explanation for Codex/Antigravity/local Ollama), and dual-stage Test Connection status.
+6. Tests: create `premium/electron/liveBrain/brains/__tests__/DeepgramVoiceAgentBrain.test.ts` (mock WebSocket handshake, assistant/user `ConversationText`, `UserStartedSpeaking`, binary discard, `KeepAlive`, managed & BYO configs, ≤ 25k prompt assertion, 401 auth failure, 3x retry) and update settings/foundation coverage. Verify `npx tsc --noEmit` and Live Brain tests.
+
+---
+
 ## Test corpus (Phase 0 creates; all phases use)
 
 | ID | Scenario | Expected |
