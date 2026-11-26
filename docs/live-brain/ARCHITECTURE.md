@@ -489,7 +489,7 @@ Fallback order (§9) is automatic and needs no setting: selected provider → th
 
 | Metric | Target (Gemini Live) |
 |---|---|
-| Interviewer stops → first visible answer words (D12: Gemini's own output transcription) | median ≤ 1.0 s, p90 ≤ 1.5 s (Phase 0 measured ~0.5 s) |
+| Interviewer stops → first visible answer words (D12: Gemini's own output transcription) | median ≤ 1.5 s, p90 ≤ 2.5 s (user accepted 2026-11-26 after the Phase 4b spike: medians 1.46 s on 3.1 Flash Live Preview, 1.44 s on 3.8 Live, default VAD). Tune end-of-speech in Phase 4b to go lower without cutting in on mid-question pauses. |
 | Answer text streaming | word by word as Gemini speaks; never held until the answer is complete |
 | Interviewer stops → full answer visible | speaking pace (accepted under D12, like ChatGPT Voice) — record it, no target |
 | `interviewer_speech_started` → "⏸ interviewer speaking" marker | ≤ 300 ms |

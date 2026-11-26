@@ -47,6 +47,8 @@
 
 - 2026-11-26 — **D12 replaces D10/D11 (user decision after the first live tests):** the goal is ChatGPT Voice behaviour, so Gemini Live writes the answer itself. Its audio is discarded and its output transcription streams into the overlay word by word as it speaks (never waiting for the full answer). Measured before the switch (2 live runs, Windows): speech end → decision 2.6 / 5.2 s, decision → first text 2.2 / 4.6 s (answer model was codex-cli via Fast Response Mode's Auto tier), first word 4.9 / 9.8 s. The D10 trade-off (a separate model writes the answer, so Gemini stops answering) was not stated clearly when D10 was offered; recorded here so it is not repeated.
 
+- 2026-11-26 — **Phase 4b gate:** after the spike (first words median ~1.45 s, incremental transcription), the user accepted median ≤ 1.5 s / p90 ≤ 2.5 s and approved building Phase 4b on `gemini-3.1-flash-live-preview`, with end-of-speech tuning added as task 6.
+
 - 2026-11-26 — **D13:** user asked to add ElevenLabs Realtime (`eleven_realtime_v1_mini` / `v1_max`) as a third provider, same card, same behaviour as Gemini and OpenAI. ElevenLabs states OpenAI-Realtime wire compatibility, so one shared protocol client. Built in Phase 6 after an ElevenLabs spike; text-only output is unverified.
 
 - 2026-11-26 — **Scope:** Live Brain answers only interviewer speech. Typed questions, Direct Assist, manual "What to answer" presses, screenshots and all other modes keep default Natively behaviour (ARCHITECTURE §9a scope rule).

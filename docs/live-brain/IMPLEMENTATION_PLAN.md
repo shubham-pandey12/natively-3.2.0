@@ -186,10 +186,13 @@ Tasks:
 3. `responseParser.ts`: accept spoken sentinels (`No action`, leading `Ask:`) besides the bracket forms; never hold text longer than needed to decide (≤ ~16 chars).
 4. `meeting.ts` / `ResponseOrchestrator.ts`: use the existing text-writing-brain path (response_* events) for Gemini; overlay rows identical to Auto Answer (§7 UI rule); replace-in-place on barge-in; clarification timeout sends the assumption instruction to Gemini as a client text turn. AnswerWriter is not created for Gemini.
 5. Prompt Debugger timings: `speechStoppedAt → firstTextAt → doneAt`, status, model.
+6. **End-of-speech tuning (added after the spike, user accepted 2026-11-26):** expose `realtimeInputConfig.automaticActivityDetection` (`endOfSpeechSensitivity`, `silenceDurationMs`, `prefixPaddingMs`) as constants in GeminiLiveBrain (not user settings yet). Re-run the `--answer` spike on S1 (mid-question pause), S2, S4, S7 with 2–3 settings; pick the fastest setting that does not answer during S1's pause; record in PROGRESS.md.
+
+**Spike result (Task 0, 8182296a):** transcription incremental (~130–140 ms chunks); first words median 1.46 s (3.1 Flash Live Preview) / 1.44 s (3.8 Live). Gate relaxed by the user to median ≤ 1.5 s, p90 ≤ 2.5 s (ARCHITECTURE §11). Default model for Phase 4b: `gemini-3.1-flash-live-preview` (finer chunks, only model that used `Ask:`).
 
 Tests: mock WebSocket replaying recorded sequences: incremental transcription → deltas in order with no buffering; `No action.` / silence → nothing shown; `Ask:` → ask row; `interrupted` mid-answer → cancelled + replacement answer replaces in place; late chunks of a cancelled turn dropped; goAway/429/auth unchanged. Parser: spoken sentinels split across chunks.
 Manual: S1–S9 live on Windows; record first-word and full-answer times vs §11.
-Acceptance: first words median ≤ 1.0 s after speech end; text visibly streams while Gemini speaks; interruptions replace the answer; flag-off parity; existing suites green.
+Acceptance: first words median ≤ 1.5 s, p90 ≤ 2.5 s after speech end; text visibly streams while Gemini speaks; interruptions replace the answer; flag-off parity; existing suites green.
 
 ---
 
