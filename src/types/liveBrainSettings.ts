@@ -1,4 +1,4 @@
-export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'deepgram-voice-agent';
+export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'deepgram-voice-agent' | 'deepgram-flux';
 export type LiveBrainProvider = LiveBrainKeyProvider | 'pipeline';
 export type LiveBrainPromptVariant = 'full' | 'trimmed';
 export type DeepgramThinkMode = 'managed' | 'byo';
@@ -8,6 +8,20 @@ export const DEFAULT_OPENAI_REALTIME_MODEL = 'gpt-realtime-2.1';
 export const DEFAULT_ELEVENLABS_REALTIME_MODEL = 'eleven_realtime_v1_mini';
 export const DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER: DeepgramManagedProvider = 'open_ai';
 export const DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL = 'gpt-4o-mini';
+export const DEFAULT_DEEPGRAM_FLUX_MODEL = 'flux-general-multi';
+
+export interface FluxAiRouteStatus {
+    provider: string;
+    providerLabel: string;
+    model: string;
+    configured: boolean;
+    reason?: string;
+}
+
+export interface FluxAiRouteTestStatus extends FluxAiRouteStatus {
+    replied: boolean;
+    detail: string;
+}
 
 export interface DeepgramByoOption {
     id: string;
@@ -43,6 +57,7 @@ export interface LiveBrainConfig {
     model: string;
     promptVariant: LiveBrainPromptVariant | null;
     deepgram?: DeepgramSettingsConfig;
+    fluxAiRoute?: FluxAiRouteStatus;
 }
 
 export type LiveBrainOptions =
@@ -60,7 +75,16 @@ export type LiveBrainOptions =
     }
     | { promptVariant: LiveBrainPromptVariant };
 
-export type LiveBrainSettingsResult = { success: boolean; error?: string; message?: string };
+export type LiveBrainSettingsResult = {
+    success: boolean;
+    error?: string;
+    message?: string;
+    fluxResult?: {
+        connected: boolean;
+        detail: string;
+        aiRoute: FluxAiRouteTestStatus;
+    };
+};
 
 export interface LiveBrainModel { id: string; label: string; description?: string }
 export type LiveBrainModelsResult = { success: boolean; models: LiveBrainModel[]; error?: string };

@@ -4,7 +4,10 @@ import type { LiveBrainEvent } from './types';
 export type AnswerCompletion = 'completed' | 'cancelled' | 'failed';
 
 export interface AnswerWriterPort {
-    write(request: { question: string; replacesAutomaticAnswer: boolean }): {
+    write(
+        request: { question: string; replacesAutomaticAnswer: boolean },
+        options?: { suppressQuestionRow?: boolean },
+    ): {
         generationId: number;
         done: Promise<AnswerCompletion>;
     };
@@ -110,7 +113,7 @@ export class ResponseOrchestrator<Timer> {
 
     constructor(private readonly ports: {
         answerWriter?: AnswerWriterPort;
-        requestClarificationAnswer?: () => void;
+        requestClarificationAnswer?: () => boolean | void;
         overlay: LiveBrainOverlayPort;
         clock: ResponseClock<Timer>;
     }) {}
@@ -175,6 +178,13 @@ export class ResponseOrchestrator<Timer> {
         this.sttPending = { text: clean, at };
     }
 
+    endProviderTurn(): void {
+        this.closeQuestion();
+        this.question = undefined;
+        this.sttPending = undefined;
+        if (this.current) this.setSpeaking(this.current, false);
+    }
+
     reset(): void {
         this.clearClarification();
         this.closeTextResponse();
@@ -202,6 +212,13 @@ export class ResponseOrchestrator<Timer> {
             case 'answer': {
                 const question = event.question?.trim();
                 if (!question) return;
+                // D15/D17: filler-only speech does not cancel or replace an active answer,
+                // unless an Ask clarification is waiting for a short reply ("Yes.").
+                if (!this.askPending && isFillerOnly(question)) {
+                    if (this.current) this.setSpeaking(this.current, false);
+                    this.closeQuestion();
+                    return;
+                }
                 this.clearClarification();
                 const replacesAutomaticAnswer = this.replaceCurrent();
                 this.closeTextResponse();
@@ -219,12 +236,21 @@ export class ResponseOrchestrator<Timer> {
         }
     }
 
+    noteWriterClarification(question: string): void {
+        this.askPending = true;
+        this.armClarification(question);
+    }
+
     private showAsk(askId: string, clarification: string, question?: string, askStreaming?: boolean): void {
         this.clearClarification();
         this.supersedeForNewTurn(false);
         this.askPending = true;
         this.ports.overlay.showAsk({ askId, clarification, ...(askStreaming === undefined ? {} : { askStreaming }) });
-        if (askStreaming) return;
+        if (!askStreaming) this.armClarification(question);
+    }
+
+    private armClarification(question?: string): void {
+        this.clearClarification();
         const requestAnswer = this.ports.requestClarificationAnswer;
         if (!question && !requestAnswer) return;
 
@@ -232,10 +258,8 @@ export class ResponseOrchestrator<Timer> {
             timer: this.ports.clock.setTimeout(() => {
                 if (this.clarification !== pending) return;
                 this.clarification = undefined;
-                if (requestAnswer) {
-                    requestAnswer();
-                    return;
-                }
+                if (requestAnswer && requestAnswer() !== false) return;
+                if (!question) return;
                 this.replaceCurrent();
                 this.closeTextResponse();
                 this.write(`${question}\n\nThe interviewer did not clarify; state a reasonable assumption first, then answer.`, false);
@@ -313,16 +337,23 @@ export class ResponseOrchestrator<Timer> {
     private write(question: string, replacesAutomaticAnswer: boolean): void {
         const writer = this.ports.answerWriter;
         if (!writer) return;
-        const { generationId, done } = writer.write({ question, replacesAutomaticAnswer });
+        this.askPending = false;
+        const bubble = this.question && this.question.generationId === undefined ? this.question : undefined;
+        if (bubble) this.closeQuestion();
+        const { generationId, done } = bubble
+            ? writer.write({ question, replacesAutomaticAnswer }, { suppressQuestionRow: true })
+            : writer.write({ question, replacesAutomaticAnswer });
+        if (bubble) {
+            bubble.generationId = generationId;
+            this.emitQuestion(bubble);
+        }
         const answer: CurrentAnswer = { generationId, source: 'writer', outdated: false, speaking: false };
         this.current = answer;
         const settle = (status: AnswerCompletion) => {
             if (this.current !== answer) return;
+            this.setSpeaking(answer, false);
             if (status === 'completed') answer.completedAt = this.ports.clock.now();
-            else {
-                this.setSpeaking(answer, false);
-                this.current = undefined;
-            }
+            else this.current = undefined;
         };
         void done.then(settle, () => settle('failed'));
     }

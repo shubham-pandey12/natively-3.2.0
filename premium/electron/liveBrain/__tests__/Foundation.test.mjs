@@ -168,7 +168,7 @@ test('answer variants retain the imported voice while trimmed omits scenario rul
 test('the exhaustive factory constructs each known provider and rejects unknown ids', () => {
     for (const id of ['gemini-live', 'gemini']) assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, 'gemini-live');
     assert.equal(createLiveBrain('pipeline', {}).id, 'pipeline');
-    for (const id of ['openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent']) {
+    for (const id of ['openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent', 'deepgram-flux']) {
         assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, id);
     }
     assert.ok(buildDeepgramInstructions({ modeTemplate: 'technical-interview' }).length <= 25_000);

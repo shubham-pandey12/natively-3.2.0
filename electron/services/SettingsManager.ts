@@ -73,6 +73,7 @@ export interface AppSettings {
     liveBrainReuseOpenaiKey?: boolean;
     liveBrainReuseElevenlabsKey?: boolean;
     liveBrainReuseDeepgramKey?: boolean;
+    liveBrainReuseDeepgramFluxKey?: boolean;
     // Agreement to share the transcripts of meetings where Auto Answer runs, for
     // training the Auto Answer decider (autoAnswerAccess.ts; Evin 2026-11-13).
     // Free users need it to run Auto Answer; for Pro/trial it is an opt-in.

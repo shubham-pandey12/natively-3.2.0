@@ -425,6 +425,56 @@ test('Deepgram Voice Agent settings reuse STT key, configure managed & BYO Think
         assert.equal(save({ byoKeyProvider: 'custom:current-gateway' }).success, true);
         assert.equal(resolveLiveBrainRuntime().model, 'gateway-model');
         assert.equal(resolveLiveBrainRuntime().deepgramThink.byoCustomHeader, 'Authorization: Bearer cURL-secret');
+
+        // Switching to deepgram-flux keeps Voice Agent Think settings/keys untouched and reuses Speech Provider key.
+        assert.equal(invoke('set-provider', 'deepgram-flux').success, true);
+        const fluxCfg = invoke('get-config');
+        assert.equal(fluxCfg.provider, 'deepgram-flux');
+        assert.equal(fluxCfg.keySource, 'ai-providers');
+        assert.equal(fluxCfg.maskedSuffix, '••••••••SttK');
+        const fluxKey = 'dg_' + 'f'.repeat(36) + 'FlxK';
+        assert.equal(invoke('set-key', { provider: 'deepgram-flux', apiKey: fluxKey }).success, true);
+        assert.equal(invoke('get-config').keySource, 'dedicated');
+        assert.equal(invoke('get-config').maskedSuffix, '••••••••FlxK');
+        assert.equal(resolveLiveBrainRuntime('deepgram-voice-agent').apiKey, sttKey);
+        assert.equal(resolveLiveBrainRuntime('deepgram-flux').apiKey, fluxKey);
+        assert.equal(JSON.stringify(invoke('get-config')).includes(fluxKey), false);
+
+        // inspectFluxAiRoute & testFluxAiRoute cover Codex, Antigravity, Ollama, OpenAI, and unconfigured states.
+        const { inspectFluxAiRoute, testFluxAiRoute } = require(`${compiled}liveBrainSettings.js`);
+        const fakeLlm = {
+            currentProvider: 'codex-cli',
+            modelId: 'codex-cli:gpt-5.3-codex',
+            display: 'gpt-5.3-codex',
+            codexErr: null,
+            getCurrentProvider() { return this.currentProvider; },
+            getCurrentModelId() { return this.modelId; },
+            getCurrentModelDisplayName() { return this.display; },
+            getCodexSelectionAuthError() { return this.codexErr; },
+            getDirectAssistSelection() { return { provider: this.currentProvider, model: this.modelId }; },
+            async *streamDirectAssist(request) {
+                assert.deepEqual(request.selection, this.getDirectAssistSelection());
+                yield 'O';
+                yield 'K';
+            },
+        };
+        assert.equal(inspectFluxAiRoute(fakeLlm, credentials).configured, true);
+        assert.equal(inspectFluxAiRoute(fakeLlm, credentials).providerLabel, 'Codex CLI');
+        assert.equal((await testFluxAiRoute(fakeLlm, credentials)).replied, true);
+
+        fakeLlm.codexErr = 'Sign in to ChatGPT Codex in AI Providers.';
+        assert.equal(inspectFluxAiRoute(fakeLlm, credentials).configured, false);
+        assert.equal((await testFluxAiRoute(fakeLlm, credentials)).replied, false);
+
+        fakeLlm.currentProvider = 'antigravity';
+        fakeLlm.modelId = 'antigravity:gemini-3-flash';
+        fakeLlm.display = 'gemini-3-flash (Antigravity)';
+        assert.equal(inspectFluxAiRoute(fakeLlm, credentials).configured, false);
+
+        fakeLlm.currentProvider = 'ollama';
+        fakeLlm.modelId = 'qwen2.5:7b';
+        fakeLlm.display = 'qwen2.5:7b';
+        assert.equal(inspectFluxAiRoute(fakeLlm, credentials).configured, true);
     } finally {
         Module._load = load;
         globalThis.__nativelySettingsManagerV1__ = originalSettings;

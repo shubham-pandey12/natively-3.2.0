@@ -20,4 +20,5 @@ export type WhatToAnswerQuestionEvent = {
     responseText?: { text: string; done: boolean };
     liveBrainStatus?: LiveBrainStatus | null;
     liveBrainQuestion?: LiveBrainQuestion;
+    liveBrainAnswerStart?: boolean;
 } & ({ generationId: number } | { askId: string; clarification: string } | { liveBrainStatus: LiveBrainStatus | null } | { liveBrainQuestion: LiveBrainQuestion });

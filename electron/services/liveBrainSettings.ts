@@ -1,9 +1,12 @@
+import { randomUUID } from 'node:crypto';
+import type { DirectAssistDispatchRequest, DirectAssistSelection } from '../direct-assist/types';
 import { CredentialsManager } from './CredentialsManager';
 import { SettingsManager, type AppSettings } from './SettingsManager';
 import type { AppState } from '../main';
 import { loadLiveBrainPremium, type DeepgramThinkConfig } from '../premium/liveBrain';
 import curl2Json from '@bany/curl-to-json';
 import {
+    DEFAULT_DEEPGRAM_FLUX_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER,
     DEFAULT_ELEVENLABS_REALTIME_MODEL,
@@ -14,6 +17,8 @@ import type {
     DeepgramByoOption,
     DeepgramManagedProvider,
     DeepgramSettingsConfig,
+    FluxAiRouteStatus,
+    FluxAiRouteTestStatus,
     LiveBrainConfig,
     LiveBrainKeyProvider,
     LiveBrainModel,
@@ -25,8 +30,17 @@ const settingsUnavailable = 'Settings store is unavailable; the change was not s
 
 type CredentialsReader = Pick<
     CredentialsManager,
-    'getLiveBrainGeminiKey' | 'getLiveBrainOpenaiKey' | 'getLiveBrainElevenlabsKey' | 'getLiveBrainDeepgramKey' | 'getAllCredentials' | 'getElevenLabsApiKey' | 'getDeepgramApiKey' | 'getLiveBrainDeepgramEndpoint' | 'getAllCustomProviders'
->;
+    'getLiveBrainGeminiKey' | 'getLiveBrainOpenaiKey' | 'getLiveBrainElevenlabsKey' | 'getLiveBrainDeepgramKey' | 'getLiveBrainDeepgramFluxKey' | 'getAllCredentials' | 'getElevenLabsApiKey' | 'getDeepgramApiKey' | 'getLiveBrainDeepgramEndpoint' | 'getAllCustomProviders'
+> & Partial<Pick<CredentialsManager, 'getCodexOAuthTokens' | 'getAntigravityOAuthTokens'>>;
+
+export interface FluxLlmHelper {
+    getCurrentProvider(): string;
+    getCurrentModelId(): string;
+    getCurrentModelDisplayName(): string;
+    getCodexSelectionAuthError?(): string | null;
+    getDirectAssistSelection?(): DirectAssistSelection;
+    streamDirectAssist?(request: DirectAssistDispatchRequest, signal: AbortSignal): AsyncIterable<string>;
+}
 
 export const DEEPGRAM_MANAGED_MODELS: Record<DeepgramManagedProvider, LiveBrainModel[]> = {
     open_ai: [
@@ -120,8 +134,8 @@ const PROVIDERS: Record<LiveBrainKeyProvider, {
     /** A local shape check before any provider handshake. */
     keyPattern: RegExp;
     envNames: string[];
-    modelSetting: 'liveBrainGeminiModel' | 'liveBrainOpenaiModel' | 'liveBrainElevenlabsModel' | 'liveBrainDeepgramManagedModel';
-    reuseSetting: 'liveBrainReuseGeminiKey' | 'liveBrainReuseOpenaiKey' | 'liveBrainReuseElevenlabsKey' | 'liveBrainReuseDeepgramKey';
+    modelSetting?: 'liveBrainGeminiModel' | 'liveBrainOpenaiModel' | 'liveBrainElevenlabsModel' | 'liveBrainDeepgramManagedModel';
+    reuseSetting: 'liveBrainReuseGeminiKey' | 'liveBrainReuseOpenaiKey' | 'liveBrainReuseElevenlabsKey' | 'liveBrainReuseDeepgramKey' | 'liveBrainReuseDeepgramFluxKey';
     dedicatedKey(credentials: CredentialsReader): string | undefined;
     /** The vendor key the user already stored elsewhere in Natively. */
     existingKey(credentials: CredentialsReader): string | undefined;
@@ -173,6 +187,16 @@ const PROVIDERS: Record<LiveBrainKeyProvider, {
         // Reuse the Deepgram Speech Provider key if the user saved one.
         existingKey: c => c.getDeepgramApiKey(),
         setKey: (c, key) => c.setLiveBrainDeepgramKey(key),
+    },
+    'deepgram-flux': {
+        vendor: 'Deepgram',
+        keyPattern: /^[A-Za-z0-9._-]{30,200}$/,
+        envNames: ['DEFAULT_DEEPGRAM_KEY', 'DEEPGRAM_API_KEY'],
+        reuseSetting: 'liveBrainReuseDeepgramFluxKey',
+        dedicatedKey: c => c.getLiveBrainDeepgramFluxKey(),
+        // Reuse the Deepgram Speech Provider key if the user saved one.
+        existingKey: c => c.getDeepgramApiKey(),
+        setKey: (c, key) => c.setLiveBrainDeepgramFluxKey(key),
     },
 };
 
@@ -333,13 +357,232 @@ function inspectDeepgramSettings(settings: SettingsManager, credentials: Credent
     };
 }
 
+const FLUX_AI_PROVIDER_LABELS: Record<string, string> = {
+    openai: 'OpenAI',
+    claude: 'Anthropic (Claude)',
+    gemini: 'Google Gemini',
+    groq: 'Groq',
+    deepseek: 'DeepSeek',
+    nvidia_nim: 'NVIDIA NIM',
+    openrouter: 'OpenRouter',
+    fluxion: 'Fluxion',
+    agentrouter: 'AgentRouter',
+    litellm: 'LiteLLM',
+    ninerouter: '9Router',
+    'codex-cli': 'Codex CLI',
+    antigravity: 'Antigravity',
+    ollama: 'Ollama',
+    custom: 'Custom Provider',
+    curl: 'Custom cURL',
+    natively: 'Natively AI',
+};
+
+/**
+ * Inspects Natively's active AI Provider selection and credential readiness
+ * without returning secrets or mutating configuration.
+ */
+export function inspectFluxAiRoute(
+    llmHelper: FluxLlmHelper | undefined,
+    credentials: CredentialsReader,
+): FluxAiRouteStatus {
+    if (!llmHelper) {
+        return {
+            provider: 'unknown',
+            providerLabel: 'AI Provider',
+            model: '',
+            configured: false,
+            reason: 'Open AI Providers in Settings to choose an answer model.',
+        };
+    }
+
+    const creds = credentials.getAllCredentials();
+    let provider = '';
+    let model = '';
+    let selectionError: string | undefined;
+
+    try {
+        if (typeof llmHelper.getDirectAssistSelection === 'function') {
+            const selected = llmHelper.getDirectAssistSelection();
+            provider = selected.provider;
+            model = selected.model;
+        } else {
+            provider = llmHelper.getCurrentProvider();
+            model = llmHelper.getCurrentModelId();
+        }
+    } catch {
+        selectionError = 'Choose an active model supported by AI Providers.';
+        provider = llmHelper.getCurrentProvider?.() || 'unknown';
+        model = llmHelper.getCurrentModelId?.() || '';
+    }
+
+    const displayModel = (llmHelper.getCurrentModelDisplayName?.() || model || '').trim();
+    const providerLabel = FLUX_AI_PROVIDER_LABELS[provider] ?? (provider || 'AI Provider');
+    if (selectionError) {
+        return { provider, providerLabel, model: displayModel, configured: false, reason: selectionError };
+    }
+
+    let configured = true;
+    let reason: string | undefined;
+    switch (provider) {
+        case 'openai':
+            configured = Boolean(creds.openaiApiKey?.trim());
+            if (!configured) reason = 'Add an OpenAI API key in AI Providers.';
+            break;
+        case 'claude':
+            configured = Boolean(creds.claudeApiKey?.trim());
+            if (!configured) reason = 'Add an Anthropic API key in AI Providers.';
+            break;
+        case 'gemini':
+            configured = Boolean(creds.geminiApiKey?.trim());
+            if (!configured) reason = 'Add a Gemini API key in AI Providers.';
+            break;
+        case 'groq':
+            configured = Boolean(creds.groqApiKey?.trim());
+            if (!configured) reason = 'Add a Groq API key in AI Providers.';
+            break;
+        case 'deepseek':
+            configured = Boolean(creds.deepseekApiKey?.trim());
+            if (!configured) reason = 'Add a DeepSeek API key in AI Providers.';
+            break;
+        case 'nvidia_nim':
+            configured = Boolean(creds.nvidiaNimApiKey?.trim());
+            if (!configured) reason = 'Add an NVIDIA NIM API key in AI Providers.';
+            break;
+        case 'openrouter':
+            configured = Boolean(creds.openrouterApiKey?.trim());
+            if (!configured) reason = 'Add an OpenRouter API key in AI Providers.';
+            break;
+        case 'fluxion':
+            configured = Boolean(creds.fluxionApiKey?.trim());
+            if (!configured) reason = 'Add a Fluxion API key in AI Providers.';
+            break;
+        case 'agentrouter':
+            configured = Boolean(creds.agentrouterApiKey?.trim());
+            if (!configured) reason = 'Add an AgentRouter API key in AI Providers.';
+            break;
+        case 'litellm':
+            configured = Boolean(creds.litellmBaseURL?.trim());
+            if (!configured) reason = 'Configure LiteLLM in AI Providers.';
+            break;
+        case 'ninerouter':
+            configured = Boolean(creds.ninerouterBaseURL?.trim());
+            if (!configured) reason = 'Configure 9Router in AI Providers.';
+            break;
+        case 'codex-cli': {
+            const authErr = llmHelper.getCodexSelectionAuthError?.();
+            if (authErr) {
+                configured = false;
+                reason = 'Sign in to ChatGPT Codex in AI Providers.';
+            } else if (credentials.getCodexOAuthTokens) {
+                // Codex CLI token or cached CLI auth status is checked cleanly without leaking secrets.
+                const hasTokens = Boolean(credentials.getCodexOAuthTokens()?.accessToken);
+                if (!hasTokens && llmHelper.getCodexSelectionAuthError) {
+                    configured = llmHelper.getCodexSelectionAuthError() === null;
+                }
+            }
+            break;
+        }
+        case 'antigravity': {
+            const tokens = credentials.getAntigravityOAuthTokens?.();
+            configured = Boolean(tokens?.refreshToken || tokens?.accessToken);
+            if (!configured) reason = 'Sign in to Antigravity in AI Providers.';
+            break;
+        }
+        case 'ollama':
+            configured = Boolean(displayModel);
+            if (!configured) reason = 'Select an Ollama model in AI Providers.';
+            break;
+        case 'natively':
+            configured = Boolean(creds.nativelyApiKey?.trim());
+            if (!configured) reason = 'Sign in or configure a provider in AI Providers.';
+            break;
+        case 'custom':
+        case 'curl':
+            configured = Boolean(model.trim());
+            if (!configured) reason = 'Configure a custom provider in AI Providers.';
+            break;
+        default:
+            configured = Boolean(displayModel);
+            if (!configured) reason = 'Configure an active provider in AI Providers.';
+            break;
+    }
+
+    return { provider, providerLabel, model: displayModel, configured, ...(reason ? { reason } : {}) };
+}
+
+/**
+ * Separately probes the configured Natively AI route with a tiny prompt so Test
+ * Connection distinguishes local configuration readiness from an actual reply.
+ */
+export async function testFluxAiRoute(
+    llmHelper: FluxLlmHelper | undefined,
+    credentials: CredentialsReader,
+    timeoutMs = 10_000,
+): Promise<FluxAiRouteTestStatus> {
+    const route = inspectFluxAiRoute(llmHelper, credentials);
+    if (!route.configured) {
+        return {
+            ...route,
+            replied: false,
+            detail: route.reason || `${route.providerLabel} needs setup in AI Providers.`,
+        };
+    }
+    if (!llmHelper?.streamDirectAssist || !llmHelper.getDirectAssistSelection) {
+        return {
+            ...route,
+            replied: false,
+            detail: `${route.providerLabel} (${route.model}) is configured, but could not run a test reply in this context.`,
+        };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+    let reply = '';
+    try {
+        const stream = llmHelper.streamDirectAssist({
+            requestId: randomUUID(),
+            selection: llmHelper.getDirectAssistSelection(),
+            userPrompt: 'Reply with OK.',
+            systemPrompt: 'Reply with only the single word OK.',
+            imagePaths: [],
+        }, controller.signal);
+        for await (const chunk of stream) {
+            reply += chunk;
+            if (reply.length > 32) break;
+        }
+        if (controller.signal.aborted || !/^OK[.!]?$/i.test(reply.trim())) {
+            return {
+                ...route,
+                replied: false,
+                detail: `${route.providerLabel} (${route.model}) is configured, but did not return a valid test reply.`,
+            };
+        }
+        return {
+            ...route,
+            replied: true,
+            detail: `${route.providerLabel} (${route.model}) replied.`,
+        };
+    } catch {
+        return {
+            ...route,
+            replied: false,
+            detail: `${route.providerLabel} (${route.model}) is configured, but the test request failed.`,
+        };
+    } finally {
+        clearTimeout(timer);
+        if (!controller.signal.aborted) controller.abort();
+    }
+}
+
 function inspectConfig(settings: SettingsManager, credentials: CredentialsReader,
     envKey: (provider: LiveBrainKeyProvider) => string | undefined = devEnvKey,
-    forProvider?: LiveBrainKeyProvider): {
+    forProvider?: LiveBrainKeyProvider,
+    llmHelper?: FluxLlmHelper): {
     config: LiveBrainConfig;
     keyIsWellFormed: boolean;
     usableKey?: string;
     deepgramThink?: DeepgramThinkConfig;
+    fluxAiRoute?: FluxAiRouteStatus;
 } {
     const provider = forProvider ?? settings.get('liveBrainProvider') ?? 'gemini-live';
     const promptVariant = settings.get('liveBrainPromptVariant') ?? null;
@@ -363,10 +606,12 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
     const key = dedicated || fromEnv || (usingAiProvidersKey ? aiProvidersKey : undefined);
     const keyIsWellFormed = key !== undefined && isWellFormed(provider, key);
     const deepgramInfo = provider === 'deepgram-voice-agent' ? inspectDeepgramSettings(settings, credentials) : undefined;
+    const fluxAiRoute = provider === 'deepgram-flux' ? inspectFluxAiRoute(llmHelper, credentials) : undefined;
     return {
         keyIsWellFormed,
         usableKey: keyIsWellFormed ? key : undefined,
         deepgramThink: deepgramInfo?.runtime,
+        fluxAiRoute,
         config: {
             provider,
             hasKey: Boolean(key),
@@ -377,9 +622,12 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
             keySource: dedicated ? 'dedicated' : fromEnv ? 'env' : usingAiProvidersKey ? 'ai-providers' : null,
             model: deepgramInfo
                 ? (deepgramInfo.ui.thinkMode === 'byo' ? deepgramInfo.runtime.byoModel ?? '' : deepgramInfo.ui.managedModel)
-                : (settings.get(spec.modelSetting) ?? ''),
+                : provider === 'deepgram-flux'
+                    ? DEFAULT_DEEPGRAM_FLUX_MODEL
+                    : (spec.modelSetting ? settings.get(spec.modelSetting) ?? '' : ''),
             promptVariant,
             ...(deepgramInfo ? { deepgram: deepgramInfo.ui } : {}),
+            ...(fluxAiRoute ? { fluxAiRoute } : {}),
         },
     };
 }
@@ -394,14 +642,17 @@ export function resolveLiveBrainRuntime(forProvider?: LiveBrainKeyProvider): Pic
 }
 
 export function registerLiveBrainSettingsIpc(
-    appState: Pick<AppState, 'getLiveBrainEnabled' | 'setLiveBrainEnabled'>,
+    appState: Pick<AppState, 'getLiveBrainEnabled' | 'setLiveBrainEnabled'> & {
+        processingHelper?: { getLLMHelper(): FluxLlmHelper };
+    },
     safeHandle: (channel: string, listener: (event: unknown, payload?: unknown) => unknown) => void,
     broadcastChanged: () => void,
     loadPremium = loadLiveBrainPremium,
 ): void {
     const settings = () => SettingsManager.getInstance();
     const credentials = () => CredentialsManager.getInstance();
-    const inspect = () => inspectConfig(settings(), credentials());
+    const llmHelper = () => appState.processingHelper?.getLLMHelper?.();
+    const inspect = () => inspectConfig(settings(), credentials(), devEnvKey, undefined, llmHelper());
     // Legacy URL and header could have been saved independently. Discard the
     // old header rather than guessing which destination the user authorized.
     if (settings().get('liveBrainDeepgramByoCustomHeader') !== undefined
@@ -475,7 +726,7 @@ export function registerLiveBrainSettingsIpc(
                     return saved(settings().set(spec.reuseSetting, options.useAiProvidersKey), settingsUnavailable, true);
                 }
                 if (options.provider !== 'deepgram-voice-agent') {
-                    if ('model' in options && typeof options.model === 'string') {
+                    if ('model' in options && typeof options.model === 'string' && spec.modelSetting) {
                         return saved(settings().set(spec.modelSetting, options.model.trim()));
                     }
                 } else {
@@ -538,12 +789,37 @@ export function registerLiveBrainSettingsIpc(
     safeHandle('live-brain:test-connection', async () => {
         const { config: { provider, hasKey, model, keySource }, usableKey, deepgramThink } = inspect();
         if (isKeyProvider(provider)) {
+            if (provider === 'deepgram-flux') {
+                const routeTest = () => testFluxAiRoute(llmHelper(), credentials());
+                if (!hasKey || !usableKey) {
+                    const aiRoute = await routeTest();
+                    const keyMsg = !hasKey ? 'Add a Deepgram API key first.' : "The Deepgram API key doesn't look valid.";
+                    return {
+                        success: false,
+                        error: !hasKey ? 'no_key' : 'invalid_key',
+                        message: `${keyMsg} · AI route: ${aiRoute.detail}`,
+                        fluxResult: { connected: false, detail: keyMsg, aiRoute },
+                    };
+                }
+                const premium = loadPremium();
+                const result = await (premium?.testConnection({
+                    apiKey: usableKey,
+                    model,
+                    provider,
+                    testAiRoute: routeTest,
+                }) ?? { success: false, error: 'unavailable', message: 'Deepgram Flux is unavailable in this build.' });
+                if (!result.success && result.error === 'auth' && keySource) {
+                    const source = keySource === 'ai-providers' ? 'Speech Provider' : KEY_SOURCE_LABEL[keySource];
+                    return { ...result, message: `${result.message} (key from ${source})` };
+                }
+                return result;
+            }
             if (!hasKey) return { success: false, error: 'no_key', message: 'Add an API key first.' };
             if (!usableKey) return { success: false, error: 'invalid_key', message: "The API key doesn't look valid." };
             const premium = loadPremium();
             const name = provider === 'gemini-live' ? 'Gemini Live'
                 : provider === 'deepgram-voice-agent' ? 'Deepgram Voice Agent'
-                : `${PROVIDERS[provider].vendor} Realtime`;
+                    : `${PROVIDERS[provider].vendor} Realtime`;
             const result = await (premium?.testConnection({
                 apiKey: usableKey,
                 model,
@@ -569,6 +845,9 @@ export function registerLiveBrainSettingsIpc(
             if (deepgram?.thinkMode === 'byo') return { success: true, models: deepgram.byoRecommendedModels };
             const mp = deepgram?.managedProvider ?? DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER;
             return { success: true, models: DEEPGRAM_MANAGED_MODELS[mp] };
+        }
+        if (provider === 'deepgram-flux') {
+            return { success: true, models: [{ id: DEFAULT_DEEPGRAM_FLUX_MODEL, label: 'Flux General Multilingual', description: 'Fixed STT + turn detector' }] };
         }
         if (provider !== 'gemini-live') return { success: true, models: [] };
         if (!usableKey) return { success: false, models: GEMINI_LIVE_FALLBACK_MODELS, error: 'Add an API key to load the model list.' };

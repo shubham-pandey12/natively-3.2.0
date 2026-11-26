@@ -27,3 +27,12 @@ test('a question already above its answer stays where it is', () => {
   const next = placeLiveBrainQuestion(rows, { questionId: 'q1', text: 'Q', done: true, generationId: -1 });
   assert.deepEqual(next.map((row) => row.id), ['live-brain-q-q1', 'live-brain-text--1']);
 });
+
+test('a late Flux question is placed above the existing answer writer row', () => {
+  const rows = [
+    { id: 'older', role: 'system', text: 'Earlier answer' },
+    { id: 'answer-writer-row', role: 'system', text: 'Use shards.', whatToAnswerGeneration: 42 },
+  ];
+  const next = placeLiveBrainQuestion(rows, { questionId: 'q2', text: 'How do you scale writes?', done: true, generationId: 42 });
+  assert.deepEqual(next.map((row) => row.id), ['older', 'live-brain-q-q2', 'answer-writer-row']);
+});

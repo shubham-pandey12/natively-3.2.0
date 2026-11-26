@@ -25,6 +25,10 @@ export interface LiveBrainAnswerRequest {
     replacesAutomaticAnswer: boolean;
     signal: AbortSignal;
     onFirstText?: (at: number) => void;
+    onComplete?: (text: string) => void;
+    liveBrainNotebook?: string;
+    speechStoppedAt?: number;
+    suppressQuestionRow?: boolean;
 }
 
 export interface LiveBrainAnswerEngine {
@@ -44,7 +48,10 @@ export interface LiveBrainMeetingOptions {
     modeTemplate?: string;
     modePrompt?: string;
     modeContext?: string;
-    engine: { setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void };
+    engine: {
+        setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void;
+        runLiveBrainAnswer?: LiveBrainAnswerEngine['runLiveBrainAnswer'];
+    };
     pipeline?: { activate(): void; cancel(): void };
     summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
@@ -112,7 +119,13 @@ export class LiveBrainRouting {
 
 interface LiveBrainPremium {
     createMeeting(options: LiveBrainMeetingOptions): LiveBrainMeetingSession;
-    testConnection(options: { apiKey: string; model?: string; provider?: LiveBrainKeyProvider; deepgramThink?: DeepgramThinkConfig }): Promise<LiveBrainSettingsResult>;
+    testConnection(options: {
+        apiKey: string;
+        model?: string;
+        provider?: LiveBrainKeyProvider;
+        deepgramThink?: DeepgramThinkConfig;
+        testAiRoute?: () => Promise<import('../../src/types/liveBrainSettings').FluxAiRouteTestStatus>;
+    }): Promise<LiveBrainSettingsResult>;
 }
 
 export function loadLiveBrainPremium(): LiveBrainPremium | null {

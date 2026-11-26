@@ -43,6 +43,7 @@ import type {
     LiveBrainSettingsResult,
 } from '../types/liveBrainSettings';
 import {
+    DEFAULT_DEEPGRAM_FLUX_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     DEFAULT_ELEVENLABS_REALTIME_MODEL,
     DEFAULT_GEMINI_LIVE_MODEL,
@@ -469,6 +470,7 @@ const LIVE_BRAIN_KEY_URLS: Record<LiveBrainKeyProvider, string> = {
     'openai-realtime': 'https://platform.openai.com/api-keys',
     'elevenlabs-realtime': 'https://elevenlabs.io/app/settings/api-keys',
     'deepgram-voice-agent': 'https://console.deepgram.com',
+    'deepgram-flux': 'https://console.deepgram.com',
 };
 
 // Per-provider display details for the Live Brain key card.
@@ -479,6 +481,7 @@ const LIVE_BRAIN_PROVIDER_UI: Record<LiveBrainKeyProvider, {
     'openai-realtime': { name: 'OpenAI Realtime', vendor: 'OpenAI', mark: 'openai', defaultModel: DEFAULT_OPENAI_REALTIME_MODEL, existingKeyPlace: 'AI Providers' },
     'elevenlabs-realtime': { name: 'ElevenLabs Realtime', vendor: 'ElevenLabs', mark: 'elevenlabs', defaultModel: DEFAULT_ELEVENLABS_REALTIME_MODEL, existingKeyPlace: 'Speech Provider' },
     'deepgram-voice-agent': { name: 'Deepgram Voice Agent', vendor: 'Deepgram', mark: 'deepgram', defaultModel: DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL, existingKeyPlace: 'Speech Provider' },
+    'deepgram-flux': { name: 'Deepgram Flux + My AI Provider', vendor: 'Deepgram', mark: 'deepgram', defaultModel: DEFAULT_DEEPGRAM_FLUX_MODEL, existingKeyPlace: 'Speech Provider' },
 };
 const DEEPGRAM_MANAGED_PROVIDER_LABELS: Record<DeepgramManagedProvider, string> = {
     open_ai: 'OpenAI (via Deepgram)',
@@ -610,6 +613,7 @@ const LiveBrainProviderSettings = () => {
     const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
     const [testDetail, setTestDetail] = useState('');
+    const [fluxTestResult, setFluxTestResult] = useState<LiveBrainSettingsResult['fluxResult']>();
     const [note, setNote] = useState('');
     const [models, setModels] = useState<LiveBrainModel[]>([]);
     const [modelsLoading, setModelsLoading] = useState(false);
@@ -639,6 +643,7 @@ const LiveBrainProviderSettings = () => {
             ++feedbackVersion.current;
             setTestStatus('idle');
             setTestDetail('');
+            setFluxTestResult(undefined);
             void refresh();
         });
     }, [api, refresh]);
@@ -675,7 +680,7 @@ const LiveBrainProviderSettings = () => {
     // The list belongs to the provider and the key in use; reload when either changes.
     useEffect(() => {
         setModels([]);
-        if (!isDeepgramByo && keyProvider && (config?.hasKey || keyProvider === 'deepgram-voice-agent')) void loadModels();
+        if (!isDeepgramByo && keyProvider && keyProvider !== 'deepgram-flux' && (config?.hasKey || keyProvider === 'deepgram-voice-agent')) void loadModels();
         else setModelsLoading(false);
         return () => { ++modelsVersion.current; };
     }, [keyProvider, config?.hasKey, config?.keySource, config?.deepgram?.managedProvider, isDeepgramByo, loadModels]);
@@ -687,6 +692,7 @@ const LiveBrainProviderSettings = () => {
         setNote('');
         setTestStatus('idle');
         setTestDetail('');
+        setFluxTestResult(undefined);
     };
 
     const saveOptionChange = async (persist: () => Promise<LiveBrainSettingsResult>) => {
@@ -742,13 +748,15 @@ const LiveBrainProviderSettings = () => {
         const version = ++feedbackVersion.current;
         setNote('');
         setTestDetail('');
+        setFluxTestResult(undefined);
         setTestStatus('testing');
         try {
             const result = await api.testLiveBrainConnection();
             if (version !== feedbackVersion.current) return;
             setTestStatus(result.success ? 'success' : 'error');
+            setFluxTestResult(result.fluxResult);
             if (result.success) setTestDetail(result.message ? t(result.message) : '');
-            else setNote(t(result.message || result.error || 'Connection failed.'));
+            else if (!result.fluxResult) setNote(t(result.message || result.error || 'Connection failed.'));
         } catch {
             if (version !== feedbackVersion.current) return;
             setTestStatus('error');
@@ -787,6 +795,7 @@ const LiveBrainProviderSettings = () => {
                                     { id: 'openai-realtime', label: t('OpenAI Realtime'), badge: provider === 'openai-realtime' && config.hasKey ? 'Saved' : null, desc: t('OpenAI Realtime API'), color: 'green', icon: <BrandMark provider="openai" />, neutralTile: true },
                                     { id: 'elevenlabs-realtime', label: t('ElevenLabs Realtime'), badge: provider === 'elevenlabs-realtime' && config.hasKey ? 'Saved' : null, desc: t('Eleven Realtime v1 API'), color: 'teal', icon: <BrandMark provider="elevenlabs" />, neutralTile: true },
                                     { id: 'deepgram-voice-agent', label: t('Deepgram Voice Agent'), badge: provider === 'deepgram-voice-agent' && config.hasKey ? 'Saved' : null, desc: t('Deepgram Voice Agent API'), color: 'purple', icon: <BrandMark provider="deepgram" />, neutralTile: true },
+                                    { id: 'deepgram-flux', label: t('Deepgram Flux + My AI Provider'), badge: provider === 'deepgram-flux' && config.hasKey ? 'Saved' : null, desc: t('Flux STT + your active AI Provider'), color: 'purple', icon: <BrandMark provider="deepgram" />, neutralTile: true },
                                     { id: 'pipeline', label: t('Existing pipeline'), badge: null, desc: t('The Auto Answer engine; no extra key'), color: 'blue', icon: <BrandMark provider="natively" />, neutralTile: true },
                                 ]}
                             />
@@ -906,7 +915,7 @@ const LiveBrainProviderSettings = () => {
                                                         t('Test Connection')}
                                         </SizedLabelSwap>
                                     </button>
-                                    {(!isDeepgramByo || listedModels.length > 0) && (
+                                    {keyProvider !== 'deepgram-flux' && (!isDeepgramByo || listedModels.length > 0) && (
                                         <AipModelList
                                             pickOnly
                                             catalogIsComplete
@@ -1051,7 +1060,46 @@ const LiveBrainProviderSettings = () => {
                                     );
                                 })()}
 
-                                {testDetail && testStatus === 'success' && <p className="aip-meta settings-swap-in" role="status">{testDetail}</p>}
+                                {keyProvider === 'deepgram-flux' && config.fluxAiRoute && (
+                                    <div className="space-y-1.5 pt-1">
+                                        <div className="aip-provider-row">
+                                            <span className="aip-meta shrink-0">{t('AI Provider route')}</span>
+                                            <span className="text-xs font-medium text-text-primary truncate">
+                                                {config.fluxAiRoute.providerLabel}
+                                                {config.fluxAiRoute.model ? ` · ${config.fluxAiRoute.model}` : ''}
+                                            </span>
+                                            <span className={`ml-auto text-[11px] font-medium shrink-0 ${config.fluxAiRoute.configured ? 'text-text-secondary' : 'aip-danger-fg'}`}>
+                                                {config.fluxAiRoute.configured ? t('Configured') : t('Needs setup')}
+                                            </span>
+                                        </div>
+                                        {!config.fluxAiRoute.configured && (
+                                            <p className="aip-meta aip-danger-fg" role="alert">
+                                                {t(config.fluxAiRoute.reason || 'Configure your active provider in Settings → AI Providers.')}
+                                            </p>
+                                        )}
+                                        <p className="aip-meta">
+                                            {t('Deepgram Flux transcribes the interviewer. Answers stream directly from Natively using your active AI Providers selection (including Codex CLI, Antigravity, and Ollama).')}
+                                        </p>
+                                    </div>
+                                )}
+
+                                {fluxTestResult && (
+                                    <div className="space-y-1 pt-1 settings-swap-in" role="status">
+                                        <p className={`aip-meta ${fluxTestResult.connected ? '' : 'aip-danger-fg'}`}>
+                                            {t('Deepgram Flux')}: {t(fluxTestResult.detail)}
+                                        </p>
+                                        <p className={`aip-meta ${fluxTestResult.aiRoute.replied ? '' : 'aip-danger-fg'}`}>
+                                            {t('AI Route')} ({fluxTestResult.aiRoute.providerLabel}{fluxTestResult.aiRoute.model ? ` · ${fluxTestResult.aiRoute.model}` : ''}):{' '}
+                                            {fluxTestResult.aiRoute.replied
+                                                ? t('Configured · Test reply succeeded')
+                                                : fluxTestResult.aiRoute.configured
+                                                    ? `${t('Configured · Test reply failed')} (${fluxTestResult.aiRoute.detail})`
+                                                    : `${t('Needs setup')} (${fluxTestResult.aiRoute.detail})`}
+                                        </p>
+                                    </div>
+                                )}
+
+                                {testDetail && testStatus === 'success' && !fluxTestResult && <p className="aip-meta settings-swap-in" role="status">{testDetail}</p>}
                                 {note && <p className="aip-meta aip-danger-fg aip-provider-note settings-swap-in" role="alert">{note}</p>}
                                 <style>{AIP_CSS}</style>
                             </div>

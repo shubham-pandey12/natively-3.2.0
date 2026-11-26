@@ -424,3 +424,31 @@ test('D15: a short reply to a waiting Ask is shown in the chat', () => {
     h.send({ type: 'interviewer_transcript', text: 'Yes.', final: true });
     assert.equal(h.latest('q2').text, 'Yes.');
 });
+
+test('D17: AnswerWriter path suppresses filler while keeping answers, allows Yes on Ask, and pairs one question bubble on correction', async () => {
+    const h = await rig();
+    h.brain.emit({ type: 'interviewer_transcript', text: 'Design a cache.', final: true, at: h.clock.now() });
+    h.decision('answer', { question: 'Design a cache.' });
+    assert.deepEqual(h.calls.filter(([k]) => k === 'write'), [['write', { question: 'Design a cache.', replacesAutomaticAnswer: false }]]);
+
+    // Filler during active answer clears speaking without cancelling or writing again.
+    h.brain.emit({ type: 'interviewer_speech_started', at: h.clock.now() });
+    h.decision('answer', { question: 'Mm-hmm.' });
+    assert.equal(h.calls.filter(([k]) => k === 'write').length, 1);
+    assert.equal(h.calls.filter(([k]) => k === 'cancel').length, 0);
+    assert.deepEqual(h.calls.at(-1), ['speaking', 1, false]);
+
+    // Correction supersedes and cancels generation 1.
+    h.brain.emit({ type: 'interviewer_transcript', text: 'Actually, no Redis.', final: true, at: h.clock.now() });
+    h.decision('answer', { question: 'Actually, no Redis.' });
+    assert.ok(h.calls.some(([k, r]) => k === 'cancel' && r === 'answer_corrected'));
+    assert.equal(h.calls.filter(([k]) => k === 'write').length, 2);
+
+    // Pending Ask allows short "Yes." reply through to AnswerWriter.
+    h.completions[1].resolve('completed');
+    await flush();
+    h.decision('ask', { question: 'Design a cache.', clarification: 'Read heavy?' });
+    h.decision('answer', { question: 'Yes.' });
+    assert.equal(h.calls.filter(([k]) => k === 'write').length, 3);
+    assert.equal(h.calls.filter(([k]) => k === 'write').at(-1)[1].question, 'Yes.');
+});

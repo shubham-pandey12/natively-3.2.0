@@ -29,7 +29,8 @@ export function placeLiveBrainQuestion(messages, question) {
     next = [...messages, { id, role: 'interviewer', ...patch }];
   }
   if (question.generationId === undefined) return next;
-  const answerIndex = next.findIndex((message) => message.id === liveBrainAnswerRowId(question.generationId));
+  const answerIndex = next.findIndex((message) => message.id === liveBrainAnswerRowId(question.generationId)
+    || message.whatToAnswerGeneration === question.generationId);
   const rowIndex = next.findIndex((message) => message.id === id);
   if (answerIndex < 0 || rowIndex < answerIndex) return next;
   const row = next[rowIndex];

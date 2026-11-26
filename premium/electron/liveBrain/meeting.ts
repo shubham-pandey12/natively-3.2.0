@@ -1,12 +1,16 @@
 import { notePromptDebugLiveBrain, isPromptDebugEnabled, notePromptDebugAnswerTiming } from '../../../electron/llm/promptDebug';
 import type { DeepgramThinkConfig, LiveBrainMeetingOptions, LiveBrainMeetingSession } from '../../../electron/premium/liveBrain';
 import {
+    DEFAULT_DEEPGRAM_FLUX_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     DEFAULT_ELEVENLABS_REALTIME_MODEL,
     DEFAULT_OPENAI_REALTIME_MODEL,
+    type FluxAiRouteTestStatus,
     type LiveBrainKeyProvider,
     type LiveBrainSettingsResult,
 } from '../../../src/types/liveBrainSettings';
+import { AnswerWriter } from './AnswerWriter';
+import { DeepgramFluxBrain, DeepgramFluxError } from './brains/DeepgramFluxBrain';
 import { DeepgramVoiceAgentBrain, DeepgramVoiceAgentError } from './brains/DeepgramVoiceAgentBrain';
 import { DEFAULT_GEMINI_LIVE_MODEL, GeminiLiveBrain, GeminiLiveError, type GeminiLiveOptions } from './brains/GeminiLiveBrain';
 import { RealtimeBrainError } from './brains/RealtimeBrain';
@@ -26,6 +30,7 @@ const DEFAULT_MODELS: Record<LiveBrain['id'], string> = {
     'openai-realtime': DEFAULT_OPENAI_REALTIME_MODEL,
     'elevenlabs-realtime': DEFAULT_ELEVENLABS_REALTIME_MODEL,
     'deepgram-voice-agent': DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
+    'deepgram-flux': DEFAULT_DEEPGRAM_FLUX_MODEL,
     pipeline: 'pipeline',
 };
 
@@ -65,8 +70,66 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         now: clock.now, summarize: options.summarize,
         onUpdate: sizes => diagnostic('notebook', sizes),
     });
+    let supervisor!: BrainSupervisor<Parameters<typeof clearTimeout>[0]>;
+    let writerRun: symbol | undefined;
+    const answerWriter = options.engine.runLiveBrainAnswer
+        ? new AnswerWriter({
+            runLiveBrainAnswer: (request) => {
+                const liveBrainNotebook = supervisor?.notebookContext || undefined;
+                const stopAt = speechStoppedAt;
+                speechStoppedAt = undefined;
+                const run = Symbol();
+                writerRun = run;
+                presented = false;
+                supervisor.setExternalWriting(true);
+                if (debug) {
+                    finishTiming('cancelled');
+                    const brainId = supervisor?.current?.id ?? preferred;
+                    timing = {
+                        brainId,
+                        model: (options.model?.trim() || DEFAULT_MODELS[brainId]).replace(/^models\//, ''),
+                        responseId: `writer:${Date.now()}`,
+                        responseStartedAt: Date.now(),
+                        speechStoppedAt: stopAt,
+                    };
+                }
+                showStatus('Thinking');
+                const res = options.engine.runLiveBrainAnswer!({
+                    ...request,
+                    ...(liveBrainNotebook ? { liveBrainNotebook } : {}),
+                    ...(stopAt !== undefined ? { speechStoppedAt: stopAt } : {}),
+                    onFirstText: (at) => {
+                        if (!started || writerRun !== run || request.signal.aborted) return;
+                        presented = true;
+                        if (timing && timing.firstTextAt === undefined) timing.firstTextAt = at;
+                        request.onFirstText?.(at);
+                    },
+                    onComplete: (text) => {
+                        if (!started || writerRun !== run || request.signal.aborted) return;
+                        presented = true;
+                        const clarification = /^Ask:\s*(\S[\s\S]*)$/i.exec(text.trim());
+                        supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
+                        if (clarification) orchestrator.noteWriterClarification(request.question);
+                        request.onComplete?.(text);
+                    },
+                });
+                const settle = (status: 'completed' | 'cancelled' | 'failed') => {
+                    if (writerRun !== run) return;
+                    writerRun = undefined;
+                    if (started) showStatus(status === 'completed' && presented ? 'Answer ready' : 'Listening');
+                    finishTiming(status);
+                    supervisor.setExternalWriting(false);
+                };
+                void res.done.then(({ status }) => {
+                    settle(status === 'completed' || status === 'partial' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed');
+                }, () => settle('failed'));
+                return res;
+            },
+        })
+        : undefined;
     const orchestrator = new ResponseOrchestrator({
         clock,
+        ...(answerWriter ? { answerWriter } : {}),
         overlay: createLiveBrainOverlayPort({
             emitQuestion: event => {
                 if (event.responseText?.text.trim() || event.clarification?.trim()) {
@@ -77,7 +140,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             },
             setAutomaticAnswerOutdated: (generationId, outdated) => options.engine.setAutomaticAnswerOutdated(generationId, outdated),
         }),
-        requestClarificationAnswer: () => supervisor.current?.requestClarificationAnswer?.(),
+        requestClarificationAnswer: () => {
+            if (supervisor.current?.id === 'deepgram-flux') return false;
+            supervisor.current?.requestClarificationAnswer?.();
+        },
     });
     const finishTiming = (status: 'completed' | 'cancelled' | 'failed') => {
         if (!timing) return;
@@ -85,7 +151,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         timing = undefined;
     };
     let injected = injectedBrain;
-    const supervisor = new BrainSupervisor({
+    supervisor = new BrainSupervisor({
         sessionId: options.sessionId, preferred, instructions, notebook, clock,
         create(id) {
             if (id === 'pipeline') {
@@ -98,7 +164,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 injected = undefined;
                 return { brain, model };
             }
-            if (!config?.apiKey) return undefined;
+            if (!config?.apiKey || (id === 'deepgram-flux' && !answerWriter)) return undefined;
             const deepgramThink = id === 'deepgram-voice-agent'
                 ? (config.deepgramThink ?? options.deepgramThink)
                 : undefined;
@@ -106,21 +172,41 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         },
         onSwitch: data => {
             diagnostic('brain-switch', data);
+            if (data.from === 'deepgram-flux') {
+                answerWriter?.cancel('answer_corrected');
+                writerRun = undefined;
+                finishTiming('cancelled');
+                supervisor.setExternalWriting(false);
+                orchestrator.endProviderTurn();
+            }
             if (data.to === 'pipeline') options.pipeline?.activate();
         },
         onRollover: data => diagnostic('rollover', data),
         onEvent(event, id, model) {
+            if (event.type === 'error' && event.fatal && id === 'deepgram-flux') {
+                answerWriter?.cancel('answer_corrected');
+                writerRun = undefined;
+                finishTiming('cancelled');
+                orchestrator.clearClarification();
+                orchestrator.endProviderTurn();
+            }
             if (event.type === 'error' && event.fatal && !options.pipeline) { options.onFailure(event.code); return; }
             const backup = id === 'pipeline' && preferred !== 'pipeline';
             if (event.type === 'response_started') presented = false;
             if (event.type === 'status') {
                 if (event.status === 'ready') showStatus(id !== preferred ? 'Backup brain' : 'Listening');
-                if (event.status === 'connecting' || event.status === 'degraded') showStatus('Reconnecting');
+                if (event.status === 'connecting' || event.status === 'degraded') {
+                    if (id === 'deepgram-flux') orchestrator.endProviderTurn();
+                    showStatus('Reconnecting');
+                }
             } else if (!backup) {
                 if (event.type === 'interviewer_speech_started' || event.type === 'response_silent') showStatus('Listening');
                 if (event.type === 'interviewer_speech_stopped' || event.type === 'response_started') showStatus('Thinking');
             }
-            if (debug && event.type === 'interviewer_speech_stopped' && id !== 'gemini-live') speechStoppedAt ??= event.at;
+            if (event.type === 'interviewer_speech_stopped') {
+                if (id === 'deepgram-flux') speechStoppedAt = event.at;
+                else if (debug && id !== 'gemini-live') speechStoppedAt ??= event.at;
+            }
             if (debug && event.type === 'response_started') {
                 finishTiming('cancelled');
                 timing = { brainId: id, model, responseId: event.responseId, responseStartedAt: event.at, speechStoppedAt };
@@ -155,6 +241,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         stop() {
             if (!started) return;
             started = false;
+            writerRun = undefined;
+            answerWriter?.cancel('auto_disabled_or_meeting_ended');
             supervisor.stop();
             orchestrator.reset();
             finishTiming('cancelled');
@@ -187,7 +275,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         },
         cancelAnswer(reason) {
             orchestrator.clearClarification();
-            supervisor.current?.cancelResponse(reason);
+            if (supervisor.current?.id === 'deepgram-flux') answerWriter?.cancel(reason);
+            else supervisor.current?.cancelResponse(reason);
         },
     };
 }
@@ -203,12 +292,20 @@ const connectionError: Record<LiveBrainErrorCode, string> = {
 };
 
 export async function testConnection(
-    options: GeminiLiveOptions & { provider?: LiveBrainKeyProvider; deepgramThink?: DeepgramThinkConfig; thinkTimeoutMs?: number },
+    options: GeminiLiveOptions & {
+        provider?: LiveBrainKeyProvider;
+        deepgramThink?: DeepgramThinkConfig;
+        thinkTimeoutMs?: number;
+        testAiRoute?: () => Promise<FluxAiRouteTestStatus>;
+    },
 ): Promise<LiveBrainSettingsResult> {
     const provider = options.provider ?? 'gemini-live';
     const config = { ...options, setupTimeoutMs: options.setupTimeoutMs ?? 5_000, backoffMs: [] };
     if (provider === 'deepgram-voice-agent') {
         return testDeepgramConnection(config);
+    }
+    if (provider === 'deepgram-flux') {
+        return testFluxConnection(config);
     }
     const brain = provider === 'gemini-live' ? new GeminiLiveBrain(config) : createLiveBrain(provider, config);
     const name = provider === 'gemini-live' ? 'Gemini Live' : provider === 'openai-realtime' ? 'OpenAI Realtime' : 'ElevenLabs Realtime';
@@ -269,6 +366,55 @@ async function testDeepgramConnection(
     } finally {
         await brain.stop();
     }
+}
+
+async function testFluxConnection(
+    options: GeminiLiveOptions & { testAiRoute?: () => Promise<FluxAiRouteTestStatus> },
+): Promise<LiveBrainSettingsResult> {
+    const brain = new DeepgramFluxBrain(options);
+    let fluxConnected = false;
+    let fluxError: LiveBrainErrorCode | undefined;
+    let fluxDetail = 'Deepgram Flux connected.';
+    try {
+        await brain.start(startContext('connection-test', '', new AbortController().signal));
+        fluxConnected = true;
+    } catch (error) {
+        fluxError = error instanceof DeepgramFluxError ? error.code : 'protocol';
+        fluxDetail = realtimeConnectionError(fluxError, 'Deepgram Flux');
+    } finally {
+        await brain.stop();
+    }
+
+    const aiRoute: FluxAiRouteTestStatus = options.testAiRoute
+        ? await options.testAiRoute()
+        : {
+            provider: 'unknown',
+            providerLabel: 'AI Provider',
+            model: '',
+            configured: false,
+            replied: false,
+            detail: 'AI Provider route status unavailable.',
+        };
+
+    const success = fluxConnected && aiRoute.replied;
+    const error = !fluxConnected
+        ? (fluxError ?? 'protocol')
+        : !aiRoute.configured
+            ? 'ai_provider_unconfigured'
+            : !aiRoute.replied
+                ? 'ai_provider_test_failed'
+                : undefined;
+
+    return {
+        success,
+        ...(error ? { error } : {}),
+        message: `${fluxDetail} · ${aiRoute.detail}`,
+        fluxResult: {
+            connected: fluxConnected,
+            detail: fluxDetail,
+            aiRoute,
+        },
+    };
 }
 
 function realtimeConnectionError(code: LiveBrainErrorCode, name: string): string {

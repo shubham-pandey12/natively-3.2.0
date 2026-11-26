@@ -273,3 +273,94 @@ test('Prompt Debugger captures spoken instructions and timestamps the first disp
     }]);
     session.stop();
 });
+
+test('D17: Deepgram Flux streams answers through IntelligenceEngine, cancels on correction, and hands off on fallback', async () => {
+    const engine = Object.create(IntelligenceEngine.prototype);
+    engine.currentGenerationId = engine.nextGenerationId = 0;
+    engine.llmHelper = {};
+    engine.isManualAnswerActive = () => false;
+    engine.skipOwnedAutomaticTrigger = () => false;
+    engine.planSuggestionTrigger = () => assert.fail('Flux already decided EndOfTurn');
+    const runs = [];
+    const cancellations = [];
+    const outdated = [];
+    engine.setAutomaticAnswerOutdated = (...args) => outdated.push(args);
+    engine.runWhatShouldISay = (question, _conf, _images, options) => {
+        const result = Promise.withResolvers();
+        engine.currentGenerationId = options.liveBrain.generationId;
+        runs.push({ question, options, resolve: result.resolve });
+        return result.promise;
+    };
+    const origCancel = engine.cancelAutomaticAnswer.bind(engine);
+    engine.cancelAutomaticAnswer = reason => { cancellations.push(reason); return origCancel(reason); };
+
+    const flux = new FakeLiveBrain();
+    flux.id = 'deepgram-flux';
+    const startFlux = flux.start.bind(flux);
+    flux.start = ctx => {
+        const p = startFlux(ctx);
+        flux.emit({ type: 'status', status: 'ready' });
+        return p;
+    };
+
+    const overlay = [];
+    const routing = new LiveBrainRouting();
+    routing.start(onFailure => createMeeting({
+        sessionId: 'flux-meeting', apiKey: 'fake', provider: 'deepgram-flux', engine,
+        pipeline: { activate() {}, cancel() {} },
+        emitQuestion: ev => overlay.push(ev),
+        onFailure,
+    }, flux), () => {});
+
+    assert.equal(routing.pipelineOverride(true), false);
+    flux.emit({ type: 'interviewer_transcript', text: 'How do you scale reads?', final: false, at: 10 });
+    flux.emit({ type: 'interviewer_transcript', text: 'How do you scale reads?', final: true, at: 20 });
+    flux.emit({ type: 'interviewer_speech_stopped', at: 20 });
+    flux.emit({ type: 'decision', decisionId: 'f1', action: 'answer', question: 'How do you scale reads?', at: 21 });
+    await flush();
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].options.liveBrain.suppressQuestionRow, true);
+    assert.ok(overlay.some(e => e.liveBrainQuestion?.text === 'How do you scale reads?' && e.liveBrainQuestion.generationId === runs[0].options.liveBrain.generationId));
+
+    // Correction cancels generation 1 and feeds generation 2.
+    flux.emit({ type: 'interviewer_transcript', text: 'Actually, assume write-heavy.', final: true, at: 30 });
+    flux.emit({ type: 'decision', decisionId: 'f2', action: 'answer', question: 'Actually, assume write-heavy.', at: 31 });
+    assert.deepEqual(cancellations, ['answer_corrected']);
+    assert.equal(outdated.length, 1);
+    runs[0].resolve(null);
+    await flush();
+    assert.equal(runs.length, 2);
+    assert.equal(overlay.filter(event => event.liveBrainStatus).at(-1)?.liveBrainStatus, 'Thinking');
+    runs[1].options.outcomeOut.value = { status: 'success' };
+    runs[1].options.liveBrain.onComplete?.('Use sharded write logs.');
+    runs[1].resolve('Use sharded write logs.');
+    await flush();
+
+    // The writer itself opens a clarification. A short reply is then meaningful.
+    flux.emit({ type: 'interviewer_transcript', text: 'Can the cache serve from disk?', final: true, at: 40 });
+    flux.emit({ type: 'decision', decisionId: 'f3', action: 'answer', question: 'Can the cache serve from disk?', at: 41 });
+    await flush();
+    assert.equal(runs.length, 3);
+    runs[2].options.liveBrain.onComplete?.('Ask: Is disk latency acceptable?');
+    runs[2].options.outcomeOut.value = { status: 'success' };
+    runs[2].resolve('Ask: Is disk latency acceptable?');
+    await flush();
+    flux.emit({ type: 'interviewer_speech_started', at: 50 });
+    flux.emit({ type: 'interviewer_transcript', text: 'Yes.', final: true, at: 55 });
+    flux.emit({ type: 'decision', decisionId: 'f4', action: 'answer', question: 'Yes.', at: 55 });
+    await flush();
+    assert.equal(runs.length, 4);
+    assert.equal(runs[3].question, 'Yes.');
+    assert.match(runs[3].options.liveBrainNotebook, /Is disk latency acceptable/);
+
+    // A fallback must abort even when the writer already started the replacement.
+    flux.emit({ type: 'error', code: 'auth', fatal: true });
+    assert.equal(cancellations.at(-1), 'answer_corrected');
+    runs[3].options.liveBrain.onComplete?.('This stale answer must stay out of the notebook.');
+    runs[3].resolve(null);
+    await flush();
+    assert.doesNotMatch(routing.activeSession.pipelineContext(), /This stale answer/);
+    assert.equal(routing.pipelineOverride(true), true);
+    assert.match(routing.activeSession.pipelineContext(), /Use sharded write logs/);
+    routing.stop();
+});

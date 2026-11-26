@@ -8017,7 +8017,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status, liveBrainQuestion }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status, liveBrainQuestion, liveBrainAnswerStart }) => {
         if (status !== undefined) {
           setLiveBrainStatus(status);
           return;
@@ -8046,6 +8046,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return;
         }
         if (generationId === undefined) return;
+        if (liveBrainAnswerStart) {
+          if (activeDirectAssistRef.current) return;
+          const decision = resolveLiveAnswerBatch(
+            legacyIntelligenceTombstonedRef.current ? null : liveAnswerGenIdRef.current,
+            generationId,
+            liveAnswerFloorRef.current,
+          );
+          if (!decision.accept) return;
+          legacyIntelligenceTombstonedRef.current = false;
+          liveAnswerGenIdRef.current = decision.activeId;
+          if (updated) updatedAnswerGenerationRef.current = generationId;
+          pinAnswerPanel();
+          return;
+        }
         if (typeof outdated === 'boolean' || typeof interviewerSpeaking === 'boolean') {
           setMessages((prev) => prev.map((message) => message.whatToAnswerGeneration === generationId
             ? { ...message,

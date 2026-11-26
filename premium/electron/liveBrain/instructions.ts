@@ -85,6 +85,9 @@ export function buildProviderInstructions(
         }
         return buildDeepgramInstructions(ctx);
     }
+    if (id === 'deepgram-flux') {
+        return '';
+    }
     const instructions = `${buildAnswerInstructions(ctx, variant, id === 'openai-realtime' ? 'text' : 'spoken')}\n\n${FILLER_TURN_RULE}`;
     return id === 'elevenlabs-realtime' ? `${instructions}\n\n${ELEVENLABS_TURN_OUTPUT}` : instructions;
 }

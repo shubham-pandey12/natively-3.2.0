@@ -1485,7 +1485,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
      */
-    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void }): Promise<AutomaticAnswerResult> {
+    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
         // An absent confidence is not a low one: the planner substitutes the
         // intent classifier's score. Only an EXPLICIT sub-threshold value skips.
         // Not for an AUTOMATIC trigger: its confidence is the judge's
@@ -1541,7 +1541,7 @@ export class IntelligenceEngine extends EventEmitter {
         return true;
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void }): Promise<AutomaticAnswerResult> {
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
         if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         if (trigger.automatic && this.isManualAnswerActive()) return { status: 'skipped', reason: 'busy' };
         // Gemini already decided to answer. Keep manual/turn ownership guards,
@@ -1704,7 +1704,9 @@ export class IntelligenceEngine extends EventEmitter {
             // recorded it as answered (forensics 2026-11-13, F-ACC-08 / D3).
             const generationBefore = this.currentGenerationId;
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
-                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain, ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {}) } : {}) });
+                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain,
+                    ...(liveBrain?.onComplete ? { promptInstruction: 'If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.' } : {}),
+                    ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {}) } : {}) });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
             await run;
             const outcome = outcomeOut.value;
@@ -2099,7 +2101,13 @@ export class IntelligenceEngine extends EventEmitter {
                     automatic: true,
                     replacesAutomaticAnswer: request.replacesAutomaticAnswer,
                     reuseSpeculative: false,
-                }, undefined, { generationId, onFirstText: request.onFirstText });
+                    ...(request.liveBrainNotebook ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
+                }, request.speechStoppedAt, {
+                    generationId,
+                    onFirstText: request.onFirstText,
+                    onComplete: request.onComplete,
+                    suppressQuestionRow: request.suppressQuestionRow,
+                });
             } finally {
                 request.signal.removeEventListener('abort', cancel);
                 if (this.debugLiveBrainFirstText?.generationId === generationId) this.debugLiveBrainFirstText = undefined;
@@ -2596,7 +2604,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2672,7 +2680,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2827,9 +2835,11 @@ export class IntelligenceEngine extends EventEmitter {
         const showWtaAnswer = (answer: string, answeredQuestion: string, score: number,
             delivered: boolean, sourceLabel?: string, stopReason?: string) => {
             const out = options?.outcomeOut;
-            if (out?.value) out.value = { ...out.value, delivered: delivered && Boolean(answer.trim()) && this.currentGenerationId === generationId };
+            const deliveredNow = delivered && Boolean(answer.trim()) && this.currentGenerationId === generationId;
+            if (out?.value) out.value = { ...out.value, delivered: deliveredNow };
             const outcome = out?.value;
             if (delivered) this.noteFirstVisibleText(generationId, answer, 'final');
+            if (deliveredNow) options?.liveBrain?.onComplete?.(answer);
             this.emit('suggested_answer', answer, answeredQuestion, score, generationId, sourceLabel, stopReason, outcome);
         };
         // Stamp the run's identity before any await: a manual press racing in
@@ -2860,7 +2870,8 @@ export class IntelligenceEngine extends EventEmitter {
         const automaticQuestion = this.automaticGenerationId === generationId && !isSpeculative ? question?.trim() : undefined;
         if (automaticQuestion) {
             this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true,
-                ...(options?.replacesAutomaticAnswer ? { updated: true } : {}) });
+                ...(options?.replacesAutomaticAnswer ? { updated: true } : {}),
+                ...(options?.liveBrain?.suppressQuestionRow ? { liveBrainAnswerStart: true } : {}) });
         }
         this.setMode('what_to_say');
         // Speculative runs don't stamp lastTriggerTime at start — the cooldown slot

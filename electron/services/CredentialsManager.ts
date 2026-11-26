@@ -105,6 +105,7 @@ export interface StoredCredentials {
     liveBrainOpenaiKey?: string;
     liveBrainElevenlabsKey?: string;
     liveBrainDeepgramKey?: string;
+    liveBrainDeepgramFluxKey?: string;
     liveBrainDeepgramEndpoint?: { url: string; authHeader?: string };
     groqApiKey?: string;
     openaiApiKey?: string;
@@ -966,6 +967,10 @@ export class CredentialsManager {
         return this.credentials.liveBrainDeepgramKey;
     }
 
+    public getLiveBrainDeepgramFluxKey(): string | undefined {
+        return this.credentials.liveBrainDeepgramFluxKey;
+    }
+
     public setLiveBrainGeminiKey(key: string): boolean {
         return this.setLiveBrainKey('liveBrainGeminiKey', key);
     }
@@ -982,7 +987,11 @@ export class CredentialsManager {
         return this.setLiveBrainKey('liveBrainDeepgramKey', key);
     }
 
-    private setLiveBrainKey(field: 'liveBrainGeminiKey' | 'liveBrainOpenaiKey' | 'liveBrainElevenlabsKey' | 'liveBrainDeepgramKey', key: string): boolean {
+    public setLiveBrainDeepgramFluxKey(key: string): boolean {
+        return this.setLiveBrainKey('liveBrainDeepgramFluxKey', key);
+    }
+
+    private setLiveBrainKey(field: 'liveBrainGeminiKey' | 'liveBrainOpenaiKey' | 'liveBrainElevenlabsKey' | 'liveBrainDeepgramKey' | 'liveBrainDeepgramFluxKey', key: string): boolean {
         if (this.refuseWriteWhileDegraded('set Live Brain key')) return false;
         const previous = this.credentials[field];
         this.credentials[field] = key.trim() || undefined;

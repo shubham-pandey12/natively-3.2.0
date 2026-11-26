@@ -6,13 +6,21 @@ export class AnswerWriter implements AnswerWriterPort {
 
     constructor(private readonly engine: LiveBrainAnswerEngine) {}
 
-    write(request: Parameters<AnswerWriterPort['write']>[0], onFirstText?: (at: number) => void): ReturnType<AnswerWriterPort['write']> {
+    write(
+        request: Parameters<AnswerWriterPort['write']>[0],
+        optionsOrFirstText?: ((at: number) => void) | { suppressQuestionRow?: boolean },
+    ): ReturnType<AnswerWriterPort['write']> {
         this.cancel('answer_corrected');
         const controller = new AbortController();
         this.active = controller;
-        // The engine supplies the current prompt, profile and model. Notebook
-        // context will enter through this adapter when Phase 5 owns it.
-        const answer = this.engine.runLiveBrainAnswer({ ...request, signal: controller.signal, onFirstText });
+        const onFirstText = typeof optionsOrFirstText === 'function' ? optionsOrFirstText : undefined;
+        const suppressQuestionRow = typeof optionsOrFirstText === 'object' ? optionsOrFirstText?.suppressQuestionRow : undefined;
+        const answer = this.engine.runLiveBrainAnswer({
+            ...request,
+            signal: controller.signal,
+            ...(onFirstText ? { onFirstText } : {}),
+            ...(suppressQuestionRow ? { suppressQuestionRow } : {}),
+        });
         const done = answer.done.then<AnswerCompletion>(({ status }) => {
             if (status === 'completed' || status === 'partial') return 'completed';
             return status === 'cancelled' ? 'cancelled' : 'failed';

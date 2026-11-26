@@ -258,6 +258,20 @@ Tasks:
 
 ---
 
+## Phase 9 — Deepgram Flux + My AI Provider (D17)
+
+**Objective:** add `deepgram-flux` as a second Deepgram Live Brain mode alongside `deepgram-voice-agent`, pairing standalone Deepgram Flux `/v2/listen` turn detection with Natively's existing streaming answer engine (`AnswerWriter` → `IntelligenceEngine.runLiveBrainAnswer`).
+
+Tasks:
+1. Settings & credentials: add `'deepgram-flux'` to `LiveBrainKeyProvider`, `SettingsManager` (`liveBrainReuseDeepgramFluxKey`), `CredentialsManager` (`liveBrainDeepgramFluxKey`), and `PROVIDERS` / `inspectFluxAiRoute` in `electron/services/liveBrainSettings.ts` (preserving all Voice Agent keys/settings, reusing the Deepgram Speech Provider key when enabled, and exposing sanitized active AI Provider + model + setup state to the renderer).
+2. Transport: implement standalone `premium/electron/liveBrain/brains/DeepgramFluxBrain.ts` (`wss://api.deepgram.com/v2/listen?model=flux-general-multi&encoding=linear16&sample_rate=16000`, `Authorization: Token <key>`, 80 ms / 2,560-byte 16 kHz `linear16` binary frames, sparse-capture zero padding, `CloseStream` shutdown, monotonic `turn_index` dedupe, partial/final `interviewer_transcript`, and one confirmed `decision: { action: 'answer' }` per meaningful `EndOfTurn` with no speculative answer triggers).
+3. Answer streaming integration: wire `AnswerWriter` in `premium/electron/liveBrain/meeting.ts` (`IntelligenceManager.runLiveBrainAnswer`), thread `liveBrainNotebook`, `speechStoppedAt`, assistant notebook recording, and duplicate-bubble prevention (`suppressQuestionRow` / `liveBrainAnswerStart`), keep `ResponseOrchestrator` filler suppression (`!askPending && isFillerOnly`) and clarification replies (`"Yes"`), and ensure active generation cancellation (`answer_corrected`) drops stale chunks cleanly.
+4. Supervisor, factory & Test Connection: add `'deepgram-flux'` to `premium/electron/liveBrain/index.ts` and `BrainSupervisor.ts` (decision timeout reset, 50-min rollover, fallback), and implement two-part `testConnection` verifying `/v2/listen` and separately testing the active Natively AI route (distinguishing configured vs test reply).
+5. Settings UI: show both `Deepgram Voice Agent` and `Deepgram Flux + My AI Provider` in `SettingsOverlay.tsx`, display the Flux active AI provider/model & setup state, and show the dual Flux + AI route test status cleanly.
+6. Tests & verification: add `DeepgramFluxBrain.test.mjs` and extend `ResponseOrchestrator.test.mjs`, `BrainSupervisor.test.mjs`, `Meeting.test.mjs`, `Foundation.test.mjs`, and `LiveBrainSettings.test.mjs` covering settings/key reuse, mid-sentence pauses, duplicate finals, filler turns, corrections, clarification `"Yes"`, stale deltas, reconnect, shutdown, and fallback ownership. Run builds, typechecks, Live Brain tests, lib/component tests, and side-by-side synthetic clip measurements on Windows.
+
+---
+
 ## Test corpus (Phase 0 creates; all phases use)
 
 | ID | Scenario | Expected |

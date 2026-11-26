@@ -3,12 +3,13 @@ import { createResponseParser } from './responseParser';
 import type { ResponseClock } from './ResponseOrchestrator';
 import type { ConversationTurn, LiveBrain, LiveBrainEvent, LiveBrainId, LiveBrainStartContext } from './types';
 
-const REALTIME = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent'] as const;
+const REALTIME = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent', 'deepgram-flux'] as const;
 const ROLLOVER_MS = {
     'gemini-live': 13.5 * 60_000,
     'openai-realtime': 50 * 60_000,
     'elevenlabs-realtime': 8.5 * 60_000,
     'deepgram-voice-agent': 110 * 60_000,
+    'deepgram-flux': 50 * 60_000,
 };
 const MAX_AUDIO_SAMPLES = 160_000; // 10 s of 16 kHz PCM
 const MAX_RESPONSE_CHARS = 16_000; // notebook only; the overlay receives the entire stream
@@ -42,6 +43,7 @@ export class BrainSupervisor<Timer> {
     private quoteAfter = 0;
     private rolloverAt?: number;
     private forceHandoff = false;
+    private externalWriting = false;
     private connectionSequence = 0;
     private readonly attempted = new Set<LiveBrainId>();
     private readonly retriedFresh = new Set<LiveBrainId>();
@@ -56,13 +58,25 @@ export class BrainSupervisor<Timer> {
         onEvent(event: LiveBrainEvent, id: LiveBrainId, model: string): void;
         onSwitch?(data: { from?: LiveBrainId; to: LiveBrainId; reason: string; elapsedMs: number }): void;
         onRollover?(data: { brain: LiveBrainId; reason: string; elapsedMs: number }): void;
-    }) {}
+    }) { }
 
     get current(): LiveBrain | undefined { return this.active?.brain; }
+    get notebookContext(): string {
+        return [this.options.notebook.renderNotebook(), renderRecentTurns(this.options.notebook.recentTurns())].filter(Boolean).join('\n\n');
+    }
     get pipelineContext(): string {
-        return this.current?.id === 'pipeline'
-            ? [this.options.notebook.renderNotebook(), renderRecentTurns(this.options.notebook.recentTurns())].filter(Boolean).join('\n\n')
-            : '';
+        return this.current?.id === 'pipeline' ? this.notebookContext : '';
+    }
+
+    setExternalWriting(writing: boolean): void {
+        this.externalWriting = writing;
+        if (!writing) this.promote();
+    }
+
+    recordAssistantTurn(text: string, isClarification = false): void {
+        if (!this.stopped && text.trim()) {
+            this.options.notebook.record({ role: 'assistant', text: text.trim(), at: this.options.clock.now() }, isClarification);
+        }
     }
 
     start(): void {
@@ -89,6 +103,7 @@ export class BrainSupervisor<Timer> {
         this.missed = 0;
         this.speaking = false;
         this.forceHandoff = false;
+        this.externalWriting = false;
         this.clearAudio();
         this.candidates = [];
         this.options.notebook.clear();
@@ -207,6 +222,12 @@ export class BrainSupervisor<Timer> {
             this.clearResponseTimeout();
         }
         if (event.type === 'interviewer_speech_stopped') this.noteSpeechStop(event.at);
+        if (event.type === 'decision') {
+            this.clearResponseTimeout();
+            this.missed = 0;
+            this.speaking = false;
+            if (event.action === 'answer') this.clearAudio();
+        }
         if (event.type === 'interviewer_transcript' && event.final) {
             this.options.notebook.record({ role: 'interviewer', text: event.text, at: event.at });
         }
@@ -282,7 +303,7 @@ export class BrainSupervisor<Timer> {
 
     private promote(force = false): void {
         const replacement = this.standby;
-        if (!replacement?.ready || (!force && !this.forceHandoff && (this.response || this.speaking) && this.active?.ready)) return;
+        if (!replacement?.ready || (!force && !this.forceHandoff && (this.response || this.externalWriting || this.speaking) && this.active?.ready)) return;
         const previous = this.active;
         this.finishActiveResponse(previous, 'cancelled');
         this.active = replacement;
@@ -354,7 +375,7 @@ export class BrainSupervisor<Timer> {
         if (!lease) return;
         lease.unsubscribe?.();
         lease.controller.abort();
-        void lease.brain.stop().catch(() => {});
+        void lease.brain.stop().catch(() => { });
     }
 
     private clearAudio(): void { this.audio = []; this.audioSamples = 0; }
