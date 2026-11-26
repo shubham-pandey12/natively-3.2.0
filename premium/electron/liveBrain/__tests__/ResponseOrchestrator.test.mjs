@@ -247,7 +247,7 @@ test('D14: the provider transcript streams into one bubble that closes when its 
     assert.equal(new Set(h.shown.map(payload => payload.questionId)).size, 1);
 });
 
-test('D14: the next question starts a new bubble, and a filler turn gets a bubble with no answer', () => {
+test('D14: the next question starts a new bubble, and a filler-only turn gets no bubble (D15)', () => {
     const h = chatRig();
     h.send({ type: 'interviewer_transcript', text: 'First question?', final: true });
     h.send({ type: 'response_started', responseId: 'r1' });
@@ -256,7 +256,7 @@ test('D14: the next question starts a new bubble, and a filler turn gets a bubbl
     h.send({ type: 'interviewer_speech_started' });
     h.send({ type: 'interviewer_transcript', text: 'Okay.', final: true });
     h.send({ type: 'response_silent' });
-    assert.deepEqual(h.latest('q2'), { questionId: 'q2', text: 'Okay.', done: true });
+    assert.equal(h.latest('q2'), undefined);
     h.send({ type: 'interviewer_transcript', text: 'Second question?', final: true });
     assert.equal(h.latest('q3').text, 'Second question?');
 });
@@ -403,4 +403,24 @@ test('D15: every realtime provider gets the mandatory filler rule', () => {
         assert.ok(buildProviderInstructions({}, 'full', id).includes(FILLER_TURN_RULE), id);
     }
     assert.match(FILLER_TURN_RULE, /never repeat, continue, or rephrase your previous answer/);
+});
+
+test('D15: a bubble that starts as filler appears once it becomes a real question', () => {
+    const h = chatRig();
+    h.send({ type: 'interviewer_speech_started' });
+    h.send({ type: 'interviewer_transcript', text: 'Okay,', final: false });
+    assert.equal(h.shown.length, 0);
+    h.send({ type: 'interviewer_transcript', text: 'Okay, short one. If Redis goes down?', final: false });
+    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'Okay, short one. If Redis goes down?', done: false });
+});
+
+test('D15: a short reply to a waiting Ask is shown in the chat', () => {
+    const h = chatRig();
+    h.send({ type: 'interviewer_transcript', text: 'Design a cache.', final: true });
+    h.send({ type: 'response_started', responseId: 'r1' });
+    h.send({ type: 'response_delta', responseId: 'r1', text: 'Ask: Is it read heavy?' });
+    h.send({ type: 'response_done', responseId: 'r1', status: 'completed' });
+    h.send({ type: 'interviewer_speech_started' });
+    h.send({ type: 'interviewer_transcript', text: 'Yes.', final: true });
+    assert.equal(h.latest('q2').text, 'Yes.');
 });

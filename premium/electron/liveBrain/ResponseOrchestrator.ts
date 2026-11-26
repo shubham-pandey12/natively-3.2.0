@@ -64,6 +64,8 @@ interface QuestionBubble {
     open: boolean;
     source: 'provider' | 'stt';
     generationId?: number;
+    /** Sent to the overlay at least once. */
+    shown?: boolean;
 }
 
 interface AnswerTurn {
@@ -431,6 +433,11 @@ export class ResponseOrchestrator<Timer> {
     private emitQuestion(bubble: QuestionBubble): void {
         const text = joinText(bubble.base, bubble.live);
         if (!text) return;
+        // D15: filler-only speech ("Mm-hmm.", "Okay.") stays out of the chat. A
+        // bubble appears once its text is more than filler ("Okay, short one…"),
+        // and a short reply to a waiting Ask ("Yes.") is still shown.
+        if (!bubble.shown && !this.askPending && isFillerOnly(text)) return;
+        bubble.shown = true;
         this.ports.overlay.showQuestion?.({
             questionId: bubble.id, text, done: !bubble.open,
             ...(bubble.generationId === undefined ? {} : { generationId: bubble.generationId }),

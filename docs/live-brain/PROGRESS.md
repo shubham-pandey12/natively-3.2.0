@@ -517,6 +517,9 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 - Not covered: a filler bubble that arrives only after its answer started (OpenAI's late Whisper transcript) is not filtered, and the hidden answer's text is still saved to the notebook.
 - Tests: the filler word list, a hidden answer under "Mm-hmm." (the next real question is answered normally), a "Yes." after an Ask is answered, and every provider getting the rule. 94 Live Brain tests pass; build and all three typechecks pass. Needs a live check. Requires physical macOS verification.
 
+- Live check (Gemini, Windows): "Mhm." between two questions got no answer; both real questions were answered normally (about 1.1 s to first text). Gemini started a turn after the filler, but no text from it was shown. The logs do not show whether the instruction or the safety net stopped it.
+- Follow-up (user request): filler-only speech no longer gets a bubble in the chat either. `emitQuestion` skips a bubble until its text is more than filler, unless an Ask is waiting. The transcript strip at the top is unchanged. Two new tests (filler that grows into a question, "Yes." after an Ask), and the D14 filler test now expects no bubble. 96 Live Brain tests pass; build, `npx tsc --noEmit -p tsconfig.json` and `npm run typecheck:premium` pass. Requires physical macOS verification.
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).
