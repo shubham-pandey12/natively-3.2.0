@@ -23,6 +23,7 @@ export interface DeepgramSettingsConfig {
     managedModel: string;
     byoKeyProvider: string;
     byoModel?: string;
+    byoRecommendedModels: LiveBrainModel[];
     byoCustomUrl: string;
     byoHasCustomHeader: boolean;
     byoOptions: DeepgramByoOption[];

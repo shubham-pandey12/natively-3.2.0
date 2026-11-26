@@ -361,6 +361,7 @@ test('Deepgram Voice Agent settings reuse STT key, configure managed & BYO Think
 
         assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', managedProvider: 'anthropic' }).success, true);
         assert.equal(invoke('get-config').deepgram.managedModel, 'claude-haiku-4-5');
+        assert.deepEqual((await invoke('list-models')).models.map(model => model.id), ['claude-haiku-4-5', 'claude-sonnet-4-5']);
 
         const byoKey = 'sk-' + 'b'.repeat(20) + 'ByoK';
         credentials.setOpenaiApiKey(byoKey);
@@ -380,8 +381,33 @@ test('Deepgram Voice Agent settings reuse STT key, configure managed & BYO Think
         await invoke('test-connection');
         assert.equal(connections[0].deepgramThink.byoApiKey, byoKey);
         const save = options => invoke('set-options', { provider: 'deepgram-voice-agent', ...options });
+
+        credentials.setGeminiApiKey('google-test-key');
+        credentials.setClaudeApiKey('anthropic-test-key');
+        credentials.setGroqApiKey('groq-test-key');
+        credentials.setOpenrouterApiKey('openrouter-test-key');
+        for (const [provider, recommendation] of Object.entries({
+            openai: 'gpt-4o-mini',
+            google: 'gemini-3.5-flash-lite',
+            anthropic: 'claude-haiku-4-5',
+            groq: 'openai/gpt-oss-20b',
+            openrouter: 'openai/gpt-4o-mini',
+        })) {
+            assert.equal(save({ byoKeyProvider: provider }).success, true);
+            const { models } = await invoke('list-models');
+            assert.deepEqual(models, invoke('get-config').deepgram.byoRecommendedModels);
+            assert.ok(models.length <= 5);
+            assert.equal(new Set(models.map(model => model.id)).size, models.length);
+            assert.ok(models.some(model => model.id === recommendation));
+            assert.equal(save({ byoKeyProvider: provider, byoModel: recommendation }).success, true);
+            assert.equal(resolveLiveBrainRuntime().deepgramThink.byoModel, recommendation);
+        }
+        assert.equal(save({ byoKeyProvider: 'google' }).success, true);
+        assert.equal(resolveLiveBrainRuntime().model, 'gemini-3.5-flash-lite');
+
         assert.equal(readFileSync(join(userData, 'settings.json'), 'utf8').includes('secret-hdr'), false);
         assert.equal(save({ byoKeyProvider: 'custom', byoModel: 'custom-model' }).success, true);
+        assert.deepEqual((await invoke('list-models')).models, []);
         assert.equal(resolveLiveBrainRuntime().model, 'custom-model');
         assert.equal(resolveLiveBrainRuntime().deepgramThink.byoCustomHeader, 'Authorization: Bearer secret-hdr');
         assert.equal(save({ byoCustomUrl: 'https://another.example.com/v1/chat/completions' }).success, true);

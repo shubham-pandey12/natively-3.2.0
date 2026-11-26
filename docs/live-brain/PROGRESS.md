@@ -553,6 +553,11 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 - Moved Deepgram tests into the shared Live Brain `.mjs` suite and load the compiled modules from `dist-electron`. The suite is included in `npm test`. Run it with the Settings IPC tests using `npm run test:live-brain`.
 - Kept `provider.type: 'groq'` for native Groq BYO. Deepgram documents this provider type and accepted the session settings in a live probe. The probe could not get a Think reply, and Groq's models API returned HTTP 401 for the available key. A successful Groq Think reply still needs a valid key.
 
+## Phase 8 follow-up — Deepgram BYO model picker (Windows, 2026-11-27)
+
+- The existing Models control now shows up to five curated text chat models for the selected BYO provider. OpenAI, Google AI Studio, Anthropic, Groq, and OpenRouter each have a list. Model selection uses the existing per-provider setting and the manual model ID field still supports custom endpoints and other models.
+- The Electron build, renderer and Electron type checks, 110 Live Brain and settings tests, 1,002 component tests, and four native-popup policy tests passed on Windows. The settings test covers the list cap, provider switching, per-provider persistence, and custom endpoints. The shared renderer and settings code have no OS-specific paths. Live BYO compatibility and response latency were not measured, and macOS was reviewed but not executed.
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).

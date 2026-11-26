@@ -58,6 +58,41 @@ function isDeepgramManagedProvider(value: unknown): value is DeepgramManagedProv
     return value === 'open_ai' || value === 'anthropic' || value === 'google' || value === 'nvidia';
 }
 
+// A short list of text chat models for the supported BYO endpoints.
+const DEEPGRAM_BYO_MODELS = new Map<string, LiveBrainModel[]>([
+    ['openai', [
+        { id: 'gpt-4o-mini', label: 'GPT-4o mini' },
+        { id: 'gpt-5-nano', label: 'GPT-5 nano' },
+        { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
+        { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+        { id: 'gpt-4.1', label: 'GPT-4.1' },
+    ]],
+    ['google', [
+        { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite' },
+        { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' },
+        { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite' },
+        { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+        { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
+    ]],
+    ['anthropic', [
+        { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+        { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+        { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+    ]],
+    ['groq', [
+        { id: 'openai/gpt-oss-20b', label: 'GPT-OSS 20B' },
+        { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B Instant' },
+        { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B' },
+        { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B Versatile' },
+    ]],
+    ['openrouter', [
+        { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini' },
+        { id: 'google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite' },
+        { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5' },
+        { id: 'anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+    ]],
+]);
+
 /**
  * Deepgram's servers make outbound HTTPS requests to BYO think endpoints, so
  * loopback, link-local, RFC1918 private IPs, and non-HTTPS URLs cannot work.
@@ -280,6 +315,7 @@ function inspectDeepgramSettings(settings: SettingsManager, credentials: Credent
             managedModel,
             byoKeyProvider,
             byoModel,
+            byoRecommendedModels: DEEPGRAM_BYO_MODELS.get(byoKeyProvider) ?? [],
             byoCustomUrl,
             byoHasCustomHeader: Boolean(byoCustomHeader),
             byoOptions,
@@ -530,6 +566,7 @@ export function registerLiveBrainSettingsIpc(
         if (provider === 'openai-realtime') return { success: true, models: OPENAI_REALTIME_MODELS };
         if (provider === 'elevenlabs-realtime') return { success: true, models: ELEVENLABS_REALTIME_MODELS };
         if (provider === 'deepgram-voice-agent') {
+            if (deepgram?.thinkMode === 'byo') return { success: true, models: deepgram.byoRecommendedModels };
             const mp = deepgram?.managedProvider ?? DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER;
             return { success: true, models: DEEPGRAM_MANAGED_MODELS[mp] };
         }

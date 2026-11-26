@@ -650,6 +650,7 @@ const LiveBrainProviderSettings = () => {
 
     const provider = config?.provider;
     const keyProvider: LiveBrainKeyProvider | null = isLiveBrainKeyProvider(provider) ? provider : null;
+    const isDeepgramByo = keyProvider === 'deepgram-voice-agent' && config?.deepgram?.thinkMode === 'byo';
 
     useEffect(() => setCustomUrlDraft(config?.deepgram?.byoCustomUrl ?? ''), [config?.deepgram?.byoCustomUrl]);
     useEffect(() => setByoModelDraft(config?.deepgram?.byoModel ?? ''),
@@ -674,10 +675,10 @@ const LiveBrainProviderSettings = () => {
     // The list belongs to the provider and the key in use; reload when either changes.
     useEffect(() => {
         setModels([]);
-        if (keyProvider && (config?.hasKey || keyProvider === 'deepgram-voice-agent')) void loadModels();
+        if (!isDeepgramByo && keyProvider && (config?.hasKey || keyProvider === 'deepgram-voice-agent')) void loadModels();
         else setModelsLoading(false);
         return () => { ++modelsVersion.current; };
-    }, [keyProvider, config?.hasKey, config?.keySource, config?.deepgram?.managedProvider, config?.deepgram?.thinkMode, loadModels]);
+    }, [keyProvider, config?.hasKey, config?.keySource, config?.deepgram?.managedProvider, isDeepgramByo, loadModels]);
 
     const resetFeedback = () => {
         ++feedbackVersion.current;
@@ -765,8 +766,9 @@ const LiveBrainProviderSettings = () => {
         : null;
     const { defaultModel } = ui;
     const currentModel = config?.model || defaultModel;
-    const listedModels = models.some(m => m.id === currentModel)
-        ? models : [{ id: currentModel, label: currentModel }, ...models];
+    const listedModels = isDeepgramByo
+        ? config?.deepgram?.byoRecommendedModels ?? []
+        : models.some(m => m.id === currentModel) ? models : [{ id: currentModel, label: currentModel }, ...models];
 
     return (
         <div>
@@ -904,7 +906,7 @@ const LiveBrainProviderSettings = () => {
                                                         t('Test Connection')}
                                         </SizedLabelSwap>
                                     </button>
-                                    {(keyProvider !== 'deepgram-voice-agent' || config.deepgram?.thinkMode !== 'byo') && (
+                                    {(!isDeepgramByo || listedModels.length > 0) && (
                                         <AipModelList
                                             pickOnly
                                             catalogIsComplete
@@ -913,14 +915,20 @@ const LiveBrainProviderSettings = () => {
                                             onToggle={() => {}}
                                             onReset={() => {}}
                                             defaultId={currentModel}
-                                            onSetDefault={(model) => void setOption(
-                                                keyProvider === 'deepgram-voice-agent'
-                                                    ? { provider: 'deepgram-voice-agent', managedModel: model }
-                                                    : { provider: keyProvider, model },
-                                            )}
+                                            onSetDefault={(model) => {
+                                                if (isDeepgramByo) {
+                                                    const byoKeyProvider = config.deepgram?.byoKeyProvider;
+                                                    if (optionsSaving || !byoKeyProvider) return;
+                                                    void setOption({ provider: 'deepgram-voice-agent', byoKeyProvider, byoModel: model });
+                                                } else if (keyProvider === 'deepgram-voice-agent') {
+                                                    void setOption({ provider: keyProvider, managedModel: model });
+                                                } else {
+                                                    void setOption({ provider: keyProvider, model });
+                                                }
+                                            }}
                                             refreshing={modelsLoading}
-                                            onRefresh={() => void loadModels()}
-                                            lastFetchedAt={modelsFetchedAt}
+                                            onRefresh={isDeepgramByo ? undefined : () => void loadModels()}
+                                            lastFetchedAt={isDeepgramByo ? undefined : modelsFetchedAt}
                                         />
                                     )}
                                 </div>
