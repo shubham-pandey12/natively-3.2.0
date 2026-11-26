@@ -51,6 +51,10 @@
 
 - 2026-11-26 — **D13:** user asked to add ElevenLabs Realtime (`eleven_realtime_v1_mini` / `v1_max`) as a third provider, same card, same behaviour as Gemini and OpenAI. ElevenLabs states OpenAI-Realtime wire compatibility, so one shared protocol client. Built in Phase 6 after an ElevenLabs spike; text-only output is unverified.
 
+- 2026-11-26 — **ElevenLabs spike accepted (user):** audio mode with the transcript shown and the audio discarded, because text-only produced no answers. Mini is the default; Max is labelled "slower (~3 s)". Late deltas are dropped after a cancel. If filler or `Ask:` sentinels are ignored, that is documented as a known limitation, with no local filtering.
+
+- 2026-11-26 — **End-of-speech wait kept at 1.3 s (user):** Gemini stays at `silenceDurationMs` 1300 with low end sensitivity, and OpenAI and ElevenLabs keep `semantic_vad` low eagerness. This was chosen over a GPT-like ~0.5 s so that a mid-question pause (corpus S1, 1.2 s) does not trigger an answer. Phase 7 tuning must not shorten it without asking the user.
+
 - 2026-11-26 — **Scope:** Live Brain answers only interviewer speech. Typed questions, Direct Assist, manual "What to answer" presses, screenshots and all other modes keep default Natively behaviour (ARCHITECTURE §9a scope rule).
 
 ## Phase UI — 2026-11-25
