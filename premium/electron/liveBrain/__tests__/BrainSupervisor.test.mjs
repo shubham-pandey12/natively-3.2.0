@@ -9,12 +9,11 @@ const load = name => require(`${dist}premium/electron/liveBrain/${name}.js`);
 const { BrainSupervisor } = load('BrainSupervisor');
 const { InterviewNotebook } = load('InterviewNotebook');
 const { PipelineBrain } = load('brains/PipelineBrain');
-const { LiveBrainNotImplementedError } = load('index');
 const { FakeLiveBrain } = load('__tests__/FakeLiveBrain');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const MIN = 60_000;
 
-function rig(preferred = 'gemini-live', standbyStartupMs = 0) {
+function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemini-live']) {
     const clock = new FakeClock();
     const notebook = new InterviewNotebook({ now: () => clock.now() });
     const realtime = [];
@@ -23,12 +22,12 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0) {
     const switches = [];
     const rollovers = [];
     const supervisor = new BrainSupervisor({
-        sessionId: 'meeting', preferred, instructions: 'Answer instructions', notebook, clock,
+        sessionId: 'meeting', preferred, instructions: id => `Answer instructions for ${id}`, notebook, clock,
         create(id) {
             attempted.push(id);
             if (id === 'pipeline') return { brain: new PipelineBrain(() => {}), model: 'pipeline' };
-            if (id !== 'gemini-live') throw new LiveBrainNotImplementedError(id);
-            const brain = new FakeLiveBrain();
+            if (!available.includes(id)) return undefined;
+            const brain = new FakeLiveBrain(id);
             brain.history = [];
             brain.addHistoryContext = history => brain.history.push(history);
             if (realtime.length && standbyStartupMs) {
@@ -135,11 +134,27 @@ test('resumption failure opens a fresh seeded session and replays buffered PCM',
     h.supervisor.stop();
 });
 
-test('selected unimplemented providers skip to Gemini and unknown ids throw', async () => {
+test('providers without usable keys skip to Gemini and unknown ids throw', async () => {
     const h = rig('elevenlabs-realtime');
     h.supervisor.start();
     await flush();
     assert.deepEqual(h.attempted, ['elevenlabs-realtime', 'gemini-live']);
     h.supervisor.stop();
     assert.throws(() => rig('unknown').supervisor.start(), /Unsupported live brain/);
+});
+
+test('the selected realtime provider comes first, followed by Gemini, remaining realtime and pipeline', async () => {
+    const providerIds = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime'];
+    const h = rig('elevenlabs-realtime', 0, providerIds);
+    h.supervisor.start();
+    for (const id of ['elevenlabs-realtime', 'gemini-live', 'openai-realtime']) {
+        await flush();
+        const brain = h.supervisor.current;
+        assert.equal(brain.id, id);
+        assert.match(brain.starts[0].instructions, new RegExp(id));
+        brain.emit({ type: 'error', code: 'quota', fatal: true });
+    }
+    assert.equal(h.supervisor.current.id, 'pipeline');
+    assert.deepEqual(h.attempted, ['elevenlabs-realtime', 'gemini-live', 'openai-realtime', 'pipeline']);
+    h.supervisor.stop();
 });

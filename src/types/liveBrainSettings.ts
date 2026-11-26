@@ -2,6 +2,8 @@ export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime' | 'elevenla
 export type LiveBrainProvider = LiveBrainKeyProvider | 'pipeline';
 export type LiveBrainPromptVariant = 'full' | 'trimmed';
 export const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
+export const DEFAULT_OPENAI_REALTIME_MODEL = 'gpt-realtime-2.1';
+export const DEFAULT_ELEVENLABS_REALTIME_MODEL = 'eleven_realtime_v1_mini';
 
 export interface LiveBrainConfig {
     provider: LiveBrainProvider;

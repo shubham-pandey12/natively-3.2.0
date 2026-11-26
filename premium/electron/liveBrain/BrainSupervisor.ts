@@ -4,7 +4,7 @@ import type { ResponseClock } from './ResponseOrchestrator';
 import type { ConversationTurn, LiveBrain, LiveBrainEvent, LiveBrainId, LiveBrainStartContext } from './types';
 
 const REALTIME = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime'] as const;
-const ROLLOVER_MS = { 'gemini-live': 13.5 * 60_000, 'openai-realtime': 50 * 60_000, 'elevenlabs-realtime': 50 * 60_000 };
+const ROLLOVER_MS = { 'gemini-live': 13.5 * 60_000, 'openai-realtime': 50 * 60_000, 'elevenlabs-realtime': 8.5 * 60_000 };
 const MAX_AUDIO_SAMPLES = 160_000; // 10 s of 16 kHz PCM
 const MAX_RESPONSE_CHARS = 16_000; // notebook only; the overlay receives the entire stream
 const NO_RESPONSE_MS = 6_000;
@@ -44,7 +44,7 @@ export class BrainSupervisor<Timer> {
     constructor(private readonly options: {
         sessionId: string;
         preferred: LiveBrainId;
-        instructions: string;
+        instructions(id: LiveBrainId): string;
         notebook: InterviewNotebook;
         clock: ResponseClock<Timer>;
         create(id: LiveBrainId): { brain: LiveBrain; model: string } | undefined;
@@ -123,17 +123,10 @@ export class BrainSupervisor<Timer> {
     }
 
     private create(id: LiveBrainId, reason: string): Lease | undefined {
-        try {
-            const provider = this.options.create(id);
-            if (!provider) return undefined;
-            if (provider.brain.id !== id) throw new Error(`Live brain factory returned ${provider.brain.id} for ${id}`);
-            return { ...provider, reason, since: this.options.clock.now(), ready: false, controller: new AbortController() };
-        } catch (error) {
-            // The premium build also bundles the factory as a separate entry.
-            // Match its typed provider error across those module boundaries.
-            if (error instanceof Error && error.name === 'LiveBrainNotImplementedError' && 'id' in error && error.id === id) return undefined;
-            throw error;
-        }
+        const provider = this.options.create(id);
+        if (!provider) return undefined;
+        if (provider.brain.id !== id) throw new Error(`Live brain factory returned ${provider.brain.id} for ${id}`);
+        return { ...provider, reason, since: this.options.clock.now(), ready: false, controller: new AbortController() };
     }
 
     private select(reason: string, from?: LiveBrainId): void {
@@ -162,7 +155,7 @@ export class BrainSupervisor<Timer> {
         const ctx: LiveBrainStartContext = {
             sessionId: this.options.sessionId, responseNamespace: `${this.options.sessionId}:${++this.connectionSequence}`,
             signal: lease.controller.signal, notebook: snapshot, recentTurns,
-            instructions: [this.options.instructions, notebook.renderNotebook(), renderRecentTurns(recentTurns)].filter(Boolean).join('\n\n'),
+            instructions: [this.options.instructions(lease.brain.id), notebook.renderNotebook(), renderRecentTurns(recentTurns)].filter(Boolean).join('\n\n'),
         };
         lease.unsubscribe = lease.brain.onEvent(event => this.onEvent(lease, event));
         void lease.brain.start(ctx).then(() => {

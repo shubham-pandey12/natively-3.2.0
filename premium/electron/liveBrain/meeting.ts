@@ -1,17 +1,25 @@
 import { notePromptDebugLiveBrain, isPromptDebugEnabled, notePromptDebugAnswerTiming } from '../../../electron/llm/promptDebug';
 import type { LiveBrainMeetingOptions, LiveBrainMeetingSession } from '../../../electron/premium/liveBrain';
-import type { LiveBrainSettingsResult } from '../../../src/types/liveBrainSettings';
+import { DEFAULT_ELEVENLABS_REALTIME_MODEL, DEFAULT_OPENAI_REALTIME_MODEL, type LiveBrainKeyProvider, type LiveBrainSettingsResult } from '../../../src/types/liveBrainSettings';
 import { DEFAULT_GEMINI_LIVE_MODEL, GeminiLiveBrain, GeminiLiveError, type GeminiLiveOptions } from './brains/GeminiLiveBrain';
+import { RealtimeBrainError } from './brains/RealtimeBrain';
 import { createLiveBrain } from './index';
 import { BrainSupervisor } from './BrainSupervisor';
 import { InterviewNotebook } from './InterviewNotebook';
 import { PipelineBrain } from './brains/PipelineBrain';
 import type { LiveBrainStatus } from '../../../src/types/whatToAnswerQuestion';
-import { buildAnswerInstructions } from './instructions';
+import { buildProviderInstructions } from './instructions';
 import { toPcm16kMono } from './interviewerAudio';
 import { createLiveBrainOverlayPort } from './overlayPort';
 import { ResponseOrchestrator } from './ResponseOrchestrator';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainStartContext } from './types';
+
+const DEFAULT_MODELS: Record<LiveBrain['id'], string> = {
+    'gemini-live': DEFAULT_GEMINI_LIVE_MODEL,
+    'openai-realtime': DEFAULT_OPENAI_REALTIME_MODEL,
+    'elevenlabs-realtime': DEFAULT_ELEVENLABS_REALTIME_MODEL,
+    pipeline: 'pipeline',
+};
 
 function startContext(sessionId: string, instructions: string, signal: AbortSignal): LiveBrainStartContext {
     return {
@@ -23,7 +31,7 @@ function startContext(sessionId: string, instructions: string, signal: AbortSign
 export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: LiveBrain): LiveBrainMeetingSession {
     const preferred = options.provider ?? 'gemini-live';
     const promptVariant = options.promptVariant ?? 'full';
-    const instructions = buildAnswerInstructions(options, promptVariant, 'spoken');
+    const instructions = (id: LiveBrain['id']) => buildProviderInstructions(options, promptVariant, id);
     const clock = { now: Date.now, setTimeout, clearTimeout };
     const debug = isPromptDebugEnabled();
     let speechStoppedAt: number | undefined;
@@ -70,7 +78,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 return options.pipeline ? { brain: new PipelineBrain(options.pipeline.cancel), model: 'pipeline' } : undefined;
             }
             const config = options.resolveProvider?.(id) ?? (id === preferred ? options : undefined);
-            const model = (config?.model?.trim() || (id === 'gemini-live' ? DEFAULT_GEMINI_LIVE_MODEL : '')).replace(/^models\//, '');
+            const model = (config?.model?.trim() || DEFAULT_MODELS[id]).replace(/^models\//, '');
             if (injected?.id === id) {
                 const brain = injected;
                 injected = undefined;
@@ -89,12 +97,13 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             const backup = id === 'pipeline' && preferred !== 'pipeline';
             if (event.type === 'response_started') presented = false;
             if (event.type === 'status') {
-                if (event.status === 'ready') showStatus(backup ? 'Backup brain' : 'Listening');
+                if (event.status === 'ready') showStatus(id !== preferred ? 'Backup brain' : 'Listening');
                 if (event.status === 'connecting' || event.status === 'degraded') showStatus('Reconnecting');
             } else if (!backup) {
                 if (event.type === 'interviewer_speech_started' || event.type === 'response_silent') showStatus('Listening');
                 if (event.type === 'interviewer_speech_stopped' || event.type === 'response_started') showStatus('Thinking');
             }
+            if (debug && event.type === 'interviewer_speech_stopped' && id !== 'gemini-live') speechStoppedAt ??= event.at;
             if (debug && event.type === 'response_started') {
                 finishTiming('cancelled');
                 timing = { brainId: id, model, responseId: event.responseId, responseStartedAt: event.at, speechStoppedAt };
@@ -122,7 +131,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             started = true;
             if (debug) notePromptDebugLiveBrain({
                 surface: 'live-brain', promptSource: 'answer', provider: preferred === 'gemini-live' ? 'gemini' : preferred,
-                model: (options.model?.trim() || DEFAULT_GEMINI_LIVE_MODEL).replace(/^models\//, ''), system: instructions, user: '',
+                model: (options.model?.trim() || DEFAULT_MODELS[preferred]).replace(/^models\//, ''), system: instructions(preferred), user: '',
             });
             supervisor.start();
         },
@@ -174,16 +183,32 @@ const connectionError: Record<LiveBrainErrorCode, string> = {
     unsupported: 'This Gemini Live configuration is unsupported.',
 };
 
-export async function testConnection(options: GeminiLiveOptions): Promise<LiveBrainSettingsResult> {
-    const brain = new GeminiLiveBrain({ ...options, setupTimeoutMs: options.setupTimeoutMs ?? 5_000, backoffMs: [] });
+export async function testConnection(options: GeminiLiveOptions & { provider?: LiveBrainKeyProvider }): Promise<LiveBrainSettingsResult> {
+    const provider = options.provider ?? 'gemini-live';
+    const config = { ...options, setupTimeoutMs: options.setupTimeoutMs ?? 5_000, backoffMs: [] };
+    const brain = provider === 'gemini-live' ? new GeminiLiveBrain(config) : createLiveBrain(provider, config);
+    const name = provider === 'gemini-live' ? 'Gemini Live' : provider === 'openai-realtime' ? 'OpenAI Realtime' : 'ElevenLabs Realtime';
     try {
-        await brain.start(startContext('connection-test', buildAnswerInstructions({}, 'full', 'spoken'), new AbortController().signal));
-        return { success: true, message: 'Connected to Gemini Live.' };
+        await brain.start(startContext('connection-test', buildProviderInstructions({}, 'full', provider), new AbortController().signal));
+        return { success: true, message: `Connected to ${name}.` };
     } catch (error) {
-        const code = error instanceof GeminiLiveError ? error.code : 'protocol';
-        return { success: false, error: code, message: connectionError[code] };
+        const code = error instanceof GeminiLiveError || error instanceof RealtimeBrainError ? error.code : 'protocol';
+        const message = provider === 'gemini-live' ? connectionError[code] : realtimeConnectionError(code, name);
+        return { success: false, error: code, message };
     } finally {
         await brain.stop();
+    }
+}
+
+function realtimeConnectionError(code: LiveBrainErrorCode, name: string): string {
+    switch (code) {
+        case 'auth': return `${name} rejected the API key or access to the model.`;
+        case 'quota': return `${name} quota is exhausted. Check your provider plan.`;
+        case 'rate_limited': return `${name} is rate-limiting requests. Try again shortly.`;
+        case 'network': return `Could not reach ${name}. Check your connection and try again.`;
+        case 'protocol': return `${name} rejected the session setup.`;
+        case 'timeout': return `${name} did not finish setup in time.`;
+        case 'unsupported': return `${name} does not support the selected model or session configuration.`;
     }
 }
 

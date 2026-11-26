@@ -20,7 +20,7 @@ import { safeDetachAndClose } from './wsSafeTeardown';
 import axios from 'axios';
 import FormData from 'form-data';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
-import { streamingStttWsOptions } from './dnsHelpers';
+import { bearerRealtimeHeaders, openAiHandshakeVerdict, realtimeReconnectDelay, realtimeSocketOptions, resampleRealtimePcm16, SEND_THRESHOLD_SAMPLES, WS_SAMPLE_RATE } from './realtimeTransport';
 import { OpenAITranscriptTurnCoalescer } from './openaiTranscriptTurnCoalescer';
 import { OpenAILiveTranscriptItems } from './openaiLiveTranscriptItems';
 import { RealtimeSilenceTail } from './realtimeSilenceTail';
@@ -71,10 +71,6 @@ const LIVE_SILENCE_CLEAR_SAMPLES = 24_000 * 30;
 /** Max consecutive WebSocket failures before advancing to next model / REST */
 const MAX_WS_FAILURES_PER_MODEL = 3;
 
-/** Exponential backoff reconnect delays */
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS  = 30_000;
-
 /** Keep-alive ping interval (ms) — prevents idle disconnects */
 const KEEPALIVE_INTERVAL_MS = 20_000;
 
@@ -88,20 +84,10 @@ const REST_SAFETY_NET_MS = 10_000;
 /** Minimum buffered bytes before attempting a REST upload */
 const REST_MIN_UPLOAD_BYTES = 4_000;
 
-/**
- * WebSocket audio batching: 24 kHz samples per append (100 ms). It was 250 ms,
- * which held every chunk back by up to a quarter second — and during the native
- * keepalive cadence (20 ms of audio per 100 ms) took ~1.25 s to fill, delaying
- * the very silence the server VAD waits for. Ten appends a second is well
- * inside what the Realtime API takes.
- */
-export const SEND_THRESHOLD_SAMPLES = 2400;
-
 /** Silence RMS threshold — skip REST uploads for silent buffers */
 const SILENCE_RMS_THRESHOLD = 50;
 
 /** PCM parameters */
-const WS_SAMPLE_RATE      = 24_000; // OpenAI Realtime API requires 24 kHz for pcm16
 const REST_SAMPLE_RATE    = 16_000; // whisper-1 REST accepts 16 kHz
 const BITS_PER_SAMPLE     = 16;
 const NUM_CHANNELS        = 1;
@@ -112,35 +98,7 @@ type Mode = 'ws' | 'rest';
 
 // ─── Class ────────────────────────────────────────────────────────────────────
 
-/**
- * The terminal error for a refused realtime handshake, or null when the
- * refusal may pass (5xx, a plain 429 rate limit): those keep the normal
- * retry and model fallback. 401 bad key, 403 region or project access, and a
- * 429 whose body says insufficient_quota (no credits) are final for every
- * model and for the REST fallback, which use the same key.
- */
-export function openAiHandshakeVerdict(status: number, body: string): Error | null {
-    let message = '';
-    let type = '';
-    try {
-        const parsed = JSON.parse(body);
-        message = String(parsed?.error?.message ?? '').trim();
-        type = String(parsed?.error?.code || parsed?.error?.type || '').trim();
-    } catch {
-        message = body.trim().slice(0, 200);
-    }
-    const outOfCredits = /insufficient_quota|credit_balance_exhausted/i.test(`${type} ${body}`);
-    if (status === 429 && outOfCredits) {
-        return Object.assign(new Error(`insufficient_quota: ${message || 'OpenAI account has no credits left'}`), {
-            code: 'insufficient_quota', httpStatus: 429, terminal: true,
-        });
-    }
-    if (status !== 401 && status !== 403) return null;
-    const what = status === 401 ? 'OpenAI rejected the API key (invalid API key)' : 'OpenAI refused access';
-    return Object.assign(new Error(message ? `${what}: ${message}` : what), {
-        code: type || `openai_${status}`, httpStatus: status, terminal: true,
-    });
-}
+export { openAiHandshakeVerdict, SEND_THRESHOLD_SAMPLES } from './realtimeTransport';
 
 export class OpenAIStreamingSTT extends EventEmitter {
     // Public config
@@ -555,11 +513,7 @@ export class OpenAIStreamingSTT extends EventEmitter {
         // streamingStttWsOptions: IPv4-only DNS + 15s handshake cap (dnsHelpers.ts).
         // Bound to a local so every handler below can check it still owns
         // this.ws before touching shared state (F-203, as in Soniox/Deepgram).
-        const ws = new WebSocket(REALTIME_WS_URL, streamingStttWsOptions({
-            headers: {
-                Authorization: `Bearer ${this.apiKey}`,
-            },
-        }) as WebSocket.ClientOptions);
+        const ws = new WebSocket(REALTIME_WS_URL, realtimeSocketOptions(bearerRealtimeHeaders(this.apiKey)));
         this.ws = ws;
 
         // A refused handshake (bad key, region, no credit) used to reach only
@@ -1108,10 +1062,7 @@ export class OpenAIStreamingSTT extends EventEmitter {
 
     private _scheduleWsReconnect(): void {
         if (!this.shouldReconnect) return;
-        const delay = Math.min(
-            RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempts),
-            RECONNECT_MAX_MS,
-        );
+        const delay = realtimeReconnectDelay(this.reconnectAttempts);
         this.reconnectAttempts++;
         console.log(`[OpenAIStreaming] WS reconnect in ${delay}ms (attempt ${this.reconnectAttempts})`);
         this.reconnectTimer = setTimeout(() => {
@@ -1366,61 +1317,8 @@ export class OpenAIStreamingSTT extends EventEmitter {
 
     // ─── Audio Utilities ──────────────────────────────────────────────────────
 
-    /**
-     * Convert raw PCM buffer from the capture pipeline into 16-bit PCM at the given target rate.
-     * The pipeline outputs Int16LE PCM, potentially at a higher sample rate (e.g. 48kHz).
-     */
     private _resamplePcm16(chunk: Buffer, targetRate: number): Buffer {
-        // Safe read from unaligned memory
-        const numSamples = chunk.length / 2;
-        const inputS16 = new Int16Array(numSamples);
-        for (let i = 0; i < numSamples; i++) {
-            inputS16[i] = chunk.readInt16LE(i * 2);
-        }
-
-        if (this.inputSampleRate === targetRate && this.numChannels === 1) {
-            return Buffer.from(inputS16.buffer);
-        }
-
-        // Mix down multi-channel to mono first, then downsample
-        let monoS16: Int16Array;
-        if (this.numChannels > 1) {
-            const monoLength = Math.floor(inputS16.length / this.numChannels);
-            monoS16 = new Int16Array(monoLength);
-            for (let i = 0; i < monoLength; i++) {
-                let sum = 0;
-                for (let c = 0; c < this.numChannels; c++) {
-                    sum += inputS16[i * this.numChannels + c];
-                }
-                monoS16[i] = Math.round(sum / this.numChannels);
-            }
-        } else {
-            monoS16 = inputS16;
-        }
-
-        // Downsample
-        if (this.inputSampleRate === targetRate) {
-            return Buffer.from(monoS16.buffer);
-        }
-
-        // Linear interpolation, as audioResampler.ts does for local Whisper.
-        // The native capture delivers 16 kHz, so for the 24 kHz socket this
-        // UPSAMPLES: taking the nearest sample repeated every third one, which
-        // left distortion only 10-13 dB below speech at 2-3 kHz (22-29 dB now).
-        // Whole-number ratios (48 → 24 kHz, 48 → 16 kHz) land on frac 0 and
-        // come out exactly as before. Output length is unchanged.
-        const factor       = this.inputSampleRate / targetRate;
-        const outputLength = Math.floor(monoS16.length / factor);
-        const outputS16    = new Int16Array(outputLength);
-        const lastIndex    = monoS16.length - 1;
-        for (let i = 0; i < outputLength; i++) {
-            const pos  = i * factor;
-            const k    = Math.floor(pos);
-            const a    = monoS16[k];
-            const b    = monoS16[Math.min(k + 1, lastIndex)];
-            outputS16[i] = Math.round(a + (b - a) * (pos - k));
-        }
-        return Buffer.from(outputS16.buffer);
+        return resampleRealtimePcm16(chunk, this.inputSampleRate, this.numChannels, targetRate);
     }
 
     private _isSilent(pcm: Buffer): boolean {

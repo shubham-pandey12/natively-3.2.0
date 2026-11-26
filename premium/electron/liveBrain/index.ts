@@ -1,13 +1,8 @@
 import type { LiveBrain, LiveBrainId } from './types';
 import { GeminiLiveBrain, type GeminiLiveOptions } from './brains/GeminiLiveBrain';
 import { PipelineBrain } from './brains/PipelineBrain';
-
-export class LiveBrainNotImplementedError extends Error {
-    constructor(readonly id: LiveBrainId) {
-        super(`Live brain not implemented: ${id}`);
-        this.name = 'LiveBrainNotImplementedError';
-    }
-}
+import { OpenAIRealtimeBrain } from './brains/OpenAIRealtimeBrain';
+import { ElevenLabsRealtimeBrain } from './brains/ElevenLabsRealtimeBrain';
 
 export function createLiveBrain(id: LiveBrainId | 'gemini', deps: GeminiLiveOptions & { cancelPipeline?: () => void }): LiveBrain {
     switch (id) {
@@ -15,8 +10,9 @@ export function createLiveBrain(id: LiveBrainId | 'gemini', deps: GeminiLiveOpti
         case 'gemini-live':
             return new GeminiLiveBrain(deps);
         case 'openai-realtime':
+            return new OpenAIRealtimeBrain(deps);
         case 'elevenlabs-realtime':
-            throw new LiveBrainNotImplementedError(id);
+            return new ElevenLabsRealtimeBrain(deps);
         case 'pipeline':
             return new PipelineBrain(deps.cancelPipeline ?? (() => {}));
         default: {

@@ -2,7 +2,7 @@ import { CredentialsManager } from './CredentialsManager';
 import { SettingsManager } from './SettingsManager';
 import type { AppState } from '../main';
 import { loadLiveBrainPremium } from '../premium/liveBrain';
-import { DEFAULT_GEMINI_LIVE_MODEL } from '../../src/types/liveBrainSettings';
+import { DEFAULT_ELEVENLABS_REALTIME_MODEL, DEFAULT_GEMINI_LIVE_MODEL, DEFAULT_OPENAI_REALTIME_MODEL } from '../../src/types/liveBrainSettings';
 import type { LiveBrainConfig, LiveBrainKeyProvider, LiveBrainModel, LiveBrainModelsResult, LiveBrainSettingsResult } from '../../src/types/liveBrainSettings';
 
 const settingsUnavailable = 'Settings store is unavailable; the change was not saved.';
@@ -230,22 +230,17 @@ export function registerLiveBrainSettingsIpc(
         if (isKeyProvider(provider)) {
             if (!hasKey) return { success: false, error: 'no_key', message: 'Add an API key first.' };
             if (!usableKey) return { success: false, error: 'invalid_key', message: "The API key doesn't look valid." };
-            if (provider === 'gemini-live') {
-                const premium = loadPremium();
-                const result = await (premium?.testConnection({ apiKey: usableKey, model })
-                    ?? { success: false, error: 'unavailable', message: 'Gemini Live is unavailable in this build.' });
-                // Name the key that was tried: a reused AI Providers key failing
-                // otherwise reads exactly like the Live Brain key failing.
-                if (!result.success && result.error === 'auth' && keySource) {
-                    return { ...result, message: `${result.message} (key from ${KEY_SOURCE_LABEL[keySource]})` };
-                }
-                return result;
+            const premium = loadPremium();
+            const name = provider === 'gemini-live' ? 'Gemini Live' : `${PROVIDERS[provider].vendor} Realtime`;
+            const result = await (premium?.testConnection({ apiKey: usableKey, model, ...(provider === 'gemini-live' ? {} : { provider }) })
+                ?? { success: false, error: 'unavailable', message: `${name} is unavailable in this build.` });
+            // Include the key source for an auth failure without exposing the key.
+            if (!result.success && result.error === 'auth' && keySource) {
+                return { ...result, message: `${result.message} (key from ${KEY_SOURCE_LABEL[keySource]})` };
             }
+            return result;
         }
-        const message = provider === 'pipeline' ? 'The existing pipeline needs no separate Live Brain connection.'
-            : provider === 'elevenlabs-realtime' ? 'Key saved. ElevenLabs Realtime connection testing arrives with its brain (Phase 6).'
-            : 'OpenAI Realtime connection testing is not available yet.';
-        return { success: false, error: 'not_available_yet', message };
+        return { success: false, error: 'not_available_yet', message: 'The existing pipeline needs no separate Live Brain connection.' };
     });
 
     safeHandle('live-brain:list-models', async (): Promise<LiveBrainModelsResult> => {
@@ -268,13 +263,12 @@ const GEMINI_LIVE_FALLBACK_MODELS: LiveBrainModel[] = [
 ];
 
 const OPENAI_REALTIME_MODELS: LiveBrainModel[] = [
-    { id: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1', description: 'Default' },
+    { id: DEFAULT_OPENAI_REALTIME_MODEL, label: 'GPT Realtime 2.1', description: 'Default' },
 ];
 
-// Model ids from ElevenLabs' 2026-10-19 changelog; re-check in the Phase 6 spike.
 const ELEVENLABS_REALTIME_MODELS: LiveBrainModel[] = [
-    { id: 'eleven_realtime_v1_mini', label: 'Eleven Realtime v1 Mini', description: 'Default · fastest' },
-    { id: 'eleven_realtime_v1_max', label: 'Eleven Realtime v1 Max', description: 'Reasons before answering' },
+    { id: DEFAULT_ELEVENLABS_REALTIME_MODEL, label: 'Eleven Realtime v1 Mini', description: 'Default · fastest' },
+    { id: 'eleven_realtime_v1_max', label: 'Eleven Realtime v1 Max · slower (~3 s)' },
 ];
 
 /** The models this key can open a Live session with (bidiGenerateContent). */

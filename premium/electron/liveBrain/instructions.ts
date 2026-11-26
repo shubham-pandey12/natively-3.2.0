@@ -7,6 +7,7 @@ import {
     UNIVERSAL_WHAT_TO_ANSWER_PROMPT,
 } from '../../../electron/llm/prompts';
 import { ASK_SENTINEL, NO_ACTION_SENTINEL } from './responseParser';
+import type { LiveBrainId } from './types';
 
 interface LiveContext {
     modeName?: string;
@@ -34,6 +35,14 @@ const LIVE_PREAMBLE = 'You are listening to a live interview. The audio is the i
 const CLARIFICATION_RULE = 'Ask for clarification only when missing information materially changes the answer. Ask one short question. Never repeat a clarification or ask for information already supplied.';
 const CORRECTION_RULE = 'The newest interviewer instruction overrides earlier requirements.';
 export const CLARIFICATION_ASSUMPTION = 'The interviewer did not clarify; state a reasonable assumption first, then answer the original interviewer question.';
+
+// Keep the language exercised in the ElevenLabs Mini sentinel check.
+const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: If the entire interviewer turn is an acknowledgment or filler (for example, mm-hmm, okay, right), output exactly No action. and stop. Never greet, acknowledge, offer help, or answer filler. If a design question has multiple materially different scopes and no scope was supplied, begin with the exact prefix Ask: followed by a single short question, then stop and wait. Do not answer or assume a scope in that turn.';
+
+export function buildProviderInstructions(ctx: AnswerContext, variant: 'full' | 'trimmed', id: LiveBrainId): string {
+    const instructions = buildAnswerInstructions(ctx, variant, id === 'openai-realtime' ? 'text' : 'spoken');
+    return id === 'elevenlabs-realtime' ? `${instructions}\n\n${ELEVENLABS_TURN_OUTPUT}` : instructions;
+}
 
 function contextBlocks(ctx: LiveContext, profile?: string): string {
     const fields = [

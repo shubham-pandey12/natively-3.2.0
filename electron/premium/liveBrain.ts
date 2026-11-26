@@ -93,7 +93,7 @@ export class LiveBrainRouting {
 
 interface LiveBrainPremium {
     createMeeting(options: LiveBrainMeetingOptions): LiveBrainMeetingSession;
-    testConnection(options: { apiKey: string; model?: string }): Promise<LiveBrainSettingsResult>;
+    testConnection(options: { apiKey: string; model?: string; provider?: LiveBrainKeyProvider }): Promise<LiveBrainSettingsResult>;
 }
 
 export function loadLiveBrainPremium(): LiveBrainPremium | null {

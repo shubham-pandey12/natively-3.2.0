@@ -253,15 +253,19 @@ test('ElevenLabs Realtime: own key, Speech Provider key reuse, .env in dev, mode
         assert.equal(invoke('get-config').maskedSuffix, '••••••••OwnK');
         assert.equal(JSON.stringify(invoke('get-config')).includes(ownKey), false);
         assert.equal(readFileSync(join(userData, 'credentials.fallback.enc')).includes(Buffer.from(ownKey)), false);
-        // The ElevenLabs key never reaches the Gemini handshake.
+        // The test only sends the key to the selected provider in the main process.
         const tested = await invoke('test-connection');
-        assert.equal(tested.error, 'not_available_yet');
-        assert.equal(connections.length, 0);
+        assert.equal(tested.success, true);
+        assert.equal(JSON.stringify(tested).includes(ownKey), false);
+        assert.deepEqual(connections, [{ provider: 'elevenlabs-realtime', apiKey: ownKey, model: '' }]);
 
         assert.equal(invoke('set-options', { provider: 'elevenlabs-realtime', model: 'eleven_realtime_v1_max' }).success, true);
         assert.equal(invoke('get-config').model, 'eleven_realtime_v1_max');
         const models = await invoke('list-models');
         assert.deepEqual(models.models.map(m => m.id), ['eleven_realtime_v1_mini', 'eleven_realtime_v1_max']);
+        assert.match(models.models[1].label, /slower \(~3 s\)/);
+        assert.equal((await invoke('test-connection')).success, true);
+        assert.equal(connections.at(-1).model, 'eleven_realtime_v1_max');
 
         // Development builds: .env sits between the Live Brain key and the reused key.
         packaged = false;

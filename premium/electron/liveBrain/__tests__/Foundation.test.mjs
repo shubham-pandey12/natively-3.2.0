@@ -8,7 +8,7 @@ const load = (name) => require(`${dist}premium/electron/liveBrain/${name}.js`);
 const { createResponseParser, NO_ACTION_SENTINEL, ASK_SENTINEL } = load('responseParser');
 const { DECIDE_TURN_TOOL, toGeminiDecideTurnTool, parseDecideTurnArgs } = load('decideTurnTool');
 const { buildDeciderInstructions, buildAnswerInstructions } = load('instructions');
-const { createLiveBrain, LiveBrainNotImplementedError } = load('index');
+const { createLiveBrain } = load('index');
 const { FakeLiveBrain } = load('__tests__/FakeLiveBrain');
 const {
     HUMAN_SPOKEN_ANSWER_CONTRACT,
@@ -165,11 +165,11 @@ test('answer variants retain the imported voice while trimmed omits scenario rul
     assert.ok(!buildAnswerInstructions({ modeName: 'Technical Interview' }, 'full').includes(MODE_TECHNICAL_INTERVIEW_PROMPT.trim()));
 });
 
-test('the exhaustive factory distinguishes known placeholders from unknown ids', () => {
+test('the exhaustive factory constructs each known provider and rejects unknown ids', () => {
     for (const id of ['gemini-live', 'gemini']) assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, 'gemini-live');
     assert.equal(createLiveBrain('pipeline', {}).id, 'pipeline');
     for (const id of ['openai-realtime', 'elevenlabs-realtime']) {
-        assert.throws(() => createLiveBrain(id, {}), error => error instanceof LiveBrainNotImplementedError && error.id === id);
+        assert.equal(createLiveBrain(id, { apiKey: 'fake' }).id, id);
     }
     assert.throws(() => createLiveBrain('future-brain', {}), { message: 'Unsupported live brain: future-brain' });
 });
