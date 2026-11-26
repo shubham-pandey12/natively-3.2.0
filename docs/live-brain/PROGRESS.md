@@ -15,7 +15,7 @@
 | 4 — GeminiLiveBrain | Implemented | D11 accepted `decide_turn`. Steps 1–6 are in place. Live meeting validation and consistent S4 constraint replacement are still open. |
 | 4b — Gemini writes the answer (D12) | ☐ Next | Replaces the decide_turn + AnswerWriter answer path. Starts with the `--answer` spike. |
 | 5 — Notebook + Supervisor | ☐ Not started | |
-| 6 — OpenAI + ElevenLabs Realtime | ☐ Not started | D13 added ElevenLabs Realtime; starts with an ElevenLabs spike. |
+| 6 — OpenAI + ElevenLabs Realtime | ☐ Not started (ElevenLabs settings done early) | D13 added ElevenLabs Realtime. Its settings (provider, key, models, reuse, dev `.env`) shipped ahead of the phase in 895b3e8b at the user's request; the brain itself and its spike are still Phase 6. Selecting it today runs the existing pipeline. |
 | 7 — Tuning & validation | ☐ Not started | |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
@@ -179,6 +179,15 @@ Findings (measured, single sample — repeat before tuning):
 
 - Windows validation: `npm run build:electron`, `npm run typecheck:electron`, `npm run typecheck:ts7`, and `npm run typecheck:premium` passed. Live Brain, Phase 1 corrections, Settings IPC, and baseline timing tests passed 50/50. `npm run test:auto-answer` passed 200 of 201 with only the known `AutoAnswerUsageTelemetry2026_09_27` “main.ts wires it” assertion failing. `npm run test:lib` passed 3,242 with 15 skipped. `npm run test:components` passed 1,002 with 2 skipped.
 - Windows Electron CDP verified Settings → Audio shows the Live Brain section after Speech Provider and reports the missing key when testing without a key. The mock WebSocket test covers the successful setup-only handshake. The two S4 trials used synthetic speech and exercised the standalone probe. Real meeting S1–S9, physical capture, and end-to-end answer latency still need verification. Requires physical macOS verification.
+
+## Post-Phase-4 fixes and settings — 2026-11-26 (Claude, Windows)
+
+- **a2f86c04, 97ebe139 — core-smoke dev builds:** private `premium/` imports are externalized only when they resolve under `<root>/premium`, and they now point at the compiled copy in `dist-electron/premium` by absolute path, because the importer is inlined into its entry bundle (e.g. `dist-electron/electron/main.js`), where `../../premium/x` landed on the TypeScript source. Symptom was "Gemini Live is unavailable in this build" and "Auto Answer is off in this build" in `electron:dev:ultra`.
+- **97ebe139 — overlay "Maximum update depth exceeded":** an unused `conversationContext` state was set on every `messages` change; during streaming it tipped React past its nested-update limit and no streamed answer rendered (Auto Answer and Live Brain alike). Removed; 0 loop errors in the next live run. Also logs `[LiveBrain] meeting start: Live Brain is on|off`.
+- **120a4cd0, e2f85ac6 — keys and settings card:** dev builds prefer the `.env` key after a dedicated Live Brain key; the card matches the Speech Provider card; Live model list; working Save/Test.
+- **895b3e8b — ElevenLabs Realtime settings** (see Phase 6 row).
+- **Live timing, old D10 path (2 runs):** speech end → decision 2.6 / 5.2 s; decision → first text 2.2 / 4.6 s (codex-cli via Fast Response Mode's Auto tier); first word 4.9 / 9.8 s. Led to D12.
+- Validation: Tested physically on Windows (dev build). Requires physical macOS verification.
 
 ## Open risks
 
