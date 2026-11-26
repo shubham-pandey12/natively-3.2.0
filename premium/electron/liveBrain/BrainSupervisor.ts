@@ -206,7 +206,11 @@ export class BrainSupervisor<Timer> {
             this.response.text += event.text.slice(0, MAX_RESPONSE_CHARS - this.response.text.length);
         }
         if (event.type === 'response_done' && this.response?.id === event.responseId) {
+            // Audio-mode providers keep "speaking" long after the text is on
+            // screen, so the interviewer's next words usually cancel the turn.
+            // Text already shown was seen by the candidate: keep it in the notebook.
             if (event.status === 'completed') this.recordAnswer(event.finalText ?? this.response.text);
+            else if (event.status === 'cancelled' && this.response.text.trim()) this.recordAnswer(this.response.text);
             this.response = undefined;
         }
         if (event.type === 'response_silent') {

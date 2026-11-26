@@ -489,6 +489,13 @@ Ran the skipped CI stages separately. `npm run test:lib` passed 3,242 with 15 sk
 - Not fixed: two of seven reconnect gaps exceeded 1 s (1,032 and 1,130 ms). That is setup time to Google, not lost audio, because audio is buffered during the reconnect.
 - Not re-run live: the 70-minute replay. Requires physical macOS verification.
 
+## ElevenLabs live meeting + notebook fix for cancelled answers (Claude, Windows, 2026-11-26)
+
+- Tested physically on Windows: a live meeting on ElevenLabs Realtime Mini, with the user's dedicated key (Test Connection passed) and real interviewer audio through the speakers. 10 answers came through. From native speech end to first text, the median was 1,456 ms, p90 2,022 ms, and the range 598–2,181 ms, which meets the §11 targets. No fallback or connection errors.
+- 8 of the 10 answers ended `cancelled`. ElevenLabs keeps its audio turn open for 10–20 s after the text is shown, and the interviewer's next words ("Sure. Next one.") interrupt that turn. On screen a cancelled answer keeps the text it already showed. But `BrainSupervisor` saved only `completed` answers to the notebook, so follow-ups lost those answers. The same applies to Gemini when the interviewer talks before Gemini's audio turn ends.
+- Fix (`BrainSupervisor`): a cancelled answer that already showed text is saved to the notebook like a completed one. An empty cancelled answer and failed answers are still not saved. New test in `BrainSupervisor.test.mjs`. 83 Live Brain tests pass; build, `npx tsc --noEmit -p tsconfig.json` and `npm run typecheck:premium` pass.
+- Not checked: filler and `Ask:` behaviour on screen (the meeting ended before the overlay was read). Requires physical macOS verification.
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).

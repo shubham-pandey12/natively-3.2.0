@@ -158,3 +158,20 @@ test('the selected realtime provider comes first, followed by Gemini, remaining 
     assert.deepEqual(h.attempted, ['elevenlabs-realtime', 'gemini-live', 'openai-realtime', 'pipeline']);
     h.supervisor.stop();
 });
+
+test('a cancelled answer that already showed text is kept in the notebook; an empty one is not', async () => {
+    const h = rig();
+    h.supervisor.start();
+    await flush();
+    const brain = h.realtime[0];
+    const at = h.clock.now();
+    brain.emit({ type: 'interviewer_transcript', text: 'How would you handle a slow query?', final: true, at });
+    brain.emit({ type: 'response_started', responseId: 'shown', at });
+    brain.emit({ type: 'response_delta', responseId: 'shown', text: 'I would add an index and a timeout.' });
+    brain.emit({ type: 'response_done', responseId: 'shown', status: 'cancelled' });
+    brain.emit({ type: 'response_started', responseId: 'empty', at });
+    brain.emit({ type: 'response_done', responseId: 'empty', status: 'cancelled' });
+    const assistant = h.notebook.recentTurns().filter(turn => turn.role === 'assistant');
+    assert.deepEqual(assistant.map(turn => turn.text), ['I would add an index and a timeout.']);
+    h.supervisor.stop();
+});
