@@ -59,17 +59,23 @@ async function readWav(path) {
 // autoVad: let Gemini's automatic activity detection decide the end of the turn
 // (what the product does) instead of explicit activityStart/activityEnd. The
 // measured time then includes Gemini's own end-of-turn wait.
-async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
+async function probe({ apiKey, model, wav, mode, autoVad, decider, answerInstructions, bargeIn }) {
     const start = performance.now();
     let speechEnd;
     let firstText = false;
     let setupReady = false;
     let text = '';
     let audioBytesSent = 0;
+    let bargeAt;
+    let bargeStarted;
+    let turn = 1;
+    let firstChunkAt;
+    let interrupted = false;
     const controller = new AbortController();
     const log = (event, detail) => console.log(JSON.stringify({
         mode,
         ...(decider ? { model, probe: 'decide' } : {}),
+        ...(answerInstructions ? { model, probe: 'answer', turn, at: new Date().toISOString() } : {}),
         vad: autoVad ? 'auto' : 'manual',
         event,
         msSinceConnectStart: Math.round(performance.now() - start),
@@ -83,39 +89,56 @@ async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
     const send = (message) => new Promise((resolve, reject) => {
         socket.send(JSON.stringify(message), (error) => error ? reject(error) : resolve());
     });
-    const stream = async () => {
-        if (!autoVad) await send({ realtimeInput: { activityStart: {} } });
-        const audio = createReadStream(wav.path, {
-            start: wav.start,
-            end: wav.start + wav.length - 1,
-            highWaterMark: Math.max(2, Math.round(wav.sampleRate * 0.04) * 2),
+    const sendAudio = (data, sampleRate) => send({ realtimeInput: { audio: {
+        data: data.toString('base64'),
+        mimeType: `audio/pcm;rate=${sampleRate}`,
+    } } });
+    const streamWav = async (input, utterance) => {
+        const audio = createReadStream(input.path, {
+            start: input.start,
+            end: input.start + input.length - 1,
+            highWaterMark: Math.max(2, Math.round(input.sampleRate * 0.04) * 2),
             signal: controller.signal,
         });
         const audioStart = performance.now();
+        let bytes = 0;
         for await (const chunk of audio) {
             audioBytesSent += chunk.length;
-            await send({ realtimeInput: { audio: {
-                data: chunk.toString('base64'),
-                mimeType: `audio/pcm;rate=${wav.sampleRate}`,
-            } } });
-            const nextChunkAt = audioStart + audioBytesSent / (wav.sampleRate * 2) * 1000;
+            bytes += chunk.length;
+            await sendAudio(chunk, input.sampleRate);
+            const nextChunkAt = audioStart + bytes / (input.sampleRate * 2) * 1000;
             await delay(Math.max(0, nextChunkAt - performance.now()), undefined, { signal: controller.signal });
         }
         speechEnd = performance.now();
-        log('speech_end');
+        log('speech_end', answerInstructions ? { utterance } : undefined);
+    };
+    const streamSilence = async (sampleRate, chunks, stop = () => false) => {
+        const silence = Buffer.alloc(Math.round(sampleRate * 0.1) * 2);
+        for (let sent = 0; sent < chunks && !stop(); sent++) {
+            await sendAudio(silence, sampleRate);
+            await delay(100, undefined, { signal: controller.signal });
+        }
+    };
+    const stream = async () => {
+        if (!autoVad) await send({ realtimeInput: { activityStart: {} } });
+        await streamWav(wav, 1);
         if (!autoVad) {
             await send({ realtimeInput: { activityEnd: {} } });
             return;
         }
         // Automatic VAD needs to hear the silence after the question, in real time.
-        const silence = Buffer.alloc(Math.round(wav.sampleRate * 0.1) * 2).toString('base64');
-        for (let sent = 0; sent < 30 && !controller.signal.aborted; sent++) {
-            await send({ realtimeInput: { audio: { data: silence, mimeType: `audio/pcm;rate=${wav.sampleRate}` } } });
-            await delay(100, undefined, { signal: controller.signal });
-        }
+        if (!bargeIn) return streamSilence(wav.sampleRate, 30);
+        await streamSilence(wav.sampleRate, 120, () => bargeAt !== undefined && performance.now() >= bargeAt);
+        if (bargeAt === undefined || interrupted || !firstChunkAt) return;
+        bargeStarted = performance.now();
+        log('barge_in_start', { msSinceFirstChunk: Math.round(bargeStarted - firstChunkAt) });
+        speechEnd = undefined;
+        await streamWav(bargeIn, 2);
+        await streamSilence(bargeIn.sampleRate, 30);
     };
 
     let timeout;
+    let observationTimeout;
     try {
         return await new Promise((resolve) => {
             let streamFinished = false;
@@ -133,7 +156,9 @@ async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
                 controller.abort();
                 resolve(false);
             };
-            timeout = setTimeout(() => fail('timeout'), (decider ? 25_000 : 45_000) + wav.length / (wav.sampleRate * 2) * 1000);
+            const durationMs = (input) => input.length / (input.sampleRate * 2) * 1000;
+            timeout = setTimeout(() => fail('timeout'), (answerInstructions ? 120_000 : decider ? 25_000 : 45_000)
+                + durationMs(wav) + (bargeIn ? durationMs(bargeIn) : 0));
             socket.on('error', () => fail('websocket_error'));
             socket.on('close', (code, reason) => fail('closed_before_done', {
                 code,
@@ -152,6 +177,10 @@ async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
                             tools: [decider.tool],
                         }
                         : mode === 'AUDIO' ? { outputAudioTranscription: {} } : {}),
+                    ...(answerInstructions ? {
+                        inputAudioTranscription: {},
+                        systemInstruction: { parts: [{ text: answerInstructions }] },
+                    } : {}),
                 } }).catch(() => fail('setup_send_error'));
             });
             socket.on('message', (data) => {
@@ -169,6 +198,11 @@ async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
                     void stream().then(() => {
                         streamFinished = true;
                         if (decider) finishDecisionProbe();
+                        if (answerInstructions && !firstChunkAt) {
+                            observationTimeout = setTimeout(() => {
+                                if (!firstChunkAt) fail('no_transcription_observed', { bargeInStarted: bargeStarted !== undefined });
+                            }, Math.max(0, 12_000 - (performance.now() - speechEnd)));
+                        }
                     }).catch(() => fail('audio_stream_error'));
                 }
                 if (decider) {
@@ -194,6 +228,45 @@ async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
                 }
                 const content = message.serverContent;
                 if (!content) return;
+                if (answerInstructions) {
+                    const input = content.inputTranscription;
+                    if (input?.text !== undefined) log('input_transcription', { text: input.text, finished: input.finished });
+                    const output = content.outputTranscription;
+                    if (typeof output?.text === 'string') {
+                        text += output.text;
+                        log('output_transcription', { text: output.text, chars: output.text.length });
+                        if (output.text.trim() && firstChunkAt === undefined) {
+                            firstChunkAt = performance.now();
+                            if (bargeIn && bargeStarted === undefined && speechEnd !== undefined) {
+                                bargeAt = firstChunkAt + 300;
+                            }
+                        }
+                    }
+                    if (content.interrupted) {
+                        interrupted = true;
+                        log('interrupted', bargeStarted === undefined ? undefined : {
+                            msSinceBargeInStart: Math.round(performance.now() - bargeStarted),
+                        });
+                    }
+                    if (content.turnComplete) {
+                        log('turn_complete', {
+                            words: text.trim().split(/\s+/u).filter(Boolean).length,
+                            wasInterrupted: interrupted,
+                            interactionStatus: content.interactionStatus,
+                        });
+                        if (speechEnd !== undefined && firstChunkAt >= speechEnd && !interrupted
+                            && content.interactionStatus !== 'IN_PROGRESS' && (!bargeIn || bargeStarted !== undefined)) {
+                            controller.abort();
+                            resolve(true);
+                        }
+                        turn++;
+                        text = '';
+                        firstChunkAt = undefined;
+                        interrupted = false;
+                        bargeAt = undefined;
+                    }
+                    return;
+                }
                 // Only inspect the chosen text signal. Audio parts are discarded.
                 const delta = mode === 'AUDIO'
                     ? (content.outputTranscription?.text ?? '')
@@ -213,18 +286,40 @@ async function probe({ apiKey, model, wav, mode, autoVad, decider }) {
         });
     } finally {
         clearTimeout(timeout);
+        clearTimeout(observationTimeout);
         controller.abort();
         socket.terminate();
     }
 }
 
+function buildSpokenAnswerInstructions() {
+    const require = createRequire(import.meta.url);
+    const { UNIVERSAL_WHAT_TO_ANSWER_PROMPT, MODE_TECHNICAL_INTERVIEW_PROMPT } =
+        require('../../dist-electron/electron/llm/prompts.js');
+    return [
+        'You are listening to a live technical interview. Audio is the interviewer. Text lines beginning “Candidate said:” are the candidate.',
+        UNIVERSAL_WHAT_TO_ANSWER_PROMPT.trim(),
+        MODE_TECHNICAL_INTERVIEW_PROMPT.trim(),
+        `Live spoken output protocol. Speak only what the candidate should say next, without reading any formatting aloud.
+For filler, small talk, or an unfinished interviewer question, say nothing or say exactly "No action."
+For a clarification, start with "Ask:" and say only one short question. Ask only if the missing information materially changes the answer. Never repeat a clarification or ask for information already provided. If the interviewer moves on without clarifying, answer with a stated assumption.
+Otherwise, speak the answer directly without a sentinel. The newest interviewer instruction overrides earlier requirements.
+Follow this live spoken protocol if anything above conflicts with it.`,
+        'Interview mode: Technical Interview',
+    ].join('\n\n');
+}
+
 async function main() {
     const args = process.argv.slice(2);
     const decide = args.includes('--decide');
-    const autoVad = decide || args.includes('--auto-vad');
-    const [file, model = defaultModel, extra] = args.filter(arg => arg !== '--auto-vad' && arg !== '--decide');
-    if (!file || extra || !/^[a-z0-9][a-z0-9.-]*$/.test(model)) {
-        console.error('Usage: node scripts/spikes/gemini-live.mjs <mono 16-bit PCM WAV> [model-id] [--auto-vad] [--decide]');
+    const answer = args.includes('--answer');
+    const autoVad = decide || answer || args.includes('--auto-vad');
+    const bargeIndex = args.indexOf('--barge-in');
+    const bargeFile = bargeIndex === -1 ? undefined : args.splice(bargeIndex, 2)[1];
+    const [file, model = defaultModel, extra] = args.filter(arg => !['--auto-vad', '--decide', '--answer'].includes(arg));
+    if (!file || extra || (decide && answer) || (bargeIndex !== -1 && (!answer || !bargeFile))
+        || !/^[a-z0-9][a-z0-9.-]*$/.test(model)) {
+        console.error('Usage: node scripts/spikes/gemini-live.mjs <mono 16-bit PCM WAV> [model-id] [--auto-vad | --decide | --answer [--barge-in <second WAV>]]');
         return 1;
     }
     const apiKey = process.env.GEMINI_API_KEY?.trim();
@@ -232,10 +327,22 @@ async function main() {
         console.error('Set GEMINI_API_KEY in the environment before running this spike.');
         return 1;
     }
-    let wav;
-    try { wav = await readWav(file); } catch {
+    let wav, bargeIn;
+    try {
+        wav = await readWav(file);
+        if (bargeFile) bargeIn = await readWav(bargeFile);
+    } catch {
         console.error('Could not read the WAV. Use a readable, uncompressed mono 16-bit PCM RIFF/WAVE file.');
         return 1;
+    }
+    if (answer) {
+        let answerInstructions;
+        try { answerInstructions = buildSpokenAnswerInstructions(); } catch {
+            console.error('Run npm run build:electron before using --answer.');
+            return 1;
+        }
+        const completed = await probe({ apiKey, model, wav, mode: 'AUDIO', autoVad, answerInstructions, bargeIn });
+        return completed ? 0 : 1;
     }
     if (decide) {
         const require = createRequire(import.meta.url);

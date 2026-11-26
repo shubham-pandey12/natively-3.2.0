@@ -13,7 +13,7 @@
 | 2 — Foundation | ✅ Done (reviewed) | Implemented by Codex, reviewed and fixed by Claude. Contracts, instructions, decide_turn tool, parser, factory, test double. No runtime wiring yet. |
 | 3 — Orchestrator + overlay | ✅ Done | Injected ports, fake-clock tests, and offline renderer verification. |
 | 4 — GeminiLiveBrain | Implemented | D11 accepted `decide_turn`. Steps 1–6 are in place. Live meeting validation and consistent S4 constraint replacement are still open. |
-| 4b — Gemini writes the answer (D12) | ☐ Next | Replaces the decide_turn + AnswerWriter answer path. Starts with the `--answer` spike. |
+| 4b — Gemini writes the answer (D12) | Task 0 complete | Both models streamed incremental transcription. Both missed the first-word latency gate. |
 | 5 — Notebook + Supervisor | ☐ Not started | |
 | 6 — OpenAI + ElevenLabs Realtime | ☐ Not started (ElevenLabs settings done early) | D13 added ElevenLabs Realtime. Its settings (provider, key, models, reuse, dev `.env`) shipped ahead of the phase in 895b3e8b at the user's request; the brain itself and its spike are still Phase 6. Selecting it today runs the existing pipeline. |
 | 7 — Tuning & validation | ☐ Not started | |
@@ -188,6 +188,61 @@ Findings (measured, single sample — repeat before tuning):
 - **895b3e8b — ElevenLabs Realtime settings** (see Phase 6 row).
 - **Live timing, old D10 path (2 runs):** speech end → decision 2.6 / 5.2 s; decision → first text 2.2 / 4.6 s (codex-cli via Fast Response Mode's Auto tier); first word 4.9 / 9.8 s. Led to D12.
 - Validation: Tested physically on Windows (dev build). Requires physical macOS verification.
+
+## Phase 4b spike
+
+**2026-11-26, Windows.** Ran one fresh Gemini Live session per case per model using `node --env-file=.env scripts/spikes/gemini-live.mjs <wav> <model> --answer`. Both model IDs accepted setup. The probe uses automatic VAD and `AUDIO`, enables both transcriptions, sends no tools, and discards the response audio. It composes the existing universal and Technical Interview prompts with the §6 spoken protocol. The fixture provides interview mode only.
+
+The inputs were locally synthesized Windows speech, trimmed at the outer speech edges and replayed as 16 kHz mono PCM in 40 ms windows. S1, S2, S4, and S7 use the corpus wording and inter-step gaps with the synthesizer's own speaking durations. Filler was “mm-hmm, okay”. The ambiguous prompt was S8, “Design an e-commerce app.” The barge-in run replayed S2 and started S7 about 300 ms after the first nonblank answer chunk in the same session.
+
+### Standalone turns
+
+Times are in milliseconds from paced WAV speech end. The first chunk is the first nonblank transcription delta. Cadence is the median interval between nonblank chunks. Sizes are in characters (minimum / median / maximum), including whitespace in each chunk. Word counts come from the joined transcript. Last chunk measures when the answer text was fully available to the probe.
+
+| Model | Case | First chunk | Chunks | Size | Cadence | Last chunk | `turnComplete` | Words | Answer quality |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 3.1 Flash Live Preview | S1 | 1,328 | 37 | 3 / 9 / 14 | 125.5 | 6,080 | 19,910 | 51 | First-person design with a real-time presence assumption. A premature “I'm assuming” appeared 1,639 ms before final speech end and was interrupted. |
+| 3.1 Flash Live Preview | S2 | 2,253 | 60 | 4 / 9 / 17 | 126 | 9,371 | 29,102 | 87 | Covers the mapping, redirect and database scaling paths. Starts with a coaching phrase and adds a check-in at the end. |
+| 3.1 Flash Live Preview | S4 | 1,594 | 37 | 4 / 8 / 18 | 131 | 6,440 | 20,475 | 50 | Concise, first-person MongoDB document design with embedded variants. Uses the corrected database. |
+| 3.1 Flash Live Preview | S7 | 1,298 | 42 | 3 / 8 / 22 | 111 | 6,058 | 19,657 | 48 | Defines both scaling types with concrete examples and a short tradeoff. |
+| 3.1 Flash Live Preview | Filler | 1,404 | 1 | 10 / 10 / 10 | — | 1,404 | 2,225 | 2 | Exact `No action.` |
+| 3.1 Flash Live Preview | Ambiguous | 1,427 | 15 | 3 / 8 / 11 | 88 | 2,895 | 7,088 | 22 | Starts with `Ask:` and asks one useful question about scope. |
+| 3.8 Live | S1 | 1,420 | 19 | 9 / 19 / 24 | 138.5 | 3,929 | 20,873 | 52 | Direct, first-person scaling answer. The mid-question pause triggered an interrupted `No action.` 1,628 ms before final speech end. |
+| 3.8 Live | S2 | 1,453 | 26 | 9 / 15.5 / 33 | 146 | 5,064 | 28,195 | 73 | States its workload assumption and covers shortening, hot redirects and database sharding in candidate voice. |
+| 3.8 Live | S4 | 2,461 | 19 | 10 / 19 / 24 | 165.5 | 5,571 | 21,614 | 59 | Direct MongoDB answer with a concrete tradeoff between embedding and linking variants. Uses the corrected database. |
+| 3.8 Live | S7 | 1,339 | 18 | 8 / 19.5 / 26 | 134 | 3,730 | 19,921 | 53 | Explains both scaling types with examples. “Nearly limitless growth” overstates horizontal scaling. |
+| 3.8 Live | Filler | 1,426 | 2 | 3 / 5 / 7 | 93 | 1,519 | 2,435 | 2 | Exact `No action.` across two chunks. |
+| 3.8 Live | Ambiguous | 1,785 | 21 | 6 / 17 / 27 | 45.5 | 4,819 | 22,342 | 51 | Omits `Ask:` and assumes a large marketplace, then gives a concise architecture. |
+
+### Barge-in
+
+| Model | Turn | First chunk | Chunks | Size | Cadence | Last chunk | `turnComplete` | Words | Answer quality |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 3.1 Flash Live Preview | Original (S2) | 2,214 | 5 | 6 / 8 / 10 | 116.5 | 2,773 | 2,820 | 8 | Starts with a scale requirement and cuts off mid-thought. |
+| 3.1 Flash Live Preview | Replacement (S7) | 1,288 | 22 | 3 / 7 / 20 | 104 | 3,928 | 11,470 | 27 | Concise candidate-ready explanation with a RAM example. |
+| 3.8 Live | Original (S2) | 1,308 | 4 | 10 / 18 / 21 | 139 | 1,737 | 1,862 | 14 | Opens directly with expected read load and cuts off mid-thought. |
+| 3.8 Live | Replacement (S7) | 1,279 | 9 | 11 / 19 / 31 | 120.5 | 2,229 | 10,667 | 28 | Concise explanation of both scaling types with CPU and memory examples. |
+
+- **3.1 Flash Live Preview:** S7 began 319 ms after the first S2 chunk. The provider emitted `interrupted` 276 ms after S7 started. The replacement started 1,288 ms after S7 ended, about 4,433 ms from its start.
+- **3.8 Live:** S7 began 308 ms after the first S2 chunk. The provider emitted `interrupted` 223 ms after S7 started. The replacement started 1,279 ms after S7 ended, about 4,425 ms from its start.
+- Both stopped the original stream. Their last original text arrived before `interrupted` and no further original text arrived before that turn's `turnComplete`.
+
+### Result and model recommendation
+
+The medians below use completed standalone answers to S1, S2, S4, and S7, one sample per case. P90 uses nearest rank (the maximum with four samples).
+
+| Model | Median first chunk (ms) | P90 first chunk (ms) | Median last chunk (ms) | Median `turnComplete` (ms) | Median words | Median of per-turn chunk sizes (chars) | Median of per-turn cadences (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `gemini-3.1-flash-live-preview` | 1,461 | 2,253 | 6,260 | 20,192.5 | 50.5 | 8.5 | 125.75 |
+| `gemini-3.8-live` | 1,436.5 | 2,461 | 4,496.5 | 21,243.5 | 56 | 19 | 142.25 |
+
+**Incremental transcription passed on both.** Gemini answered directly without tools or a separate text model. In the four standalone answer cases per model, 3.1 delivered 37–60 short word or phrase chunks and 3.8 delivered 18–26, with occasional partial words. The last text arrived 13.6–23.1 seconds before `turnComplete` across those runs. The probe measured text arrival at the socket and discarded audio. Audible playback and overlay paint were outside the spike.
+
+**First-word latency failed the gate on both.** The first chunk arrived within 1,500 ms in two of four 3.1 answers and three of four 3.8 answers. Both missed §11's median ≤1,000 ms and p90 ≤1,500 ms targets. Neither is recommended for product integration at this gate. If follow-up measurement is approved, start with 3.1 Flash Live Preview because it used the exact `Ask:` prefix and delivered smaller chunks. Its premature S1 answer remains a turn-taking issue.
+
+Windows validation used the 14 live `--answer` invocations, `node --check scripts/spikes/gemini-live.mjs`, `node --test premium/electron/liveBrain/__tests__/*.test.mjs` (44 passed), and `git diff --check`. The standalone probe uses shared Node APIs and has no platform branch. Reviewed but not executed on macOS. Requires physical macOS verification.
+
+Official protocol references for this run include the [v1beta WebSocket endpoint](https://aistudio.google.com/api-reference/live/bidi-generate-content), [AUDIO and both transcription setup fields](https://aistudio.google.com/docs/live-api/capabilities#audio-transcription), [PCM input](https://aistudio.google.com/docs/live-api/capabilities#audio-formats), [automatic VAD and barge-in](https://aistudio.google.com/docs/live-api/capabilities#interruptions), and the [`outputTranscription`, `interrupted`, and `turnComplete` events](https://aistudio.google.com/api-reference/live#BidiGenerateContentServerContent).
 
 ## Open risks
 
