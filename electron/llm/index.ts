@@ -45,7 +45,7 @@ export { detectExplicitCodingContract, isCodingContinuation, withActiveCodingPro
 export { resolveCodingPromptSignals, screenPromotedCodingSignals, detectSuppliedCodeTemplate, codingTaskKindFor, isBuildTask, isDeicticAsk, isImageCodingAsk, isScreenOnlyAsk, isRepeatPressAsk, type CodingPromptSignals, type CodingTaskKind } from "./codingPromptSignals";
 export type { ExplicitCodingContract, PriorCodingTurn } from "./codingFollowup";
 export { shouldHumanize, shouldHumanizeOutput, detectCorporateFiller, humanizeDirectiveFor, HUMANIZE_DIRECTIVE, humanizeSpokenAnswer, humanizeForAnswerType } from "./humanLikeness";
-export type { CorporateFillerVerdict } from "./humanLikeness";
+export type { CorporateFillerVerdict, HumanizeSpokenAnswerOptions } from "./humanLikeness";
 export {
   countSpokenWordsExcludingCode, estimateSpeakSeconds, decideSpeakability,
   trimToSpeakable, applySpeakabilityBudget, compressTechnicalConcept,

@@ -1115,3 +1115,9 @@ node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b88
 - Centralized the Flux opening-partial guard and count Unicode characters without requiring whitespace. The automated regression covers the captured filler sequence, a short confirmed question, and live emission of a long partial in a language without word-separating spaces. The saved Windows reruns predate this adjustment.
 - Voice Agent emitted response events before the question clips ended. Its second answers lacked a completion event within the 35-second capture, so completion beyond that window was not verified. The S2 clarification was interrupted before it could support a live reply or timeout test.
 - The Windows Electron build, 135 Live Brain tests, Electron, premium, and TS7 type checks, and diff whitespace check passed. Phase 5 comparison is complete. Live clarification, Voice Agent provider behavior, OpenAI Realtime access, and physical macOS verification remain documented follow-ups.
+
+### Later phase 7 — Shared response cleanup integration (proposed 2026-11-27)
+
+- Cleanup is now a shared project for Auto Answer, text replies, and Live Brain: docs/response-cleanup/PLAN.md. Live Brain phase 7 covers only its integration.
+- Shared cleanup Phase 1 rule fixes were reviewed on Windows. Follow-up fixes preserve singular “solution,” source attribution in third-person statements, and references to another candidate within a sentence. The Electron build, both Electron type checks, and 218 focused tests passed. Shared caller mapping and live integration are pending. Reviewed but not executed on macOS. Requires physical macOS verification.
+- Status: not started. **Order changed (user decision 2026-11-27):** shared response cleanup is next; Phase 6 (multi-turn clarification) is on hold.

@@ -525,6 +525,9 @@ docs/*
 # contract every agent (Claude, Codex) follows when building the feature.
 !docs/live-brain/
 !docs/live-brain/**
+# Shared response cleanup plan (Auto Answer, text replies, Live Brain).
+!docs/response-cleanup/
+!docs/response-cleanup/**
 # Per-release notes are published artifacts (linked from the README), not scratch notes.
 !docs/releases/
 !docs/releases/**

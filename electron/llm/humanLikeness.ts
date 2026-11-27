@@ -19,6 +19,7 @@
 // Pure, deterministic, no LLM, no profile-specific strings.
 
 import type { AnswerType } from './AnswerPlanner';
+import { CANDIDATE_VOICE_ANSWER_TYPES } from './ProfileOutputValidator';
 
 /** Answer types spoken aloud as a person (interview / job-seeking / sales). The PROMPT
  *  DIRECTIVE (humanizeDirectiveFor) is added only for this core set, keeping the up-front
@@ -169,8 +170,9 @@ const withCase = (match: string, replacement: string): string =>
  */
 const PHRASE_REWRITES: ReadonlyArray<{ re: RegExp; to: string }> = [
   // whole-phrase cliches (must precede their component words)
-  { re: /\bturn(?:ing|s|ed)?\s+raw\s+data\s+into\s+actionable\s+intelligence\b/gi, to: 'turn messy data into something useful' },
-  { re: /\brobust\s+and\s+scalable\b/gi, to: 'reliable' },
+  { re: /\brobust\s+and\s+scalable\s+solution\b/gi, to: 'reliable solution that holds up as things grow' },
+  { re: /\brobust\s+and\s+scalable\s+solutions\b/gi, to: 'reliable solutions that hold up as things grow' },
+  { re: /\brobust\s+and\s+scalable\b/gi, to: 'reliable and scalable' },
   { re: /\bmove\s+the\s+needle\b/gi, to: 'make a real difference' },
   { re: /\bbridge\s+the\s+gap\b/gi, to: 'close the gap' },
   // NOTE: every replacement that can sit directly after "a"/"an" starts with a CONSONANT
@@ -182,7 +184,8 @@ const PHRASE_REWRITES: ReadonlyArray<{ re: RegExp; to: string }> = [
   { re: /\bactionable\s+insight\b/gi, to: 'useful takeaway' },
   { re: /\bbusiness\s+objectives\b/gi, to: 'goals' },
   { re: /\bhigh[- ]impact\s+solutions?\b/gi, to: 'solutions that matter' },
-  { re: /\bscalable\s+solutions?\b/gi, to: 'solutions that hold up as things grow' },
+  { re: /(?<!\band\s)\bscalable\s+solution\b/gi, to: 'solution that holds up as things grow' },
+  { re: /(?<!\band\s)\bscalable\s+solutions\b/gi, to: 'solutions that hold up as things grow' },
   // The optional adjective AND its trailing space live INSIDE the group, so when no
   // adjective is present the leading space before "competitive" is NOT consumed (avoids
   // "a competitive advantage" -> "aleg up"). code-review HIGH 2026-06-15.
@@ -209,9 +212,9 @@ const PHRASE_REWRITES: ReadonlyArray<{ re: RegExp; to: string }> = [
   { re: /(?<!\b(?:the|a|an|my|our|your|his|her|their|its|more|less|some|no|any|financial|main|real|extra|added|negotiating|bargaining)\s)\bleverage\b(?=\s+\w)/gi, to: 'use' },
 ];
 
-/** Sentence-initial source-narration that can be cut cleanly (grammar-safe deletion). */
-const SOURCE_NARRATION_RE =
-  /\b(?:based\s+on\s+(?:my|your|the)\s+(?:resume|profile|background|cv|provided\s+context|context)|according\s+to\s+(?:the|my|your)\s+(?:jd|job\s+description|resume|profile))\s*,?\s*/gi;
+/** Sentence-initial source-narration lead-in that can be cut cleanly (grammar-safe deletion). */
+const SOURCE_NARRATION_LEADIN_RE =
+  /(^|[.!?]\s+|\n+\s*)(?:based\s+on\s+(?:my|your|the)\s+(?:resume|profile|background|cv|provided\s+context|context)|according\s+to\s+(?:the|my|your)\s+(?:jd|job\s+description|resume|profile))(?:\s*,\s*|\s+)(?=(?:I|we|my|our)\b)(\S)/gi;
 
 /** "the candidate <aux/copula>" -> first person. ONLY safe verb frames (no agreement risk). */
 const CANDIDATE_NARRATION_REWRITES: ReadonlyArray<{ re: RegExp; to: string }> = [
@@ -224,6 +227,40 @@ const CANDIDATE_NARRATION_REWRITES: ReadonlyArray<{ re: RegExp; to: string }> = 
   { re: /\bthe\s+candidate\s+would\b/gi, to: 'I would' },
   { re: /\bthe\s+candidate\s+brings\b/gi, to: 'I bring' },
 ];
+
+const THIRD_PERSON_CANDIDATE_GUARD_RE =
+  /\b(?:it|its|itself|rejected|filtered|scored|ranked|pruned|evicted|validated|validation)\b/i;
+
+export interface HumanizeSpokenAnswerOptions {
+  /**
+   * Identifies who is speaking. Third-person "the candidate" narration is only
+   * converted to first person when the caller explicitly identifies the speaker
+   * as `'candidate'` or supplies a candidate-voice `answerType`.
+   */
+  speaker?: 'candidate' | 'assistant' | 'third_person' | 'unknown';
+  answerType?: AnswerType;
+}
+
+function isCandidateVoiceContext(options?: HumanizeSpokenAnswerOptions): boolean {
+  if (options?.speaker !== undefined) {
+    return options.speaker === 'candidate';
+  }
+  if (options?.answerType !== undefined) {
+    return CANDIDATE_VOICE_ANSWER_TYPES.has(options.answerType);
+  }
+  return false;
+}
+
+function rewriteCandidateNarration(text: string): string {
+  return text.replace(/[^.!?\n]+(?:[.!?]+|\n|$)/g, (sentence) => {
+    if (THIRD_PERSON_CANDIDATE_GUARD_RE.test(sentence)) return sentence;
+    let out = sentence;
+    for (const { re, to } of CANDIDATE_NARRATION_REWRITES) {
+      out = out.replace(re, (m, offset: number) => out.slice(0, offset).trim() ? m : withCase(m, to));
+    }
+    return out;
+  });
+}
 
 const HFENCE_RE = /```[\s\S]*?```/g;
 const INLINE_CODE_RE = /`[^`\n]+`/g;
@@ -249,7 +286,10 @@ const SENT_RESTORE_RE = new RegExp(`${SENT_OPEN}(\\d+)${SENT_CLOSE}`, 'g');
  *
  * Returns the original string unchanged when nothing matches.
  */
-export function humanizeSpokenAnswer(answer: string): string {
+export function humanizeSpokenAnswer(
+  answer: string,
+  options?: HumanizeSpokenAnswerOptions,
+): string {
   if (!answer || typeof answer !== 'string') return answer;
 
   // 1. Pull out everything we must never touch, in priority order. The placeholder is a
@@ -270,12 +310,16 @@ export function humanizeSpokenAnswer(answer: string): string {
   protect(INLINE_CODE_RE);
   protect(INLINE_MATH_RE);
 
-  // 2. Drop sentence-initial source narration ("Based on your resume, ...").
-  text = text.replace(SOURCE_NARRATION_RE, '');
+  // 2. Drop sentence-initial source-narration lead-ins ("Based on your resume, ...").
+  text = text.replace(
+    SOURCE_NARRATION_LEADIN_RE,
+    (_m, lead: string, nextChar: string) => lead + nextChar.toUpperCase(),
+  );
 
-  // 3. "the candidate <verb>" -> first person (safe frames only).
-  for (const { re, to } of CANDIDATE_NARRATION_REWRITES) {
-    text = text.replace(re, (m) => withCase(m, to));
+  // 3. "the candidate <verb>" -> first person (only when speaker is candidate-voice and
+  //    the sentence is not a third-person/technical reference).
+  if (isCandidateVoiceContext(options)) {
+    text = rewriteCandidateNarration(text);
   }
 
   // 4. Corporate-idiom -> plain-speech swaps (grammatical drop-ins, longest first).
@@ -345,6 +389,6 @@ export function humanizeForAnswerType(
   answer: string,
 ): { text: string; changed: boolean } {
   if (!shouldHumanizeOutput(answerType)) return { text: answer, changed: false };
-  const out = humanizeSpokenAnswer(answer);
+  const out = humanizeSpokenAnswer(answer, { answerType });
   return { text: out, changed: out !== answer };
 }

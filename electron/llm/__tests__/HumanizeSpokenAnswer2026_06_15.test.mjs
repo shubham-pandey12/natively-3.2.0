@@ -180,10 +180,14 @@ describe('humanizeSpokenAnswer — drops source narration & "the candidate"', ()
     'The candidate brings real depth here.',
   ];
   for (const c of candidateFrames) {
-    test(`third-person candidate framing → first person: "${c}"`, () => {
-      const out = humanizeSpokenAnswer(c);
+    test(`third-person candidate framing → first person when speaker is candidate: "${c}"`, () => {
+      const out = humanizeSpokenAnswer(c, { speaker: 'candidate' });
       assert.doesNotMatch(out, /\bthe candidate\b/i);
       assert.match(out, /\bI\b|\bmy\b|\bI'm\b/i);
+
+      const viaType = humanizeForAnswerType('jd_fit_answer', c);
+      assert.equal(viaType.changed, true);
+      assert.doesNotMatch(viaType.text, /\bthe candidate\b/i);
     });
   }
 });
@@ -289,6 +293,101 @@ describe('humanizeSpokenAnswer — code-review regression cases (2026-06-15)', (
     const out = humanizeSpokenAnswer('Call the `helper()` now and ship it.');
     assert.ok(out.includes('`helper()`'));
     assert.match(out, /the `helper\(\)` now/);
+  });
+});
+
+describe('humanizeSpokenAnswer — Phase 1 cleanup regression cases', () => {
+  test('1. "The service is robust and scalable." preserves both claims', () => {
+    const out = humanizeSpokenAnswer('The service is robust and scalable.');
+    assert.equal(out, 'The service is reliable and scalable.');
+    assert.match(out, /\breliable\b/i);
+    assert.match(out, /\bscalable\b/i);
+
+    const attr = humanizeSpokenAnswer('I build robust and scalable solutions with deep expertise.');
+    assert.equal(attr, 'I build reliable solutions that hold up as things grow with real experience.');
+    assert.equal(
+      humanizeSpokenAnswer('I built a robust and scalable solution.'),
+      'I built a reliable solution that holds up as things grow.',
+    );
+  });
+
+  test('2. "The pipeline turns raw data into actionable intelligence." preserves verb agreement and avoids "messy"', () => {
+    const out = humanizeSpokenAnswer('The pipeline turns raw data into actionable intelligence.');
+    assert.equal(out, 'The pipeline turns raw data into useful information.');
+    assert.doesNotMatch(out, /\bmessy\b/i);
+    assert.match(out, /\bturns raw data into useful information\b/);
+
+    assert.equal(
+      humanizeSpokenAnswer('Turning raw data into actionable intelligence helps.'),
+      'Turning raw data into useful information helps.',
+    );
+    assert.equal(
+      humanizeSpokenAnswer('It turned raw data into actionable intelligence.'),
+      'It turned raw data into useful information.',
+    );
+  });
+
+  test('3. "This estimate is based on the provided context." keeps mid-sentence uses while stripping clear lead-ins', () => {
+    const midSentence = 'This estimate is based on the provided context.';
+    assert.equal(humanizeSpokenAnswer(midSentence), midSentence);
+
+    const trailingUse = 'I gave that estimate based on my resume.';
+    assert.equal(humanizeSpokenAnswer(trailingUse), trailingUse);
+
+    const subjectUse = 'Based on the provided context is not enough.';
+    assert.equal(humanizeSpokenAnswer(subjectUse), subjectUse);
+
+    assert.equal(
+      humanizeSpokenAnswer('Based on my resume, I scaled the service.'),
+      'I scaled the service.',
+    );
+    const attribution = 'Good question. Based on the provided context, the service scaled.';
+    assert.equal(humanizeSpokenAnswer(attribution), attribution);
+  });
+
+  test('4. "Here the candidate is rejected if it fails validation." preserves third-person references and requires speaker context', () => {
+    const technicalRef = 'Here the candidate is rejected if it fails validation.';
+    assert.equal(humanizeSpokenAnswer(technicalRef), technicalRef);
+    assert.equal(humanizeSpokenAnswer(technicalRef, { speaker: 'candidate' }), technicalRef);
+    const otherPerson = 'I spoke with the recruiter because the candidate has questions.';
+    assert.equal(humanizeSpokenAnswer(otherPerson, { speaker: 'candidate' }), otherPerson);
+    assert.deepEqual(humanizeForAnswerType('project_answer', technicalRef), {
+      text: technicalRef,
+      changed: false,
+    });
+
+    const candidateFrame = 'The candidate has strong backend skills.';
+    assert.equal(humanizeSpokenAnswer(candidateFrame), candidateFrame);
+    assert.deepEqual(humanizeForAnswerType('general_meeting_answer', candidateFrame), {
+      text: candidateFrame,
+      changed: false,
+    });
+    assert.equal(
+      humanizeSpokenAnswer(candidateFrame, { speaker: 'candidate' }),
+      'I have strong backend skills.',
+    );
+    assert.deepEqual(humanizeForAnswerType('jd_fit_answer', candidateFrame), {
+      text: 'I have strong backend skills.',
+      changed: true,
+    });
+  });
+
+  test('gating and code/math/numeric-range protection remain intact', () => {
+    const technical = 'The service is robust and scalable for `1—5` items and $O(n)$.';
+    assert.deepEqual(humanizeForAnswerType('technical_concept_answer', technical), {
+      text: technical,
+      changed: false,
+    });
+
+    const spoken = humanizeForAnswerType(
+      'experience_answer',
+      'The service is robust and scalable for `a — b`, $O(n)$, and 5—10 nodes.',
+    );
+    assert.equal(spoken.changed, true);
+    assert.ok(spoken.text.includes('`a — b`'));
+    assert.ok(spoken.text.includes('$O(n)$'));
+    assert.ok(spoken.text.includes('5-10'));
+    assert.ok(spoken.text.includes('reliable and scalable'));
   });
 });
 
