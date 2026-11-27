@@ -48,6 +48,7 @@ test('Live Brain settings persist and only the Gemini handshake receives the res
             },
         }));
         return {
+            settings,
             credentials,
             invoke: (channel, payload) => handlers.get(`live-brain:${channel}`)(null, payload),
             broadcasts: () => broadcasts,
@@ -64,6 +65,23 @@ test('Live Brain settings persist and only the Gemini handshake receives the res
         assert.equal(invoke('get-config').useAiProvidersKey, false);
         for (const value of [1, 'true', null, undefined, {}]) assert.equal(invoke('set-enabled', value).success, false);
         assert.equal(invoke('set-provider', 'unknown').success, false);
+        first.settings.set('liveBrainProvider', 'future-brain');
+        assert.equal(invoke('set-enabled', true).error, 'unsupported_provider');
+        assert.equal(invoke('get-enabled'), false);
+        first.settings.set('liveBrainProvider', undefined);
+
+        for (const [provider, setting, defaultModel] of [
+            ['openai-realtime', 'liveBrainOpenaiModel', 'gpt-realtime-2.1'],
+            ['elevenlabs-realtime', 'liveBrainElevenlabsModel', 'eleven_realtime_v1_mini'],
+        ]) {
+            assert.equal(invoke('set-provider', provider).success, true);
+            first.settings.set(setting, 'unknown-model');
+            assert.equal(invoke('get-config').model, defaultModel);
+            assert.deepEqual(invoke('set-options', { provider, model: 'another-unknown-model' }),
+                { success: false, error: 'Select a supported model.' });
+            assert.equal(first.settings.get(setting), 'unknown-model');
+        }
+        assert.equal(invoke('set-provider', 'gemini-live').success, true);
         assert.equal(invoke('set-enabled', true).error, 'live_brain_key_required');
         assert.equal((await invoke('test-connection')).error, 'no_key');
         assert.equal(first.broadcasts(), 0);
@@ -128,6 +146,13 @@ test('Live Brain settings persist and only the Gemini handshake receives the res
         assert.equal((await restarted.invoke('test-connection')).error, 'not_available_yet');
         assert.equal(restarted.invoke('set-enabled', false).success, true);
         assert.equal(restarted.invoke('set-provider', 'amazon-sonic').success, true);
+        restarted.settings.setValues({
+            liveBrainSonicRegion: 'eu-west-1',
+            liveBrainSonicModel: 'amazon.nova-sonic-v1:0',
+        });
+        assert.equal(restarted.invoke('get-config').sonicRegion, undefined);
+        assert.equal(restarted.invoke('get-config').model, 'amazon.nova-2-5-sonic');
+        assert.equal((await restarted.invoke('test-connection')).error, 'no_region');
         assert.equal(restarted.invoke('set-enabled', true).error, 'sonic_region_required');
         assert.equal(restarted.invoke('set-options', { provider: 'amazon-sonic', region: 'eu-west-1', model: 'amazon.nova-2-5-sonic' }).success, false);
         assert.equal(restarted.invoke('set-options', { provider: 'amazon-sonic', region: 'eu-north-1', model: 'amazon.nova-2-5-sonic' }).success, true);
@@ -272,7 +297,7 @@ test('ElevenLabs Realtime: own key, Speech Provider key reuse, .env in dev, mode
         const tested = await invoke('test-connection');
         assert.equal(tested.success, true);
         assert.equal(JSON.stringify(tested).includes(ownKey), false);
-        assert.deepEqual(connections, [{ provider: 'elevenlabs-realtime', apiKey: ownKey, model: '' }]);
+        assert.deepEqual(connections, [{ provider: 'elevenlabs-realtime', apiKey: ownKey, model: 'eleven_realtime_v1_mini' }]);
 
         assert.equal(invoke('set-options', { provider: 'elevenlabs-realtime', model: 'eleven_realtime_v1_max' }).success, true);
         assert.equal(invoke('get-config').model, 'eleven_realtime_v1_max');
@@ -377,6 +402,18 @@ test('Deepgram Voice Agent settings reuse STT key, configure managed & BYO Think
         assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', managedProvider: 'anthropic' }).success, true);
         assert.equal(invoke('get-config').deepgram.managedModel, 'claude-haiku-4-5');
         assert.deepEqual((await invoke('list-models')).models.map(model => model.id), ['claude-haiku-4-5', 'claude-sonnet-4-5']);
+
+        assert.equal(invoke('set-options', {
+            provider: 'deepgram-voice-agent', byoCustomUrl: 'https://llm.example.com/v1', thinkMode: 'byo',
+        }).success, true);
+        assert.equal(credentials.getLiveBrainDeepgramEndpoint().url, 'https://llm.example.com/v1');
+        assert.equal(settings.get('liveBrainDeepgramThinkMode'), 'byo');
+        assert.equal(invoke('get-config').deepgram.thinkMode, 'byo');
+        settings.set('liveBrainDeepgramByoKeyProvider', 'openai');
+        assert.equal(invoke('set-enabled', true).error, 'live_brain_key_required');
+        assert.equal(invoke('get-enabled'), false);
+        assert.deepEqual(invoke('set-options', { provider: 'deepgram-voice-agent', byoCustomUrl: 42 }),
+            { success: false, error: 'byoCustomUrl must be a string.' });
 
         const byoKey = 'sk-' + 'b'.repeat(20) + 'ByoK';
         credentials.setOpenaiApiKey(byoKey);

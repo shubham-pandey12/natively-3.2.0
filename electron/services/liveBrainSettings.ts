@@ -596,11 +596,16 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
     const provider = forProvider ?? settings.get('liveBrainProvider') ?? 'gemini-live';
     const promptVariant = settings.get('liveBrainPromptVariant') ?? null;
     if (provider === 'amazon-sonic') {
-        const sonicRegion = settings.get('liveBrainSonicRegion');
+        const savedRegion = settings.get('liveBrainSonicRegion');
+        const sonicRegion = typeof savedRegion === 'string'
+            ? AMAZON_SONIC_REGIONS.find(region => region === savedRegion.trim())
+            : undefined;
+        const savedModel = settings.get('liveBrainSonicModel');
+        const model = AMAZON_SONIC_MODELS.find(entry => entry.id === savedModel)?.id ?? DEFAULT_AMAZON_SONIC_MODEL;
         return { keyIsWellFormed: Boolean(sonicRegion), config: {
             provider, promptVariant, sonicRegion, hasKey: false, hasDedicatedKey: false,
             maskedSuffix: null, useAiProvidersKey: false, usingAiProvidersKey: false, keySource: null,
-            model: settings.get('liveBrainSonicModel') ?? DEFAULT_AMAZON_SONIC_MODEL,
+            model,
         } };
     }
     if (!isKeyProvider(provider)) {
@@ -614,6 +619,11 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
     }
 
     const spec = PROVIDERS[provider];
+    let model = (spec.modelSetting ? settings.get(spec.modelSetting) : undefined) ?? '';
+    const staticModels = staticRealtimeModels(provider);
+    if (staticModels && !staticModels.some(entry => entry.id === model)) {
+        model = provider === 'openai-realtime' ? DEFAULT_OPENAI_REALTIME_MODEL : DEFAULT_ELEVENLABS_REALTIME_MODEL;
+    }
     const dedicated = spec.dedicatedKey(credentials);
     const aiProvidersKey = spec.existingKey(credentials)?.trim();
     const useAiProvidersKey = settings.get(spec.reuseSetting) ?? Boolean(aiProvidersKey);
@@ -641,7 +651,7 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
                 ? (deepgramInfo.ui.thinkMode === 'byo' ? deepgramInfo.runtime.byoModel ?? '' : deepgramInfo.ui.managedModel)
                 : provider === 'deepgram-flux'
                     ? DEFAULT_DEEPGRAM_FLUX_MODEL
-                    : (spec.modelSetting ? settings.get(spec.modelSetting) ?? '' : ''),
+                    : model,
             promptVariant,
             ...(deepgramInfo ? { deepgram: deepgramInfo.ui } : {}),
             ...(fluxAiRoute ? { fluxAiRoute } : {}),
@@ -690,7 +700,7 @@ export function registerLiveBrainSettingsIpc(
     safeHandle('live-brain:set-enabled', (_, enabled) => {
         if (typeof enabled !== 'boolean') return { success: false, error: 'Expected a boolean.' };
         if (enabled) {
-            const { config: { provider, hasKey }, keyIsWellFormed } = inspect();
+            const { config: { provider, hasKey }, keyIsWellFormed, deepgramThink } = inspect();
             if (provider === 'amazon-sonic' && !keyIsWellFormed) {
                 return { success: false, error: 'sonic_region_required', message: 'Save an AWS Region for Amazon Sonic first.' };
             }
@@ -705,6 +715,13 @@ export function registerLiveBrainSettingsIpc(
                         ? `The ${vendor} key doesn't look valid. Check it in Audio → Live Brain Provider.`
                         : `Add your ${vendor} key in Audio → Live Brain Provider.`,
                 };
+            }
+            if (!isKeyProvider(provider) && provider !== 'pipeline' && provider !== 'amazon-sonic') {
+                return { success: false, error: 'unsupported_provider', message: 'The saved Live Brain provider is not supported. Select a provider in settings.' };
+            }
+            if (provider === 'deepgram-voice-agent' && deepgramThink?.thinkMode === 'byo'
+                && !deepgramThink.byoApiKey && !deepgramThink.byoCustomUrl) {
+                return { success: false, error: 'live_brain_key_required', message: 'The selected Think provider key is missing. Add it in AI Providers.' };
             }
         }
         return saved(appState.setLiveBrainEnabled(enabled));
@@ -755,12 +772,21 @@ export function registerLiveBrainSettingsIpc(
                 }
                 if (options.provider !== 'deepgram-voice-agent') {
                     if ('model' in options && typeof options.model === 'string' && spec.modelSetting) {
-                        return saved(settings().set(spec.modelSetting, options.model.trim()));
+                        const model = options.model.trim();
+                        const staticModels = staticRealtimeModels(options.provider);
+                        if (staticModels && !staticModels.some(entry => entry.id === model)) {
+                            return { success: false, error: 'Select a supported model.' };
+                        }
+                        return saved(settings().set(spec.modelSetting, model));
                     }
                 } else {
                     const st = settings();
                     const cm = credentials();
                     const current = inspectDeepgramSettings(st, cm).ui;
+                    let endpoint: { url: string; authHeader?: string } | undefined;
+                    if ('byoCustomUrl' in options && typeof options.byoCustomUrl !== 'string') {
+                        return { success: false, error: 'byoCustomUrl must be a string.' };
+                    }
                     if ('byoCustomUrl' in options || 'byoCustomHeader' in options) {
                         const url = 'byoCustomUrl' in options && typeof options.byoCustomUrl === 'string'
                             ? options.byoCustomUrl.trim() : current.byoCustomUrl;
@@ -775,7 +801,7 @@ export function registerLiveBrainSettingsIpc(
                             || !/^(?:Authorization|X-API-Key|API-Key):[^\r\n]+$/i.test(authHeader))) {
                             return { success: false, error: 'Enter a single Authorization, X-API-Key, or API-Key header for this endpoint.' };
                         }
-                        return saved(cm.setLiveBrainDeepgramEndpoint(url, authHeader));
+                        endpoint = { url, authHeader };
                     }
 
                     const change: Partial<AppSettings> = {};
@@ -807,7 +833,10 @@ export function registerLiveBrainSettingsIpc(
                     if ('byoModel' in options && typeof options.byoModel === 'string' && typeof byoProvider === 'string') {
                         change.liveBrainDeepgramByoModels = { ...st.get('liveBrainDeepgramByoModels'), [byoProvider]: options.byoModel.trim() };
                     }
-                    return saved(st.setValues(change));
+                    if (endpoint && !cm.setLiveBrainDeepgramEndpoint(endpoint.url, endpoint.authHeader)) {
+                        return { success: false, error: 'Could not save the Deepgram Think endpoint.' };
+                    }
+                    return Object.keys(change).length ? saved(st.setValues(change)) : { success: true };
                 }
             }
         }
@@ -906,6 +935,12 @@ const ELEVENLABS_REALTIME_MODELS: LiveBrainModel[] = [
     { id: DEFAULT_ELEVENLABS_REALTIME_MODEL, label: 'Eleven Realtime v1 Mini', description: 'Default · fastest' },
     { id: 'eleven_realtime_v1_max', label: 'Eleven Realtime v1 Max · slower (~3 s)' },
 ];
+
+function staticRealtimeModels(provider: LiveBrainKeyProvider): LiveBrainModel[] | undefined {
+    if (provider === 'openai-realtime') return OPENAI_REALTIME_MODELS;
+    if (provider === 'elevenlabs-realtime') return ELEVENLABS_REALTIME_MODELS;
+    return undefined;
+}
 
 /** The models this key can open a Live session with (bidiGenerateContent). */
 export async function listGeminiLiveModels(apiKey: string, fetchImpl: typeof fetch = fetch): Promise<LiveBrainModelsResult> {

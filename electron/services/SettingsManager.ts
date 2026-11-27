@@ -690,7 +690,7 @@ export class SettingsManager {
                     } else {
                         throw new Error('Settings JSON is not a valid object');
                     }
-                } catch (parseError) {
+                } catch {
                     // F-703: the file EXISTS but is unreadable. Continuing with
                     // `{}` is fine for reads, but the next set() used to
                     // serialize that empty object straight over settings.json —
@@ -700,7 +700,7 @@ export class SettingsManager {
                     // treats this exact situation as unacceptable and refuses
                     // writes for the session; mirror that here so a recoverable
                     // file is never overwritten with a partial one.
-                    this.quarantineUnreadableSettings(parseError);
+                    this.quarantineUnreadableSettings();
                 }
                 console.log('[SettingsManager] Settings loaded');
             }
@@ -779,7 +779,7 @@ export class SettingsManager {
      * is the correct conservative choice: we could not move the file, so we must
      * not overwrite it either.
      */
-    private quarantineUnreadableSettings(cause: unknown): void {
+    private quarantineUnreadableSettings(): void {
         this.settings = {};
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
         const quarantinePath = `${this.settingsPath}.corrupt-${stamp}`;
@@ -788,15 +788,13 @@ export class SettingsManager {
             this.settingsUnreadable = false;
             console.error(
                 `[SettingsManager] settings.json could not be parsed and was moved to ${quarantinePath}. `
-                + 'Continuing with defaults on a writable store; the original file is preserved for recovery. Cause:',
-                cause,
+                + 'Continuing with defaults on a writable store; the original file is preserved for recovery.',
             );
-        } catch (renameErr) {
+        } catch {
             this.settingsUnreadable = true;
             console.error(
                 '[SettingsManager] settings.json could not be parsed AND could not be quarantined; '
-                + 'continuing READ-ONLY so the existing file is not overwritten. Parse cause:',
-                cause, 'Quarantine error:', renameErr,
+                + 'continuing READ-ONLY so the existing file is not overwritten.',
             );
         }
     }
