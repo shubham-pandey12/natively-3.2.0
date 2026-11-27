@@ -25,7 +25,7 @@ export interface ResponseCleanupResult {
   changed: boolean;
 }
 
-const CONTROL_MESSAGE_RE = /^(?:ask\s*:|\[\[ask\]\]|\[\[no_action\]\]|no\s+action\.?$)/i;
+const CONTROL_MESSAGE_RE = /^(?:(?:\*\*|__)?ask\s*:|\[\[ask\]\]|\[\[no_action\]\]|(?:\*\*|__)?no\s+action\.?(?:\*\*|__)?$)/i;
 
 /**
  * Shared rule-based plain-English cleanup for spoken and written responses.

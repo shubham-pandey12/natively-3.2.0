@@ -70,7 +70,7 @@ describe('cleanupResponse — spoken vs text mode & preservation', () => {
   });
 
   test('preserves control messages and structured answer types untouched', () => {
-    for (const msg of ['Ask: Which region?', 'No action.', '[[NO_ACTION]]', '[[ASK]] Clarify?']) {
+    for (const msg of ['Ask: Which region?', '**Ask:** Which region?', 'No action.', '[[NO_ACTION]]', '[[ASK]] Clarify?']) {
       assert.deepEqual(cleanupResponse({ text: msg, mode: 'spoken' }), { text: msg, changed: false });
     }
     const tech = 'The service is robust and scalable with `Redis`.';
@@ -80,10 +80,25 @@ describe('cleanupResponse — spoken vs text mode & preservation', () => {
     );
   });
 
+  test('spoken cleanup preserves nested lists, indented code, hard breaks, and money ranges', () => {
+    const text = 'I used leverage ratios.  \n- Budget is $5M — $20M.\n  - Found actionable insights.\n\n    actionable insights';
+    assert.equal(cleanupResponse({ text, mode: 'spoken' }).text,
+      'I used leverage ratios.  \n- Budget is $5M — $20M.\n  - Found useful takeaways.\n\n    actionable insights');
+    assert.equal(cleanupResponse({ text: 'a—b', mode: 'spoken' }).text, 'a—b');
+    assert.equal(cleanupResponse({ text: 'Run x; y.', mode: 'spoken' }).text, 'Run x; y.');
+  });
+
   test('written cleanup keeps Markdown line breaks, links, and alternative code fences', () => {
     const protectedText = '[docs](https://example.com/actionable-insights)  \n\n\n~~~text\nactionable insights\n```\nactionable insights\n```\n~~~\n\n    https://example.com/actionable-insights\n';
     const text = 'I found actionable insights.  \n' + protectedText;
     assert.equal(cleanupResponse({ text, mode: 'text' }).text, 'I found useful takeaways.  \n' + protectedText);
+  });
+
+  test('spoken cleanup keeps percent and scaled number ranges together', () => {
+    for (const range of ['10%—20%', '10.5% – 20.5%', '10%—20', '5k–8k']) {
+      const text = `The target range is ${range}.`;
+      assert.deepEqual(cleanupResponse({ text, mode: 'spoken' }), { text, changed: false });
+    }
   });
 });
 

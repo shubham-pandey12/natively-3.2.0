@@ -3564,7 +3564,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             if (!v3Truncated && finalText.trim() && !manualDiagramTurn?.signals) {
               try {
                 if (isIntelligenceFlagEnabled('sharedResponseCleanup')) {
-                  const cleaned = cleanupResponse({ text: finalText, mode: 'text' });
+                  const cleaned = cleanupResponse({ text: finalText, mode: 'text', answerType: v3Plan?.answerType });
                   if (cleaned.changed && cleaned.text.trim().length >= 10) {
                     finalText = cleaned.text;
                     piTelemetry.emit('pi_context_policy_applied', { via: 'shared_response_cleanup_v3' });

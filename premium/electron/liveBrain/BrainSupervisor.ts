@@ -56,7 +56,7 @@ export class BrainSupervisor<Timer> {
         notebook: InterviewNotebook;
         clock: ResponseClock<Timer>;
         create(id: LiveBrainId): { brain: LiveBrain; model: string } | undefined;
-        onEvent(event: LiveBrainEvent, id: LiveBrainId, model: string): void;
+        onEvent(event: LiveBrainEvent, id: LiveBrainId, model: string): string | void;
         onSwitch?(data: { from?: LiveBrainId; to: LiveBrainId; reason: string; elapsedMs: number }): void;
         onRollover?(data: { brain: LiveBrainId; reason: string; elapsedMs: number }): void;
     }) { }
@@ -245,11 +245,12 @@ export class BrainSupervisor<Timer> {
         if (event.type === 'response_delta' && this.response?.id === event.responseId) {
             this.response.text += event.text.slice(0, MAX_RESPONSE_CHARS - this.response.text.length);
         }
+        let completedText: string | undefined;
         if (event.type === 'response_done' && this.response?.id === event.responseId) {
             // Audio-mode providers keep "speaking" long after the text is on
             // screen, so the interviewer's next words usually cancel the turn.
             // Text already shown was seen by the candidate: keep it in the notebook.
-            if (event.status === 'completed') this.recordAnswer(event.finalText ?? this.response.text);
+            if (event.status === 'completed') completedText = event.finalText ?? this.response.text;
             else if (event.status === 'cancelled' && this.response.text.trim()) this.recordAnswer(this.response.text);
             this.response = undefined;
         }
@@ -258,7 +259,14 @@ export class BrainSupervisor<Timer> {
             this.missed = 0;
             this.speaking = false;
         }
-        this.options.onEvent(event, lease.brain.id, lease.model);
+        const displayedText = this.options.onEvent(event, lease.brain.id, lease.model);
+        if (completedText !== undefined) {
+            if (typeof displayedText === 'string') {
+                this.options.notebook.record({ role: 'assistant', text: displayedText, at: this.options.clock.now() });
+            } else {
+                this.recordAnswer(completedText);
+            }
+        }
         if (event.type === 'response_done' || event.type === 'response_silent') this.promote();
     }
 

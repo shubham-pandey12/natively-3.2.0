@@ -13,7 +13,7 @@ const { FakeLiveBrain } = load('__tests__/FakeLiveBrain');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const MIN = 60_000;
 
-function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemini-live']) {
+function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemini-live'], presentedAnswer) {
     const clock = new FakeClock();
     const notebook = new InterviewNotebook({ now: () => clock.now() });
     const realtime = [];
@@ -40,12 +40,26 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemi
             realtime.push(brain);
             return { brain, model: 'gemini-model' };
         },
-        onEvent: (event, id) => seen.push([id, event]),
+        onEvent: (event, id) => {
+            seen.push([id, event]);
+            if (event.type === 'response_done') return presentedAnswer;
+        },
         onSwitch: data => switches.push(data),
         onRollover: data => rollovers.push(data),
     });
     return { clock, notebook, supervisor, realtime, attempted, seen, switches, rollovers };
 }
+
+test('completed ready-to-display text is stored in the notebook', async () => {
+    const h = rig('gemini-live', 0, ['gemini-live'], 'I found useful takeaways.');
+    h.supervisor.start();
+    await flush();
+    const brain = h.realtime[0];
+    brain.emit({ type: 'response_started', responseId: 'r1', at: h.clock.now() });
+    brain.emit({ type: 'response_delta', responseId: 'r1', text: 'I found actionable insights.' });
+    brain.emit({ type: 'response_done', responseId: 'r1', status: 'completed' });
+    assert.equal(h.notebook.recentTurns().at(-1).text, 'I found useful takeaways.');
+});
 
 test('Amazon Sonic reconnects with notebook context and rolls over before the eight-minute limit', async () => {
     const h = rig('amazon-sonic', 0, ['amazon-sonic']);

@@ -204,12 +204,11 @@ const PHRASE_REWRITES: ReadonlyArray<{ re: RegExp; to: string }> = [
   // VERB "leverage" (a top AI tell) -> "use". The -ing/-s/-ed inflections are
   // unambiguously verbs. The BASE form is also a NOUN ("financial leverage", "more
   // leverage in the deal") which is COMMON in sales/negotiation answers (in scope), so we
-  // only rewrite the base form when it is NOT preceded by a determiner/adjective that
-  // marks the noun sense. code-review HIGH 2026-06-15.
+  // only rewrite the base form after a likely verb cue, excluding common ratio terms.
   { re: /\bleveraging\b/gi, to: 'using' },
   { re: /\bleverages\b/gi, to: 'uses' },
   { re: /\bleveraged\b/gi, to: 'used' },
-  { re: /(?<!\b(?:the|a|an|my|our|your|his|her|their|its|more|less|some|no|any|financial|main|real|extra|added|negotiating|bargaining)\s)\bleverage\b(?=\s+\w)/gi, to: 'use' },
+  { re: /(?<=\b(?:I|we|you|they|and|but|to|can|could|will|would|should)\s)leverage\b(?!\s+ratios?\b)(?=\s+\w)/gi, to: 'use' },
 ];
 
 /** Sentence-initial source-narration lead-in that can be cut cleanly (grammar-safe deletion). */
@@ -324,7 +323,13 @@ export function humanizeSpokenAnswer(
     protect(/^[ \t]*~{3,}[^\n]*\n[\s\S]*?(?:^[ \t]*~{3,}[ \t]*$|(?![\s\S]))/gm);
     protect(/!?\[[^\]\n]*\]\([^\n]*?\)|https?:\/\/[^\s<>]+/g);
   }
-  if (options?.mode === 'text') protect(/^(?: {4}|\t)[^\n]*/gm);
+  if (options?.mode) {
+    protect(/^(?: {4}|\t)[^\n]*|^ +(?=(?:[-*+] |\d+[.)] ))| {2,}(?=\r?\n)/gm);
+  }
+  protect(/\d(?:[.,]\d+)*\s*[kmbt]?\s*[—–]\s*[$€£¥]\s*\d(?:[.,]\d+)*\s*[kmbt]?/gi);
+  // A suffix before the dash also marks a range when the second number has no currency sign.
+  protect(/\d(?:[.,]\d+)*[ \t]*[kmbt%][ \t]*[—–][ \t]*\d(?:[.,]\d+)*(?:[ \t]*(?:%|[kmbt]\b))?/gi);
+  if (options?.mode) protect(/\b[a-z][—–][a-z]\b/gi);
   protect(BLOCK_MATH_RE);
   protect(INLINE_CODE_RE);
   protect(INLINE_MATH_RE);
@@ -355,7 +360,7 @@ export function humanizeSpokenAnswer(
     // Convert spoken pauses to commas or sentence breaks.
     text = text.replace(/\s*[—–]\s*/g, ', ');
     text = text.replace(/\s+--\s+/g, ', ');
-    text = text.replace(/;\s+(\w)/g, (_m, c: string) => '. ' + c.toUpperCase());
+    text = text.replace(/;\s+([a-z])(?=[a-z])/gi, (_m, c: string) => '. ' + c.toUpperCase());
     text = text.replace(/;\s*$/gm, '.');
   }
 

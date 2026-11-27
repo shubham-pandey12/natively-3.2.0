@@ -289,9 +289,9 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             if (debug && event.type === 'response_silent') speechStoppedAt = undefined;
             // Pipeline emits observations for memory and diagnostics. Its native
             // answer events already carry the generation IDs used by Phase 1.
-            if (id !== 'pipeline') orchestrator.handleEvent(event);
-            else if (event.type === 'response_started') orchestrator.replaceWithExternalAnswer();
-            else if (event.type === 'response_delta') {
+            const displayedText = id !== 'pipeline' ? orchestrator.handleEvent(event) : undefined;
+            if (id === 'pipeline' && event.type === 'response_started') orchestrator.replaceWithExternalAnswer();
+            else if (id === 'pipeline' && event.type === 'response_delta') {
                 presented = true;
                 if (timing?.responseId === event.responseId && timing.firstTextAt === undefined) timing.firstTextAt = Date.now();
             }
@@ -299,6 +299,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 if (!backup && event.status === 'completed') showStatus(presented ? 'Answer ready' : 'Listening');
                 if (event.responseId === timing?.responseId) finishTiming(event.status);
             }
+            if (isIntelligenceFlagEnabled('sharedResponseCleanup')) return displayedText;
         },
     });
 

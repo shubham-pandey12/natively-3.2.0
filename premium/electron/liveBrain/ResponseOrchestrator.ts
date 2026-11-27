@@ -140,7 +140,7 @@ export class ResponseOrchestrator<Timer> {
         clock: ResponseClock<Timer>;
     }) { }
 
-    handleEvent(event: LiveBrainEvent): void {
+    handleEvent(event: LiveBrainEvent): string | undefined {
         switch (event.type) {
             case 'interviewer_transcript':
                 this.noteProviderTranscript(event.text, event.final);
@@ -203,8 +203,7 @@ export class ResponseOrchestrator<Timer> {
                     this.readTextEvents(response, response.parser.finish());
                     if (!response.kind && this.current) this.setSpeaking(this.current, false);
                 }
-                this.closeTextResponse(event.status === 'completed');
-                break;
+                return this.closeTextResponse(event.status === 'completed');
             }
         }
     }
@@ -673,7 +672,7 @@ export class ResponseOrchestrator<Timer> {
         });
     }
 
-    private closeTextResponse(completed = false): void {
+    private closeTextResponse(completed = false): string | undefined {
         const response = this.response;
         this.response = undefined;
         if (response?.kind === 'ask' && response.text.trim()) {
@@ -692,6 +691,7 @@ export class ResponseOrchestrator<Timer> {
             this.current.completedAt = this.ports.clock.now();
         }
         this.showText(response, true);
+        return completed && response.kind === 'answer' && !response.suppressed ? response.text : undefined;
     }
 
     private showText(response: TextResponse, done: boolean): void {
