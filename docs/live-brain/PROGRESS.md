@@ -23,6 +23,7 @@
 | Baseline 2 — Flux Private Draft | ✅ Done | Verified on Windows Electron (`dev:agent` WASAPI loopback, `deepgram-flux` / `flux-general-multi` + `codex-cli`, Technical Interview, `full` prompt) vs fresh `5c092319` baseline worktree. S1 first overlay text dropped from `6,024` / `6,628 ms` to `2,471` / `2,863 ms` (smoke `2,322 ms`); S2 pause held with 2–3 `turn_resumed` draft discards and 1 final answer (`4,863` / `4,054 ms` vs `6,290` / `4,499 ms`); S4 cancelled Q1 cleanly with no stale chunks (`6,329` / `7,966 ms` vs `6,554` / `3,517 ms`, cause of the timing difference unverified). All 126 Live Brain tests, build, and typechecks pass. Physical macOS verification remains open. |
 | Baseline 3 — Flux Interruptions & Corrections | ✅ Done | Reproduced S3 filler bubble (`"Emma"` → `"MM"` → `"MM."` → `"Mhmm."`), added Flux short-opening-partial hold (`DeepgramFluxBrain.ts`) + deferred `setOutdated` until replacement first text (`ResponseOrchestrator.ts`), and reran S2–S5 (`n=2`, `deepgram-flux` + `codex-cli`). S3 produced `0/2` filler bubbles and `0` duplicate answers; S4 kept Q1 visible until replacement first text (`-21 ms` before overlay batch); S5 kept base answers visible (`outdated: false` in `2/2`); S2 held the 1.2 s pause (`5,909` / `5,714 ms`, `2/1/1` drafts). All `132/132` Live Brain tests, builds, typechecks, `test:lib`, and `test:components` pass. Physical macOS verification remains open. |
 | Baseline 4 — Flux Follow-up & Clarification Context | ✅ Done | Added `fluxTurnContext.ts`, wired `ResponseOrchestrator` + `AnswerWriter` + `meeting.ts` + `IntelligenceEngine.ts` (`contextKey` staleness check on private drafts), grounded follow-ups/corrections/pending clarification replies (`<turn_context>`), and omitted prior topics on unrelated new questions. Verified at the AI route boundary (`134/134` in `test:live-brain`) and on Windows Electron (`deepgram-flux` + `codex-cli`, S4 & S5 `n=2` each). Builds, typechecks, `test:lib`, and `test:components` pass. Physical macOS verification remains open. |
+| Baseline 5 — Comparison & Regressions | ✅ Done | Replayed S1–S6 (`n=2` each) on Windows Electron (`aba131df`, `win32`) for `deepgram-flux` (`flux-general-multi` + `codex-cli`) and `deepgram-voice-agent` (managed `open_ai` / `gpt-4o-mini`). Flux S1 (`2,758`/`2,688 ms`) and S2 (`5,940`/`4,827 ms` post-fix) improved over Phase 1 (`5,130 ms`, `8,917 ms`), S4 replaced cleanly (`4,599`/`5,488 ms` vs Phase 1 `7,058 ms`), S5 kept base visible (`outdated: false`), and Voice Agent exhibited 2–11 s inter-burst gaps plus early split on S2/S3. Fixed single-letter `"A"` noise-burst filler (`ResponseOrchestrator.ts`) and verified S2 rerun (`1` answer each). Live S6 `"Yes."` remains blocked (`gotAsk=false` on both Deepgram modes); covered by deterministic `Meeting.test.mjs` (`135/135` in `test:live-brain`). Physical macOS and OpenAI Realtime live verification remain open. |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
 
@@ -985,9 +986,118 @@ node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b88
 - **Tested physically on Windows:** `dev:agent` Windows Electron app (`deepgram-flux` + `codex-cli`).
 - **Reviewed but not executed on macOS. Requires physical macOS verification.**
 
+## Baseline Phase 5 — Comparison and Regressions (Windows, 2026-11-27)
+
+Started from commit `aba131df` on `feat/live-brain` (`platform: win32`, Technical Interview mode, `dev:agent` WASAPI loopback, `NATIVELY_E2E=1`, `NATIVELY_PROMPT_DEBUG=1`).
+
+### 1. Routes & Test Connection verified
+
+- **Deepgram Flux + My AI Provider:** `deepgram-flux` (`flux-general-multi`) + `codex-cli` (`codex-cli`) — `testLiveBrainConnection()` passed (`"Deepgram Flux connected. · Codex CLI (codex-cli) replied."`).
+- **Deepgram Voice Agent:** `deepgram-voice-agent` (`listen: flux-general-multi`, `thinkMode: managed`, `managedProvider: open_ai`, `managedModel: gpt-4o-mini`) — `testLiveBrainConnection()` passed (`"Deepgram key verified · Think model replied."`).
+- **OpenAI Realtime (`gpt-realtime-2.1`):** remains blocked on the available OpenAI account (no Realtime model access in `GET /v1/models`, Phase 1).
+- **Gemini Live (`gemini-3.1-flash-live-preview`):** comparable Phase 1 Windows Electron baseline retained from `PROGRESS.md` (S1 `1,788 ms`, S2 `1,925`/`1,799 ms`, S4 `2,065 ms`, S5 `1,978 ms` with leaked preamble).
+
+### 2. Full Electron App Corpus (`S1`–`S6`, `n=2` reps each)
+
+Commands & raw artifacts (outside Git):
+~~~powershell
+$env:NATIVELY_E2E='1'; $env:NATIVELY_PROMPT_DEBUG='1'; npm run dev:agent
+node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase5.mjs" --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli --reps 2 --only 1,2,3,4,5,6
+node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase5.mjs" --provider deepgram-voice-agent --reps 2 --only 1,2,3,4,5,6
+node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase5.mjs" --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli --reps 2 --only 2 --out "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\results_phase5_flux_s2_rerun.json"
+~~~
+
+- Flux JSON: `C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\results_phase5_deepgram-flux.json`
+- Flux S2 post-fix JSON: `C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\results_phase5_flux_s2_rerun.json`
+- Voice Agent JSON: `C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\results_phase5_deepgram-voice-agent.json`
+
+#### Deepgram Flux + Codex CLI (`aba131df`, `n=2` per scenario)
+
+| Scenario & clip | Rep | EoT / Speech→1st | Drafts (s/r/d) | Regressions & observations |
+|---|---:|---|---|---|
+| S1 Complete (`s1_complete.wav`) | 1 / 2 | `1,496`→**`2,758 ms`** / `1,367`→**`2,688 ms`** | `1/1/0` / `1/1/0` | `1` answer each (`60` chunks); `-2.4 s` vs Phase 1 (`5,130 ms`) |
+| S2 1.2 s pause (`s2_pause1200.wav`, initial) | 1 / 2 | `2,843`→**`4,150 ms`** / `8,548`→**`6,043 ms`** | `3/1/2` / `8/2/6` | Rep 1 clean (`1` answer); Rep 2 had late single-letter `"A"` noise burst (`q2`, `gid 34`) |
+| S2 1.2 s pause (**post-fix rerun**) | 1 / 2 | `2,581`→**`5,940 ms`** / `2,762`→**`4,827 ms`** | `2/1/1` / `3/1/2` | `1` answer each (`273`/`286` chunks, `outdated: false`); `-3.0` to `-4.1 s` vs Phase 1 (`8,917 ms`) |
+| S3 `"Mm-hmm"` mid-stream (`s3_question+mmhmm`) | 1 / 2 | `1,835`→**`9,524 ms`** / `2,689`→**`8,118 ms`** | `2/1/1` / `2/1/1` | `0` duplicate answers/cancels (`outdated: false`); Rep 1 had `q2: "Mhmm."` (`gid: null`), Rep 2 `q1` only |
+| S4 Correction mid-stream (`s4_question+correction`) | 1 / 2 | Corr `2,131`→**`4,599 ms`** / `2,097`→**`5,488 ms`** | `3/2/1` / `2/2/0` | Q1 cancelled (`outdated: true`), Q2 (`updated: true`, no cache, zero stale chunks); `-1.6` to `-2.5 s` vs Phase 1 (`7,058 ms`) |
+| S5 Follow-up (`s5_base+followup`) | 1 / 2 | FU `1,406`→**`4,207 ms`** / `1,295`→**`3,341 ms`** | `2/2/0` / `2/2/0` | Base kept visible (`outdated: false` in `2/2`); FU grounded in CRDT + local note queue (`-1.3` to `-2.1 s` vs Phase 1 `5,458 ms`) |
+| S6 Clarification (`s6_ambiguous.wav`) | 1 / 2 | `2,410`→**`18,755 ms`** / `2,448`→**`21,761 ms`** | `1/1/0` / `1/1/0` | `gotAsk=false` (answered with stated assumptions); live `"Yes."` blocked |
+
+#### Deepgram Voice Agent (`managed` `open_ai` / `gpt-4o-mini`, `aba131df`, `n=2` per scenario)
+
+| Scenario & clip | Rep | Speech→1st | Bursts & inter-chunk gaps | Regressions & observations |
+|---|---:|---|---|---|
+| S1 Complete (`s1_complete.wav`) | 1 / 2 | **`1,489 ms`** / **`1,200 ms`** | `4` bursts (`9,586`, `11,160 ms`) / `4` bursts (`5,298`, `5,321`, `7,560 ms`) | `1` answer each; multi-second gaps between `ConversationText` bursts |
+| S2 1.2 s pause (`s2_pause1200.wav`) | 1 / 2 | **`3,984 ms`** / **`3,059 ms`** | `5` bursts (`3.6–9.8 s` gaps) / `4` bursts (`6.2–9.2 s` gaps) | Rep 1 `1` bubble; Rep 2 split question into `q1` + `q2: "Millions of concurrent users."` |
+| S3 `"Mm-hmm"` mid-stream (`s3_question+mmhmm`) | 1 / 2 | **`-3,759 ms`** / **`-3,766 ms`** (premature!) | `2` bursts (`q1`) + `2–3` bursts (`q2`, `5.1–8.2 s` gaps) | **Early split:** fired Answer 1 before `s3_question.wav` ended (`-3.76 s`), then `Walk me through...` superseded it (`outdated: true`, `updated: true`) |
+| S4 Correction mid-stream (`s4_question+correction`) | 1 / 2 | Corr: **`10,307 ms`** / **`10,344 ms`** | `2` bursts (`q1`) + `4` bursts (`q2`, `2.1–8.8 s` gaps) | Answer 1 finished (`18.3` / `20.4 s`) before correction; Answer 2 omitted caching (`outdated: false`) |
+| S5 Follow-up (`s5_base+followup`) | 1 / 2 | FU: **`3,147 ms`** / **`1,295 ms`** | `4–5` bursts (`4.3–10.3 s` gaps) | Base kept visible (`outdated: false`), follow-up grounded in offline local storage |
+| S6 Clarification (`s6_ambiguous.wav`) | 1 / 2 | **`22,299 ms`** / **`20,603 ms`** | `1` burst each | `gotAsk=false` (answered directly); live `"Yes."` blocked |
+
+### 3. Fix & Regression Verification
+- **Single-letter `"A"` noise-burst filler (`premium/electron/liveBrain/ResponseOrchestrator.ts`):** added `a` to `FILLER_WORD` so isolated `"A"` / `"A."` noise artifacts are suppressed while multi-word questions (`"A cache?"`, `"A B-tree?"`) pass. Added unit assertions in `ResponseOrchestrator.test.mjs` and verified `S2` rerun (`1` answer each, `5,940` / `4,827 ms`).
+- **Clarification lifecycle (deterministic coverage):** Live S6 `"Design an e-commerce app."` did not emit `Ask:` on either Deepgram mode (`gotAsk=false`). Reply (`"Yes."`), 10 s timeout stated-assumption fallback, and reconnect/meeting-end clearing are verified in `Meeting.test.mjs` and `ResponseOrchestrator.test.mjs` (`135/135` passing).
+
+### 4. Final Validation
+- `npm run test:live-brain`: **`135/135`** pass, `0` fail (includes `DeepgramVoiceAgentBrain.test.mjs`, `DeepgramFluxBrain.test.mjs`, `ResponseOrchestrator.test.mjs`, `Meeting.test.mjs`, `LiveBrainSettings.test.mjs`).
+- `npm run build:electron`: passed (exit 0).
+- `npm run typecheck:electron`, `typecheck:premium`, `typecheck:ts7`: all clean (exit 0).
+- `git diff --check`: exit 0.
+- **Tested physically on Windows:** `dev:agent` Windows Electron app (`deepgram-flux` + `codex-cli` and `deepgram-voice-agent` managed `open_ai`/`gpt-4o-mini`).
+- **Remaining open:** OpenAI Realtime live run (blocked by account model access), live `Ask:` → `"Yes."` trigger from an unprompted model, and **physical macOS verification (`Requires physical macOS verification`)**.
+
 ### Baseline Phase 4 review
 
 - Fixed the Flux writer clarification timeout to send the original question, clarification, and stated-assumption instruction through AnswerWriter. Reconnect and silent turns cancel the pending timer. Speech suppresses the timed fallback while the pending reply is still eligible until expiry.
 - Unrelated questions can supersede an active stream without being treated as corrections. Successive corrections retain the confirmed question and correction text, and the draft key includes relevant notebook constraints apart from sentences already represented by the current transcript.
 - Independently verified the saved Windows Electron traces for both corrections and both completed-answer follow-ups. From clip end to first visible text, follow-ups took 2,613 and 3,002 ms and replacements took 6,217 and 5,172 ms. These traces predate the review fixes. The short-reply and timeout paths are covered through automated meeting and AI-route tests.
 - Independent validation on Windows: Electron build, all 135 Live Brain tests, Electron and premium type checks, and diff whitespace check. Physical macOS and a live provider clarification replay remain open.
+
+### Baseline Phase 5 independent review
+
+- Recalculated the clip-end-to-first-text timings from the three saved Windows Electron JSON files. Flux S2 initial repetition 2 started two answer generations and the first never reported completion. The two saved S2 reruns each show one completed answer. Narrowed the filter to standalone "A" and "A." and added coverage that "A?" still passes.
+- Flux S3 repetition 1 showed a "Mhmm." question row with no answer generation. Neither S3 run cancelled the answer. Repeated the isolated S3 backchannel WAV three times over the Flux transport using the existing eager probe adapted to include Update events. All three finalized as "mm." and none supplied a new transcript sequence explaining the renderer leak. Saved those transport events in scratch/results_phase5_review_s3_transport.jsonl alongside the Electron JSON files. A fresh full-app trace of the failing sequence remains open.
+- Voice Agent S3 started answering about 3.76 s before the question clip ended in both runs, and S2 repetition 2 showed two question rows. Several Voice Agent captures lack a completion event. The summaries cannot distinguish a truncated answer from the replay ending before the provider completed.
+
+### Baseline Phase 5 follow-up trace, fix, and rerun (Windows, 2026-11-27)
+
+1. **Full-app Flux S3 filler-bubble reproduction (`trace_phase5_detail.mjs`):**
+   - Raw trace: `C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\trace_phase5_detail.json`
+   - Captured exact sequence on `s3_mmhmm.wav` (`p2=[6422, 7388]` ms relative to `p1.psEnd`):
+     - `dt: 7339` `interviewer_speech_started`
+     - `dt: 7942` `interviewer_transcript` `text: "É mesmo"`, `final: false` → **opened `q2` (`dt: 7950`, `questionId: "q2"`, `text: "É mesmo"`, `done: false`)**
+     - `dt: 8099` `interviewer_transcript` `text: "É mesmo?"`, `final: false` → `dt: 8138` `eager_end_of_turn` `"É mesmo?"`
+     - `dt: 8258` `interviewer_transcript` `text: "Emem."`, `final: false` + `turn_resumed` → `dt: 8299` `eager_end_of_turn` `"Emem."`
+     - `dt: 9898` `interviewer_transcript` `text: "Mhmm."`, `final: false` + `turn_resumed` → `dt: 9939` `eager_end_of_turn` `"Mhmm."`
+     - `dt: 10857` `interviewer_transcript` `text: "Mhmm."`, `final: true` + `decision` `"Mhmm."` → `dt: 10891` `q2: "Mhmm.", done: true`.
+   - Cause: multilingual `flux-general-multi` transcribed the nasal onset as `"É mesmo"` (2 words, 7 chars), which bypassed the prior single-word `< 8`-char hold and set `bubble.shown = true` before revising to `"Mhmm."`.
+
+2. **Fix & deterministic regression (`DeepgramFluxBrain.ts`, `DeepgramFluxBrain.test.mjs`):**
+   - Updated `DeepgramFluxBrain.ts` (`Update`, `EagerEndOfTurn`, `TurnResumed`) to hold opening `interviewer_transcript` (`final: false`) until `lastPartialText` is set OR `(transcript.length >= 12 && /\s/.test(transcript))`. `EndOfTurn` still emits `final: true` for every turn.
+   - Replaced the earlier `"Emma"` test in `DeepgramFluxBrain.test.mjs` with the captured `"É mesmo"` → `"É mesmo?"` → `"Emem."` → `"Mhmm."` sequence and verified that `"A cache with TTL?"` still streams live once `>= 2` words and `>= 12` chars.
+
+3. **Post-fix Flux S2–S4 Windows Electron rerun (`n=2` each, `deepgram-flux` + `codex-cli`):**
+   - Command: `node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase5.mjs" --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli --reps 2 --only 2,3,4 --out "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\results_phase5_flux_postfix_s234.json"`
+   - **S2 (1.2 s pause):** `7,156 ms` (`EoT 2,896 ms`, drafts `2/1/1`, `256` chunks) and `4,648 ms` (`EoT 2,667 ms`, drafts `2/1/1`, `262` chunks) — `1` question, `1` answer (`outdated: false`) in both reps.
+   - **S3 (`"Mm-hmm"` mid-stream):** `6,323 ms` (`EoT 1,934 ms`, `185` chunks) and `7,028 ms` (`EoT 1,981 ms`, `313` chunks) — **`q1` only (`0/2` filler bubbles)**, `1` answer (`outdated: false`), zero cancellations.
+   - **S4 (Correction mid-stream):** `7,590 ms` (`Corr EoT 1,981` + `EoT→1st 5,609 ms`, drafts `2/2/0`) and `5,185 ms` (`Corr EoT 1,810` + `EoT→1st 3,375 ms`, drafts `2/2/0`) — Q1 cancelled (`outdated: true`), Q2 (`updated: true`, `62`/`64` chunks), zero stale chunks.
+
+4. **Voice Agent S2 & S3 diagnosis (`trace_phase5_detail.json`, `managed` `open_ai` / `gpt-4o-mini`):**
+   - **S2 (`play=[-5028, 0]`):** Deepgram's server-side Voice Agent endpointed during the 1.2 s pause at `dt: -2040` (`"How would you design a system that can handle?"`), started `response_started` at `dt: -1103` (`"Ask: Can you specify..."`), cancelled on `UserStartedSpeaking` at `dt: -819`, then finalized `"Millions of concurrent users."` at `dt: +4204` (`response_delta` bursts at `4.2 s`, `10.3 s`, `22.5 s`, `29.3 s`; `AgentAudioDone` had not arrived by `+35 s`).
+   - **S3 (`p1=[-7721, 0]`, `p2=[5, 908]`):** Deepgram's server-side Voice Agent endpointed between the two sentences of `s3_question.wav` at `dt: -4368` (`"How would you make retry safe in an order API?"`), started `response_started` at `dt: -3453` (`112` chars), cancelled at `dt: -3265` when `"Walk me through..."` began, then finalized `q2` at `dt: +2243` (`7` bursts from `2.3 s` to `30.6 s`; `AgentAudioDone` not yet emitted by `+35 s`).
+   - **Conclusion:** Both S2/S3 splits and early answers originate in Deepgram Voice Agent's server-side endpointing/streaming behavior (`flux-general-multi` inside `/v1/agent/converse` without standalone `eot_threshold=0.95` / `eot_timeout_ms=1500`), not local `ResponseOrchestrator` handling. Left open as an upstream provider-behavior finding outside Phase 5 scope.
+
+5. **Final validation after all edits:**
+   - `npm run test:live-brain`: **`135/135`** pass, `0` fail.
+   - `npm run build:electron`: passed (exit 0).
+   - `npm run typecheck:electron`, `typecheck:premium`, `typecheck:ts7`: all clean (exit 0).
+   - `git diff --check`: exit 0.
+   - **Clarification & platform status:** Live S6 `Ask:` → `"Yes."` remains blocked (`gotAsk=false` on both Deepgram modes); deterministic reply, timeout, and reconnect tests pass in `test:live-brain`. **Requires physical macOS verification.**
+
+
+### Baseline Phase 5 final review
+
+- Independently inspected the saved Flux and Voice Agent traces and all six post-fix Flux runs. Both S3 runs show one completed answer and one question row. S2 retained one completed answer per run, and both S4 replacements completed.
+- Centralized the Flux opening-partial guard and count Unicode characters without requiring whitespace. The automated regression covers the captured filler sequence, a short confirmed question, and live emission of a long partial in a language without word-separating spaces. The saved Windows reruns predate this adjustment.
+- Voice Agent emitted response events before the question clips ended. Its second answers lacked a completion event within the 35-second capture, so completion beyond that window was not verified. The S2 clarification was interrupted before it could support a live reply or timeout test.
+- The Windows Electron build, 135 Live Brain tests, Electron, premium, and TS7 type checks, and diff whitespace check passed. Phase 5 comparison is complete. Live clarification, Voice Agent provider behavior, OpenAI Realtime access, and physical macOS verification remain documented follow-ups.

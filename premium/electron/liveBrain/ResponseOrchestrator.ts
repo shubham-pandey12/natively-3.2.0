@@ -108,7 +108,8 @@ const FILLER_WORD = String.raw`(?:m+-?h+m+|m+\.m+|m+|h+m+|u+h+-?h+u+h+|uh+|um+|o
 const FILLER_ONLY = new RegExp(String.raw`^${FILLER_WORD}(?:[\s,.!?-]+${FILLER_WORD})*[\s,.!?-]*$`, 'i');
 
 export function isFillerOnly(text: string): boolean {
-    return FILLER_ONLY.test(text.trim());
+    const clean = text.trim();
+    return /^a\.?$/i.test(clean) || FILLER_ONLY.test(clean);
 }
 const CLARIFICATION_MS = 10_000;
 // The overlay can keep earlier answers when Live Brain is disabled and

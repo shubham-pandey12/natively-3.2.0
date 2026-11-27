@@ -549,10 +549,10 @@ test('Phase 2: ResponseOrchestrator skips empty/filler eager turns, allows Yes o
 
 test('Phase 3: Flux/Gemini filler variants and initial M partial are suppressed, while filler-like real questions pass', () => {
     const { isFillerOnly } = require(`${dist}ResponseOrchestrator.js`);
-    for (const filler of ['MM.', 'mm', 'M.M.', 'M.M', 'Mhmm.', 'M', 'M.', 'Mmm...', 'Mm, okay.']) {
+    for (const filler of ['MM.', 'mm', 'M.M.', 'M.M', 'Mhmm.', 'M', 'M.', 'A', 'A.', 'Mmm...', 'Mm, okay.']) {
         assert.equal(isFillerOnly(filler), true, `expected filler: ${filler}`);
     }
-    for (const real of ['MySQL?', 'MongoDB or Postgres?', 'M.I.T.?', 'Make it stateless.', 'Memory limit?', 'Okay, how does caching work?', 'Yes, what about offline?']) {
+    for (const real of ['MySQL?', 'MongoDB or Postgres?', 'M.I.T.?', 'Make it stateless.', 'Memory limit?', 'A?', 'A cache?', 'A B-tree?', 'Okay, how does caching work?', 'Yes, what about offline?']) {
         assert.equal(isFillerOnly(real), false, `expected real question: ${real}`);
     }
 });

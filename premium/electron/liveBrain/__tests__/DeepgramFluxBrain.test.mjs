@@ -324,16 +324,18 @@ test('Phase 2 Flux turnKey scoping: duplicate EagerEndOfTurn dedupes, TurnResume
     assert.notEqual(reconnectDecision.turnKey, preReconnectTurnKey);
 });
 
-test('Phase 3: Flux holds single short opening partials (Emma -> MM -> Mhmm.) until multi-word or final', async (t) => {
+test('Phase 5: Flux holds captured S3 filler sequence while streaming real questions', async (t) => {
     const { brain, events, connections } = await createRig(t);
     await brain.start(makeContext());
     const conn = connections[0];
 
-    // Exact reproduced S3 sequence: "Emma" -> "MM" -> "MM." -> "Mhmm." -> EndOfTurn "Mhmm."
+    // Exact reproduced S3 sequence from Windows Electron trace:
     sendJson(conn.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 0, transcript: '' });
-    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'Emma' });
-    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'MM' });
-    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'MM.' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'É mesmo' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'É mesmo?' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', turn_index: 0, transcript: 'É mesmo?' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'Emem.' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'TurnResumed', turn_index: 0, transcript: 'Emem.' });
     sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'Mhmm.' });
     sendJson(conn.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 0, transcript: 'Mhmm.' });
 
@@ -341,13 +343,29 @@ test('Phase 3: Flux holds single short opening partials (Emma -> MM -> Mhmm.) un
     assert.equal(events.filter(e => e.type === 'interviewer_transcript' && !e.final).length, 0);
     assert.equal(events.filter(e => e.type === 'interviewer_transcript' && e.final).at(-1).text, 'Mhmm.');
 
-    // Genuine question starting with "Emma": held at "Emma", then streams once multi-word.
+    // Question beginning with a short word still streams once the partial reaches 12 characters.
     sendJson(conn.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 1, transcript: '' });
-    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'Emma' });
-    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'Emma, how do you scale?' });
-    sendJson(conn.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 1, transcript: 'Emma, how do you scale?' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'A' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'A cache?' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'A cache with TTL?' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 1, transcript: 'A cache with TTL?' });
 
     await until(() => events.filter(e => e.type === 'decision').length === 2);
     const turn1Partials = events.filter(e => e.type === 'interviewer_transcript' && !e.final);
-    assert.deepEqual(turn1Partials.map(e => e.text), ['Emma, how do you scale?']);
+    assert.deepEqual(turn1Partials.map(e => e.text), ['A cache with TTL?']);
+
+    // Flux multilingual partials can contain no spaces. Short confirmed questions
+    // still reach the writer even if their opening partial was held.
+    const unsegmented = '分散システムの設計を説明してください';
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 2, transcript: '' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 2, transcript: unsegmented });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 2, transcript: unsegmented });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 3, transcript: '' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 3, transcript: 'A cache?' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 3, transcript: 'A cache?' });
+
+    await until(() => events.filter(e => e.type === 'decision').length === 4);
+    assert.deepEqual(events.filter(e => e.type === 'interviewer_transcript' && !e.final).map(e => e.text),
+        ['A cache with TTL?', unsegmented]);
+    assert.equal(events.filter(e => e.type === 'decision').at(-1).question, 'A cache?');
 });

@@ -153,6 +153,15 @@ export class DeepgramFluxBrain implements LiveBrain {
         for (const listener of this.listeners) listener(event);
     }
 
+    private emitPartialTranscript(transcript: string, at: number): void {
+        if (transcript === this.lastPartialText) return;
+        // Short opening hypotheses such as "Emma" and "É mesmo?" can revise
+        // to filler. Hold them until more text arrives or the turn finalizes.
+        if (!this.lastPartialText && Array.from(transcript).length < 12) return;
+        this.lastPartialText = transcript;
+        this.emit({ type: 'interviewer_transcript', text: transcript, final: false, at });
+    }
+
     private turnKeyFor(turnIndex: number): string {
         return `${this.currentConnectionKey}:t${turnIndex}`;
     }
@@ -254,16 +263,7 @@ export class DeepgramFluxBrain implements LiveBrain {
                         this.activeEager = null;
                         this.emit({ type: 'interviewer_speech_started', at });
                     }
-                    if (transcript !== this.lastPartialText) {
-                        // Hold a single short opening token (e.g. Flux's "Emma" / "MM"
-                        // before settling on "Mhmm.") until it grows into >= 2 words
-                        // or >= 8 chars, so filler-only turns never flash a bubble.
-                        if (!this.lastPartialText && !/\s/.test(transcript) && transcript.length < 8) {
-                            break;
-                        }
-                        this.lastPartialText = transcript;
-                        this.emit({ type: 'interviewer_transcript', text: transcript, final: false, at });
-                    }
+                    this.emitPartialTranscript(transcript, at);
                 }
                 break;
             case 'EagerEndOfTurn':
@@ -274,10 +274,7 @@ export class DeepgramFluxBrain implements LiveBrain {
                         this.activeTurnIndex = turnIndex;
                         this.emit({ type: 'interviewer_speech_started', at });
                     }
-                    if (transcript !== this.lastPartialText && (this.lastPartialText || /\s/.test(transcript) || transcript.length >= 8)) {
-                        this.lastPartialText = transcript;
-                        this.emit({ type: 'interviewer_transcript', text: transcript, final: false, at });
-                    }
+                    this.emitPartialTranscript(transcript, at);
                     const turnKey = this.turnKeyFor(turnIndex);
                     if (this.activeEager?.turnKey !== turnKey || this.activeEager.transcript !== transcript) {
                         this.activeEager = { turnKey, transcript };
@@ -293,10 +290,7 @@ export class DeepgramFluxBrain implements LiveBrain {
                         this.activeTurnIndex = turnIndex;
                         this.emit({ type: 'interviewer_speech_started', at });
                     }
-                    if (transcript !== this.lastPartialText && (this.lastPartialText || /\s/.test(transcript) || transcript.length >= 8)) {
-                        this.lastPartialText = transcript;
-                        this.emit({ type: 'interviewer_transcript', text: transcript, final: false, at });
-                    }
+                    this.emitPartialTranscript(transcript, at);
                 }
                 const turnKey = this.turnKeyFor(turnIndex);
                 this.activeEager = null;

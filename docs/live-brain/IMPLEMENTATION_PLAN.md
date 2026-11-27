@@ -297,7 +297,7 @@ Tasks:
 2. **Confirmed release of early drafts.** Done. Draft on EagerEndOfTurn, cancel on TurnResumed, and release on matching confirmation with confirmed-turn fallback. Windows Electron replays verified draft reuse and faster first text on the complete and paused questions. Correction timing was mixed. See PROGRESS.md for the comparison.
 3. **Interruptions and corrections.** Done. Fixed Flux/Gemini filler variants (`MM.`, `mm`, `M.M.`, `Mhmm.`, `M` partial), kept completed answers visible on ordinary follow-ups, and preserved useful on-screen text when a replacement fails before showing text. Windows Electron reruns covered S2–S5 and showed no filler bubbles. Paused questions stayed intact, with slower first text than in the Phase 2 samples. See PROGRESS.md.
 4. **Follow-up and clarification context.** Done. Added focused Flux turn context (`fluxTurnContext.ts`), grounded follow-ups, corrections, and pending clarification replies at the AI route boundary, omitted prior topics on unrelated new questions, and verified context staleness checks on early drafts. See PROGRESS.md.
-5. **Comparison and regressions.** Repeat this corpus. Compare first-text timing, replacement timing, and incorrect or duplicate answers. Check both Deepgram modes and record platform and provider coverage.
+5. **Comparison and regressions.** Done. Compared both Deepgram modes on Windows, fixed the reproduced Flux question-row regressions, and traced Voice Agent early turns to provider behavior. Live clarification, OpenAI Realtime account access, and physical macOS coverage remain open. See PROGRESS.md.
 
 ---
 
