@@ -9,6 +9,7 @@ export interface LiveBrainStartContext {
     instructions: string;
     notebook: NotebookSnapshot;
     recentTurns: ConversationTurn[];
+    needsFreshContext?(): boolean;
     refreshContext?(): Pick<LiveBrainStartContext, 'instructions' | 'notebook' | 'recentTurns'>;
     signal: AbortSignal;
 }
@@ -38,7 +39,7 @@ export type LiveBrainEvent =
     }
     | { type: 'response_started'; responseId: string; at: number }
     | { type: 'response_delta'; responseId: string; text: string }
-    | { type: 'response_done'; responseId: string; status: 'completed' | 'cancelled' | 'failed'; finalText?: string }
+    | { type: 'response_done'; responseId: string; status: 'completed' | 'cancelled' | 'failed'; finalText?: string; cancelReason?: 'interviewer_barge_in' | 'manual' | 'rollover' | 'context_revoked' }
     | { type: 'response_silent' }
     | { type: 'session_expiring'; inMs: number; resumable?: false }
     | { type: 'error'; code: LiveBrainErrorCode; fatal: boolean; detail?: string };

@@ -26,6 +26,8 @@ interface Lease {
     ready: boolean;
     controller: AbortController;
     seeded?: ConversationTurn[];
+    groundingKey?: string;
+    pendingFluxTranscript?: { text: string; at: number };
     unsubscribe?: () => void;
 }
 
@@ -47,6 +49,8 @@ export class BrainSupervisor<Timer> {
     private rolloverAt?: number;
     private forceHandoff = false;
     private externalWriting = false;
+    private missedTurnsDiscards = 0;
+    private groundingDiscards = 0;
     private connectionSequence = 0;
     private readonly attempted = new Set<LiveBrainId>();
     private readonly retriedFresh = new Set<LiveBrainId>();
@@ -55,12 +59,14 @@ export class BrainSupervisor<Timer> {
         sessionId: string;
         preferred: LiveBrainId;
         instructions(id: LiveBrainId): string;
+        groundingKey?(): string | undefined;
         notebook: InterviewNotebook;
         clock: ResponseClock<Timer>;
         create(id: LiveBrainId): { brain: LiveBrain; model: string } | undefined;
         onEvent(event: LiveBrainEvent, id: LiveBrainId, model: string): OrchestratorDisposition | void;
         onSwitch?(data: { from?: LiveBrainId; to: LiveBrainId; reason: string; elapsedMs: number }): void;
         onRollover?(data: { brain: LiveBrainId; reason: string; elapsedMs: number }): void;
+        onLeaseDetached?(lease: { brain: LiveBrain; model: string }, reason: string, role: 'active' | 'standby'): void;
     }) { }
 
     get current(): LiveBrain | undefined { return this.active?.brain; }
@@ -93,6 +99,8 @@ export class BrainSupervisor<Timer> {
             throw new Error(`Unsupported live brain: ${String(preferred)}`);
         }
         this.stopped = false;
+        this.missedTurnsDiscards = 0;
+        this.groundingDiscards = 0;
         this.options.notebook.clear();
         this.attempted.clear();
         this.retriedFresh.clear();
@@ -104,8 +112,8 @@ export class BrainSupervisor<Timer> {
         this.clearTimers();
         const { active, standby } = this;
         this.active = this.standby = undefined;
-        this.release(active);
-        this.release(standby);
+        this.release(active, 'stopped', 'active');
+        this.release(standby, 'stopped', 'standby');
         this.response = undefined;
         this.rolloverAt = undefined;
         this.latestSpeechStop = undefined;
@@ -113,9 +121,30 @@ export class BrainSupervisor<Timer> {
         this.speaking = false;
         this.forceHandoff = false;
         this.externalWriting = false;
+        this.missedTurnsDiscards = 0;
+        this.groundingDiscards = 0;
         this.clearAudio();
         this.candidates = [];
         this.options.notebook.clear();
+    }
+
+    refreshContext(): void {
+        const previous = this.active;
+        if (this.stopped || !previous || previous.brain.id === 'pipeline' || previous.brain.id === 'deepgram-flux') return;
+        const replacement = this.create(previous.brain.id, 'context_revoked');
+        this.finishActiveResponse(previous, 'cancelled', 'context_revoked');
+        this.active = replacement;
+        const standby = this.standby;
+        this.standby = undefined;
+        this.clearTimers();
+        this.release(previous, 'context_revoked', 'active');
+        this.release(standby, 'context_revoked', 'standby');
+        this.speaking = false;
+        this.missed = 0;
+        this.latestSpeechStop = undefined;
+        this.rolloverAt = this.options.clock.now();
+        if (replacement) this.launch(replacement);
+        else this.select('context_revoked', previous.brain.id);
     }
 
     pushAudio(pcm: Int16Array): void {
@@ -177,6 +206,7 @@ export class BrainSupervisor<Timer> {
 
     private launch(lease: Lease): void {
         const { notebook } = this.options;
+        lease.groundingKey = this.options.groundingKey?.();
         const refreshContext = () => {
             const recentTurns = notebook.recentTurns();
             const instructions = this.options.instructions(lease.brain.id);
@@ -194,6 +224,7 @@ export class BrainSupervisor<Timer> {
         const ctx: LiveBrainStartContext = {
             sessionId: this.options.sessionId, responseNamespace: `${this.options.sessionId}:${++this.connectionSequence}`,
             signal: lease.controller.signal, ...initial,
+            needsFreshContext: () => lease.groundingKey !== this.options.groundingKey?.(),
             ...(lease.brain.id === 'deepgram-voice-agent' ? { refreshContext } : {}),
         };
         lease.unsubscribe = lease.brain.onEvent(event => this.onEvent(lease, event));
@@ -225,7 +256,7 @@ export class BrainSupervisor<Timer> {
         }
         if (event.type === 'session_expiring') {
             this.rolloverAt ??= this.options.clock.now();
-            if (event.resumable === false) this.prepareFresh(lease, event.inMs, 'no_resume_handle');
+            if (event.resumable === false || lease.groundingKey !== this.options.groundingKey?.()) this.prepareFresh(lease, event.inMs, event.resumable === false ? 'no_resume_handle' : 'context_changed');
         }
         if (event.type === 'interviewer_speech_started') {
             this.speaking = true;
@@ -261,7 +292,15 @@ export class BrainSupervisor<Timer> {
         }
         const disposition = this.options.onEvent(event, lease.brain.id, lease.model);
         if (event.type === 'interviewer_transcript' && event.final && disposition?.kind !== 'interviewer_already_recorded') {
-            this.recordInterviewerTurn(event.text, event.at);
+            // Flux confirms this transcript in the immediately following decision.
+            // Draft and final use the same pre-question notebook.
+            if (lease.brain.id === 'deepgram-flux') lease.pendingFluxTranscript = event;
+            else this.recordInterviewerTurn(event.text, event.at);
+        }
+        if (event.type === 'decision' && lease.pendingFluxTranscript) {
+            const { text, at } = lease.pendingFluxTranscript;
+            lease.pendingFluxTranscript = undefined;
+            this.recordInterviewerTurn(text, at);
         }
         if (rawResponse !== undefined) {
             if (disposition?.kind === 'answer' || disposition?.kind === 'ask') {
@@ -301,7 +340,7 @@ export class BrainSupervisor<Timer> {
         if (id !== 'pipeline') this.rollover = this.options.clock.setTimeout(() => {
             if (this.active !== lease || this.standby) return;
             this.rolloverAt = this.options.clock.now();
-            if (!lease.brain.requestSessionRollover?.(30_000)) this.prepareFresh(lease, 30_000, 'scheduled');
+            if (lease.groundingKey !== this.options.groundingKey?.() || !lease.brain.requestSessionRollover?.(30_000)) this.prepareFresh(lease, 30_000, 'scheduled');
         }, ROLLOVER_MS[id]);
     }
 
@@ -320,16 +359,46 @@ export class BrainSupervisor<Timer> {
     private promote(force = false): void {
         const replacement = this.standby;
         if (!replacement?.ready || (!force && !this.forceHandoff && (this.response || this.externalWriting || this.speaking) && this.active?.ready)) return;
+        if (replacement.groundingKey !== this.options.groundingKey?.() && !force && !this.forceHandoff && this.groundingDiscards < 3) {
+            this.groundingDiscards++;
+            this.standby = undefined;
+            if (this.deadline !== undefined) {
+                this.options.clock.clearTimeout(this.deadline);
+                this.deadline = undefined;
+            }
+            this.forceHandoff = false;
+            this.release(replacement, 'context_changed', 'standby');
+            if (!this.stopped && this.active) this.prepareFresh(this.active, 30_000, 'context_changed');
+            else if (!this.stopped) this.select('context_changed', replacement.brain.id);
+            return;
+        }
+        const seeded = replacement.seeded ?? [];
+        const history = this.options.notebook.recentTurns().filter(
+            turn => !seeded.some(before => before.at === turn.at && before.role === turn.role && before.text === turn.text),
+        );
+        if (history.length > 0 && !replacement.brain.addHistoryContext && !force && !this.forceHandoff && this.missedTurnsDiscards < 1) {
+            this.missedTurnsDiscards++;
+            this.standby = undefined;
+            if (this.deadline !== undefined) {
+                this.options.clock.clearTimeout(this.deadline);
+                this.deadline = undefined;
+            }
+            this.forceHandoff = false;
+            this.release(replacement, 'missed_turns', 'standby');
+            if (!this.stopped && this.active) this.prepareFresh(this.active, 30_000, 'missed_turns');
+            else if (!this.stopped) this.select('missed_turns', replacement.brain.id);
+            return;
+        }
         const previous = this.active;
-        this.finishActiveResponse(previous, 'cancelled');
+        const detachReason = this.forceHandoff ? 'forced_rollover' : 'rollover';
+        this.missedTurnsDiscards = 0;
+        this.groundingDiscards = 0;
+        this.finishActiveResponse(previous, 'cancelled', 'rollover');
         this.active = replacement;
         this.standby = undefined;
         this.speaking = false;
         this.clearTimers();
-        this.release(previous);
-        const seeded = replacement.seeded ?? [];
-        const history = this.options.notebook.recentTurns().filter(turn => turn.at >= replacement.since
-            && !seeded.some(before => before.at === turn.at && before.role === turn.role && before.text === turn.text));
+        this.release(previous, detachReason, 'active');
         if (replacement.brain.addHistoryContext) {
             replacement.brain.addHistoryContext(renderRecentTurns(history));
             this.candidates = [];
@@ -342,7 +411,7 @@ export class BrainSupervisor<Timer> {
     private fail(lease: Lease, reason: string, retryFresh = false): void {
         if (lease === this.standby) {
             this.standby = undefined;
-            this.release(lease);
+            this.release(lease, reason, 'standby');
             if (!this.active) {
                 this.rolloverAt = undefined;
                 this.select(reason, lease.brain.id);
@@ -356,7 +425,7 @@ export class BrainSupervisor<Timer> {
         this.missed = 0;
         this.latestSpeechStop = undefined;
         this.clearTimers();
-        this.release(lease);
+        this.release(lease, reason, 'active');
         if (this.standby) {
             if (reason !== 'auth' && reason !== 'quota') {
                 this.promote(true);
@@ -364,7 +433,7 @@ export class BrainSupervisor<Timer> {
             }
             const standby = this.standby;
             this.standby = undefined;
-            this.release(standby);
+            this.release(standby, reason, 'standby');
         }
         if (retryFresh && lease.brain.id === 'amazon-sonic'
             && lease.readyAt !== undefined
@@ -385,17 +454,23 @@ export class BrainSupervisor<Timer> {
         this.select(reason, lease.brain.id);
     }
 
-    private finishActiveResponse(lease: Lease | undefined, status: 'cancelled' | 'failed'): void {
+    private finishActiveResponse(
+        lease: Lease | undefined,
+        status: 'cancelled' | 'failed',
+        cancelReason?: 'interviewer_barge_in' | 'manual' | 'rollover' | 'context_revoked',
+    ): void {
         if (lease && this.response) this.options.onEvent({
             type: 'response_done', responseId: this.response.id, status,
+            ...(cancelReason ? { cancelReason } : {}),
         }, lease.brain.id, lease.model);
         this.response = undefined;
     }
 
-    private release(lease?: Lease): void {
+    private release(lease?: Lease, reason = 'released', role: 'active' | 'standby' = 'active'): void {
         if (!lease) return;
         lease.unsubscribe?.();
         lease.controller.abort();
+        this.options.onLeaseDetached?.({ brain: lease.brain, model: lease.model }, reason, role);
         void lease.brain.stop().catch(() => { });
     }
 

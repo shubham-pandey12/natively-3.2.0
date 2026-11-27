@@ -49,6 +49,7 @@ export { DISPATCH_MAX_MS, DISPATCH_STALL_MS } from '../../../electron/llm/automa
 export const USER_BACKCHANNEL = /^(?:(?:yeah|yes|yep|yup|ya|mm-?hm+|mhm+|uh-?huh|ok(?:ay)?|right|sure|cool|got it|i see|nice|great|perfect|exactly|interesting|makes sense|sounds good|true|correct|wow|oh|ah|hm+|haha+|alright|of course|fair enough|no problem|totally|absolutely|definitely|indeed|good|fine)[\s,.!?-]*){1,4}$/i;
 /** The interviewer must be quiet this long before the judge is consulted. Unfitted placeholder. */
 export const STABILITY_MS = 900;
+const FALLBACK_QUESTION_ANSWERABILITY = 0.9;
 /**
  * Quiet needed before the judge is ASKED, as opposed to before the answer is
  * COMMITTED (that stays STABILITY_MS).
@@ -674,6 +675,7 @@ export class SimpleAutoAnswerEngine {
     /** Aborts the judge call in flight; nulled when it settles or is superseded. */
     private judgeAbort: AbortController | null = null;
     private sequence = 0;
+    private lastSequenceGeneration: number | null = null;
     private lastJudgedKey = '';
     /** One retry per candidate after a judge or answer failure (see scheduleRecovery). */
     private recovery: { key: string; parts?: PendingPart[] } | null = null;
@@ -1225,7 +1227,7 @@ export class SimpleAutoAnswerEngine {
                 const key = normalizeForCompare(candidate);
                 if (key === this.lastJudgedKey) return;
                 this.lastJudgedKey = key;
-                const id = `${this.host.meetingGeneration()}-q${++this.sequence}`;
+                const id = this.nextCandidateId();
                 void this.consult(id, candidate, now, false, correction);
                 return;
             }
@@ -1327,7 +1329,7 @@ export class SimpleAutoAnswerEngine {
             return;
         }
 
-        const id = `${this.host.meetingGeneration()}-q${++this.sequence}`;
+        const id = this.nextCandidateId();
         this.emit({
             name: 'auto_answer_candidate', questionId: id,
             candidateWordCount: words, endpointSource: this.pending.some(p => p.provisional) ? 'stt_stall' : 'quiet_window',
@@ -1432,6 +1434,7 @@ export class SimpleAutoAnswerEngine {
             this.judgeAbort = abort;
             this.inFlight = { id, parts: snapshot, askShaped: isQuestionShaped(unjudged) || isReportShaped(unjudged) };
             this.settledNegative = null;
+            let onAbort: (() => void) | null = null;
             try {
                 raw = await Promise.race([
                     this.host.judgeCandidate({
@@ -1453,11 +1456,17 @@ export class SimpleAutoAnswerEngine {
                         const asked = /\?\s*$/.test(candidate) || sentencesOf(unjudged).some(x => /\?\s*$/.test(x));
                         timer = this.clock.setTimeout(() => { timedOut = true; resolve(null); }, asked ? QUESTION_JUDGE_DEADLINE_MS : JUDGE_DEADLINE_MS);
                     }),
+                    new Promise<null>((resolve) => {
+                        if (abort.signal.aborted) { resolve(null); return; }
+                        onAbort = () => resolve(null);
+                        abort.signal.addEventListener('abort', onAbort, { once: true });
+                    }),
                 ]);
                 if (timedOut) { outcome = 'timeout'; try { abort.abort(); } catch { /* noop */ } }
             } catch {
                 outcome = 'error';
             } finally {
+                if (onAbort) abort.signal.removeEventListener('abort', onAbort);
                 if (timer !== null) this.clock.clearTimeout(timer);
                 if (this.judgeAbort === abort) this.judgeAbort = null;
                 if (this.inFlight?.id === id) this.inFlight = null;
@@ -1581,7 +1590,7 @@ export class SimpleAutoAnswerEngine {
             const declarative = endsOnDeclarativeAsk(unjudged || candidate, this.punctuationGuaranteed);
             if (asked || (!this.punctuationGuaranteed && interrogative) || declarative) {
                 this.host.log?.(`[AutoAnswer:simple] judge ${outcome} — fallback dispatch`);
-                this.deliver(id, candidate, 0.9, 'general_question', committedAt);
+                this.deliver(id, candidate, FALLBACK_QUESTION_ANSWERABILITY, 'general_question', committedAt);
                 return;
             }
             // Not shaped like a question: one more try, then let it go.
@@ -1936,6 +1945,23 @@ export class SimpleAutoAnswerEngine {
         if (this.recoveryTimer !== null) this.clock.clearTimeout(this.recoveryTimer);
         this.recoveryTimer = null;
         this.recovery = null;
+    }
+
+    private nextCandidateId(): string {
+        const gen = this.host.meetingGeneration();
+        if (this.lastSequenceGeneration !== gen) {
+            this.lastSequenceGeneration = gen;
+            this.sequence = 0;
+        }
+        return `${gen}-q${++this.sequence}`;
+    }
+
+    createLiveBrainFallbackCandidate(text: string, at: number) {
+        return {
+            ...this.question(this.nextCandidateId(), text, FALLBACK_QUESTION_ANSWERABILITY, 'general_question', at, []),
+            replacesAutomaticAnswer: false,
+            endpointSource: 'live_brain_fallback',
+        };
     }
 
     private question(id: string, text: string, answerability: number, act: AutoAnswerQuestion['dialogueAct'], committedAt: number,
@@ -2325,7 +2351,6 @@ export class SimpleAutoAnswerEngine {
         this.coveredBy = null;
         this.settledNegative = null;
         this.bumpJudgeSeq('meeting_reset');
-        this.sequence = 0;
     }
 
     private emit(event: Omit<AutoAnswerTelemetryEvent, 'meetingGeneration'>): void {

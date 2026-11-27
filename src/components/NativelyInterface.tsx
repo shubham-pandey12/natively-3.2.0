@@ -6268,6 +6268,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // finals after the Direct reveal has sealed and activeDirectAssistRef clears.
   // A deliberate new legacy WTA/code-hint/brainstorm request revives the lane.
   const legacyIntelligenceTombstonedRef = useRef(false);
+  // U9-2: track active vs closed/discarded realtime Live Brain ids so Reset or a
+  // provisional discard ignores late events from those ids without blocking new ones.
+  const activeLiveBrainQuestionIdsRef = useRef(new Set<string>());
+  const closedLiveBrainQuestionIdsRef = useRef(new Set<string>());
+  const activeLiveBrainAskIdsRef = useRef(new Set<string>());
+  const closedLiveBrainAskIdsRef = useRef(new Set<string>());
+  const activeLiveBrainGenIdsRef = useRef(new Set<number>());
+  const closedLiveBrainGenIdsRef = useRef(new Set<number>());
   // Deferred-finalize bookkeeping. THE ONE mechanism for "commit this row's
   // final isStreaming:false only once the reveal ticker has actually caught
   // up to the full text" — used by BOTH:
@@ -7686,6 +7694,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     clearScreenshotRetry();
     clearScreenshotRetry();
     cancelActiveChatStream();
+    for (const id of activeLiveBrainQuestionIdsRef.current) closedLiveBrainQuestionIdsRef.current.add(id);
+    activeLiveBrainQuestionIdsRef.current.clear();
+    for (const id of activeLiveBrainAskIdsRef.current) closedLiveBrainAskIdsRef.current.add(id);
+    activeLiveBrainAskIdsRef.current.clear();
+    for (const id of activeLiveBrainGenIdsRef.current) closedLiveBrainGenIdsRef.current.add(id);
+    activeLiveBrainGenIdsRef.current.clear();
+    const trimClosed = <T,>(closed: Set<T>) => {
+      while (closed.size > 256) {
+        const oldest = closed.values().next().value;
+        if (oldest === undefined) break;
+        closed.delete(oldest);
+      }
+    };
+    trimClosed(closedLiveBrainQuestionIdsRef.current);
+    trimClosed(closedLiveBrainAskIdsRef.current);
+    trimClosed(closedLiveBrainGenIdsRef.current);
+    setLiveBrainStatus(null);
     diagramRepairBlockedRef.current.clear();
     previousDiagramRef.current = null;
     resumeAutoScroll();
@@ -8017,21 +8042,34 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status, liveBrainQuestion, liveBrainAnswerStart }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status, liveBrainQuestion, liveBrainAnswerStart, discard }) => {
         if (status !== undefined) {
           setLiveBrainStatus(status);
+          return;
+        }
+        if (discard && generationId !== undefined) {
+          closedLiveBrainGenIdsRef.current.add(generationId);
+          activeLiveBrainGenIdsRef.current.delete(generationId);
+          const id = `live-brain-text-${generationId}`;
+          setMessages((prev) => prev.filter((message) => message.id !== id));
           return;
         }
         // D14: chat-style Live Brain. The interviewer's words stream into this
         // row, and the answer appears directly below it.
         if (liveBrainQuestion) {
           if (activeDirectAssistRef.current) return;
+          if (closedLiveBrainQuestionIdsRef.current.has(liveBrainQuestion.questionId)) return;
+          if (liveBrainQuestion.generationId !== undefined
+            && closedLiveBrainGenIdsRef.current.has(liveBrainQuestion.generationId)) return;
+          activeLiveBrainQuestionIdsRef.current.add(liveBrainQuestion.questionId);
           setMessages((prev) => placeLiveBrainQuestion(prev, liveBrainQuestion));
           pinAnswerPanel();
           return;
         }
         if (askId && clarification) {
           if (activeDirectAssistRef.current) return;
+          if (closedLiveBrainAskIdsRef.current.has(askId)) return;
+          activeLiveBrainAskIdsRef.current.add(askId);
           const id = `live-brain-ask-${askId}`;
           pinAnswerPanel();
           setMessages((prev) => {
@@ -8048,12 +8086,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (generationId === undefined) return;
         if (liveBrainAnswerStart) {
           if (activeDirectAssistRef.current) return;
+          if (closedLiveBrainGenIdsRef.current.has(generationId)) return;
           const decision = resolveLiveAnswerBatch(
             legacyIntelligenceTombstonedRef.current ? null : liveAnswerGenIdRef.current,
             generationId,
             liveAnswerFloorRef.current,
           );
           if (!decision.accept) return;
+          activeLiveBrainGenIdsRef.current.add(generationId);
           legacyIntelligenceTombstonedRef.current = false;
           liveAnswerGenIdRef.current = decision.activeId;
           if (updated) updatedAnswerGenerationRef.current = generationId;
@@ -8061,6 +8101,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return;
         }
         if (typeof outdated === 'boolean' || typeof interviewerSpeaking === 'boolean') {
+          if (closedLiveBrainGenIdsRef.current.has(generationId)) return;
           setMessages((prev) => prev.map((message) => message.whatToAnswerGeneration === generationId
             ? { ...message,
                 ...(typeof outdated === 'boolean' ? { outdated } : {}),
@@ -8071,6 +8112,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         }
         if (responseText) {
           if (activeDirectAssistRef.current) return;
+          if (closedLiveBrainGenIdsRef.current.has(generationId)) return;
+          activeLiveBrainGenIdsRef.current.add(generationId);
           const id = `live-brain-text-${generationId}`;
           pinAnswerPanel();
           setMessages((prev) => {

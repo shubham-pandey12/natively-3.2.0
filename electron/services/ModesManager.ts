@@ -591,10 +591,17 @@ export class ModesManager {
         return store;
     }
 
+    private liveGroundingChangeListener?: () => void;
+
+    public setLiveGroundingChangeListener(listener: () => void): void {
+        this.liveGroundingChangeListener = listener;
+    }
+
     private invalidateActiveModeCache(): void {
         const store = ModesManager._cache;
         store.info = null;
         store.valid = false;
+        this.liveGroundingChangeListener?.();
     }
 
     /**

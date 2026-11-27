@@ -45,7 +45,7 @@ export class AnswerWriter implements AnswerWriterPort {
             && this.draft.sessionId === this.sessionId
             && this.draft.turnKey === request.turnKey
             && this.draft.question.trim() === question
-            && (request.contextKey === undefined || (this.draft.contextKey ?? '') === request.contextKey)
+            && (this.draft.contextKey ?? '') === (request.contextKey ?? '')
             && (currentRoute === undefined || this.draft.routeKey === currentRoute)
             && this.draft.canAdopt()) {
             return false;
@@ -159,7 +159,7 @@ export class AnswerWriter implements AnswerWriterPort {
         if (!turnKey || draft.turnKey !== turnKey) return 'turn_mismatch';
         if (draft.sessionId !== this.sessionId) return 'session_mismatch';
         if (draft.question.trim() !== question.trim()) return 'transcript_changed';
-        if (contextKey !== undefined && (draft.contextKey ?? '') !== contextKey) return 'context_changed';
+        if ((draft.contextKey ?? '') !== (contextKey ?? '')) return 'context_changed';
         const currentRoute = this.engine.getLiveBrainAiRouteKey?.();
         if (currentRoute !== undefined && draft.routeKey !== currentRoute) return 'route_changed';
         if (!draft.canAdopt()) return 'draft_unusable';

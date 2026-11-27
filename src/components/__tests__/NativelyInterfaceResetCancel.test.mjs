@@ -87,6 +87,7 @@ test('a correction marks only its generation and seals the discarded draft for t
     legacyIntelligenceTombstonedRef: { current: false },
     liveAnswerGenIdRef: { current: 3 },
     liveAnswerFloorRef: { current: null },
+    closedLiveBrainGenIdsRef: { current: new Set() },
     streamingIntentRef: { current: 'what_to_answer' },
     streamingTextRef: { current: 'Old answer' },
     setMessages: (update) => { rows = update(rows); },
@@ -122,6 +123,9 @@ test('Live Brain asks reuse the answer row and speaking updates only the identif
     legacyIntelligenceTombstonedRef: { current: false },
     liveAnswerGenIdRef: { current: 3 },
     liveAnswerFloorRef: { current: null },
+    activeLiveBrainAskIdsRef: { current: new Set() },
+    closedLiveBrainAskIdsRef: { current: new Set() },
+    closedLiveBrainGenIdsRef: { current: new Set() },
     resolveLiveAnswerBatch,
     updatedAnswerGenerationRef: { current: null },
     pinAnswerPanel: () => {},
@@ -149,4 +153,74 @@ test('Live Brain asks reuse the answer row and speaking updates only the identif
   assert.equal(rows.at(-1).answerPending, true);
   assert.equal(rows.at(-1).kind, undefined);
   assert.equal(rows.at(-1).interviewerSpeaking, undefined);
+});
+
+test('U9-2: resetChatState clears liveBrainStatus and ignores pre-reset or discarded realtime events', () => {
+  const onQuestion = ui.match(/onWhatToAnswerQuestion\?\.\((\(\{[^\n]*\}\) => \{[\s\S]*?\n      \})\) \?\?/)?.[1];
+  const resetChat = ui.match(/const resetChatState = useCallback\((\(\) => \{[\s\S]*?\n  \}), \[cancelActiveChatStream/)?.[1];
+  assert.ok(onQuestion && resetChat);
+  let rows = [];
+  let status = 'Listening';
+  const state = {
+    activeDirectAssistRef: { current: null },
+    legacyIntelligenceTombstonedRef: { current: false },
+    liveAnswerGenIdRef: { current: null },
+    liveAnswerFloorRef: { current: null },
+    updatedAnswerGenerationRef: { current: null },
+    activeLiveBrainQuestionIdsRef: { current: new Set() },
+    closedLiveBrainQuestionIdsRef: { current: new Set() },
+    activeLiveBrainAskIdsRef: { current: new Set() },
+    closedLiveBrainAskIdsRef: { current: new Set() },
+    activeLiveBrainGenIdsRef: { current: new Set() },
+    closedLiveBrainGenIdsRef: { current: new Set() },
+    resolveLiveAnswerBatch,
+    placeLiveBrainQuestion: (prev, q) => [...prev, { id: `live-brain-q-${q.questionId}`, role: 'interviewer', text: q.text, isStreaming: !q.done }],
+    pinAnswerPanel: () => {},
+    setMessages: (update) => { rows = typeof update === 'function' ? update(rows) : update; },
+    setLiveBrainStatus: (next) => { status = next; },
+    clearScreenshotRetry: () => {},
+    cancelActiveChatStream: () => {},
+    diagramRepairBlockedRef: { current: new Set() },
+    previousDiagramRef: { current: null },
+    resumeAutoScroll: () => {},
+    answerPanelPinnedRef: { current: false },
+    setAnswerPanelPinned: () => {},
+    lastManualSubmitRef: { current: null },
+    manualSubmitInFlightRef: { current: false },
+    directAssistHistoryRef: { current: [] },
+  };
+  const { dispatch, reset } = runInNewContext(stripTypeScriptTypes(`
+    const dispatch = ${onQuestion};
+    const reset = ${resetChat};
+    ({ dispatch, reset });
+  `), state);
+
+  dispatch({ liveBrainQuestion: { questionId: 'q-old', text: 'Half question', done: false } });
+  dispatch({ askId: 'ask-old', clarification: 'Which DB?', askStreaming: true });
+  dispatch({ generationId: -10, liveBrainAnswerStart: true });
+  dispatch({ generationId: -10, responseText: { text: 'Partial', done: false } });
+  assert.equal(rows.length, 3);
+
+  reset();
+  assert.equal(status, null);
+  assert.equal(rows.length, 0);
+
+  // Late events for pre-reset ids are ignored.
+  dispatch({ liveBrainQuestion: { questionId: 'q-old', text: 'Half question finished', done: true } });
+  dispatch({ askId: 'ask-old', clarification: 'Which DB?', askStreaming: false });
+  dispatch({ generationId: -10, responseText: { text: 'Partial more', done: true } });
+  assert.equal(rows.length, 0);
+
+  // Provisionally discarded generationId is also ignored afterwards.
+  dispatch({ generationId: -11, responseText: { text: 'Provisional', done: false } });
+  assert.equal(rows.length, 1);
+  dispatch({ generationId: -11, discard: true });
+  assert.equal(rows.length, 0);
+  dispatch({ generationId: -11, responseText: { text: 'Late provisional', done: true } });
+  assert.equal(rows.length, 0);
+
+  // New ids after reset still render normally.
+  dispatch({ liveBrainQuestion: { questionId: 'q-new', text: 'New question?', done: true } });
+  dispatch({ generationId: -12, responseText: { text: 'New answer', done: true } });
+  assert.equal(rows.length, 2);
 });

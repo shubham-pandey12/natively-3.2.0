@@ -1508,7 +1508,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
      */
-    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
+    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
         // An absent confidence is not a low one: the planner substitutes the
         // intent classifier's score. Only an EXPLICIT sub-threshold value skips.
         // Not for an AUTOMATIC trigger: its confidence is the judge's
@@ -1564,7 +1564,7 @@ export class IntelligenceEngine extends EventEmitter {
         return true;
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
         if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         if (trigger.automatic && this.isManualAnswerActive()) return { status: 'skipped', reason: 'busy' };
         // Gemini already decided to answer. Keep manual/turn ownership guards,
@@ -2119,7 +2119,10 @@ export class IntelligenceEngine extends EventEmitter {
     getLiveBrainAiRouteKey(): string {
         try {
             const sel = (this.llmHelper as any)?.getDirectAssistSelection?.();
-            if (sel?.provider && sel?.model) return `${sel.provider}:${sel.model}`;
+            if (sel?.provider && sel?.model) {
+                const fingerprint = this.llmHelper.getLiveBrainCustomRouteFingerprint?.();
+                return fingerprint ? `${sel.provider}:${sel.model}:${fingerprint}` : `${sel.provider}:${sel.model}`;
+            }
         } catch { /* fall through */ }
         try {
             const provider = this.llmHelper?.getCurrentProvider?.() ?? 'unknown';
@@ -2178,6 +2181,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return { status: control.phase === 'cancelled' ? 'cancelled' : 'failed' };
             }
             const declined = turnOut.writeDecision?.policy === 'do_not_store';
+            if (outcomeOut.value?.status === 'cancelled') return { status: 'cancelled' };
             if (answer && !declined) {
                 this.recordLiveTurn(answer, undefined, question, 0, undefined, 'meeting', { startedUnder });
             }
@@ -2259,6 +2263,7 @@ export class IntelligenceEngine extends EventEmitter {
                     generationId,
                     onFirstText: request.onFirstText,
                     onComplete: request.onComplete,
+                    signal: request.signal,
                     suppressQuestionRow: request.suppressQuestionRow,
                 });
             } finally {
@@ -2757,7 +2762,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2815,7 +2820,7 @@ export class IntelligenceEngine extends EventEmitter {
         if (declined && !options?.speculative && answered) {
             console.warn(`[IntelligenceEngine] What to answer turn not recorded in the conversation ring (${turnOut.writeDecision?.reason ?? 'do_not_store'})`);
         }
-        if (!options?.speculative && answered && !declined) {
+        if (!options?.speculative && answered && !declined && !options?.liveBrain?.signal?.aborted) {
             // A run that resolved no question ('') and saw no screen or page
             // still answered something; filed with no question it took the
             // question of the turn before it.
@@ -2833,7 +2838,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }; privateDraft?: InternalPrivateLiveBrainDraft; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; privateDraft?: InternalPrivateLiveBrainDraft; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -3080,8 +3085,8 @@ export class IntelligenceEngine extends EventEmitter {
             };
         }
         const showWtaAnswer = (answer: string, answeredQuestion: string, score: number,
-            delivered: boolean, sourceLabel?: string, stopReason?: string) => {
-            if (privateDraft && !privateDraft.adopted) return;
+            delivered: boolean, sourceLabel?: string, stopReason?: string, storageVeto = false) => {
+            if (isLiveBrainCancelled() || (privateDraft && !privateDraft.adopted)) return;
             const out = options?.outcomeOut;
             const deliveredNow = delivered && Boolean(answer.trim()) && this.currentGenerationId === generationId;
             if (out?.value) out.value = { ...out.value, delivered: deliveredNow };
@@ -3090,7 +3095,8 @@ export class IntelligenceEngine extends EventEmitter {
                 if (privateDraft) privateDraft.visibleTextShown = true;
                 this.noteFirstVisibleText(generationId, answer, 'final');
             }
-            if (deliveredNow) (liveReqRef?.onComplete ?? options?.liveBrain?.onComplete)?.(answer);
+            if (deliveredNow) (liveReqRef?.onComplete ?? options?.liveBrain?.onComplete)?.(answer, { stopReason, storageVeto });
+            if (isLiveBrainCancelled()) return;
             this.emit('suggested_answer', answer, answeredQuestion, score, generationId, sourceLabel, stopReason, outcome);
         };
         // Stamp the run's identity before any await: a manual press racing in
@@ -3117,7 +3123,10 @@ export class IntelligenceEngine extends EventEmitter {
                 this.claimSpokenTurn(spokenQuestion ? this.spokenTurnFor(spokenQuestion) : this.latestSpokenTurn(), false, generationId);
             }
         }
-        const isWtaSuperseded = () => (
+        // The writer's signal represents explicit cancellation. The transport
+        // controller also aborts on a deadline, when a partial may still be delivered.
+        const isLiveBrainCancelled = () => Boolean((liveReqRef?.signal ?? options?.liveBrain?.signal)?.aborted);
+        const isWtaSuperseded = () => isLiveBrainCancelled() || (
             (privateDraft && !privateDraft.adopted)
                 ? whatToAnswerCancellationToken.signal.aborted
                 : (this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken || this.currentGenerationId !== generationId)
@@ -8214,6 +8223,8 @@ export class IntelligenceEngine extends EventEmitter {
                 fullAnswer = stripVerificationSpec(fullAnswer);
             }
 
+            if (isLiveBrainCancelled()) return yieldToSupersedingRun(true);
+
             // Token-emit reconciliation — flush whatever is still buffered so the
             // streamed row holds the complete pre-validation text:
             //  - Coding: flush the gate's tail (covers a short answer that never
@@ -8432,7 +8443,8 @@ export class IntelligenceEngine extends EventEmitter {
             // error branch computed one, so every normal answer read 'General
             // knowledge' (F-ACC-04).
             showWtaAnswer(finalWtaAnswer, question || 'What to Answer', confidence,
-                !answerIsNotice, this.answerSourceLabel(requestSnapshot, _c3TurnPlan), wtaStopReason);
+                !answerIsNotice, this.answerSourceLabel(requestSnapshot, _c3TurnPlan), wtaStopReason,
+                wtaWriteDecision.policy === 'do_not_store');
             // Compile-only syntax check of fenced JavaScript (observe-only: the
             // turn trace + telemetry record it, the answer is never changed).
             try {
@@ -8559,6 +8571,7 @@ export class IntelligenceEngine extends EventEmitter {
                     this.speculativeTextExpiry = Infinity;
                 }
                 if (openedStreamRow && this.currentGenerationId === generationId) this.emit('suggested_answer_discard', 'superseded', generationId);
+                if (isLiveBrainCancelled() && this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) this.setMode('idle');
                 return null;
             }
             if (privateDraft && privateDraft.adopted && !openedStreamRow && !privateDraft.visibleTextShown) {

@@ -527,6 +527,37 @@ test('Deepgram Voice Agent settings reuse STT key, configure managed & BYO Think
         fakeLlm.modelId = 'qwen2.5:7b';
         fakeLlm.display = 'qwen2.5:7b';
         assert.equal(inspectFluxAiRoute(fakeLlm, credentials).configured, true);
+
+        // U9-3: atomic set-options validation, mixed promptVariant + provider, and sanitized internal_error.
+        assert.equal(invoke('set-options', { provider: 'gemini-live', model: '   ' }).success, false);
+        assert.equal(invoke('set-options', { provider: 'gemini-live', model: 'm'.repeat(201) }).success, false);
+        assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', thinkMode: 'invalid' }).success, false);
+        assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', managedModel: 123 }).success, false);
+        assert.equal(invoke('set-options', { provider: 'deepgram-voice-agent', byoCustomHeader: 123 }).success, false);
+        assert.equal(invoke('set-options', { promptVariant: 'trimmed', provider: 'gemini-live', model: 'gemini-3.8-live' }).success, true);
+        assert.equal(settings.get('liveBrainPromptVariant'), 'trimmed');
+        assert.equal(settings.get('liveBrainGeminiModel'), 'gemini-3.8-live');
+
+        // Rejecting mixed call leaves neither setting mutated.
+        assert.equal(invoke('set-options', { promptVariant: 'full', provider: 'gemini-live', model: '' }).success, false);
+        assert.equal(settings.get('liveBrainPromptVariant'), 'trimmed');
+
+        // test-connection throwing in premium returns sanitized internal_error without raw error text.
+        const throwingHandlers = new Map();
+        require(`${compiled}liveBrainSettings.js`).registerLiveBrainSettingsIpc({
+            getLiveBrainEnabled: () => false,
+            setLiveBrainEnabled: () => true,
+        }, (channel, listener) => throwingHandlers.set(channel, listener), () => {}, () => ({
+            async testConnection() {
+                throw new Error('secret-raw-failure');
+            },
+        }));
+        settings.set('liveBrainProvider', 'gemini-live');
+        credentials.setLiveBrainGeminiKey('AIza' + 'z'.repeat(35));
+        const errRes = await throwingHandlers.get('live-brain:test-connection')(null);
+        assert.equal(errRes.success, false);
+        assert.equal(errRes.error, 'internal_error');
+        assert.equal(JSON.stringify(errRes).includes('secret-raw-failure'), false);
     } finally {
         Module._load = load;
         globalThis.__nativelySettingsManagerV1__ = originalSettings;

@@ -183,3 +183,49 @@ test('disabling the switch while the correction is being judged clears its marke
     assert.deepEqual(h.cancels, []);
     assert.equal(h.dispatches.length, 1);
 });
+
+test('U10-1: candidate ids do not repeat across mid-meeting reset and reset on new meetingGeneration', () => {
+    let gen = 1;
+    const engine = new SimpleAutoAnswerEngine({
+        isEnabled: () => true,
+        isMeetingActive: () => true,
+        meetingGeneration: () => gen,
+        engineAccepting: () => true,
+        recentTurns: () => [],
+        dispatch: async () => ({ status: 'completed' }),
+    }, new FakeClock());
+    const q1 = engine.createLiveBrainFallbackCandidate('First?', 1);
+    engine.onMeetingStop();
+    const q2 = engine.createLiveBrainFallbackCandidate('Second?', 2);
+    assert.notEqual(q1.id, q2.id);
+    assert.equal(q1.id, '1-q1');
+    assert.equal(q2.id, '1-q2');
+
+    gen = 2;
+    engine.onMeetingStart();
+    const q3 = engine.createLiveBrainFallbackCandidate('Next meeting?', 3);
+    assert.equal(q3.id, '2-q1');
+});
+
+test('U10-3: noncooperative judge settles immediately on stop and clears its deadline timer', async () => {
+    const clock = new FakeClock();
+    let active = true;
+    const engine = new SimpleAutoAnswerEngine({
+        isEnabled: () => true,
+        isMeetingActive: () => active,
+        meetingGeneration: () => 1,
+        engineAccepting: () => true,
+        recentTurns: () => [],
+        dispatch: async () => ({ status: 'completed' }),
+        judgeCandidate: () => new Promise(() => {}),
+    }, clock);
+    engine.onMeetingStart();
+    engine.ingest({ speaker: 'interviewer', text: 'How would you scale this service?', final: true, timestamp: clock.now(), origin: 'stt', punctuationSource: 'provider' });
+    clock.advance(STABILITY_MS);
+    await flush();
+    assert.ok(clock.pendingCount() > 0);
+    active = false;
+    engine.onMeetingStop();
+    await flush();
+    assert.equal(clock.pendingCount(), 0);
+});

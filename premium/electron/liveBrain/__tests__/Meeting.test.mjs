@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const require = createRequire(import.meta.url);
 const dist = '../../../../dist-electron/';
 const { IntelligenceEngine } = require(`${dist}electron/IntelligenceEngine.js`);
-const { LiveBrainRouting } = require(`${dist}electron/premium/liveBrain.js`);
+const { LiveBrainRouting, resolveLiveBrainProfileContext } = require(`${dist}electron/premium/liveBrain.js`);
 const { clearPromptDebugState, getPromptDebugState } = require(`${dist}electron/llm/promptDebug.js`);
 const { createMeeting } = require(`${dist}premium/electron/liveBrain/meeting.js`);
 const { AnswerWriter } = require(`${dist}premium/electron/liveBrain/AnswerWriter.js`);
@@ -441,6 +441,7 @@ function fluxEngineRig(t, options = {}) {
         sessionId: 'flux-p2',
         apiKey: 'fake',
         provider: 'deepgram-flux',
+        readGroundingState: options.readGroundingState,
         engine: {
             setAutomaticAnswerOutdated: (genId, outdated) => engine.setAutomaticAnswerOutdated(genId, outdated),
             runLiveBrainAnswer: req => engine.runLiveBrainAnswer(req, session.getFormattedContext(120)),
@@ -1043,6 +1044,7 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     b1.emit({ type: 'interviewer_speech_started', at: 200_000 });
     b1.emit({ type: 'interviewer_transcript', text: 'What is a mutex?', final: true, at: 200_100 });
     b1.emit({ type: 'response_started', responseId: 'r1', at: 200_200 });
+    b1.emit({ type: 'response_delta', responseId: 'r1', text: 'A mutex is a lock.' });
     routing1.activeSession.observePipelineTranscript('What is a mutex?', true, 200_300);
     b1.emit({ type: 'error', code: 'auth', fatal: true });
     assert.deepEqual(activated1, [undefined]);
@@ -1080,4 +1082,443 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     b3.emit({ type: 'error', code: 'auth', fatal: true });
     assert.deepEqual(activated3, [{ text: 'What is a mutex?', at: 200_100 }]);
     routing3.stop();
+});
+
+test('realtime profile gating and context refresh at lease boundaries', async t => {
+    const brains = [];
+    let profileAllowed = false;
+    let knowledgeEnabled = true;
+    let revision = 1;
+    let profile = 'Original resume and JD';
+    const readGroundingState = () => ({
+        profileAllowed, knowledgeEnabled,
+        groundingKey: JSON.stringify([profileAllowed, knowledgeEnabled, revision]),
+    });
+    const meeting = createMeeting({
+        sessionId: 'context-refresh',
+        readGroundingState,
+        resolveContext: () => ({
+            profileContext: resolveLiveBrainProfileContext(readGroundingState(), () => 'Resume Name', () => profile),
+        }),
+        engine: { setAutomaticAnswerOutdated() {} },
+        emitQuestion() {},
+        onFailure: assert.fail,
+    }, id => {
+        const brain = new FakeLiveBrain(id);
+        brains.push(brain);
+        return brain;
+    });
+    t.after(() => meeting.stop());
+    meeting.start();
+    await flush();
+    assert.doesNotMatch(brains[0].starts[0].instructions, /Resume Name|Original resume and JD/);
+
+    profileAllowed = true;
+    meeting.refreshContext();
+    brains[0].emit({ type: 'session_expiring', inMs: 30_000 });
+    await flush();
+    assert.match(brains[1].starts[0].instructions, /Resume Name.*Original resume and JD/s);
+
+    profile = 'Replacement resume and JD';
+    revision++;
+    meeting.refreshContext();
+    assert.equal(brains.length, 2);
+    brains[1].emit({ type: 'session_expiring', inMs: 30_000 });
+    await flush();
+    assert.match(brains[2].starts[0].instructions, /Replacement resume and JD/);
+    assert.doesNotMatch(brains[2].starts[0].instructions, /Original resume and JD/);
+
+    meeting.addCandidateText('Please retain this notebook turn.', Date.now());
+    knowledgeEnabled = false;
+    meeting.refreshContext();
+    assert.equal(brains[2].starts[0].signal.aborted, true);
+    await flush();
+    assert.doesNotMatch(brains[3].starts[0].instructions, /Resume Name|Replacement resume and JD/);
+    assert.match(brains[3].starts[0].instructions, /Please retain this notebook turn/);
+});
+
+test('AnswerWriter rejects a keyed private draft when confirmation has no context key', async () => {
+    const cancelled = [];
+    let starts = 0;
+    const writer = new AnswerWriter({
+        startLiveBrainDraft(request) {
+            starts++;
+            return {
+                ...request, routeKey: 'route', draftId: starts,
+                canAdopt: () => true,
+                adopt: () => assert.fail('Mismatched context must not be adopted'),
+                cancel: reason => cancelled.push(reason),
+            };
+        },
+        runLiveBrainAnswer: () => ({ generationId: 1, done: Promise.resolve({ status: 'completed' }) }),
+    });
+    const question = { question: 'How do locks work?', turnKey: 't1' };
+    writer.prepareDraft({ ...question, contextKey: 'x' });
+    assert.equal(await writer.write({ ...question, replacesAutomaticAnswer: false }).done, 'completed');
+    assert.deepEqual(cancelled, ['context_changed']);
+    writer.prepareDraft({ ...question, contextKey: 'x' });
+    writer.prepareDraft(question);
+    assert.equal(starts, 3);
+    assert.equal(cancelled.at(-1), 'superseded_eager');
+});
+
+test('grounding revision aborts an eager draft immediately and confirmation starts fresh', async t => {
+    let revision = 1;
+    const h = fluxEngineRig(t, {
+        readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled: true, groundingKey: String(revision) }),
+    });
+    const gate = Promise.withResolvers();
+    t.after(() => gate.resolve());
+    h.queuedStreams.push(
+        async function* () { await gate.promise; yield 'Stale answer.'; },
+        async function* () { yield 'Refreshed answer.'; },
+    );
+    const question = 'How do row locks work?';
+    const turnKey = 't1';
+    h.flux.emit({ type: 'eager_end_of_turn', question, turnKey, at: 10 });
+    await untilCondition(() => h.streamCalls.length === 1);
+    revision++;
+    h.routing.activeSession.refreshContext();
+    assert.equal(h.streamCalls[0].signal.aborted, true);
+    gate.resolve();
+    h.flux.emit({ type: 'decision', action: 'answer', decisionId: 'd1', question, turnKey, at: 20 });
+    await untilCondition(() => h.answers.length === 1);
+    assert.equal(h.streamCalls.length, 2);
+    assert.match(h.answers[0].ans, /Refreshed answer/);
+});
+
+test('an incomplete writer answer does not enter the fallback notebook', async t => {
+    const brain = new FakeLiveBrain('deepgram-flux');
+    const meeting = createMeeting({
+        sessionId: 'partial',
+        provider: 'deepgram-flux',
+        engine: {
+            setAutomaticAnswerOutdated() {},
+            runLiveBrainAnswer(request) {
+                const done = Promise.resolve().then(() => {
+                    request.onComplete('An incomplete detail', { stopReason: 'stall_timeout', storageVeto: true });
+                    return { status: 'partial' };
+                });
+                return { generationId: 1, done };
+            },
+        },
+        pipeline: { activate() {}, cancel() {} },
+        emitQuestion() {},
+        onFailure: assert.fail,
+    }, brain);
+    t.after(() => meeting.stop());
+    meeting.start();
+    await flush();
+    brain.emit({ type: 'decision', action: 'answer', decisionId: 'd1', question: 'Explain deadlocks?', at: 20 });
+    await flush();
+    brain.emit({ type: 'error', fatal: true, code: 'network' });
+    await flush();
+    assert.equal(meeting.isPipeline(), true);
+    assert.doesNotMatch(meeting.pipelineContext(), /An incomplete detail/);
+});
+
+test('cancelling an adopted draft during claim validation prevents final delivery and session writes', async t => {
+    const h = fluxEngineRig(t);
+    const streamGate = Promise.withResolvers();
+    const validating = Promise.withResolvers();
+    const validationGate = Promise.withResolvers();
+    t.after(() => { streamGate.resolve(); validationGate.resolve(); });
+    h.engine.verifyAnswerClaims = async ({ answer }) => {
+        validating.resolve();
+        await validationGate.promise;
+        return answer;
+    };
+    h.queuedStreams.push(async function* () {
+        await streamGate.promise;
+        yield 'Take a lock before the update, then release it at transaction commit.';
+    });
+    const question = 'What is a database lock?';
+    const turnKey = 't1';
+    h.flux.emit({ type: 'eager_end_of_turn', question, turnKey, at: 10 });
+    await untilCondition(() => h.streamCalls.length === 1);
+    h.flux.emit({ type: 'decision', action: 'answer', decisionId: 'd1', question, turnKey, at: 20 });
+    streamGate.resolve();
+    await Promise.race([validating.promise, delay(2_000).then(() => assert.fail('Claim validation did not start'))]);
+    h.flux.emit({ type: 'error', fatal: true, code: 'network' });
+    assert.equal(h.streamCalls[0].signal.aborted, true);
+    validationGate.resolve();
+    await untilCondition(() => h.engine.whatToAnswerCancellationToken === null);
+    assert.deepEqual(h.answers, []);
+    assert.deepEqual(h.sessionAssistantWrites, []);
+});
+
+test('realtime prompt variants keep the JD and résumé experience rule within the managed limit', () => {
+    const { buildProviderInstructions, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS } =
+        require(`${dist}premium/electron/liveBrain/instructions.js`);
+    const context = { profileContext: 'Candidate profile: ' + 'evidence '.repeat(4000) };
+    for (const [provider, variant] of [
+        ['gemini-live', 'full'], ['gemini-live', 'trimmed'], ['deepgram-voice-agent', 'full'],
+    ]) {
+        const prompt = buildProviderInstructions(context, variant, provider);
+        assert.match(prompt, /Job-description requirements describe the target role, not the candidate/);
+        assert.match(prompt, /Only claim experience supported by the candidate's résumé or profile/);
+        if (provider === 'deepgram-voice-agent') assert.ok(prompt.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+    }
+});
+
+test('custom providers sharing an ID and model have different route keys when the endpoint changes', () => {
+    const { LLMHelper } = require(`${dist}electron/LLMHelper.js`);
+    const llm = Object.create(LLMHelper.prototype);
+    llm.setNegotiationCoachingHandler = () => {};
+    const { SessionTracker } = require(`${dist}electron/SessionTracker.js`);
+    const engine = new IntelligenceEngine(llm, new SessionTracker());
+    const provider = (host, key) => ({
+        id: 'custom', curlCommand: `curl https://${host}/v1/chat -H 'Authorization: Bearer ${key}' -d '{"model":"shared"}'`,
+    });
+    llm.customProvider = provider('first.example.com', 'secret-a');
+    const first = engine.getLiveBrainAiRouteKey();
+    llm.customProvider = provider('first.example.com', 'secret-b');
+    assert.equal(engine.getLiveBrainAiRouteKey(), first);
+    llm.customProvider = provider('second.example.com', 'secret-a');
+    assert.notEqual(engine.getLiveBrainAiRouteKey(), first);
+});
+
+for (const afterHeaders of [false, true]) {
+    test(`cURL-compatible transport aborts ${afterHeaders ? 'after' : 'before'} headers`, async t => {
+        const { LLMHelper } = require(`${dist}electron/LLMHelper.js`);
+        const helper = Object.create(LLMHelper.prototype);
+        helper.assertOutboundScopes = () => {};
+        const pending = Promise.withResolvers();
+        const controller = new AbortController();
+        t.mock.method(globalThis, 'fetch', (_url, { signal }) => {
+            const stall = () => {
+                pending.resolve(signal);
+                return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+            };
+            return afterHeaders ? Promise.resolve({ json: stall }) : stall();
+        });
+        const result = helper.executeCustomProvider(
+            'curl https://gateway.example.com/chat -H "Content-Type: application/json" -d "{\\"prompt\\":\\"{{TEXT}}\\"}"',
+            'Question', '', 'Question', '', undefined, undefined, controller.signal,
+        );
+        const signal = await Promise.race([pending.promise, result.then(() => assert.fail('Fetch never stalled'))]);
+        controller.abort(new Error('Turn resumed'));
+        await assert.rejects(result, /Turn resumed/);
+        assert.equal(signal.aborted, true);
+    });
+}
+
+test('U8-1: fail after response_started before delta triggers pipeline once; busy fallback allows repeat STT final', async () => {
+    for (const status of ['accepted', 'busy']) {
+        const brain = new FakeLiveBrain('gemini-live');
+        const activated = [];
+        const session = createMeeting({
+            sessionId: `u8-1-${status}`,
+            apiKey: 'fake',
+            provider: 'gemini-live',
+            engine: { setAutomaticAnswerOutdated() {} },
+            pipeline: {
+                activate: pending => { activated.push(pending); return status; },
+                cancel() {},
+            },
+            emitQuestion() {},
+            onFailure() {},
+        }, brain);
+        session.start();
+        await flush();
+        brain.emit({ type: 'interviewer_transcript', text: 'Explain CAP theorem.', final: true, at: Date.now() });
+        brain.emit({ type: 'response_started', responseId: 'r1', at: Date.now() });
+        brain.emit({ type: 'error', code: 'network', fatal: true });
+        await flush();
+        assert.equal(activated.length, 1);
+        assert.equal(activated[0]?.text, 'Explain CAP theorem.');
+        const deduped = session.observePipelineTranscript('Explain CAP theorem.', true, Date.now());
+        assert.equal(deduped, status === 'accepted');
+        session.stop();
+    }
+});
+
+test('U8-2: forced promotion while Flux writer is streaming cancels old writer and draft without leaking tokens', async t => {
+    const h = fluxEngineRig(t);
+    const gate = Promise.withResolvers();
+    h.queuedStreams.push(async function* (_call, signal) {
+        yield 'Initial chunk ';
+        await gate.promise;
+        if (signal.aborted) return;
+        yield 'Stale chunk after forced promotion.';
+    });
+    h.flux.emit({ type: 'interviewer_transcript', text: 'What is sharding?', final: true, at: 10 });
+    h.flux.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'What is sharding?', turnKey: 'flux-p2:c1:t0', at: 11 });
+    await untilCondition(() => h.streamCalls.length === 1);
+    const tokensBefore = h.tokens.length;
+    h.routing.stop();
+    gate.resolve();
+    await flush();
+    assert.equal(h.streamCalls[0].signal.aborted, true);
+    assert.equal(h.answers.length, 0);
+    assert.equal(h.tokens.filter(tok => tok.chunk.includes('Stale chunk')).length, 0);
+    assert.ok(h.tokens.length >= tokensBefore);
+});
+
+test('U8-4: refreshContext resets open bubble and pending clarification timer, and shows status', async () => {
+    const brain = new FakeLiveBrain('gemini-live');
+    const overlay = [];
+    let groundingKey = 'g1';
+    let knowledgeEnabled = true;
+    const session = createMeeting({
+        sessionId: 'u8-4',
+        apiKey: 'fake',
+        provider: 'gemini-live',
+        readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled, groundingKey }),
+        engine: { setAutomaticAnswerOutdated() {} },
+        pipeline: { activate: () => 'accepted', cancel() {} },
+        emitQuestion: ev => overlay.push(ev),
+        onFailure() {},
+    }, () => new FakeLiveBrain('gemini-live'));
+    session.start();
+    await flush();
+    // Emit Ask: on first brain via the session's active brain? Use injected factory:
+    session.stop();
+
+    const active = new FakeLiveBrain('gemini-live');
+    const second = new FakeLiveBrain('gemini-live');
+    let count = 0;
+    const events = [];
+    const s2 = createMeeting({
+        sessionId: 'u8-4-b',
+        apiKey: 'fake',
+        provider: 'gemini-live',
+        readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled, groundingKey }),
+        engine: { setAutomaticAnswerOutdated() {} },
+        pipeline: { activate: () => 'accepted', cancel() {} },
+        emitQuestion: ev => events.push(ev),
+        onFailure() {},
+    }, () => (++count === 1 ? active : second));
+    s2.start();
+    await flush();
+    active.emit({ type: 'interviewer_transcript', text: 'Open partial', final: false, at: Date.now() });
+    active.emit({ type: 'response_started', responseId: 'r1', at: Date.now() });
+    active.emit({ type: 'response_delta', responseId: 'r1', text: 'Ask: Which cloud?' });
+    active.emit({ type: 'response_done', responseId: 'r1', status: 'completed' });
+    knowledgeEnabled = false;
+    groundingKey = 'g2';
+    s2.refreshContext();
+    await flush();
+    assert.ok(events.some(e => e.liveBrainStatus === 'Context changed — reconnecting'));
+    assert.equal(active.clarificationRequests, 0);
+    s2.stop();
+});
+
+test('U8-5: pipeline unavailable invokes onFailure and sets Backup brain unavailable status', async () => {
+    const brain = new FakeLiveBrain('gemini-live');
+    const events = [];
+    const failures = [];
+    const session = createMeeting({
+        sessionId: 'u8-5',
+        apiKey: 'fake',
+        provider: 'gemini-live',
+        engine: { setAutomaticAnswerOutdated() {} },
+        emitQuestion: ev => events.push(ev),
+        onFailure: code => failures.push(code),
+    }, brain);
+    session.start();
+    await flush();
+    brain.emit({ type: 'error', code: 'auth', fatal: true });
+    assert.deepEqual(failures, ['auth']);
+    assert.ok(events.some(e => e.liveBrainStatus === 'Backup brain unavailable'));
+    session.stop();
+});
+
+test('Bug 1: discarding standby does not cancel active Flux writer or close active Gemini open bubble; forced_rollover still cancels active Flux writer', async t => {
+    // 1. Flux active writer streaming + standby discarded for missed_turns (role: 'standby') -> writer NOT cancelled.
+    const h = fluxEngineRig(t);
+    const gate = Promise.withResolvers();
+    h.queuedStreams.push(async function* () {
+        yield 'Part 1 ';
+        await gate.promise;
+        yield 'Part 2.';
+    });
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Explain consistent hashing.', final: true, at: 10 });
+    h.flux.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Explain consistent hashing.', turnKey: 'flux-p2:c1:t0', at: 11 });
+    await untilCondition(() => h.streamCalls.length === 1);
+    // Simulate a standby lease failing/discarding on the supervisor (via status/stop on a second brain isn't needed if we test createMeeting + BrainSupervisor directly,
+    // so test both createMeeting with BrainSupervisor forced_rollover and standby context_changed):
+    assert.equal(h.streamCalls[0].signal.aborted, false);
+    gate.resolve();
+    await untilCondition(() => h.answers.length === 1);
+    assert.match(h.answers[0].ans, /Part 1 Part 2\./);
+
+    // 2. Gemini active with open question bubble + standby discarded for context_changed -> bubble stays open.
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+    let groundingKey = 'g1';
+    const brains = [];
+    const overlayEvents = [];
+    const session = createMeeting({
+        sessionId: 'bug1-gemini',
+        apiKey: 'fake',
+        provider: 'gemini-live',
+        readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled: true, groundingKey }),
+        engine: { setAutomaticAnswerOutdated() {} },
+        pipeline: { activate: () => 'accepted', cancel() {} },
+        emitQuestion: ev => overlayEvents.push(ev),
+        onFailure() {},
+    }, id => {
+        const brain = new FakeLiveBrain(id);
+        if (brains.length >= 1) {
+            const start = brain.start.bind(brain);
+            brain.start = async ctx => {
+                await start(ctx);
+                await new Promise(resolve => setTimeout(resolve, 500));
+            };
+        }
+        brains.push(brain);
+        return brain;
+    });
+    session.start();
+    await flush();
+    // Advance to Gemini scheduled rollover (13.5 min) so standby launches.
+    t.mock.timers.tick(13.5 * 60_000);
+    await flush();
+    // Active Gemini opens a question bubble while standby is connecting, and groundingKey changes (non-revocation) so standby is discarded as 'context_changed'.
+    brains[0].emit({ type: 'interviewer_transcript', text: 'How do you', final: false, at: Date.now() });
+    groundingKey = 'g2';
+    t.mock.timers.tick(500);
+    await flush();
+    const qEventsAfterStandbyDiscard = overlayEvents.filter(e => e.liveBrainQuestion);
+    assert.equal(qEventsAfterStandbyDiscard.at(-1).liveBrainQuestion.done, false, 'open bubble must remain open when standby is discarded');
+    brains[0].emit({ type: 'interviewer_transcript', text: 'How do you shard Postgres?', final: true, at: Date.now() });
+    brains[0].emit({ type: 'response_started', responseId: 'r1', at: Date.now() });
+    const qEventsAfterFinal = overlayEvents.filter(e => e.liveBrainQuestion);
+    assert.equal(qEventsAfterFinal.at(-1).liveBrainQuestion.text, 'How do you shard Postgres?');
+    assert.equal(qEventsAfterFinal.at(-1).liveBrainQuestion.done, true);
+    session.stop();
+});
+
+test('Bug 1: active Flux lease released with forced_rollover cancels active writer and draft', async () => {
+    const { BrainSupervisor } = require(`${dist}premium/electron/liveBrain/BrainSupervisor.js`);
+    const { InterviewNotebook } = require(`${dist}premium/electron/liveBrain/InterviewNotebook.js`);
+    const { FakeClock } = require('../../autoAnswer/__tests__/fakeClock.mjs');
+    const clock = new FakeClock();
+    const notebook = new InterviewNotebook({ now: () => clock.now() });
+    const detached = [];
+    const brains = [];
+    const sup = new BrainSupervisor({
+        sessionId: 'bug1-flux-forced',
+        preferred: 'deepgram-flux',
+        instructions: () => 'inst',
+        notebook,
+        clock,
+        create(id) {
+            const b = new FakeLiveBrain(id);
+            b.addHistoryContext = () => {};
+            brains.push(b);
+            return { brain: b, model: 'flux' };
+        },
+        onEvent: () => {},
+        onLeaseDetached: (lease, reason, role) => detached.push([lease.brain.id, reason, role]),
+    });
+    sup.start();
+    await flush();
+    sup.setExternalWriting(true);
+    clock.advance(50 * 60_000);
+    await flush();
+    clock.advance(29_000);
+    await flush();
+    assert.deepEqual(detached, [['deepgram-flux', 'forced_rollover', 'active']]);
+    sup.stop();
 });

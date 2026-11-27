@@ -1,5 +1,5 @@
 /** Metadata carried by the existing What to Answer question event. */
-export type LiveBrainStatus = 'Listening' | 'Thinking' | 'Answer ready' | 'Reconnecting' | 'Backup brain';
+export type LiveBrainStatus = 'Listening' | 'Thinking' | 'Answer ready' | 'Reconnecting' | 'Backup brain' | 'Context changed — reconnecting' | 'Backup brain unavailable';
 
 /** D14: a Live Brain interviewer bubble, shown directly above its answer
  *  (`generationId`, once that answer exists). */
@@ -21,4 +21,5 @@ export type WhatToAnswerQuestionEvent = {
     liveBrainStatus?: LiveBrainStatus | null;
     liveBrainQuestion?: LiveBrainQuestion;
     liveBrainAnswerStart?: boolean;
+    discard?: boolean;
 } & ({ generationId: number } | { askId: string; clarification: string } | { liveBrainStatus: LiveBrainStatus | null } | { liveBrainQuestion: LiveBrainQuestion });

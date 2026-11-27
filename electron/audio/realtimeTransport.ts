@@ -71,7 +71,8 @@ export function wsDataToString(raw: WebSocket.Data): string {
     if (Array.isArray(raw)) return Buffer.concat(raw).toString('utf8');
     if (Buffer.isBuffer(raw)) return raw.toString('utf8');
     if (raw instanceof ArrayBuffer) return Buffer.from(raw).toString('utf8');
-    return Buffer.from(raw as ArrayBufferView).toString('utf8');
+    const view = raw as ArrayBufferView;
+    return Buffer.from(view.buffer, view.byteOffset, view.byteLength).toString('utf8');
 }
 
 /**

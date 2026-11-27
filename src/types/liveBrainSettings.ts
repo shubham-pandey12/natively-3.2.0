@@ -65,6 +65,8 @@ export interface LiveBrainConfig {
     deepgram?: DeepgramSettingsConfig;
     fluxAiRoute?: FluxAiRouteStatus;
     sonicRegion?: string;
+    available?: boolean;
+    meetingActive?: boolean;
 }
 
 export type LiveBrainOptions =

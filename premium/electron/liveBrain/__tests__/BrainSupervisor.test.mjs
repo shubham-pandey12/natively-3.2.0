@@ -73,8 +73,8 @@ test('handled suppressed answers and cancelled filler stay out of the notebook w
     h.supervisor.start();
     await flush();
     const brain = h.realtime[0];
-    const respond = (responseId, text, status) => {
-        brain.emit({ type: 'interviewer_transcript', final: true, text: 'Mm-hmm.', at: h.clock.now() });
+    const respond = (responseId, text, status, interviewerText = 'Mm-hmm.') => {
+        brain.emit({ type: 'interviewer_transcript', final: true, text: interviewerText, at: h.clock.now() });
         brain.emit({ type: 'response_started', responseId, at: h.clock.now() });
         brain.emit({ type: 'response_delta', responseId, text });
         brain.emit({ type: 'response_done', responseId, status });
@@ -82,7 +82,7 @@ test('handled suppressed answers and cancelled filler stay out of the notebook w
     respond('hidden', 'Hidden answer.', 'completed');
     respond('interrupted', 'Hidden partial.', 'cancelled');
     assert.deepEqual(h.notebook.recentTurns().filter(turn => turn.role === 'assistant'), []);
-    respond('ask', 'Ask: Which region?', 'completed');
+    respond('ask', 'Ask: Which region?', 'completed', 'Which region should we deploy to?');
     assert.deepEqual(h.notebook.snapshot().clarifications, [{ asked: 'Which region?', answer: null }]);
     assert.deepEqual(h.notebook.recentTurns().filter(turn => turn.role === 'assistant').map(turn => turn.text),
         ['Which region?']);
@@ -286,4 +286,100 @@ test('Sonic fresh-start allowance resets after 30 s ready, while two quick failu
     await flush();
     assert.equal(h2.supervisor.current.id, 'pipeline');
     h2.supervisor.stop();
+});
+
+test('U8-3: grounding change after standby launch prevents stale promotion; Sonic with missed turn creates fresh lease', async () => {
+    let groundingKey = 'g1';
+    const clock = new FakeClock();
+    const notebook = new InterviewNotebook({ now: () => clock.now() });
+    const realtime = [];
+    const detached = [];
+    const supervisor = new BrainSupervisor({
+        sessionId: 'u8-3',
+        preferred: 'gemini-live',
+        instructions: id => `inst:${id}`,
+        groundingKey: () => groundingKey,
+        notebook,
+        clock,
+        create(id) {
+            if (id !== 'gemini-live') return undefined;
+            const brain = new FakeLiveBrain(id);
+            brain.addHistoryContext = () => { };
+            if (realtime.length === 1) {
+                const start = brain.start.bind(brain);
+                brain.start = async ctx => {
+                    await start(ctx);
+                    await new Promise(resolve => clock.setTimeout(resolve, 500));
+                };
+            }
+            realtime.push(brain);
+            return { brain, model: 'gemini' };
+        },
+        onEvent: () => { },
+        onLeaseDetached: (lease, reason, role) => detached.push([lease.brain.id, reason, role]),
+    });
+    supervisor.start();
+    await flush();
+    clock.advance(13.5 * MIN);
+    await flush();
+    const staleStandby = realtime[1];
+    groundingKey = 'g2';
+    clock.advance(500);
+    await flush();
+    assert.notEqual(supervisor.current, staleStandby);
+    assert.ok(detached.some(([, r, role]) => r === 'context_changed' && role === 'standby'));
+    supervisor.stop();
+
+    // Sonic without addHistoryContext: a missed turn during first standby connect discards once;
+    // a missed turn during the second standby connect promotes anyway, and the counter resets after promotion.
+    const sonicClock = new FakeClock();
+    const sonicNotebook = new InterviewNotebook({ now: () => sonicClock.now() });
+    const sonicBrains = [];
+    const sonicDetached = [];
+    const sonicSup = new BrainSupervisor({
+        sessionId: 'u8-3-sonic',
+        preferred: 'amazon-sonic',
+        instructions: () => 'inst',
+        groundingKey: () => 'g1',
+        notebook: sonicNotebook,
+        clock: sonicClock,
+        create(id) {
+            if (id !== 'amazon-sonic') return undefined;
+            const brain = new FakeLiveBrain(id);
+            if (sonicBrains.length >= 1) {
+                const start = brain.start.bind(brain);
+                brain.start = async ctx => {
+                    await start(ctx);
+                    await new Promise(resolve => sonicClock.setTimeout(resolve, 500));
+                };
+            }
+            sonicBrains.push(brain);
+            return { brain, model: 'sonic' };
+        },
+        onEvent: () => { },
+        onLeaseDetached: (_l, reason, role) => sonicDetached.push([reason, role]),
+    });
+    sonicSup.start();
+    await flush();
+    // Rollover 1: missed turn during standby 1 -> discarded once; missed turn during standby 2 -> promoted anyway.
+    sonicClock.advance(7.5 * MIN);
+    await flush();
+    sonicBrains[0].emit({ type: 'interviewer_transcript', text: 'Missed turn 1.', final: true, at: sonicClock.now() });
+    sonicClock.advance(500);
+    await flush();
+    assert.deepEqual(sonicDetached.filter(([r]) => r === 'missed_turns'), [['missed_turns', 'standby']]);
+    assert.equal(sonicSup.current, sonicBrains[0]);
+    sonicBrains[0].emit({ type: 'interviewer_transcript', text: 'Missed turn 2.', final: true, at: sonicClock.now() });
+    sonicClock.advance(500);
+    await flush();
+    assert.equal(sonicSup.current, sonicBrains[2]);
+    assert.ok(sonicDetached.some(([r, role]) => r === 'rollover' && role === 'active'));
+    // Rollover 2: counter reset after promotion -> missed turn discards once again.
+    sonicClock.advance(7.5 * MIN);
+    await flush();
+    sonicBrains[2].emit({ type: 'interviewer_transcript', text: 'Missed turn 3.', final: true, at: sonicClock.now() });
+    sonicClock.advance(500);
+    await flush();
+    assert.equal(sonicDetached.filter(([r]) => r === 'missed_turns').length, 2);
+    sonicSup.stop();
 });

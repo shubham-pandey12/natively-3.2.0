@@ -10,6 +10,8 @@ const load = name => require(`../../../../dist-electron/premium/electron/liveBra
 const { DeepgramFluxBrain, DEEPGRAM_FLUX_FRAME_BYTES } = load('brains/DeepgramFluxBrain');
 const { createLiveBrain } = load('index');
 const { testConnection } = load('meeting');
+const { AnswerWriter } = load('AnswerWriter');
+const { ResponseOrchestrator } = load('ResponseOrchestrator');
 
 const apiKey = 'dg_fake_key_for_deepgram_flux_tests_0123456789';
 
@@ -457,8 +459,19 @@ test('stop() inside ready listener rejects start() and does not resolve as ready
     assert.equal(events.at(-1)?.status, 'closed');
 });
 
-test('EagerEndOfTurn(turn 0) followed by StartOfTurn(turn 1) emits turn_resumed for turn 0', async t => {
+test('EagerEndOfTurn(turn 0) followed by StartOfTurn(turn 1) cancels the private writer draft', async t => {
     const { brain, connections, events } = await createRig(t);
+    const draft = new AbortController();
+    const writer = new AnswerWriter({
+        startLiveBrainDraft: request => ({ ...request, draftId: 1, routeKey: 'route', canAdopt: () => true,
+            adopt: () => assert.fail('Draft must remain private'), cancel: reason => draft.abort(reason) }),
+        runLiveBrainAnswer: () => assert.fail('StartOfTurn must not dispatch a final answer'),
+    });
+    const orchestrator = new ResponseOrchestrator({
+        answerWriter: writer, clock: { now: Date.now, setTimeout, clearTimeout },
+        overlay: { showQuestion() {}, setInterviewerSpeaking() {} },
+    });
+    brain.onEvent(event => orchestrator.handleEvent(event));
     await brain.start(makeContext());
     const { socket } = connections[0];
 
@@ -469,6 +482,7 @@ test('EagerEndOfTurn(turn 0) followed by StartOfTurn(turn 1) emits turn_resumed 
 
     sendJson(socket, { type: 'TurnInfo', event: 'StartOfTurn', sequence_id: 3, turn_index: 1, transcript: '' });
     await until(() => events.some(e => e.type === 'turn_resumed' && e.turnKey === eager.turnKey));
+    assert.equal(draft.signal.reason, 'turn_resumed');
 });
 
 test('replayed older sequence_id EagerEndOfTurn after TurnResumed is dropped', async t => {

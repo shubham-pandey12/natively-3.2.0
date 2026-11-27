@@ -40,6 +40,7 @@ import type {
     LiveBrainConfig,
     LiveBrainKeyProvider,
     LiveBrainModel,
+    LiveBrainProvider,
     LiveBrainSettingsResult,
 } from '../types/liveBrainSettings';
 import {
@@ -497,6 +498,23 @@ const DEEPGRAM_UNAVAILABLE_TOOLTIP =
 const isLiveBrainKeyProvider = (value: unknown): value is LiveBrainKeyProvider =>
     typeof value === 'string' && Object.prototype.hasOwnProperty.call(LIVE_BRAIN_PROVIDER_UI, value);
 
+const LIVE_BRAIN_PRIVACY_PROVIDER: Record<Exclude<LiveBrainProvider, 'pipeline'>, string> = {
+    'gemini-live': 'Gemini Live',
+    'openai-realtime': 'OpenAI Realtime',
+    'elevenlabs-realtime': 'ElevenLabs Realtime',
+    'deepgram-voice-agent': 'Deepgram Voice Agent',
+    'deepgram-flux': 'Deepgram Flux',
+    'amazon-sonic': 'Amazon Sonic',
+};
+
+function liveBrainPrivacyNotice(provider: LiveBrainProvider | undefined, t: (text: string) => string): string {
+    if (provider === 'pipeline') {
+        return t('Uses your existing transcription; no audio is sent to an extra provider.');
+    }
+    const name = LIVE_BRAIN_PRIVACY_PROVIDER[provider ?? 'gemini-live'];
+    return t('Interviewer audio is sent to {provider} while Live Brain is on.').replace('{provider}', t(name));
+}
+
 interface DeepgramThinkSelectProps {
     id?: string;
     value: string;
@@ -563,8 +581,7 @@ const DeepgramThinkSelect: React.FC<DeepgramThinkSelectProps> = ({ id, value, co
                             onSelect(item.value);
                             setOpen(false);
                         }}
-                        className={`w-full text-left px-2.5 py-1.5 text-xs rounded-md flex items-center justify-between gap-2 transition-colors ${
-                            selected
+                        className={`w-full text-left px-2.5 py-1.5 text-xs rounded-md flex items-center justify-between gap-2 transition-colors ${selected
                                 ? 'bg-bg-input text-text-primary'
                                 : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'
                         }`}
@@ -621,6 +638,8 @@ const LiveBrainProviderSettings = () => {
     const [models, setModels] = useState<LiveBrainModel[]>([]);
     const [modelsLoading, setModelsLoading] = useState(false);
     const [modelsFetchedAt, setModelsFetchedAt] = useState<number>();
+    const [meetingActive, setMeetingActive] = useState(false);
+    const [liveBrainEnabled, setLiveBrainEnabled] = useState(false);
     const [customUrlDraft, setCustomUrlDraft] = useState('');
     const [customHeaderDraft, setCustomHeaderDraft] = useState('');
     const [byoModelDraft, setByoModelDraft] = useState('');
@@ -633,8 +652,15 @@ const LiveBrainProviderSettings = () => {
     const refresh = useCallback(async () => {
         const version = ++refreshVersion.current;
         try {
-            const loaded = await api.getLiveBrainConfig();
-            if (version === refreshVersion.current) setConfig(loaded);
+            const [loaded, enabled] = await Promise.all([
+                api.getLiveBrainConfig(),
+                api.getLiveBrainEnabled?.().catch(() => false),
+            ]);
+            if (version === refreshVersion.current) {
+                setConfig(loaded);
+                if (typeof loaded.meetingActive === 'boolean') setMeetingActive(loaded.meetingActive);
+                if (typeof enabled === 'boolean') setLiveBrainEnabled(enabled);
+            }
         } catch {
             if (version === refreshVersion.current) setNote(t('Could not load Live Brain settings.'));
         }
@@ -642,13 +668,20 @@ const LiveBrainProviderSettings = () => {
 
     useEffect(() => {
         void refresh();
-        return api?.onCredentialsChanged?.(() => {
+        const unsubCreds = api?.onCredentialsChanged?.(() => {
             ++feedbackVersion.current;
             setTestStatus('idle');
             setTestDetail('');
             setFluxTestResult(undefined);
             void refresh();
         });
+        const unsubMeeting = api?.onMeetingStateChanged?.(({ isActive }) => {
+            setMeetingActive(isActive);
+        });
+        return () => {
+            unsubCreds?.();
+            unsubMeeting?.();
+        };
     }, [api, refresh]);
     useEffect(() => () => {
         clearTimeout(savedTimer.current);
@@ -781,14 +814,22 @@ const LiveBrainProviderSettings = () => {
         ? config?.deepgram?.byoRecommendedModels ?? []
         : models.some(m => m.id === currentModel) ? models : [{ id: currentModel, label: currentModel }, ...models];
 
+    if (config?.available === false) return null;
+
     return (
         <div>
             <h3 className="settings-heading text-text-primary mb-1">{t('Live Brain Provider')}</h3>
-            <p className="text-xs text-text-secondary mb-4">{t('Choose the realtime model that listens to the interviewer while Live Brain is on.')}</p>
+            <p className="text-xs text-text-secondary mb-2">{t('Choose the realtime model that listens to the interviewer while Live Brain is on.')}</p>
+            <p className="text-xs text-text-secondary mb-4">{liveBrainPrivacyNotice(config?.provider, t)}</p>
             {config && (
                 <div className="space-y-4">
                     <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
                         <label className="text-xs font-medium text-text-secondary block">{t('Live Brain Provider')}</label>
+                            {meetingActive && liveBrainEnabled && (
+                                <span className="text-[11px] text-text-secondary">{t('Applies from the next meeting')}</span>
+                            )}
+                        </div>
                         <div className="relative">
                             <ProviderSelect
                                 value={config.provider}
@@ -1548,12 +1589,20 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
     const [ambientChatEnabled, setAmbientChatEnabled] = useState(false);
     const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
     const [liveBrainEnabled, setLiveBrainEnabled] = useState(false);
+    const [liveBrainAvailable, setLiveBrainAvailable] = useState(true);
+    const [liveBrainProvider, setLiveBrainProvider] = useState<LiveBrainProvider>('gemini-live');
     const [liveBrainPending, setLiveBrainPending] = useState(false);
     const [liveBrainError, setLiveBrainError] = useState('');
 
     useEffect(() => {
         if (!isOpen) return;
-        const refresh = () => window.electronAPI?.getLiveBrainEnabled?.().then(setLiveBrainEnabled).catch(() => {});
+        const refresh = () => {
+            window.electronAPI?.getLiveBrainEnabled?.().then(setLiveBrainEnabled).catch(() => { });
+            window.electronAPI?.getLiveBrainConfig?.().then(cfg => {
+                if (cfg && typeof cfg.available === 'boolean') setLiveBrainAvailable(cfg.available);
+                if (cfg?.provider) setLiveBrainProvider(cfg.provider);
+            }).catch(() => { });
+        };
         refresh();
         return window.electronAPI?.onCredentialsChanged?.(refresh);
     }, [isOpen]);
@@ -3605,6 +3654,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                 )}
 
                                                 {/* Live Brain */}
+                                                            {liveBrainAvailable && (
                                                 <div className="flex items-center justify-between px-4 py-3">
                                                     <div className="flex items-center gap-4">
                                                         <div className="w-10 h-10 bg-bg-settings-tile rounded-lg border border-border-subtle text-text-primary flex items-center justify-center shrink-0">
@@ -3616,6 +3666,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                                 <LiquidGlassBadge variant="sky">{t('Beta')}</LiquidGlassBadge>
                                                             </div>
                                                             <p className="text-xs text-text-secondary mt-0.5">{t('Listens to the interviewer in real time and writes answers like a live conversation')}</p>
+                                                                            <p className="text-xs text-text-secondary mt-0.5">{liveBrainPrivacyNotice(liveBrainProvider, t)}</p>
                                                             {liveBrainError && <p className="text-xs text-text-secondary mt-0.5" role="alert">{t(liveBrainError)}</p>}
                                                         </div>
                                                     </div>
@@ -3645,6 +3696,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                         className={liveBrainEnabled ? 'bg-accent-primary border border-transparent' : 'bg-bg-toggle-switch border border-border-muted'}
                                                     />
                                                 </div>
+                                                            )}
 
                                                 {/* Ambient AI Chat */}
                                                 <div className="flex items-center justify-between px-4 py-3">
@@ -3825,8 +3877,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({
                                                             }
                                                         }}
                                                         disabled={updateStatus === 'checking'}
-                                                        className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out active:scale-[0.97] disabled:active:scale-100 motion-reduce:active:scale-100 flex items-center justify-start gap-2 shrink-0 min-w-[105px] ${
-                                                            updateStatus === 'checking'
+                                                                    className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out active:scale-[0.97] disabled:active:scale-100 motion-reduce:active:scale-100 flex items-center justify-start gap-2 shrink-0 min-w-[105px] ${updateStatus === 'checking'
                                                                 ? 'bg-bg-input text-text-tertiary border-border-subtle cursor-wait'
                                                                 : updateStatus === 'available'
                                                                     ? 'bg-legacy-action-bg text-legacy-action-fg border-legacy-action-bg hover:bg-legacy-action-hover shadow-lg shadow-[var(--legacy-action-shadow)]'

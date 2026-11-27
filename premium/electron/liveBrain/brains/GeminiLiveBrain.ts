@@ -421,7 +421,7 @@ export class GeminiLiveBrain implements LiveBrain {
             const inMs = Number.isFinite(seconds) ? Math.max(0, seconds * 1_000) : 0;
             this.emit({ type: 'session_expiring', inMs, ...(this.resumeHandle ? {} : { resumable: false }) });
             if (!this.isCurrentLifecycle(socket, generation)) return;
-            if (this.resumeHandle) this.scheduleRollover(inMs);
+            if (this.resumeHandle && !this.context?.needsFreshContext?.()) this.scheduleRollover(inMs);
         }
     }
 

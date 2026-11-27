@@ -110,6 +110,7 @@ export interface AutoAnswerEngineHost {
 
 export interface AutoAnswerEngine {
     setThresholds(t: AutoAnswerThresholds): void;
+    createLiveBrainFallbackCandidate(text: string, at: number): AutoAnswerQuestion | null;
     onMeetingStart(): void;
     /** The meeting's mode changed: drop speech held under the old mode (F-CTX-03). */
     onModeChanged(): void;
@@ -284,6 +285,7 @@ export const UNAVAILABLE_AUTO_ANSWER: AutoAnswerPremium = Object.freeze({
     createEngine: (): AutoAnswerEngine => ({
         setThresholds: noop, onMeetingStart: noop, onModeChanged: noop, onMeetingStop: noop, onEngineIdle: noop,
         onAutomaticAnswerProgress: noop,
+        createLiveBrainFallbackCandidate: () => null,
         onProviderEndpoint: noop, onLocalSpeechEnd: noop, onLocalSpeechEndBeforeFinal: noop, onLocalSpeechStart: noop,
         onManualAnswerStarted: () => 0, onManualChatStarted: noop, onManualChatSettled: noop,
         onManualSpokenAnswer: noop, onManualAnswerSettled: noop, ingest: noop,

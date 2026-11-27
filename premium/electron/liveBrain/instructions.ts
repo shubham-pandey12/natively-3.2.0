@@ -45,6 +45,8 @@ const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: Never greet, acknowledge,
 export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), is small talk, or is an unfinished question, output exactly No action. and nothing else. After an interruption, never repeat, continue, or rephrase your previous answer because of a filler turn. If you previously asked a clarification (Ask:) and the interviewer replies briefly (e.g. \'yes\', \'the second one\', \'Postgres\'), that reply is NOT filler — answer the original question using it.';
 
 export const DEEPGRAM_MAX_MANAGED_PROMPT_CHARS = 25_000;
+const PROFILE_EXPERIENCE_RULE = "Job-description requirements describe the target role, not the candidate. Only claim experience supported by the candidate's résumé or profile. If asked about a JD skill absent from the résumé, say so honestly and relate the closest real experience.";
+
 const CONTEXT_TRUNCATED = '\n\n[context truncated]';
 
 export function buildDeepgramInstructions(ctx: AnswerContext): string {
@@ -58,7 +60,7 @@ Otherwise, speak the answer directly without a sentinel.
 ${CLARIFICATION_RULE} If the interviewer moves on without clarifying, answer with a stated assumption.
 ${CORRECTION_RULE}
 If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.`;
-    const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${protocol}\n\n${FILLER_TURN_RULE}`;
+    const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${protocol}${ctx.profileContext?.trim() ? `\n\n${PROFILE_EXPERIENCE_RULE}` : ''}\n\n${FILLER_TURN_RULE}`;
     if (core.length > DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) {
         throw new Error('Deepgram managed prompt rules exceed the character limit.');
     }
@@ -158,5 +160,5 @@ ${CORRECTION_RULE}
 If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.`;
 
     const modeContext = ctx.modeContext?.trim();
-    return `${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${protocol}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`;
+    return `${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${protocol}${ctx.profileContext?.trim() ? `\n\n${PROFILE_EXPERIENCE_RULE}` : ''}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`;
 }

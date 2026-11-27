@@ -1360,7 +1360,7 @@ import { canDiarize, shouldDiarize, withVoiceEpoch } from "./audio/sttDiarizatio
 // Auto Answer lives in the private premium submodule; without it this is an inert stand-in
 // and Auto Answer is unavailable (electron/premium/autoAnswer.ts).
 import { loadAutoAnswerPremium, type AutoAnswerAccess, type AutoAnswerDecider, type AutoAnswerModelInstaller, type AutoAnswerSavingsLedger, type TrainingUploader } from "./premium/autoAnswer"
-import { LiveBrainRouting, loadLiveBrainPremium } from './premium/liveBrain'
+import { LiveBrainRouting, resolveLiveBrainProfileContext, loadLiveBrainPremium } from './premium/liveBrain'
 import { resolveLiveBrainRuntime } from './services/liveBrainSettings'
 import { currentWhisperGlossaryPrompt, nameTerms, setSttContextTerms, setSttDictionaryTerms } from "./audio/sttContextTerms"
 import { getUserDictionary } from "./audio/userDictionary"
@@ -3145,6 +3145,7 @@ export class AppState {
       if (sqliteDb && KnowledgeDatabaseManagerClass && KnowledgeOrchestratorClass) {
         const knowledgeDb = new KnowledgeDatabaseManagerClass(sqliteDb);
         this.knowledgeOrchestrator = new KnowledgeOrchestratorClass(knowledgeDb);
+        this.knowledgeOrchestrator.setLiveGroundingChangeListener?.(() => this.liveBrainRouting.activeSession?.refreshContext?.());
 
         // Role Insight owns its own tables in the same SQLite file. It needs the
         // raw handle, which KnowledgeDatabaseManager does not expose, so it is
@@ -10881,54 +10882,78 @@ export class AppState {
   private startMeetingLiveBrain(): void {
     if (this.liveBrainRouting.enabled) return;
     this.cancelAutoAnswer();
-    const activatePipeline = (pending?: { text: string; at: number }) => {
-      if (this.isAutoAnswerAvailable()) {
-        this.warmAutoAnswerJudge();
-        if (pending) {
-          const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
-          void this.intelligenceManager.runAutoAnswer({ text: pending.text, replacesAutomaticAnswer: false }, {
-            context: '',
-            reuseSpeculative: false,
-            ...(notebook ? { liveBrainNotebook: notebook } : {}),
-          }).catch((error) => console.warn('[Main] Pipeline fallback answer failed:', error));
-        }
-      } else {
+    const activatePipeline = (pending?: { text: string; at: number }): 'accepted' | 'busy' | 'failed' | 'unavailable' => {
+      if (!this.isAutoAnswerAvailable()) {
         try {
           const { Notification } = require('electron') as typeof import('electron');
           if (Notification.isSupported()) new Notification({
             title: 'Live Brain', body: 'The existing Auto Answer pipeline is unavailable in this build.', silent: true,
           }).show();
         } catch { /* Notification availability must not affect the meeting. */ }
+        return 'unavailable';
       }
+      this.warmAutoAnswerJudge();
+      if (!pending) return 'accepted';
+      const candidate = this.simpleAutoAnswer.createLiveBrainFallbackCandidate(pending.text, pending.at);
+      if (!candidate) return 'failed';
+      if (!this.intelligenceManager.canAutoAnswer(true)) return 'busy';
+      const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
+      void this.intelligenceManager.runAutoAnswer(candidate, {
+        reuseSpeculative: false,
+        ...(notebook ? { liveBrainNotebook: notebook } : {}),
+      }).catch((error) => console.warn('[Main] Pipeline fallback answer failed:', error));
+      return 'accepted';
     };
     this.liveBrainRouting.start(onFailure => {
       const { provider, model, apiKey, promptVariant, deepgramThink, sonicRegion } = resolveLiveBrainRuntime();
-      const name = this.currentUserName();
       const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
       const modes = ModesManager.getInstance();
-      const mode = modes.getActiveMode();
-      const grounding = modes.isProfileIntelligenceAllowedForMode(mode?.id)
-        ? this.getKnowledgeOrchestrator()?.getLiveInterviewProfileContext?.()
-        : '';
-      const profileContext = [name && `Candidate: ${name}`, grounding].filter(Boolean).join('\n\n');
+      modes.setLiveGroundingChangeListener(() => this.liveBrainRouting.activeSession?.refreshContext?.());
+      const readGroundingState = () => {
+        const mode = modes.getActiveMode();
+        const knowledge = this.getKnowledgeOrchestrator();
+        const profileAllowed = modes.isProfileIntelligenceAllowedForMode(mode?.id);
+        const knowledgeEnabled = Boolean(knowledge?.isKnowledgeModeSwitchedOn?.());
+        return {
+          profileAllowed,
+          knowledgeEnabled,
+          groundingKey: JSON.stringify([mode?.id, profileAllowed, knowledgeEnabled, knowledge?.getLiveProfileRevision?.()]),
+        };
+      };
+      const resolveContext = () => {
+        const mode = modes.getActiveMode();
+        const profileContext = resolveLiveBrainProfileContext(
+          readGroundingState(),
+          () => this.currentUserName(),
+          () => this.getKnowledgeOrchestrator()?.getLiveInterviewProfileContext?.(),
+        );
+        return {
+          profileContext, modeName: mode?.name, modeTemplate: mode?.templateType,
+          modePrompt: modes.getActiveModeSystemPromptSuffix(mode?.id),
+          modeContext: modes.buildActiveModeContextBlock(),
+        };
+      };
       return loadLiveBrainPremium()?.createMeeting({
         provider, apiKey, model, deepgramThink, sonicRegion, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
         resolveProvider: resolveLiveBrainRuntime,
-        profileContext, modeName: mode?.name, modeTemplate: mode?.templateType,
-        modePrompt: modes.getActiveModeSystemPromptSuffix(mode?.id),
-        modeContext: modes.buildActiveModeContextBlock(),
+        resolveContext, readGroundingState,
         engine: this.intelligenceManager,
         emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),
         summarize: (prompt, signal) => this.processingHelper.getLLMHelper().summarizeLiveInterview(prompt, signal),
-        pipeline: {
-          activate: activatePipeline,
-          cancel: () => { this.intelligenceManager.cancelAutomaticAnswer('manual_answer'); },
-        },
+        ...(this.isAutoAnswerAvailable() ? {
+          pipeline: {
+            activate: activatePipeline,
+            cancel: () => { this.intelligenceManager.cancelAutomaticAnswer('manual_answer'); },
+          },
+        } : {}),
         onFailure,
       });
     }, code => {
       if (code) console.warn(`[LiveBrain] Gemini session ended (${code}).`);
-      activatePipeline();
+      const status = activatePipeline();
+      if (status === 'unavailable') {
+        this.intelligenceManager.emitLiveBrainQuestion({ liveBrainStatus: 'Backup brain unavailable' });
+      }
     });
   }
 

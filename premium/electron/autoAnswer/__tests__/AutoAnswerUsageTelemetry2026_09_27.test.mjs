@@ -174,10 +174,10 @@ test('main.ts wires it: engine events, first word, discard, manual answer, meeti
   assert.match(main, /this\.autoAnswerUsage\.observe\(event\)/, 'every engine telemetry event is observed');
   assert.match(main, /queueBatch\('suggested_answer', \{ token, question, confidence, generationId \}\);\s*this\.autoAnswerUsage\.answerShown\(\);/, 'the first streamed token');
   assert.match(main, /flushBatchesBeforeFinal\(\);\s*this\.autoAnswerUsage\.answerShown\(\);/, 'an answer that arrives whole');
-  assert.match(main, /'suggested_answer_discard'[\s\S]{0,80}this\.autoAnswerUsage\.stopAwaitingAnswer\(\)/);
-  assert.match(main, /onManualWhatToAnswer\([^)]*\): void \{[\s\S]{0,160}this\.autoAnswerUsage\.stopAwaitingAnswer\(\);\s*this\.simpleAutoAnswer\.onManualAnswerStarted\(\);/,
+  assert.match(main, /this\.intelligenceManager\.on\('suggested_answer_discard',[\s\S]*?this\.autoAnswerUsage\.stopAwaitingAnswer\(\);[\s\S]*?sendToWindow\(/);
+  assert.match(main, /onManualWhatToAnswer\([^)]*\): (?:void|number) \{[\s\S]{0,260}this\.autoAnswerUsage\.stopAwaitingAnswer\(\);\s*(?:const pressId = )?this\.simpleAutoAnswer\.onManualAnswerStarted\(\);/,
     'stop waiting BEFORE the engine emits the override');
-  assert.match(main, /this\.isMeetingActive = true;\s*this\.autoAnswerUsage\.meetingStarted\(\);/);
+  assert.match(main, /this\.isMeetingActive = true;[\s\S]{0,240}this\.autoAnswerUsage\.meetingStarted\(\);/);
   assert.match(main, /this\.cancelAutoAnswer\(\);\s*this\.autoAnswerUsage\.meetingEnded\(\);/);
   assert.match(main, /get\('telemetryEnabled'\) === false\) return;\s*const \{ usageOutbox \}[^\n]*\n\s*usageOutbox\.recordTelemetry\(row\)/,
     'the telemetry opt-out is honoured, and rows go to the telemetry layer, never the ledger');

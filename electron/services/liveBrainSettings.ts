@@ -572,12 +572,12 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
     envKey: (provider: LiveBrainKeyProvider) => string | undefined = devEnvKey,
     forProvider?: Exclude<LiveBrainProvider, 'pipeline'>,
     llmHelper?: FluxLlmHelper): {
-    config: LiveBrainConfig;
-    keyIsWellFormed: boolean;
-    usableKey?: string;
-    deepgramThink?: DeepgramThinkConfig;
-    fluxAiRoute?: FluxAiRouteStatus;
-} {
+        config: LiveBrainConfig;
+        keyIsWellFormed: boolean;
+        usableKey?: string;
+        deepgramThink?: DeepgramThinkConfig;
+        fluxAiRoute?: FluxAiRouteStatus;
+    } {
     const provider = forProvider ?? settings.get('liveBrainProvider') ?? 'gemini-live';
     const promptVariant = settings.get('liveBrainPromptVariant') ?? null;
     if (provider === 'amazon-sonic') {
@@ -656,6 +656,7 @@ export function resolveLiveBrainRuntime(forProvider?: Exclude<LiveBrainProvider,
 
 export function registerLiveBrainSettingsIpc(
     appState: Pick<AppState, 'getLiveBrainEnabled' | 'setLiveBrainEnabled'> & {
+        getIsMeetingActive?(): boolean;
         processingHelper?: { getLLMHelper(): FluxLlmHelper };
     },
     safeHandle: (channel: string, listener: (event: unknown, payload?: unknown) => unknown) => void,
@@ -681,225 +682,333 @@ export function registerLiveBrainSettingsIpc(
         return { success: true };
     };
 
-    safeHandle('live-brain:get-enabled', () => appState.getLiveBrainEnabled());
-    safeHandle('live-brain:set-enabled', (_, enabled) => {
-        if (typeof enabled !== 'boolean') return { success: false, error: 'Expected a boolean.' };
-        if (enabled) {
-            const { config: { provider, hasKey }, keyIsWellFormed, deepgramThink } = inspect();
-            if (provider === 'amazon-sonic' && !keyIsWellFormed) {
-                return { success: false, error: 'sonic_region_required', message: 'Save an AWS Region for Amazon Sonic first.' };
-            }
-            if (isKeyProvider(provider) && !keyIsWellFormed) {
-                const { vendor } = PROVIDERS[provider];
-                return {
-                    success: false,
-                    error: 'live_brain_key_required',
-                    // A present-but-malformed key (e.g. a reused AI Providers key) needs a
-                    // different fix than a missing one.
-                    message: hasKey
-                        ? `The ${vendor} key doesn't look valid. Check it in Audio → Live Brain Provider.`
-                        : `Add your ${vendor} key in Audio → Live Brain Provider.`,
-                };
-            }
-            if (!isKeyProvider(provider) && provider !== 'pipeline' && provider !== 'amazon-sonic') {
-                return { success: false, error: 'unsupported_provider', message: 'The saved Live Brain provider is not supported. Select a provider in settings.' };
-            }
-            if (provider === 'deepgram-voice-agent' && deepgramThink?.thinkMode === 'byo'
-                && !deepgramThink.byoApiKey && !deepgramThink.byoCustomUrl) {
-                return { success: false, error: 'live_brain_key_required', message: 'The selected Think provider key is missing. Add it in AI Providers.' };
-            }
+    safeHandle('live-brain:get-enabled', () => {
+        try {
+            return appState.getLiveBrainEnabled();
+        } catch {
+            return false;
         }
-        return saved(appState.setLiveBrainEnabled(enabled));
+    });
+    safeHandle('live-brain:set-enabled', (_, enabled) => {
+        try {
+            if (typeof enabled !== 'boolean') return { success: false, error: 'Expected a boolean.' };
+            if (enabled && !loadPremium()) {
+                return { success: false, error: 'live_brain_unavailable', message: 'Live Brain is not available in this build.' };
+            }
+            if (enabled) {
+                const { config: { provider, hasKey }, keyIsWellFormed, deepgramThink } = inspect();
+                if (provider === 'amazon-sonic' && !keyIsWellFormed) {
+                    return { success: false, error: 'sonic_region_required', message: 'Save an AWS Region for Amazon Sonic first.' };
+                }
+                if (isKeyProvider(provider) && !keyIsWellFormed) {
+                    const { vendor } = PROVIDERS[provider];
+                    return {
+                        success: false,
+                        error: 'live_brain_key_required',
+                        // A present-but-malformed key (e.g. a reused AI Providers key) needs a
+                        // different fix than a missing one.
+                        message: hasKey
+                            ? `The ${vendor} key doesn't look valid. Check it in Audio → Live Brain Provider.`
+                            : `Add your ${vendor} key in Audio → Live Brain Provider.`,
+                    };
+                }
+                if (!isKeyProvider(provider) && provider !== 'pipeline' && provider !== 'amazon-sonic') {
+                    return { success: false, error: 'unsupported_provider', message: 'The saved Live Brain provider is not supported. Select a provider in settings.' };
+                }
+                if (provider === 'deepgram-voice-agent' && deepgramThink?.thinkMode === 'byo'
+                    && !deepgramThink.byoApiKey && !deepgramThink.byoCustomUrl) {
+                    return { success: false, error: 'live_brain_key_required', message: 'The selected Think provider key is missing. Add it in AI Providers.' };
+                }
+            }
+            return saved(appState.setLiveBrainEnabled(enabled));
+        } catch {
+            return { success: false, error: 'internal_error', message: 'Could not update Live Brain.' };
+        }
     });
 
-    safeHandle('live-brain:get-config', () => inspect().config);
-    safeHandle('live-brain:set-provider', (_, provider) => {
-        if (!isKeyProvider(provider) && provider !== 'pipeline' && provider !== 'amazon-sonic') {
-            return { success: false, error: 'Unknown Live Brain provider.' };
+    safeHandle('live-brain:get-config', () => {
+        try {
+            return {
+                ...inspect().config,
+                available: Boolean(loadPremium()),
+                ...(typeof appState.getIsMeetingActive === 'function' ? { meetingActive: appState.getIsMeetingActive() } : {}),
+            };
+        } catch {
+            return {
+                provider: 'gemini-live',
+                hasKey: false,
+                hasDedicatedKey: false,
+                maskedSuffix: null,
+                useAiProvidersKey: false,
+                usingAiProvidersKey: false,
+                keySource: null,
+                model: '',
+                promptVariant: null,
+                available: false,
+            };
         }
-        return saved(settings().set('liveBrainProvider', provider));
+    });
+    safeHandle('live-brain:set-provider', (_, provider) => {
+        try {
+            if (!isKeyProvider(provider) && provider !== 'pipeline' && provider !== 'amazon-sonic') {
+                return { success: false, error: 'Unknown Live Brain provider.' };
+            }
+            return saved(settings().set('liveBrainProvider', provider));
+        } catch {
+            return { success: false, error: 'internal_error', message: 'Could not save Live Brain settings.' };
+        }
     });
 
     safeHandle('live-brain:set-key', (_, payload) => {
-        if (!payload || typeof payload !== 'object' || !('provider' in payload) || !isKeyProvider(payload.provider)
-            || !('apiKey' in payload) || typeof payload.apiKey !== 'string') {
-            return { success: false, error: 'Invalid Live Brain key request.' };
-        }
-        const { provider } = payload;
-        const key = payload.apiKey.trim();
-        if (key && !isWellFormed(provider, key)) {
-            return { success: false, error: 'The API key format is invalid.' };
-        }
         try {
+            if (!payload || typeof payload !== 'object' || !('provider' in payload) || !isKeyProvider(payload.provider)
+                || !('apiKey' in payload) || typeof payload.apiKey !== 'string') {
+                return { success: false, error: 'Invalid Live Brain key request.' };
+            }
+            const { provider } = payload;
+            const key = payload.apiKey.trim();
+            if (key && !isWellFormed(provider, key)) {
+                return { success: false, error: 'The API key format is invalid.' };
+            }
             const persisted = PROVIDERS[provider].setKey(credentials(), key);
             return saved(persisted, 'Could not save the Live Brain API key.', true);
         } catch {
-            return { success: false, error: 'Could not save the Live Brain API key.' };
+            return { success: false, error: 'internal_error', message: 'Could not save the Live Brain API key.' };
         }
     });
 
     safeHandle('live-brain:set-options', (_, options) => {
-        if (options && typeof options === 'object') {
-            if ('promptVariant' in options && (options.promptVariant === 'full' || options.promptVariant === 'trimmed')) {
-                return saved(settings().set('liveBrainPromptVariant', options.promptVariant));
+        try {
+            if (!options || typeof options !== 'object' || Array.isArray(options)) {
+                return { success: false, error: 'Invalid Live Brain options.' };
             }
-            if ('provider' in options && options.provider === 'amazon-sonic') {
-                if (!('region' in options) || !AMAZON_SONIC_REGIONS.some(region => region === options.region)
-                    || !('model' in options) || !AMAZON_SONIC_MODELS.some(model => model.id === options.model)) {
-                    return { success: false, error: 'Select a supported AWS Region and Sonic model.' };
-                }
-                return saved(settings().setValues({ liveBrainSonicRegion: options.region as string, liveBrainSonicModel: options.model as string }));
-            }
-            if ('provider' in options && isKeyProvider(options.provider)) {
-                const spec = PROVIDERS[options.provider];
-                if ('useAiProvidersKey' in options && typeof options.useAiProvidersKey === 'boolean') {
-                    return saved(settings().set(spec.reuseSetting, options.useAiProvidersKey), settingsUnavailable, true);
-                }
-                if (options.provider !== 'deepgram-voice-agent') {
-                    if ('model' in options && typeof options.model === 'string' && spec.modelSetting) {
-                        const model = options.model.trim();
-                        const staticModels = staticRealtimeModels(options.provider);
-                        if (staticModels && !staticModels.some(entry => entry.id === model)) {
-                            return { success: false, error: 'Select a supported model.' };
-                        }
-                        return saved(settings().set(spec.modelSetting, model));
-                    }
-                } else {
-                    const st = settings();
-                    const cm = credentials();
-                    const current = inspectDeepgramSettings(st, cm).ui;
-                    let endpoint: { url: string; authHeader?: string } | undefined;
-                    if ('byoCustomUrl' in options && typeof options.byoCustomUrl !== 'string') {
-                        return { success: false, error: 'byoCustomUrl must be a string.' };
-                    }
-                    if ('byoCustomUrl' in options || 'byoCustomHeader' in options) {
-                        const url = 'byoCustomUrl' in options && typeof options.byoCustomUrl === 'string'
-                            ? options.byoCustomUrl.trim() : current.byoCustomUrl;
-                        if (url && !isPublicHttpsUrl(url)) {
-                            return { success: false, error: 'Enter a public HTTPS endpoint without credentials or query parameters.' };
-                        }
-                        const previous = cm.getLiveBrainDeepgramEndpoint();
-                        const authHeader = 'byoCustomHeader' in options && typeof options.byoCustomHeader === 'string'
-                            ? options.byoCustomHeader.trim() || undefined
-                            : previous?.url === url ? previous?.authHeader : undefined;
-                        if (authHeader && (!url || /[\r\n]/.test(authHeader)
-                            || !/^(?:Authorization|X-API-Key|API-Key):[^\r\n]+$/i.test(authHeader))) {
-                            return { success: false, error: 'Enter a single Authorization, X-API-Key, or API-Key header for this endpoint.' };
-                        }
-                        endpoint = { url, authHeader };
-                    }
 
-                    const change: Partial<AppSettings> = {};
-                    if ('thinkMode' in options && (options.thinkMode === 'managed' || options.thinkMode === 'byo')) {
-                        change.liveBrainDeepgramThinkMode = options.thinkMode;
+            const st = settings();
+            const cm = credentials();
+            const change: Partial<AppSettings> = {};
+            let handled = false;
+            let credentialChange = false;
+            let endpointToSave: { url: string; authHeader?: string } | undefined;
+
+            if ('promptVariant' in options) {
+                if (options.promptVariant !== 'full' && options.promptVariant !== 'trimmed') {
+                    return { success: false, error: 'Invalid instruction variant.' };
+                }
+                change.liveBrainPromptVariant = options.promptVariant;
+                handled = true;
+            }
+
+            if ('provider' in options) {
+                if (options.provider === 'amazon-sonic') {
+                    if (!('region' in options) || typeof options.region !== 'string'
+                        || !AMAZON_SONIC_REGIONS.some(region => region === options.region)
+                        || !('model' in options) || typeof options.model !== 'string'
+                        || !AMAZON_SONIC_MODELS.some(model => model.id === options.model)) {
+                        return { success: false, error: 'Select a supported AWS Region and Sonic model.' };
                     }
-                    const managedProvider = 'managedProvider' in options && isDeepgramManagedProvider(options.managedProvider)
-                        ? options.managedProvider : current.managedProvider;
-                    const managedModel = 'managedModel' in options ? options.managedModel : 'model' in options ? options.model : undefined;
-                    const validModels = DEEPGRAM_MANAGED_MODELS[managedProvider];
-                    if (typeof managedModel === 'string') {
-                        if (!validModels.some(entry => entry.id === managedModel.trim())) {
+                    change.liveBrainSonicRegion = options.region;
+                    change.liveBrainSonicModel = options.model;
+                    handled = true;
+                } else if (isKeyProvider(options.provider)) {
+                    const spec = PROVIDERS[options.provider];
+                    if ('useAiProvidersKey' in options) {
+                        if (typeof options.useAiProvidersKey !== 'boolean') {
+                            return { success: false, error: 'useAiProvidersKey must be a boolean.' };
+                        }
+                        change[spec.reuseSetting] = options.useAiProvidersKey;
+                        credentialChange = true;
+                        handled = true;
+                    }
+                    if (options.provider !== 'deepgram-voice-agent') {
+                        if ('model' in options) {
+                            if (typeof options.model !== 'string' || !spec.modelSetting) {
+                                return { success: false, error: 'Select a supported model.' };
+                            }
+                            const model = options.model.trim();
+                            if (!model || model.length > 200) {
+                                return { success: false, error: 'Select a supported model.' };
+                            }
+                            const staticModels = staticRealtimeModels(options.provider);
+                            if (staticModels && !staticModels.some(entry => entry.id === model)) {
+                                return { success: false, error: 'Select a supported model.' };
+                            }
+                            change[spec.modelSetting] = model;
+                            handled = true;
+                        }
+                    } else {
+                        const current = inspectDeepgramSettings(st, cm).ui;
+                        if ('thinkMode' in options && options.thinkMode !== 'managed' && options.thinkMode !== 'byo') {
+                            return { success: false, error: 'Invalid Deepgram thinkMode.' };
+                        }
+                        if ('managedProvider' in options && !isDeepgramManagedProvider(options.managedProvider)) {
+                            return { success: false, error: 'Select a supported Deepgram provider.' };
+                        }
+                        if ('managedModel' in options && typeof options.managedModel !== 'string') {
                             return { success: false, error: 'Select a supported model for this Deepgram provider.' };
                         }
-                        change.liveBrainDeepgramManagedModel = managedModel.trim();
-                    } else if (!validModels.some(entry => entry.id === current.managedModel)) {
-                        change.liveBrainDeepgramManagedModel = validModels[0].id;
-                    }
-                    if (managedProvider !== current.managedProvider) change.liveBrainDeepgramManagedProvider = managedProvider;
-
-                    const byoProvider = 'byoKeyProvider' in options ? options.byoKeyProvider : current.byoKeyProvider;
-                    if ('byoKeyProvider' in options) {
-                        if (typeof byoProvider !== 'string'
-                            || !current.byoOptions.some(entry => entry.id === byoProvider && (entry.configured || entry.id === 'custom'))) {
-                            return { success: false, error: 'Select a configured Deepgram Think provider.' };
+                        if ('model' in options && typeof options.model !== 'string') {
+                            return { success: false, error: 'Select a supported model for this Deepgram provider.' };
                         }
-                        change.liveBrainDeepgramByoKeyProvider = byoProvider;
+                        if ('byoCustomUrl' in options && typeof options.byoCustomUrl !== 'string') {
+                            return { success: false, error: 'byoCustomUrl must be a string.' };
+                        }
+                        if ('byoCustomHeader' in options && typeof options.byoCustomHeader !== 'string') {
+                            return { success: false, error: 'byoCustomHeader must be a string.' };
+                        }
+                        if ('byoModel' in options && typeof options.byoModel !== 'string') {
+                            return { success: false, error: 'byoModel must be a string.' };
+                        }
+
+                        if ('byoCustomUrl' in options || 'byoCustomHeader' in options) {
+                            const url = 'byoCustomUrl' in options && typeof options.byoCustomUrl === 'string'
+                                ? options.byoCustomUrl.trim() : current.byoCustomUrl;
+                            if (url && !isPublicHttpsUrl(url)) {
+                                return { success: false, error: 'Enter a public HTTPS endpoint without credentials or query parameters.' };
+                            }
+                            const previous = cm.getLiveBrainDeepgramEndpoint();
+                            const authHeader = 'byoCustomHeader' in options && typeof options.byoCustomHeader === 'string'
+                                ? options.byoCustomHeader.trim() || undefined
+                                : previous?.url === url ? previous?.authHeader : undefined;
+                            if (authHeader && (!url || /[\r\n]/.test(authHeader)
+                                || !/^(?:Authorization|X-API-Key|API-Key):[^\r\n]+$/i.test(authHeader))) {
+                                return { success: false, error: 'Enter a single Authorization, X-API-Key, or API-Key header for this endpoint.' };
+                            }
+                            endpointToSave = { url, authHeader };
+                            handled = true;
+                        }
+
+                        if ('thinkMode' in options && (options.thinkMode === 'managed' || options.thinkMode === 'byo')) {
+                            change.liveBrainDeepgramThinkMode = options.thinkMode;
+                            handled = true;
+                        }
+                        const managedProvider = 'managedProvider' in options && isDeepgramManagedProvider(options.managedProvider)
+                            ? options.managedProvider : current.managedProvider;
+                        const managedModel = 'managedModel' in options ? options.managedModel : 'model' in options ? options.model : undefined;
+                        const validModels = DEEPGRAM_MANAGED_MODELS[managedProvider];
+                        if (typeof managedModel === 'string') {
+                            if (!validModels.some(entry => entry.id === managedModel.trim())) {
+                                return { success: false, error: 'Select a supported model for this Deepgram provider.' };
+                            }
+                            change.liveBrainDeepgramManagedModel = managedModel.trim();
+                            handled = true;
+                        } else if (!validModels.some(entry => entry.id === current.managedModel)) {
+                            change.liveBrainDeepgramManagedModel = validModels[0].id;
+                            handled = true;
+                        }
+                        if (managedProvider !== current.managedProvider) {
+                            change.liveBrainDeepgramManagedProvider = managedProvider;
+                            handled = true;
+                        }
+
+                        const byoProvider = 'byoKeyProvider' in options ? options.byoKeyProvider : current.byoKeyProvider;
+                        if ('byoKeyProvider' in options) {
+                            if (typeof byoProvider !== 'string'
+                                || !current.byoOptions.some(entry => entry.id === byoProvider && (entry.configured || entry.id === 'custom'))) {
+                                return { success: false, error: 'Select a configured Deepgram Think provider.' };
+                            }
+                            change.liveBrainDeepgramByoKeyProvider = byoProvider;
+                            handled = true;
+                        }
+                        if ('byoModel' in options && typeof options.byoModel === 'string' && typeof byoProvider === 'string') {
+                            change.liveBrainDeepgramByoModels = { ...st.get('liveBrainDeepgramByoModels'), [byoProvider]: options.byoModel.trim() };
+                            handled = true;
+                        }
                     }
-                    if ('byoModel' in options && typeof options.byoModel === 'string' && typeof byoProvider === 'string') {
-                        change.liveBrainDeepgramByoModels = { ...st.get('liveBrainDeepgramByoModels'), [byoProvider]: options.byoModel.trim() };
-                    }
-                    if (endpoint && !cm.setLiveBrainDeepgramEndpoint(endpoint.url, endpoint.authHeader)) {
-                        return { success: false, error: 'Could not save the Deepgram Think endpoint.' };
-                    }
-                    return Object.keys(change).length ? saved(st.setValues(change)) : { success: true };
+                } else {
+                    return { success: false, error: 'Invalid Live Brain options.' };
                 }
             }
+
+            if (!handled) return { success: false, error: 'Invalid Live Brain options.' };
+            if (endpointToSave && !cm.setLiveBrainDeepgramEndpoint(endpointToSave.url, endpointToSave.authHeader)) {
+                return { success: false, error: 'Could not save the Deepgram Think endpoint.' };
+            }
+            return Object.keys(change).length ? saved(st.setValues(change), settingsUnavailable, credentialChange) : { success: true };
+        } catch {
+            return { success: false, error: 'internal_error', message: 'Could not save Live Brain settings.' };
         }
-        return { success: false, error: 'Invalid Live Brain options.' };
     });
 
     safeHandle('live-brain:test-connection', async () => {
-        const { config: { provider, hasKey, model, keySource, sonicRegion }, usableKey, deepgramThink } = inspect();
-        if (provider === 'amazon-sonic') {
-            if (!sonicRegion) return { success: false, error: 'no_region', message: 'Save an AWS Region for Amazon Sonic first.' };
-            return loadPremium()?.testConnection({ apiKey: '', provider, model, sonicRegion })
-                ?? { success: false, error: 'unavailable', message: 'Amazon Sonic is unavailable in this build.' };
-        }
-        if (isKeyProvider(provider)) {
-            if (provider === 'deepgram-flux') {
-                const routeTest = () => testFluxAiRoute(llmHelper(), credentials());
-                if (!hasKey || !usableKey) {
-                    const aiRoute = await routeTest();
-                    const keyMsg = !hasKey ? 'Add a Deepgram API key first.' : "The Deepgram API key doesn't look valid.";
-                    return {
-                        success: false,
-                        error: !hasKey ? 'no_key' : 'invalid_key',
-                        message: `${keyMsg} · AI route: ${aiRoute.detail}`,
-                        fluxResult: { connected: false, detail: keyMsg, aiRoute },
-                    };
+        try {
+            const { config: { provider, hasKey, model, keySource, sonicRegion }, usableKey, deepgramThink } = inspect();
+            if (provider === 'amazon-sonic') {
+                if (!sonicRegion) return { success: false, error: 'no_region', message: 'Save an AWS Region for Amazon Sonic first.' };
+                return await (loadPremium()?.testConnection({ apiKey: '', provider, model, sonicRegion })
+                    ?? Promise.resolve({ success: false, error: 'unavailable', message: 'Amazon Sonic is unavailable in this build.' }));
+            }
+            if (isKeyProvider(provider)) {
+                if (provider === 'deepgram-flux') {
+                    const routeTest = () => testFluxAiRoute(llmHelper(), credentials());
+                    if (!hasKey || !usableKey) {
+                        const aiRoute = await routeTest();
+                        const keyMsg = !hasKey ? 'Add a Deepgram API key first.' : "The Deepgram API key doesn't look valid.";
+                        return {
+                            success: false,
+                            error: !hasKey ? 'no_key' : 'invalid_key',
+                            message: `${keyMsg} · AI route: ${aiRoute.detail}`,
+                            fluxResult: { connected: false, detail: keyMsg, aiRoute },
+                        };
+                    }
+                    const premium = loadPremium();
+                    const result = await (premium?.testConnection({
+                        apiKey: usableKey,
+                        model,
+                        provider,
+                        testAiRoute: routeTest,
+                    }) ?? Promise.resolve({ success: false, error: 'unavailable', message: 'Deepgram Flux is unavailable in this build.' }));
+                    if (!result.success && result.error === 'auth' && keySource) {
+                        const source = keySource === 'ai-providers' ? 'Speech Provider' : KEY_SOURCE_LABEL[keySource];
+                        return { ...result, message: `${result.message} (key from ${source})` };
+                    }
+                    return result;
                 }
+                if (!hasKey) return { success: false, error: 'no_key', message: 'Add an API key first.' };
+                if (!usableKey) return { success: false, error: 'invalid_key', message: "The API key doesn't look valid." };
                 const premium = loadPremium();
+                const name = provider === 'gemini-live' ? 'Gemini Live'
+                    : provider === 'deepgram-voice-agent' ? 'Deepgram Voice Agent'
+                        : `${PROVIDERS[provider].vendor} Realtime`;
                 const result = await (premium?.testConnection({
                     apiKey: usableKey,
                     model,
-                    provider,
-                    testAiRoute: routeTest,
-                }) ?? { success: false, error: 'unavailable', message: 'Deepgram Flux is unavailable in this build.' });
+                    ...(provider === 'gemini-live' ? {} : { provider }),
+                    ...(deepgramThink ? { deepgramThink } : {}),
+                }) ?? Promise.resolve({ success: false, error: 'unavailable', message: `${name} is unavailable in this build.` }));
+                // Include the key source for an auth failure without exposing the key.
                 if (!result.success && result.error === 'auth' && keySource) {
-                    const source = keySource === 'ai-providers' ? 'Speech Provider' : KEY_SOURCE_LABEL[keySource];
+                    const source = keySource === 'ai-providers' && (provider === 'deepgram-voice-agent' || provider === 'elevenlabs-realtime')
+                        ? 'Speech Provider' : KEY_SOURCE_LABEL[keySource];
                     return { ...result, message: `${result.message} (key from ${source})` };
                 }
                 return result;
             }
-            if (!hasKey) return { success: false, error: 'no_key', message: 'Add an API key first.' };
-            if (!usableKey) return { success: false, error: 'invalid_key', message: "The API key doesn't look valid." };
-            const premium = loadPremium();
-            const name = provider === 'gemini-live' ? 'Gemini Live'
-                : provider === 'deepgram-voice-agent' ? 'Deepgram Voice Agent'
-                    : `${PROVIDERS[provider].vendor} Realtime`;
-            const result = await (premium?.testConnection({
-                apiKey: usableKey,
-                model,
-                ...(provider === 'gemini-live' ? {} : { provider }),
-                ...(deepgramThink ? { deepgramThink } : {}),
-            }) ?? { success: false, error: 'unavailable', message: `${name} is unavailable in this build.` });
-            // Include the key source for an auth failure without exposing the key.
-            if (!result.success && result.error === 'auth' && keySource) {
-                const source = keySource === 'ai-providers' && (provider === 'deepgram-voice-agent' || provider === 'elevenlabs-realtime')
-                    ? 'Speech Provider' : KEY_SOURCE_LABEL[keySource];
-                return { ...result, message: `${result.message} (key from ${source})` };
-            }
-            return result;
+            return { success: false, error: 'not_available_yet', message: 'The existing pipeline needs no separate Live Brain connection.' };
+        } catch {
+            return { success: false, error: 'internal_error', message: 'Connection test failed.' };
         }
-        return { success: false, error: 'not_available_yet', message: 'The existing pipeline needs no separate Live Brain connection.' };
     });
 
     safeHandle('live-brain:list-models', async (): Promise<LiveBrainModelsResult> => {
-        const { config: { provider, deepgram }, usableKey } = inspect();
-        if (provider === 'amazon-sonic') return { success: true, models: [...AMAZON_SONIC_MODELS] };
-        if (provider === 'openai-realtime') return { success: true, models: OPENAI_REALTIME_MODELS };
-        if (provider === 'elevenlabs-realtime') return { success: true, models: ELEVENLABS_REALTIME_MODELS };
-        if (provider === 'deepgram-voice-agent') {
-            if (deepgram?.thinkMode === 'byo') return { success: true, models: deepgram.byoRecommendedModels };
-            const mp = deepgram?.managedProvider ?? DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER;
-            return { success: true, models: DEEPGRAM_MANAGED_MODELS[mp] };
+        try {
+            const { config: { provider, deepgram }, usableKey } = inspect();
+            if (provider === 'amazon-sonic') return { success: true, models: [...AMAZON_SONIC_MODELS] };
+            if (provider === 'openai-realtime') return { success: true, models: OPENAI_REALTIME_MODELS };
+            if (provider === 'elevenlabs-realtime') return { success: true, models: ELEVENLABS_REALTIME_MODELS };
+            if (provider === 'deepgram-voice-agent') {
+                if (deepgram?.thinkMode === 'byo') return { success: true, models: deepgram.byoRecommendedModels };
+                const mp = deepgram?.managedProvider ?? DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER;
+                return { success: true, models: DEEPGRAM_MANAGED_MODELS[mp] };
+            }
+            if (provider === 'deepgram-flux') {
+                return { success: true, models: [{ id: DEFAULT_DEEPGRAM_FLUX_MODEL, label: 'Flux General Multilingual', description: 'Fixed STT + turn detector' }] };
+            }
+            if (provider !== 'gemini-live') return { success: true, models: [] };
+            if (!usableKey) return { success: false, models: GEMINI_LIVE_FALLBACK_MODELS, error: 'Add an API key to load the model list.' };
+            return await listGeminiLiveModels(usableKey);
+        } catch {
+            return { success: false, models: [], error: 'Could not load the model list.' };
         }
-        if (provider === 'deepgram-flux') {
-            return { success: true, models: [{ id: DEFAULT_DEEPGRAM_FLUX_MODEL, label: 'Flux General Multilingual', description: 'Fixed STT + turn detector' }] };
-        }
-        if (provider !== 'gemini-live') return { success: true, models: [] };
-        if (!usableKey) return { success: false, models: GEMINI_LIVE_FALLBACK_MODELS, error: 'Add an API key to load the model list.' };
-        return listGeminiLiveModels(usableKey);
     });
 }
 

@@ -8270,7 +8270,9 @@ let isMultimodal = !!(imagePaths?.length);
     context: string,
     imagePath?: string,
     responsePath?: string,
+    abortSignal?: AbortSignal,
   ): Promise<string> {
+    abortSignal?.throwIfAborted();
     this.assertOutboundScopes('custom_provider', combinedMessage, imagePath ? [imagePath] : undefined);
 
     // 1. Parse cURL to JSON object
@@ -8367,7 +8369,9 @@ let isMultimodal = !!(imagePaths?.length);
     // 5. Execute Fetch (30s timeout — same as RestSTT uploads)
     const customAbort = new AbortController();
     const customTimeout = setTimeout(() => customAbort.abort(), 30_000);
+    const signal = abortSignal ? AbortSignal.any([abortSignal, customAbort.signal]) : customAbort.signal;
     try {
+      signal.throwIfAborted();
       const serializedBody = JSON.stringify(body);
       // markerIntegrity reports whether the template actually substituted our
       // placeholders (TEXT/PROMPT/USER_MESSAGE) into the expanded body — a
@@ -8385,13 +8389,12 @@ let isMultimodal = !!(imagePaths?.length);
         method: requestConfig.method || 'POST',
         headers: headers,
         body: serializedBody,
-        signal: customAbort.signal,
+        signal,
         // Do not replay credentials or generated content to an unchecked URL.
         redirect: 'manual',
       });
-      clearTimeout(customTimeout);
-
       const data = await response.json();
+      signal.throwIfAborted();
       console.log(`[LLMHelper] Custom Provider response received`, { status: response.status, ok: response.ok });
 
       if (!response.ok) {
@@ -8404,9 +8407,10 @@ let isMultimodal = !!(imagePaths?.length);
       console.log(`[LLMHelper] Custom Provider extracted text length: ${extracted.length}`);
       return extracted;
     } catch (error) {
-      clearTimeout(customTimeout);
-      console.error("Custom Provider Error:", error);
+      if (!abortSignal?.aborted) console.error("Custom Provider Error:", error);
       throw error;
+    } finally {
+      clearTimeout(customTimeout);
     }
   }
 
@@ -11796,9 +11800,10 @@ let isMultimodal = !!(imagePaths?.length);
         message,
         context || "",
         imagePaths?.[0],
-        this.activeCurlProvider.responsePath
+        this.activeCurlProvider.responsePath,
+        abortSignal,
       );
-      yield response;
+      if (!abortSignal?.aborted) yield response;
       return;
     }
 
@@ -14817,6 +14822,22 @@ let isMultimodal = !!(imagePaths?.length);
     if (this.isDeepseekModel(selected)) return { provider: 'deepseek', model: selected };
     if (this.isGeminiModel(selected)) return { provider: 'gemini', model: selected };
     return null;
+  }
+
+  public getLiveBrainCustomRouteFingerprint(): string | undefined {
+    const provider = this.customProvider ?? this.activeCurlProvider;
+    if (!provider) return undefined;
+    try {
+      const config = curl2Json(provider.curlCommand);
+      const endpoint = new URL(config.url);
+      const model = typeof config.data?.model === 'string' ? config.data.model : '';
+      // Ignore headers, credentials, and query parameters which may contain keys.
+      return createHash('sha256').update(JSON.stringify([
+        endpoint.origin, endpoint.pathname, model,
+      ])).digest('hex').slice(0, 16);
+    } catch {
+      return undefined;
+    }
   }
 
   public getDirectAssistSelection(): DirectAssistSelection {

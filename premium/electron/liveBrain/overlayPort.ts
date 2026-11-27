@@ -5,6 +5,7 @@ import type { LiveBrainOverlayPort } from './ResponseOrchestrator';
 export function createLiveBrainOverlayPort(bridge: {
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
     setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void;
+    discard?(generationId: number, reason: string): void;
 }): LiveBrainOverlayPort {
     return {
         showAsk: ask => bridge.emitQuestion(ask),
@@ -16,5 +17,6 @@ export function createLiveBrainOverlayPort(bridge: {
             responseText: { text, done },
             updated,
         }),
+        ...(bridge.discard ? { discard: (generationId, reason) => bridge.discard!(generationId, reason) } : {}),
     };
 }

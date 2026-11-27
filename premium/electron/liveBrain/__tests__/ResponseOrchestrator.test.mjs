@@ -259,7 +259,7 @@ function chatRig() {
         },
     });
     const send = event => orchestrator.handleEvent({ at: clock.now(), ...event });
-    const latest = id => shown.filter(payload => payload.questionId === id).at(-1);
+    const latest = id => shown.filter(payload => payload.questionId === id || payload.questionId.endsWith(`:${id}`)).at(-1);
     const firstAnswer = () => order.find(([kind]) => kind === 'answer')[1];
     return { clock, shown, order, orchestrator, send, latest, firstAnswer };
 }
@@ -269,12 +269,15 @@ test('D14: the provider transcript streams into one bubble that closes when its 
     h.send({ type: 'interviewer_speech_started' });
     h.send({ type: 'interviewer_transcript', text: 'How would', final: false });
     h.send({ type: 'interviewer_transcript', text: 'How would you design a cache?', final: false });
-    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How would you design a cache?', done: false });
+    assert.equal(h.latest('q1').text, 'How would you design a cache?');
+    assert.equal(h.latest('q1').done, false);
     h.send({ type: 'interviewer_transcript', text: 'How would you design a cache?', final: true });
     h.send({ type: 'response_started', responseId: 'r1' });
     h.send({ type: 'response_delta', responseId: 'r1', text: 'I would use Redis.' });
     const generationId = h.firstAnswer();
-    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How would you design a cache?', done: true, generationId });
+    assert.equal(h.latest('q1').text, 'How would you design a cache?');
+    assert.equal(h.latest('q1').done, true);
+    assert.equal(h.latest('q1').generationId, generationId);
     const kinds = h.order.map(([kind]) => kind);
     assert.ok(kinds.indexOf('question') < kinds.indexOf('answer'));
     assert.equal(new Set(h.shown.map(payload => payload.questionId)).size, 1);
@@ -301,7 +304,9 @@ test('D14: a transcript that arrives after its answer started is placed above th
     h.send({ type: 'response_delta', responseId: 'r1', text: 'I would shard by user.' });
     const generationId = h.firstAnswer();
     h.send({ type: 'interviewer_transcript', text: 'How do you scale writes?', final: true });
-    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How do you scale writes?', done: true, generationId });
+    assert.equal(h.latest('q1').text, 'How do you scale writes?');
+    assert.equal(h.latest('q1').done, true);
+    assert.equal(h.latest('q1').generationId, generationId);
 });
 
 test('D14: the STT final fills a bubble only when the provider sent no transcript; provider text replaces it', () => {
@@ -310,7 +315,9 @@ test('D14: the STT final fills a bubble only when the provider sent no transcrip
     h.send({ type: 'response_started', responseId: 'r1' });
     h.send({ type: 'response_delta', responseId: 'r1', text: 'Replicas.' });
     const generationId = h.firstAnswer();
-    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'How do you scale reads?', done: true, generationId });
+    assert.equal(h.latest('q1').text, 'How do you scale reads?');
+    assert.equal(h.latest('q1').done, true);
+    assert.equal(h.latest('q1').generationId, generationId);
     h.send({ type: 'interviewer_transcript', text: 'How would you scale reads?', final: true });
     assert.equal(h.latest('q1').text, 'How would you scale reads?');
     assert.equal(new Set(h.shown.map(payload => payload.questionId)).size, 1);
@@ -455,7 +462,8 @@ test('D15: a bubble that starts as filler appears once it becomes a real questio
     h.send({ type: 'interviewer_transcript', text: 'Okay,', final: false });
     assert.equal(h.shown.length, 0);
     h.send({ type: 'interviewer_transcript', text: 'Okay, short one. If Redis goes down?', final: false });
-    assert.deepEqual(h.latest('q1'), { questionId: 'q1', text: 'Okay, short one. If Redis goes down?', done: false });
+    assert.equal(h.latest('q1').text, 'Okay, short one. If Redis goes down?');
+    assert.equal(h.latest('q1').done, false);
 });
 
 test('D15: a short reply to a waiting Ask is shown in the chat', () => {
@@ -749,4 +757,127 @@ test('Phase 4: clarification expiry, unrelated question consumption, reconnect r
     const confirmedCall = calls.filter(([k]) => k === 'write').at(-1);
     assert.doesNotMatch(confirmedCall[3], /clarification_reply/);
     assert.notEqual(draftCall[1].contextKey, confirmedCall[3]);
+});
+
+test('F-1: summary refinement landing between eager draft and final decision reuses draft snapshot and matches contextKey', () => {
+    const clock = new FakeClock();
+    const calls = [];
+    let baseNotebook = 'Earlier context: initial summary v1';
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        getContextSnapshot: () => ({ baseNotebook, constraints: [], groundingKey: 'g1' }),
+        answerWriter: {
+            prepareDraft: req => { calls.push(['prepareDraft', req]); return true; },
+            write: (req, opts) => {
+                calls.push(['write', req, opts]);
+                return { generationId: 1, done: Promise.resolve('completed') };
+            },
+            cancel: () => {},
+        },
+        overlay: { showAsk: () => {}, setOutdated: () => {}, setInterviewerSpeaking: () => {}, showText: () => {} },
+    });
+    orchestrator.handleEvent({ type: 'eager_end_of_turn', turnKey: 'c1:t0', question: 'How does Raft elect a leader?', at: 10 });
+    const draft = calls.find(([k]) => k === 'prepareDraft')[1];
+    // Background summarizer updates baseNotebook before EndOfTurn.
+    baseNotebook = 'Earlier context: refined summary v2';
+    orchestrator.handleEvent({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'How does Raft elect a leader?', turnKey: 'c1:t0', at: 20 });
+    const confirmed = calls.find(([k]) => k === 'write')[2];
+    assert.equal(confirmed.contextKey, draft.contextKey);
+    assert.equal(confirmed.liveBrainNotebook, draft.liveBrainNotebook);
+});
+
+test('U7-1: toggling off and on creates non-colliding namespaced question ids', () => {
+    const clock = new FakeClock();
+    const shownA = [];
+    const shownB = [];
+    const a = new ResponseOrchestrator({
+        sessionId: 'same-meeting',
+        clock,
+        overlay: { showAsk: () => {}, setOutdated: () => {}, setInterviewerSpeaking: () => {}, showQuestion: q => shownA.push(q), showText: () => {} },
+    });
+    const b = new ResponseOrchestrator({
+        sessionId: 'same-meeting',
+        clock,
+        overlay: { showAsk: () => {}, setOutdated: () => {}, setInterviewerSpeaking: () => {}, showQuestion: q => shownB.push(q), showText: () => {} },
+    });
+    a.handleEvent({ type: 'interviewer_transcript', text: 'First question?', final: true, at: 1 });
+    b.handleEvent({ type: 'interviewer_transcript', text: 'Second question?', final: true, at: 2 });
+    assert.notEqual(shownA[0].questionId, shownB[0].questionId);
+});
+
+test('U7-2: delta before transcript then filler retracts provisional card, and write() never reuses closed bubble', () => {
+    const clock = new FakeClock();
+    const discards = [];
+    const shownQuestions = [];
+    const writeOpts = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        answerWriter: {
+            write: (_req, opts) => {
+                writeOpts.push(opts);
+                return { generationId: writeOpts.length, done: Promise.resolve('completed') };
+            },
+            cancel: () => {},
+        },
+        overlay: {
+            showAsk: () => {},
+            setOutdated: () => {},
+            setInterviewerSpeaking: () => {},
+            showQuestion: q => shownQuestions.push(q),
+            showText: () => {},
+            discard: (generationId, reason) => discards.push({ generationId, reason }),
+        },
+    });
+    // Provisional text starts with no bubble, then filler final arrives within 1.5s -> retracted.
+    orchestrator.handleEvent({ type: 'response_started', responseId: 'r1', at: 10 });
+    orchestrator.handleEvent({ type: 'response_delta', responseId: 'r1', text: 'Sure, let me explain.' });
+    clock.advance(500);
+    orchestrator.handleEvent({ type: 'interviewer_transcript', text: 'Mm-hmm.', final: true, at: 510 });
+    assert.equal(discards.length, 1);
+    assert.equal(discards[0].reason, 'filler_turn');
+    assert.equal(shownQuestions.length, 0);
+
+    // Closed silent bubble must not be reused by a subsequent write().
+    orchestrator.handleEvent({ type: 'interviewer_transcript', text: 'Ignored silent?', final: true, at: 600 });
+    orchestrator.handleEvent({ type: 'response_silent' });
+    orchestrator.handleEvent({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Actual question?', at: 700 });
+    assert.equal(writeOpts.at(-1)?.suppressQuestionRow, undefined);
+});
+
+test('U7-3: manual/rollover cancel is not marked outdated, cancelled is not recorded, and Sonic finalText updates disposition and final row', () => {
+    const clock = new FakeClock();
+    const outdated = [];
+    const texts = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        overlay: {
+            showAsk: () => {},
+            setOutdated: (genId, flag) => outdated.push([genId, flag]),
+            setInterviewerSpeaking: () => {},
+            showText: p => texts.push(p),
+        },
+    });
+    orchestrator.handleEvent({ type: 'response_started', responseId: 'r1', at: 10 });
+    orchestrator.handleEvent({ type: 'response_delta', responseId: 'r1', text: 'Partial answer' });
+    const cancelDisp = orchestrator.handleEvent({ type: 'response_done', responseId: 'r1', status: 'cancelled', cancelReason: 'manual' });
+    assert.deepEqual(cancelDisp, { kind: 'suppressed' });
+    orchestrator.handleEvent({ type: 'response_started', responseId: 'r2', at: 20 });
+    orchestrator.handleEvent({ type: 'response_delta', responseId: 'r2', text: 'Streamed draft' });
+    const sonicDisp = orchestrator.handleEvent({ type: 'response_done', responseId: 'r2', status: 'completed', finalText: 'Authoritative Sonic final.' });
+    assert.deepEqual(sonicDisp, { kind: 'answer', text: 'Authoritative Sonic final.' });
+    assert.equal(outdated.length, 0);
+    assert.equal(texts.at(-1).text, 'Authoritative Sonic final.');
+    assert.equal(texts.at(-1).done, true);
+});
+
+test('U7-4: Flux completed answer followed by a correction 10 s later marks previous answer outdated', async () => {
+    const h = await rig();
+    h.brain.emit({ type: 'interviewer_transcript', text: 'Design a cache.', final: true, at: h.clock.now() });
+    h.decision('answer', { question: 'Design a cache.' });
+    h.completions[0].resolve('completed');
+    await flush();
+    h.clock.advance(10_000);
+    h.brain.emit({ type: 'interviewer_transcript', text: 'Actually, without Redis.', final: true, at: h.clock.now() });
+    h.decision('answer', { question: 'Actually, without Redis.' });
+    assert.ok(h.calls.some(([k, req]) => k === 'write' && req.question === 'Actually, without Redis.' && req.replacesAutomaticAnswer === true));
 });

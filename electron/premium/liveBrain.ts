@@ -26,7 +26,7 @@ export interface LiveBrainAnswerRequest {
     replacesAutomaticAnswer: boolean;
     signal: AbortSignal;
     onFirstText?: (at: number) => void;
-    onComplete?: (text: string) => void;
+    onComplete?: (text: string, disposition: { stopReason?: string; storageVeto: boolean }) => void;
     liveBrainNotebook?: string;
     speechStoppedAt?: number;
     suppressQuestionRow?: boolean;
@@ -65,7 +65,31 @@ export interface LiveBrainAnswerEngine {
     getLiveBrainAiRouteKey?(): string;
 }
 
-export interface LiveBrainMeetingOptions {
+export interface LiveBrainGroundingState {
+    profileAllowed: boolean;
+    knowledgeEnabled: boolean;
+    groundingKey: string;
+}
+
+export interface LiveBrainContextSnapshot {
+    profileContext?: string;
+    modeName?: string;
+    modeTemplate?: string;
+    modePrompt?: string;
+    modeContext?: string;
+}
+
+export function resolveLiveBrainProfileContext(
+    state: Pick<LiveBrainGroundingState, 'profileAllowed' | 'knowledgeEnabled'>,
+    getName: () => string | null,
+    getGrounding: () => string | undefined,
+): string {
+    if (!state.profileAllowed || !state.knowledgeEnabled) return '';
+    const name = getName();
+    return [name && `Candidate: ${name}`, getGrounding()].filter(Boolean).join('\n\n');
+}
+
+export interface LiveBrainMeetingOptions extends LiveBrainContextSnapshot {
     sessionId: string;
     apiKey?: string;
     provider?: LiveBrainProvider;
@@ -74,18 +98,18 @@ export interface LiveBrainMeetingOptions {
     sonicRegion?: string;
     deepgramThink?: DeepgramThinkConfig;
     promptVariant?: LiveBrainPromptVariant;
-    profileContext?: string;
-    modeName?: string;
-    modeTemplate?: string;
-    modePrompt?: string;
-    modeContext?: string;
+    resolveContext?(): LiveBrainContextSnapshot;
+    readGroundingState?(): LiveBrainGroundingState;
     engine: {
         setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void;
         runLiveBrainAnswer?: LiveBrainAnswerEngine['runLiveBrainAnswer'];
         startLiveBrainDraft?: LiveBrainAnswerEngine['startLiveBrainDraft'];
         getLiveBrainAiRouteKey?: LiveBrainAnswerEngine['getLiveBrainAiRouteKey'];
     };
-    pipeline?: { activate(pending?: { text: string; at: number }): void; cancel(): void };
+    pipeline?: {
+        activate(pending?: { text: string; at: number }): 'accepted' | 'busy' | 'failed' | 'unavailable' | Promise<'accepted' | 'busy' | 'failed' | 'unavailable'> | void;
+        cancel(): void;
+    };
     summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
     onFailure(code: string): void;
@@ -97,6 +121,7 @@ export interface LiveBrainMeetingSession {
     acceptAudio(channel: 'system' | 'mic', pcm: Buffer, sampleRate: number, channels?: number): void;
     addCandidateText(text: string, at: number): void;
     noteSpeechStop(at: number): void;
+    refreshContext?(): void;
     isPipeline?(): boolean;
     pipelineContext?(): string;
     observePipelineTranscript?(text: string, final: boolean, at: number): boolean | void;

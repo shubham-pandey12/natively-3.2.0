@@ -52,15 +52,17 @@ function startContext(sessionId: string, instructions: string, signal: AbortSign
     };
 }
 
-export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: LiveBrain): LiveBrainMeetingSession {
+export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: LiveBrain | ((id: LiveBrain['id']) => LiveBrain | undefined)): LiveBrainMeetingSession {
     const preferred = options.provider ?? 'gemini-live';
     const promptVariant = options.promptVariant ?? 'full';
+    let grounding = options.readGroundingState?.();
     const instructions = (id: LiveBrain['id']) => {
+        const context = options.resolveContext?.() ?? options;
         if (id === 'deepgram-voice-agent') {
             const dg = options.resolveProvider?.('deepgram-voice-agent')?.deepgramThink ?? options.deepgramThink;
-            return buildProviderInstructions(options, promptVariant, id, dg?.thinkMode);
+            return buildProviderInstructions(context, promptVariant, id, dg?.thinkMode);
         }
-        return buildProviderInstructions(options, promptVariant, id);
+        return buildProviderInstructions(context, promptVariant, id);
     };
     const clock = { now: Date.now, setTimeout, clearTimeout };
     const debug = isPromptDebugEnabled();
@@ -134,17 +136,21 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             onFirstText: (at) => {
                 if (!started || writerRun !== run || request.signal.aborted) return;
                 presented = true;
+                pendingQuestion = undefined;
+                turnAnswered = true;
                 if (timing && timing.firstTextAt === undefined) timing.firstTextAt = at;
                 request.onFirstText?.(at);
             },
-            onComplete: (text) => {
+            onComplete: (text, disposition) => {
                 if (!started || writerRun !== run || request.signal.aborted) return;
                 presented = true;
                 const clarification = /^Ask:\s*(\S[\s\S]*)$/i.exec(text.trim());
-                supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
-                if (clarification) orchestrator.noteWriterClarification(request.question, clarification[1]);
-                else orchestrator.noteWriterAnswer(text);
-                request.onComplete?.(text);
+                if (!disposition?.stopReason && !disposition?.storageVeto) {
+                    supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
+                    if (clarification) orchestrator.noteWriterClarification(request.question, clarification[1]);
+                    else orchestrator.noteWriterAnswer(text);
+                }
+                request.onComplete?.(text, disposition);
             },
         });
         if (!res) {
@@ -198,11 +204,13 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         })
         : undefined;
     const orchestrator = new ResponseOrchestrator({
+        sessionId: options.sessionId,
         clock,
         ...(answerWriter ? { answerWriter } : {}),
         getContextSnapshot: () => ({
             baseNotebook: supervisor?.notebookContext ?? '',
             constraints: notebook.snapshot().constraints,
+            groundingKey: options.readGroundingState?.().groundingKey,
         }),
         cleanupText: (text: string) => (
             isIntelligenceFlagEnabled('sharedResponseCleanup')
@@ -218,6 +226,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 options.emitQuestion(event);
             },
             setAutomaticAnswerOutdated: (generationId, outdated) => options.engine.setAutomaticAnswerOutdated(generationId, outdated),
+            discard: (generationId) => options.emitQuestion({ generationId, discard: true }),
         }),
         requestClarificationAnswer: () => supervisor.current?.requestClarificationAnswer?.(),
         recordSttQuestion: (text, at) => supervisor.recordInterviewerTurn(text, at),
@@ -227,15 +236,18 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         notePromptDebugAnswerTiming({ source: 'live-brain', promptVariant, ...timing, doneAt: Date.now(), status });
         timing = undefined;
     };
-    let injected = injectedBrain;
+    let injected = typeof injectedBrain === 'function' ? undefined : injectedBrain;
     supervisor = new BrainSupervisor({
         sessionId: options.sessionId, preferred, instructions, notebook, clock,
+        groundingKey: () => options.readGroundingState?.().groundingKey,
         create(id) {
             if (id === 'pipeline') {
                 return options.pipeline ? { brain: new PipelineBrain(options.pipeline.cancel), model: 'pipeline' } : undefined;
             }
             const config = options.resolveProvider?.(id) ?? (id === preferred ? options : undefined);
             const model = (config?.model?.trim() || DEFAULT_MODELS[id]).replace(/^models\//, '');
+            const testBrain = typeof injectedBrain === 'function' ? injectedBrain(id) : undefined;
+            if (testBrain) return { brain: testBrain, model };
             if (injected?.id === id) {
                 const brain = injected;
                 injected = undefined;
@@ -265,13 +277,36 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 pendingQuestion = undefined;
                 turnAnswered = false;
                 const freshPending = pending && clock.now() - pending.at <= 20_000 ? pending : undefined;
-                pipelineDedupe = freshPending
-                    ? { normalized: normalizeQuestion(freshPending.text), expiresAt: clock.now() + 5_000 }
-                    : undefined;
-                options.pipeline?.activate(freshPending);
+                const armDedupe = () => {
+                    if (freshPending) {
+                        pipelineDedupe = { normalized: normalizeQuestion(freshPending.text), expiresAt: clock.now() + 5_000 };
+                    }
+                };
+                const res = options.pipeline?.activate(freshPending);
+                if (res && typeof (res as Promise<unknown>).then === 'function') {
+                    void (res as Promise<'accepted' | 'busy' | 'failed' | 'unavailable'>).then(
+                        status => { if (status === 'accepted') armDedupe(); },
+                        () => { },
+                    );
+                } else if (res !== 'busy' && res !== 'failed' && res !== 'unavailable') {
+                    armDedupe();
+                }
             }
         },
         onRollover: data => diagnostic('rollover', data),
+        onLeaseDetached: (lease, reason, role) => {
+            if (role !== 'active' || reason === 'rollover') return;
+            if (lease.brain.id === 'deepgram-flux') {
+                answerWriter?.cancelDraft(reason);
+                answerWriter?.cancel('answer_corrected');
+                writerRun = undefined;
+                finishTiming('cancelled');
+                supervisor.setExternalWriting(false);
+                orchestrator.endProviderTurn();
+            } else {
+                orchestrator.closeOpenQuestion();
+            }
+        },
         onEvent(event, id, model) {
             if (event.type === 'error' && event.fatal && id === 'deepgram-flux') {
                 answerWriter?.cancelDraft('fatal_error');
@@ -281,16 +316,22 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 orchestrator.clearClarification();
                 orchestrator.endProviderTurn();
             }
-            if (event.type === 'error' && event.fatal && !options.pipeline) { options.onFailure(event.code); return; }
+            if (event.type === 'error' && event.fatal && !options.pipeline) {
+                showStatus('Backup brain unavailable');
+                options.onFailure(event.code);
+                return;
+            }
             const backup = id === 'pipeline' && preferred !== 'pipeline';
             if (id !== 'pipeline') {
                 if (event.type === 'interviewer_speech_started') turnAnswered = false;
                 if (event.type === 'response_started') {
                     presented = false;
+                }
+                if (event.type === 'response_delta' && event.text.trim()) {
                     turnAnswered = true;
                     pendingQuestion = undefined;
                 }
-                if (event.type === 'decision' && (event.action === 'answer' || event.action === 'ask')) {
+                if (event.type === 'decision' && event.action === 'wait') {
                     turnAnswered = true;
                     pendingQuestion = undefined;
                 }
@@ -353,6 +394,18 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             });
             supervisor.start();
         },
+        refreshContext() {
+            const previous = grounding;
+            grounding = options.readGroundingState?.();
+            if (!previous || !grounding || previous.groundingKey === grounding.groundingKey) return;
+            answerWriter?.cancelDraft('context_changed');
+            if ((previous.profileAllowed && !grounding.profileAllowed)
+                || (previous.knowledgeEnabled && !grounding.knowledgeEnabled)) {
+                orchestrator.resetTurnState();
+                showStatus('Context changed — reconnecting');
+                supervisor.refreshContext();
+            }
+        },
         stop() {
             if (!started) return;
             started = false;
@@ -407,6 +460,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         },
         cancelAnswer(reason) {
             orchestrator.clearClarification();
+            if (reason === 'manual_answer') orchestrator.noteManualCancel();
             if (supervisor.current?.id === 'deepgram-flux') {
                 answerWriter?.cancelDraft(reason);
                 answerWriter?.cancel(reason);

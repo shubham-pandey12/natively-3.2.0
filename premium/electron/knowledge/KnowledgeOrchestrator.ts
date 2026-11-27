@@ -49,6 +49,16 @@ export class KnowledgeOrchestrator {
     }
     private db: KnowledgeDatabaseManager;
     private knowledgeModeActive: boolean = false;
+    private liveProfileRevision = 0;
+    private liveGroundingChangeListener?: () => void;
+
+    getLiveProfileRevision(): number {
+        return this.liveProfileRevision;
+    }
+
+    setLiveGroundingChangeListener(listener: () => void): void {
+        this.liveGroundingChangeListener = listener;
+    }
     private depthScorer: TechnicalDepthScorer;
     private aotPipeline: AOTPipeline;
     private salaryEngine: SalaryIntelligenceEngine;
@@ -519,7 +529,9 @@ export class KnowledgeOrchestrator {
             console.warn('[KnowledgeOrchestrator] Cannot enable knowledge mode: no resume or JD loaded');
             return;
         }
+        const changed = this.knowledgeModeActive !== enabled;
         this.knowledgeModeActive = enabled;
+        if (changed) this.liveGroundingChangeListener?.();
         console.log(`[KnowledgeOrchestrator] Knowledge mode ${enabled ? 'ENABLED' : 'DISABLED'}`);
     }
 
@@ -2201,6 +2213,7 @@ export class KnowledgeOrchestrator {
 
     private refreshCache(): void {
         const prevResumeId = this.activeResume?.id ?? null;
+        const prevJdId = this.activeJD?.id ?? null;
         this.activeResume = this.db.getDocumentByType(DocType.RESUME);
         this.activeJD = this.db.getDocumentByType(DocType.JD);
         // RC-3 back-compat: migrate any legacy flat-skills (v1) resume to the
@@ -2213,6 +2226,10 @@ export class KnowledgeOrchestrator {
         // Invalidate the processResume cache if the resume document changed
         if ((this.activeResume?.id ?? null) !== prevResumeId) {
             this._processedResumeCache = null;
+        }
+        if ((this.activeResume?.id ?? null) !== prevResumeId || (this.activeJD?.id ?? null) !== prevJdId) {
+            this.liveProfileRevision++;
+            this.liveGroundingChangeListener?.();
         }
         console.log(`[KnowledgeOrchestrator] Cache refreshed: ${this.cachedNodes.length} total nodes across all docs`);
         // Fire-and-forget: re-embed any nodes left in an incompatible/old space
