@@ -274,7 +274,7 @@ Tasks:
 
 ## Baseline & Tuning Plan (Post-Phase 9)
 
-### Baseline Phase 1 — Baseline Flux against GPT Realtime and Gemini Live
+### Baseline Phase 1 — Baseline Flux against GPT Realtime and Gemini Live  ✅ Done
 
 **Objective:** measure current Windows Electron app behavior (no runtime code changes) across **Deepgram Flux + My AI Provider**, **OpenAI Realtime**, and **Gemini Live** using the same synthetic interview clips before making further tuning or behavior changes.
 
@@ -294,7 +294,7 @@ Tasks:
 
 ### Later phases
 
-2. **Confirmed release of early drafts.** Draft on `EagerEndOfTurn`, cancel on `TurnResumed`, and release only on the matching confirmed turn. Keep the existing confirmed-turn answer as fallback. Measure first-text latency and discarded drafts.
+2. **Confirmed release of early drafts.** Done. Draft on EagerEndOfTurn, cancel on TurnResumed, and release on matching confirmation with confirmed-turn fallback. Windows Electron replays verified draft reuse and faster first text on the complete and paused questions. Correction timing was mixed. See PROGRESS.md for the comparison.
 3. **Interruptions and corrections.** Keep the current answer visible through filler and completed answers visible on ordinary follow-ups. Verify a correction replaces an active stream without stale output.
 4. **Follow-up and clarification context.** Ground pronoun references and short responses in the relevant previous question, answer, or pending clarification. Verify that corrections preserve other constraints.
 5. **Comparison and regressions.** Repeat this corpus. Compare first-text timing, replacement timing, and incorrect or duplicate answers. Check both Deepgram modes and record platform and provider coverage.

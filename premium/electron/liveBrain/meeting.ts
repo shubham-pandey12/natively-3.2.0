@@ -1,5 +1,11 @@
 import { notePromptDebugLiveBrain, isPromptDebugEnabled, notePromptDebugAnswerTiming } from '../../../electron/llm/promptDebug';
-import type { DeepgramThinkConfig, LiveBrainMeetingOptions, LiveBrainMeetingSession } from '../../../electron/premium/liveBrain';
+import type {
+    AutoAnswerDispatchResult,
+    DeepgramThinkConfig,
+    LiveBrainAnswerRequest,
+    LiveBrainMeetingOptions,
+    LiveBrainMeetingSession,
+} from '../../../electron/premium/liveBrain';
 import {
     DEFAULT_DEEPGRAM_FLUX_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
@@ -72,59 +78,102 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
     });
     let supervisor!: BrainSupervisor<Parameters<typeof clearTimeout>[0]>;
     let writerRun: symbol | undefined;
+    let lastWriterStopAt: number | undefined;
+    const settleWriterRun = (run: symbol, outcomeStatus: 'completed' | 'cancelled' | 'failed') => {
+        if (writerRun !== run) return;
+        writerRun = undefined;
+        if (started) showStatus(outcomeStatus === 'completed' && presented ? 'Answer ready' : 'Listening');
+        finishTiming(outcomeStatus);
+        supervisor.setExternalWriting(false);
+    };
+    const trackWriterRun = <T extends { generationId: number; done: Promise<AutoAnswerDispatchResult> }>(
+        request: LiveBrainAnswerRequest,
+        launch: (trackedRequest: LiveBrainAnswerRequest) => T | null,
+    ): T | null => {
+        const liveBrainNotebook = supervisor?.notebookContext || undefined;
+        const stopAt = request.reuseGenerationId !== undefined ? lastWriterStopAt : speechStoppedAt;
+        lastWriterStopAt = stopAt;
+        speechStoppedAt = undefined;
+        const run = Symbol();
+        writerRun = run;
+        presented = false;
+        supervisor.setExternalWriting(true);
+        if (debug) {
+            finishTiming('cancelled');
+            const brainId = supervisor?.current?.id ?? preferred;
+            timing = {
+                brainId,
+                model: (options.model?.trim() || DEFAULT_MODELS[brainId]).replace(/^models\//, ''),
+                responseId: `writer:${Date.now()}`,
+                responseStartedAt: Date.now(),
+                speechStoppedAt: stopAt,
+            };
+        }
+        showStatus('Thinking');
+        const res = launch({
+            ...request,
+            ...(liveBrainNotebook ? { liveBrainNotebook } : {}),
+            ...(stopAt !== undefined ? { speechStoppedAt: stopAt } : {}),
+            onFirstText: (at) => {
+                if (!started || writerRun !== run || request.signal.aborted) return;
+                presented = true;
+                if (timing && timing.firstTextAt === undefined) timing.firstTextAt = at;
+                request.onFirstText?.(at);
+            },
+            onComplete: (text) => {
+                if (!started || writerRun !== run || request.signal.aborted) return;
+                presented = true;
+                const clarification = /^Ask:\s*(\S[\s\S]*)$/i.exec(text.trim());
+                supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
+                if (clarification) orchestrator.noteWriterClarification(request.question);
+                request.onComplete?.(text);
+            },
+        });
+        if (!res) {
+            if (writerRun === run) {
+                writerRun = undefined;
+                speechStoppedAt = stopAt;
+                finishTiming('cancelled');
+                supervisor.setExternalWriting(false);
+            }
+            return null;
+        }
+        void res.done.then(({ status: dispatchStatus }) => {
+            settleWriterRun(run, dispatchStatus === 'completed' || dispatchStatus === 'partial' ? 'completed' : dispatchStatus === 'cancelled' ? 'cancelled' : 'failed');
+        }, () => settleWriterRun(run, 'failed'));
+        return res;
+    };
     const answerWriter = options.engine.runLiveBrainAnswer
         ? new AnswerWriter({
-            runLiveBrainAnswer: (request) => {
-                const liveBrainNotebook = supervisor?.notebookContext || undefined;
-                const stopAt = speechStoppedAt;
-                speechStoppedAt = undefined;
-                const run = Symbol();
-                writerRun = run;
-                presented = false;
-                supervisor.setExternalWriting(true);
-                if (debug) {
-                    finishTiming('cancelled');
-                    const brainId = supervisor?.current?.id ?? preferred;
-                    timing = {
-                        brainId,
-                        model: (options.model?.trim() || DEFAULT_MODELS[brainId]).replace(/^models\//, ''),
-                        responseId: `writer:${Date.now()}`,
-                        responseStartedAt: Date.now(),
-                        speechStoppedAt: stopAt,
-                    };
+            runLiveBrainAnswer: (request) => trackWriterRun(request, tracked => options.engine.runLiveBrainAnswer!(tracked))!,
+            ...(options.engine.startLiveBrainDraft
+                ? {
+                    startLiveBrainDraft: (request) => {
+                        const liveBrainNotebook = supervisor?.notebookContext || undefined;
+                        const inner = options.engine.startLiveBrainDraft!({
+                            ...request,
+                            ...(liveBrainNotebook ? { liveBrainNotebook } : {}),
+                        });
+                        if (!inner) return null;
+                        return {
+                            draftId: inner.draftId,
+                            sessionId: inner.sessionId,
+                            turnKey: inner.turnKey,
+                            question: inner.question,
+                            routeKey: inner.routeKey,
+                            canAdopt: () => inner.canAdopt(),
+                            cancel: (reason: string) => inner.cancel(reason),
+                            adopt: (request) => trackWriterRun(request, tracked => inner.adopt(tracked)),
+                        };
+                    },
                 }
-                showStatus('Thinking');
-                const res = options.engine.runLiveBrainAnswer!({
-                    ...request,
-                    ...(liveBrainNotebook ? { liveBrainNotebook } : {}),
-                    ...(stopAt !== undefined ? { speechStoppedAt: stopAt } : {}),
-                    onFirstText: (at) => {
-                        if (!started || writerRun !== run || request.signal.aborted) return;
-                        presented = true;
-                        if (timing && timing.firstTextAt === undefined) timing.firstTextAt = at;
-                        request.onFirstText?.(at);
-                    },
-                    onComplete: (text) => {
-                        if (!started || writerRun !== run || request.signal.aborted) return;
-                        presented = true;
-                        const clarification = /^Ask:\s*(\S[\s\S]*)$/i.exec(text.trim());
-                        supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
-                        if (clarification) orchestrator.noteWriterClarification(request.question);
-                        request.onComplete?.(text);
-                    },
-                });
-                const settle = (status: 'completed' | 'cancelled' | 'failed') => {
-                    if (writerRun !== run) return;
-                    writerRun = undefined;
-                    if (started) showStatus(status === 'completed' && presented ? 'Answer ready' : 'Listening');
-                    finishTiming(status);
-                    supervisor.setExternalWriting(false);
-                };
-                void res.done.then(({ status }) => {
-                    settle(status === 'completed' || status === 'partial' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed');
-                }, () => settle('failed'));
-                return res;
-            },
+                : {}),
+            ...(options.engine.getLiveBrainAiRouteKey
+                ? { getLiveBrainAiRouteKey: () => options.engine.getLiveBrainAiRouteKey!() }
+                : {}),
+        }, {
+            sessionId: options.sessionId,
+            onDraftEvent: event => diagnostic('flux-draft', { ...event }),
         })
         : undefined;
     const orchestrator = new ResponseOrchestrator({
@@ -173,6 +222,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         onSwitch: data => {
             diagnostic('brain-switch', data);
             if (data.from === 'deepgram-flux') {
+                answerWriter?.cancelDraft('provider_switched');
                 answerWriter?.cancel('answer_corrected');
                 writerRun = undefined;
                 finishTiming('cancelled');
@@ -184,6 +234,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         onRollover: data => diagnostic('rollover', data),
         onEvent(event, id, model) {
             if (event.type === 'error' && event.fatal && id === 'deepgram-flux') {
+                answerWriter?.cancelDraft('fatal_error');
                 answerWriter?.cancel('answer_corrected');
                 writerRun = undefined;
                 finishTiming('cancelled');
@@ -196,7 +247,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             if (event.type === 'status') {
                 if (event.status === 'ready') showStatus(id !== preferred ? 'Backup brain' : 'Listening');
                 if (event.status === 'connecting' || event.status === 'degraded') {
-                    if (id === 'deepgram-flux') orchestrator.endProviderTurn();
+                    if (id === 'deepgram-flux') {
+                        answerWriter?.cancelDraft('reconnecting');
+                        orchestrator.endProviderTurn();
+                    }
                     showStatus('Reconnecting');
                 }
             } else if (!backup) {
@@ -242,6 +296,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             if (!started) return;
             started = false;
             writerRun = undefined;
+            answerWriter?.cancelDraft('meeting_ended');
             answerWriter?.cancel('auto_disabled_or_meeting_ended');
             supervisor.stop();
             orchestrator.reset();
@@ -275,7 +330,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         },
         cancelAnswer(reason) {
             orchestrator.clearClarification();
-            if (supervisor.current?.id === 'deepgram-flux') answerWriter?.cancel(reason);
+            if (supervisor.current?.id === 'deepgram-flux') {
+                answerWriter?.cancelDraft(reason);
+                answerWriter?.cancel(reason);
+            }
             else supervisor.current?.cancelResponse(reason);
         },
     };

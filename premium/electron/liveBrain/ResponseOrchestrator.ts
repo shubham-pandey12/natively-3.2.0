@@ -5,12 +5,14 @@ export type AnswerCompletion = 'completed' | 'cancelled' | 'failed';
 
 export interface AnswerWriterPort {
     write(
-        request: { question: string; replacesAutomaticAnswer: boolean },
+        request: { question: string; replacesAutomaticAnswer: boolean; turnKey?: string },
         options?: { suppressQuestionRow?: boolean },
     ): {
         generationId: number;
         done: Promise<AnswerCompletion>;
     };
+    prepareDraft?(request: { turnKey: string; question: string }): boolean;
+    cancelDraft?(reason: string, turnKey?: string): boolean;
     cancel(reason: string): void;
 }
 
@@ -113,10 +115,10 @@ export class ResponseOrchestrator<Timer> {
 
     constructor(private readonly ports: {
         answerWriter?: AnswerWriterPort;
-        requestClarificationAnswer?: () => boolean | void;
+        requestClarificationAnswer?: () => void;
         overlay: LiveBrainOverlayPort;
         clock: ResponseClock<Timer>;
-    }) {}
+    }) { }
 
     handleEvent(event: LiveBrainEvent): void {
         switch (event.type) {
@@ -129,10 +131,22 @@ export class ResponseOrchestrator<Timer> {
                 this.clearClarification();
                 if (this.current && this.isRecent(this.current)) this.setSpeaking(this.current, true);
                 break;
+            case 'eager_end_of_turn': {
+                if (!this.ports.answerWriter) return;
+                const question = event.question?.trim();
+                if (!question) return;
+                if (!this.askPending && isFillerOnly(question)) return;
+                this.ports.answerWriter.prepareDraft?.({ turnKey: event.turnKey, question });
+                break;
+            }
+            case 'turn_resumed':
+                this.ports.answerWriter?.cancelDraft?.('turn_resumed', event.turnKey);
+                break;
             case 'decision':
                 if (this.ports.answerWriter) this.handleDecision(event);
                 break;
             case 'response_silent':
+                this.ports.answerWriter?.cancelDraft?.('silent_turn');
                 if (this.current) this.setSpeaking(this.current, false);
                 this.closeQuestion();
                 this.answerTurn = undefined;
@@ -178,13 +192,6 @@ export class ResponseOrchestrator<Timer> {
         this.sttPending = { text: clean, at };
     }
 
-    endProviderTurn(): void {
-        this.closeQuestion();
-        this.question = undefined;
-        this.sttPending = undefined;
-        if (this.current) this.setSpeaking(this.current, false);
-    }
-
     reset(): void {
         this.clearClarification();
         this.closeTextResponse();
@@ -192,6 +199,7 @@ export class ResponseOrchestrator<Timer> {
         this.answerTurn = undefined;
         this.sttPending = undefined;
         this.askPending = false;
+        this.ports.answerWriter?.cancelDraft?.('auto_disabled_or_meeting_ended');
         const previous = this.current;
         this.current = undefined;
         this.seenResponseIds.clear();
@@ -204,6 +212,7 @@ export class ResponseOrchestrator<Timer> {
 
     replaceWithExternalAnswer(): void {
         this.clearClarification();
+        this.ports.answerWriter?.cancelDraft?.('external_answer');
         this.replaceCurrent();
     }
 
@@ -211,10 +220,14 @@ export class ResponseOrchestrator<Timer> {
         switch (event.action) {
             case 'answer': {
                 const question = event.question?.trim();
-                if (!question) return;
+                if (!question) {
+                    this.ports.answerWriter?.cancelDraft?.('empty_decision', event.turnKey);
+                    return;
+                }
                 // D15/D17: filler-only speech does not cancel or replace an active answer,
                 // unless an Ask clarification is waiting for a short reply ("Yes.").
                 if (!this.askPending && isFillerOnly(question)) {
+                    this.ports.answerWriter?.cancelDraft?.('filler_turn', event.turnKey);
                     if (this.current) this.setSpeaking(this.current, false);
                     this.closeQuestion();
                     return;
@@ -222,7 +235,7 @@ export class ResponseOrchestrator<Timer> {
                 this.clearClarification();
                 const replacesAutomaticAnswer = this.replaceCurrent();
                 this.closeTextResponse();
-                this.write(question, replacesAutomaticAnswer);
+                this.write(question, replacesAutomaticAnswer, event.turnKey);
                 break;
             }
             case 'ask': {
@@ -236,21 +249,12 @@ export class ResponseOrchestrator<Timer> {
         }
     }
 
-    noteWriterClarification(question: string): void {
-        this.askPending = true;
-        this.armClarification(question);
-    }
-
     private showAsk(askId: string, clarification: string, question?: string, askStreaming?: boolean): void {
         this.clearClarification();
         this.supersedeForNewTurn(false);
         this.askPending = true;
         this.ports.overlay.showAsk({ askId, clarification, ...(askStreaming === undefined ? {} : { askStreaming }) });
-        if (!askStreaming) this.armClarification(question);
-    }
-
-    private armClarification(question?: string): void {
-        this.clearClarification();
+        if (askStreaming) return;
         const requestAnswer = this.ports.requestClarificationAnswer;
         if (!question && !requestAnswer) return;
 
@@ -258,8 +262,10 @@ export class ResponseOrchestrator<Timer> {
             timer: this.ports.clock.setTimeout(() => {
                 if (this.clarification !== pending) return;
                 this.clarification = undefined;
-                if (requestAnswer && requestAnswer() !== false) return;
-                if (!question) return;
+                if (requestAnswer) {
+                    requestAnswer();
+                    return;
+                }
                 this.replaceCurrent();
                 this.closeTextResponse();
                 this.write(`${question}\n\nThe interviewer did not clarify; state a reasonable assumption first, then answer.`, false);
@@ -272,6 +278,46 @@ export class ResponseOrchestrator<Timer> {
         if (!this.clarification) return;
         this.ports.clock.clearTimeout(this.clarification.timer);
         this.clarification = undefined;
+    }
+
+    /**
+     * Called by meeting.ts after the AnswerWriter completes a turn whose text
+     * starts with "Ask:" — the writer already streamed the clarification into
+     * the overlay, so this only sets `askPending` and starts the timeout that
+     * sends a stated-assumption answer if the interviewer does not reply.
+     */
+    noteWriterClarification(question?: string): void {
+        this.askPending = true;
+        const requestAnswer = this.ports.requestClarificationAnswer;
+        if (!question && !requestAnswer) return;
+        const pending = {
+            timer: this.ports.clock.setTimeout(() => {
+                if (this.clarification !== pending) return;
+                this.clarification = undefined;
+                this.askPending = false;
+                if (requestAnswer) {
+                    requestAnswer();
+                    return;
+                }
+                this.replaceCurrent();
+                this.closeTextResponse();
+                this.write(`${question}\n\nThe interviewer did not clarify; state a reasonable assumption first, then answer.`, false);
+            }, CLARIFICATION_MS),
+        };
+        this.clarification = pending;
+    }
+
+    /**
+     * Called by meeting.ts when the Flux provider is switching, reconnecting,
+     * or failed fatally. Clears the in-flight writer turn so the new turn
+     * starts clean. The caller is responsible for cancelling any active writer
+     * stream and draft before calling this.
+     */
+    endProviderTurn(): void {
+        if (this.current) this.setSpeaking(this.current, false);
+        this.closeQuestion();
+        this.answerTurn = undefined;
+        this.sttPending = undefined;
     }
 
     private isRecent(answer: CurrentAnswer): boolean {
@@ -334,15 +380,16 @@ export class ResponseOrchestrator<Timer> {
         return replaced;
     }
 
-    private write(question: string, replacesAutomaticAnswer: boolean): void {
+    private write(question: string, replacesAutomaticAnswer: boolean, turnKey?: string): void {
         const writer = this.ports.answerWriter;
         if (!writer) return;
         this.askPending = false;
         const bubble = this.question && this.question.generationId === undefined ? this.question : undefined;
         if (bubble) this.closeQuestion();
+        const request = { question, replacesAutomaticAnswer, ...(turnKey ? { turnKey } : {}) };
         const { generationId, done } = bubble
-            ? writer.write({ question, replacesAutomaticAnswer }, { suppressQuestionRow: true })
-            : writer.write({ question, replacesAutomaticAnswer });
+            ? writer.write(request, { suppressQuestionRow: true })
+            : writer.write(request);
         if (bubble) {
             bubble.generationId = generationId;
             this.emitQuestion(bubble);

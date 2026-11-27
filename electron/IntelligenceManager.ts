@@ -292,6 +292,18 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.runLiveBrainAnswer(request, this.getFormattedContext(120));
     }
 
+    startLiveBrainDraft(request: import('./premium/liveBrain').LiveBrainDraftRequest): ReturnType<IntelligenceEngine['startLiveBrainDraft']> {
+        return this.engine.startLiveBrainDraft(request, this.getFormattedContext(120));
+    }
+
+    getLiveBrainAiRouteKey(): string {
+        return this.engine.getLiveBrainAiRouteKey();
+    }
+
+    cancelLiveBrainDrafts(reason = 'provider_switched'): void {
+        this.engine.cancelLiveBrainDrafts(reason);
+    }
+
     /** Stop the AUTOMATIC answer only (never a manual one). See IntelligenceEngine.cancelAutomaticAnswer. */
     cancelAutomaticAnswer(reason: Parameters<IntelligenceEngine['cancelAutomaticAnswer']>[0]): boolean {
         return this.engine.cancelAutomaticAnswer(reason);

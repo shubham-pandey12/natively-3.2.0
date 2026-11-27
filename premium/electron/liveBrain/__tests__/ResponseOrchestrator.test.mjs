@@ -40,6 +40,10 @@ async function rig() {
         sessionId: 'test', instructions: '', recentTurns: [], signal: new AbortController().signal,
         notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 },
     });
+    await brain.start({
+        sessionId: 'test', instructions: '', recentTurns: [], signal: new AbortController().signal,
+        notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 },
+    });
     let sequence = 0;
     const decision = (action, data = {}) => brain.emit({ type: 'decision', decisionId: `d${++sequence}`, action, at: clock.now(), ...data });
     return { brain, clock, calls, completions, orchestrator, decision };
@@ -451,4 +455,65 @@ test('D17: AnswerWriter path suppresses filler while keeping answers, allows Yes
     h.decision('answer', { question: 'Yes.' });
     assert.equal(h.calls.filter(([k]) => k === 'write').length, 3);
     assert.equal(h.calls.filter(([k]) => k === 'write').at(-1)[1].question, 'Yes.');
+});
+
+test('Phase 2: ResponseOrchestrator skips empty/filler eager turns, allows Yes on Ask, and cancels drafts on TurnResumed/reset', async () => {
+    const brain = new FakeLiveBrain();
+    const clock = new FakeClock();
+    const calls = [];
+    const completions = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        answerWriter: {
+            prepareDraft: req => { calls.push(['prepareDraft', req]); return true; },
+            cancelDraft: (reason, turnKey) => { calls.push(['cancelDraft', reason, turnKey]); return true; },
+            write(req) {
+                calls.push(['write', req]);
+                const completion = Promise.withResolvers();
+                completions.push(completion);
+                return { generationId: completions.length, done: completion.promise };
+            },
+            cancel: reason => calls.push(['cancel', reason]),
+        },
+        overlay: {
+            showAsk: payload => calls.push(['ask', payload]),
+            setOutdated: (...args) => calls.push(['outdated', ...args]),
+            setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
+            showQuestion: payload => calls.push(['question', payload]),
+            showText: payload => calls.push(['text', payload]),
+        },
+    });
+    brain.onEvent(event => orchestrator.handleEvent(event));
+    await brain.start({
+        sessionId: 'test', instructions: '', recentTurns: [], signal: new AbortController().signal,
+        notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 },
+    });
+
+    // Empty and filler eager turns must not start drafts or touch active state.
+    brain.emit({ type: 'eager_end_of_turn', turnKey: 'c1:t0', question: '   ', at: clock.now() });
+    brain.emit({ type: 'eager_end_of_turn', turnKey: 'c1:t0', question: 'Mm-hmm.', at: clock.now() });
+    assert.equal(calls.filter(([k]) => k === 'prepareDraft').length, 0);
+
+    // Meaningful eager turn prepares draft, TurnResumed cancels it, fresh eager prepares again, decision writes with turnKey.
+    brain.emit({ type: 'eager_end_of_turn', turnKey: 'c1:t1', question: 'How does', at: clock.now() });
+    brain.emit({ type: 'turn_resumed', turnKey: 'c1:t1', at: clock.now() });
+    brain.emit({ type: 'eager_end_of_turn', turnKey: 'c1:t1', question: 'How does caching work?', at: clock.now() });
+    brain.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'How does caching work?', turnKey: 'c1:t1', at: clock.now() });
+    assert.deepEqual(calls.filter(([k]) => k === 'prepareDraft' || k === 'cancelDraft' || k === 'write'), [
+        ['prepareDraft', { turnKey: 'c1:t1', question: 'How does' }],
+        ['cancelDraft', 'turn_resumed', 'c1:t1'],
+        ['prepareDraft', { turnKey: 'c1:t1', question: 'How does caching work?' }],
+        ['write', { question: 'How does caching work?', replacesAutomaticAnswer: false, turnKey: 'c1:t1' }],
+    ]);
+
+    // Pending Ask exception: "Yes." IS eligible for early drafting.
+    completions[0].resolve('completed');
+    await flush();
+    brain.emit({ type: 'decision', decisionId: 'd2', action: 'ask', question: 'Use Redis?', clarification: 'In-memory?', at: clock.now() });
+    brain.emit({ type: 'eager_end_of_turn', turnKey: 'c1:t2', question: 'Yes.', at: clock.now() });
+    assert.deepEqual(calls.filter(([k]) => k === 'prepareDraft').at(-1), ['prepareDraft', { turnKey: 'c1:t2', question: 'Yes.' }]);
+
+    // Meeting end / reset cancels any active draft cleanly.
+    orchestrator.reset();
+    assert.ok(calls.some(([k, reason]) => k === 'cancelDraft' && reason === 'auto_disabled_or_meeting_ended'));
 });

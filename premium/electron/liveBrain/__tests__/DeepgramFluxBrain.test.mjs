@@ -102,6 +102,7 @@ test('Flux handshake connects to /v2/listen with linear16 16kHz, streams 80ms bi
     assert.match(conn.url, /encoding=linear16/);
     assert.match(conn.url, /sample_rate=16000/);
     assert.match(conn.url, /eot_threshold=0\.95/);
+    assert.match(conn.url, /eager_eot_threshold=0\.5/);
     assert.match(conn.url, /eot_timeout_ms=1500/);
     assert.ok(events.some(e => e.type === 'status' && e.status === 'ready'));
 
@@ -276,4 +277,49 @@ test('Test Connection separates Flux WS verification from active AI route status
     assert.equal(unconfigured.fluxResult.connected, true);
     assert.equal(unconfigured.fluxResult.aiRoute.configured, false);
     assert.equal(unconfigured.fluxResult.aiRoute.replied, false);
+});
+
+test('Phase 2 Flux turnKey scoping: duplicate EagerEndOfTurn dedupes, TurnResumed allows a fresh eager draft, and reconnect changes turnKey', async (t) => {
+    let attemptCount = 0;
+    const { brain, events, connections } = await createRig(t, {
+        brainOptions: { backoffMs: [10, 10, 10] },
+        onOpen: (socket, attempt) => {
+            attemptCount = attempt;
+            sendJson(socket, { type: 'Connected', sequence_id: 0 });
+        },
+    });
+    await brain.start(makeContext());
+    const conn1 = connections[0];
+
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 0, transcript: '' });
+    // Duplicate EagerEndOfTurn with identical transcript emits one eager event.
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', turn_index: 0, transcript: 'How would you design a system' });
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', turn_index: 0, transcript: 'How would you design a system' });
+    // TurnResumed cancels active eager turn; a subsequent EagerEndOfTurn opens a fresh draft event.
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'TurnResumed', turn_index: 0, transcript: 'How would you design a system that scales' });
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', turn_index: 0, transcript: 'How would you design a system that scales globally?' });
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 0, transcript: 'How would you design a system that scales globally?' });
+
+    await until(() => events.filter(e => e.type === 'decision').length === 1);
+    const eagers = events.filter(e => e.type === 'eager_end_of_turn');
+    const resumed = events.filter(e => e.type === 'turn_resumed');
+    const decisions = events.filter(e => e.type === 'decision');
+    assert.equal(eagers.length, 2);
+    assert.equal(resumed.length, 1);
+    assert.equal(eagers[0].turnKey, resumed[0].turnKey);
+    assert.equal(eagers[1].turnKey, decisions[0].turnKey);
+    assert.equal(decisions[0].question, 'How would you design a system that scales globally?');
+
+    // Start turn_index=0 eager on connection 1, then drop socket and reconnect.
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 1, transcript: '' });
+    sendJson(conn1.socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', turn_index: 1, transcript: 'What about sharding?' });
+    await until(() => events.filter(e => e.type === 'eager_end_of_turn').length === 3);
+    const preReconnectTurnKey = events.filter(e => e.type === 'eager_end_of_turn').at(-1).turnKey;
+
+    conn1.socket.terminate();
+    await until(() => attemptCount === 2 && connections[1] && events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+    sendJson(connections[1].socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 0, transcript: 'What about sharding?' });
+    await until(() => events.filter(e => e.type === 'decision').length === 2);
+    const reconnectDecision = events.filter(e => e.type === 'decision').at(-1);
+    assert.notEqual(reconnectDecision.turnKey, preReconnectTurnKey);
 });

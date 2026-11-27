@@ -20,6 +20,7 @@
 | 8 — Deepgram Voice Agent (D16) | ✅ Done | Implemented `'deepgram-voice-agent'` with Deepgram-managed and public BYO HTTPS endpoints, 16 kHz raw binary PCM transport, 25k managed prompt cap, grouped Settings picker, and mocked tests. Windows dev live meeting verified after the review fixes. Physical macOS and packaged Deepgram checks remain open. |
 | 9 — Deepgram Flux + My AI Provider (D17) | ✅ Done | Implemented `'deepgram-flux'` standalone `/v2/listen` STT (`flux-general-multi`) routed into Natively's existing `AnswerWriter` / `IntelligenceEngine` streaming answer engine, supporting all configured AI Providers (OpenAI, Claude, Gemini, Groq, OpenRouter, Codex CLI, Antigravity, local Ollama, DeepSeek, NVIDIA NIM, custom). All builds, typechecks, unit/component tests, and Windows side-by-side live benchmarks passed. The later baseline covers Windows Electron replay. Physical macOS verification remains open. |
 | Baseline 1 — Flux vs GPT Realtime & Gemini Live | ✅ Done | Measured Windows Electron app (`dev:agent` WASAPI loopback) on 6 synthetic interview scenarios across `deepgram-flux` (`codex-cli` and `openai/gpt-4o-mini`) and `gemini-live` (`gemini-3.1-flash-live-preview`). OpenAI Realtime (`gpt-realtime-2.1`) setup was rejected on the available account and no Realtime model appeared in its model list. Documented the filler duplicate, completed-answer fold, and the clarification scenario that could not be reached. Physical macOS verification remains open. |
+| Baseline 2 — Flux Private Draft | ✅ Done | Verified on Windows Electron (`dev:agent` WASAPI loopback, `deepgram-flux` / `flux-general-multi` + `codex-cli`, Technical Interview, `full` prompt) vs fresh `5c092319` baseline worktree. S1 first overlay text dropped from `6,024` / `6,628 ms` to `2,471` / `2,863 ms` (smoke `2,322 ms`); S2 pause held with 2–3 `turn_resumed` draft discards and 1 final answer (`4,863` / `4,054 ms` vs `6,290` / `4,499 ms`); S4 cancelled Q1 cleanly with no stale chunks (`6,329` / `7,966 ms` vs `6,554` / `3,517 ms`, cause of the timing difference unverified). All 126 Live Brain tests, build, and typechecks pass. Physical macOS verification remains open. |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
 
@@ -716,6 +717,109 @@ Runs: `n=1` for S1/S4/S5/S6; `n=2` for S2 & S3 (S2 run 1 timed out at 25 s befor
   (3,246 passed, 15 skipped), `npm run test:components` (1,002 passed, two
   skipped), `npm run typecheck:electron`, `npm run typecheck:premium`,
   `npm run typecheck:ts7`, and `git diff --check`.
+
+## Baseline 2 — Flux Private Draft (2026-11-27)
+
+### Implementation
+
+Phase 2 adds an early private LLM draft for `deepgram-flux`. On `EagerEndOfTurn` (Flux confidence ≥ 0.5) the system starts a private `IntelligenceEngine.startLiveBrainDraft()` call that runs `runWhatShouldISayInner` in a fully suppressed mode: no overlay events, no session entries, no generation-id claim, no notebook writes, no FG-gate acquisition. Buffered text chunks accumulate in the draft's `rawChunks` array. On confirmed `EndOfTurn`, `AnswerWriter.write()` atomically adopts the draft if the session, turn-key, transcript, and AI route all still match; otherwise it falls back to a fresh `runLiveBrainAnswer`. On `TurnResumed`, the draft is cancelled silently.
+
+**Files changed (13 total):**
+
+| File | Change |
+|---|---|
+| `electron/IntelligenceEngine.ts` | Added `startLiveBrainDraft`, `cancelLiveBrainDrafts`, `getLiveBrainAiRouteKey`, `InternalPrivateLiveBrainDraft`, `pushTokenToLivePipeline`, private-draft mode in `runWhatShouldISayInner`, `claimAdoptedDraft`, `acquireFg`/`releaseFg` helpers |
+| `electron/IntelligenceManager.ts` | Delegation methods: `startLiveBrainDraft`, `getLiveBrainAiRouteKey`, `cancelLiveBrainDrafts` |
+| `electron/main.ts` | `sendModelChanged()` calls `cancelLiveBrainDrafts('provider_switched')` before model-changed broadcast |
+| `electron/premium/liveBrain.ts` | `LiveBrainDraftRequest`, `LiveBrainAdoptedDraft`, `LiveBrainPrivateDraft`, `reuseGenerationId` on answer request; optional `startLiveBrainDraft` and `getLiveBrainAiRouteKey` on engine/meeting interface; `export type { AutoAnswerDispatchResult }` |
+| `premium/electron/liveBrain/AnswerWriter.ts` | `prepareDraft`, `cancelDraft`, updated `write` for draft adoption, fallback guard, `visibleTextShown` |
+| `premium/electron/liveBrain/ResponseOrchestrator.ts` | Handles `eager_end_of_turn` → `prepareDraft`; `turn_resumed` → `cancelDraft`; `reset`/`replaceWithExternalAnswer` → `cancelDraft`; added `noteWriterClarification` (ask-pending + timer) and `endProviderTurn` (provider switch/reconnect cleanup) |
+| `premium/electron/liveBrain/brains/DeepgramFluxBrain.ts` | `eager_eot_threshold=0.5` URL param; `connectionSequence`/`currentConnectionKey`/`activeEager` fields; `EagerEndOfTurn` → `eager_end_of_turn` with deduplication; `TurnResumed` → `turn_resumed`; `EndOfTurn` carries `turnKey`; `dispose()` clears `activeEager` |
+| `premium/electron/liveBrain/types.ts` | Added `eager_end_of_turn` and `turn_resumed` event types; `decision` event carries optional `turnKey` |
+| `premium/electron/liveBrain/meeting.ts` | `answerWriter` wired with `startLiveBrainDraft`/`getLiveBrainAiRouteKey`; `trackWriterRun` supports `reuseGenerationId`; `onSwitch`/fatal/reconnect call `cancelDraft` and `endProviderTurn`; `stop()` calls `cancelDraft('meeting_ended')`; `noteWriterClarification` wired from `onComplete` |
+| `docs/live-brain/ARCHITECTURE.md` | §4.4 AnswerWriter documented with Phase 2 private-draft lifecycle; §4.7 DeepgramFluxBrain updated with `eager_eot_threshold`, `eager_end_of_turn`, `turn_resumed`, turn-key scoping, draft cancellation events; `LiveBrainEvent` union extended |
+| `premium/electron/liveBrain/__tests__/DeepgramFluxBrain.test.mjs` | Phase 2: duplicate `EagerEndOfTurn` dedup, `TurnResumed` allows fresh eager draft, reconnect changes `turnKey` |
+| `premium/electron/liveBrain/__tests__/ResponseOrchestrator.test.mjs` | Phase 2: empty/filler eager turns skipped, `Yes` on Ask allowed, `TurnResumed`/reset cancel drafts |
+| `premium/electron/liveBrain/__tests__/Meeting.test.mjs` | 6 Phase 2 integration tests (see below) |
+
+### New tests (all pass, 2026-11-27)
+
+| Test | Scenario |
+|---|---|
+| `Phase 2: confirmation before first token promotes in-flight draft` | `EagerEndOfTurn` → draft started; `EndOfTurn` arrives before first token; adoption is atomic; one overlay row |
+| `Phase 2: completed private draft leaks zero state until EndOfTurn` | Draft completes before `EndOfTurn`; buffered chunks released exactly once on confirmation; no overlay events before that |
+| `Phase 2: buffered-to-live handoff preserves chunk order` | Chunks buffered before adoption flushed in order; no loss or duplication |
+| `Phase 2: TurnResumed discards draft; changed final transcript` | `TurnResumed` → `cancelDraft`; fresh `EagerEndOfTurn` allowed; changed final transcript → draft discarded, fresh fallback |
+| `Phase 2: early AI failures fall back; post-text failures blocked` | Pre-text draft failure → fresh `runLiveBrainAnswer`; post-text failure → no second answer |
+| `Phase 2: provider/route change, reconnect, meeting end cancel drafts` | Each lifecycle event cancels active drafts with zero leakage |
+
+### Windows Electron replay — 2026-11-27
+
+#### Root cause of prior zero-event replay & smoke test
+
+The earlier `replay_phase2.mjs` run reported `0` overlay answers because its CDP selector `pages.find((p) => p.url().includes('window=overlay'))` matched `http://127.0.0.1:52731/?window=overlay-toggle` (which appeared earlier in `pages`) instead of `window=overlay`. Fixed `smoke_one.mjs` and `replay_phase2.mjs` to match `new URL(p.url()).searchParams.get('window') === 'overlay'`.
+
+#### Pre-benchmark Test Connection & smoke verification
+
+- **Selected route:** `deepgram-flux` (`flux-general-multi`) + `codex-cli` (`codex-cli`), Technical Interview mode, `promptVariant: full`, isolated `dev:agent` (`NATIVELY_E2E=1`, `NATIVELY_PROMPT_DEBUG=1`).
+- **`window.electronAPI.testLiveBrainConnection('deepgram-flux')`:** `{ success: true, message: "Deepgram Flux connected. · Codex CLI (codex-cli) replied.", fluxResult: { connected: true, aiRoute: { provider: "codex-cli", model: "codex-cli", configured: true, replied: true } } }`.
+- **Smoke test (`smoke_one.mjs`, `s1_complete.wav`):** `31` overlay events captured; live interviewer transcript streamed into `q1` (`"What is the difference between horizontal and vertical scaling?"`, `done: true` at `+1,401 ms`); Flux `EndOfTurn` at `+1,381 ms` (`speechStoppedAt`); first visible overlay `token_batch` at **`2,322 ms`** after speech end (`939 ms` after `EndOfTurn`); `final` at `3,405 ms`.
+
+#### Paired Windows Electron comparison: `5c092319` baseline vs Phase 2 working tree
+
+Replayed the same trimmed 16 kHz mono PCM WAV clips (`s1_complete.wav`, `s2_pause1200.wav`, `s4_question.wav`, `s4_correction.wav`) in fresh meetings (`n=2` reps per scenario) using `deepgram-flux` (`flux-general-multi`) + `codex-cli` (`codex-cli`). The baseline ran in an isolated detached worktree at `5c092319` (`dev:agent` CDP port `56824`); Phase 2 ran in the current working tree (`dev:agent` CDP port `52730`).
+
+~~~powershell
+# Phase 2 working tree (current repo)
+$env:NATIVELY_E2E='1'; $env:NATIVELY_PROMPT_DEBUG='1'; npm run dev:agent
+node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase2.mjs" --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli --reps 2
+
+# Isolated 5c092319 baseline worktree
+git worktree add --detach C:\Users\dell\Desktop\shubham\natively-baseline-5c092319 5c092319
+$env:NATIVELY_E2E='1'; $env:NATIVELY_PROMPT_DEBUG='1'; npm run dev:agent
+node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase2.mjs" --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli --reps 2 --out "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\results_baseline_5c092319_flux_codex-cli.json"
+~~~
+
+| Scenario | Run | `5c092319` EoT / EoT→1st / Speech→1st | Phase 2 EoT / EoT→1st / Speech→1st | Phase 2 Drafts (start / reuse / discard) | Notes |
+|---|---|---|---|---|---|
+| 1. Complete question (`n=2`) | rep 1 | `1,959` / `4,060` / **`6,024 ms`** | `2,006` / `464` / **`2,471 ms`** | `1 / 1 / 0` | One answer (`62` chunks vs `4`); `-3,553 ms` |
+| 1. Complete question (`n=2`) | rep 2 | `2,191` / `4,434` / **`6,628 ms`** | `1,299` / `1,562` / **`2,863 ms`** | `1 / 1 / 0` | One answer (`56` chunks vs `4`); `-3,765 ms` |
+| 2. 1.2 s mid-question pause (`n=2`) | rep 1 | `2,577` / `3,712` / **`6,290 ms`** | `2,270` / `2,590` / **`4,863 ms`** | `3 / 1 / 2` | Both discards `turn_resumed`; 1 final answer; `-1,427 ms` |
+| 2. 1.2 s mid-question pause (`n=2`) | rep 2 | `2,814` / `1,683` / **`4,499 ms`** | `2,769` / `1,283` / **`4,054 ms`** | `4 / 1 / 3` | All 3 discards `turn_resumed`; 1 final answer; `-445 ms` |
+| 4. Correction mid-stream (`n=2`) | rep 1 | Corr: `2,220` / `4,332` / **`6,554 ms`** | Corr: `1,910` / `4,417` / **`6,329 ms`** | `2 / 2 / 0` | Q1 cancelled (`doneAt: null`, `outdated: true`), replacement `updated: true`, no stale chunks |
+| 4. Correction mid-stream (`n=2`) | rep 2 | Corr: `2,326` / `1,191` / **`3,517 ms`** | Corr: `2,285` / `5,679` / **`7,966 ms`** | `2 / 2 / 0` | Q1 cancelled (`doneAt: null`, `outdated: true`), replacement `updated: true`, no stale chunks; `codex-cli` subprocess variance |
+
+**Summary of full-app replay findings:**
+- **Draft reuse & pause protection verified live:** Every S1 and S4 turn reused its private draft (`6/6` turns reused). Both S2 1.2 s paused turns fired `EagerEndOfTurn` during speech/pause, cancelled those drafts cleanly on `TurnResumed` (`2` and `3` discards), produced zero premature answers during the pause, and reused the final post-pause draft.
+- **S1 & S2 latency improved:** S1 improved by `3.55–3.77 s` (`2,471` / `2,863 ms` vs `6,024` / `6,628 ms`). S2 improved by `0.45–1.43 s` (`4,863` / `4,054 ms` vs `6,290` / `4,499 ms`).
+- **S4 replacement latency:** `6,329` / `7,966 ms` vs `6,554` / `3,517 ms` on `codex-cli`. In both Phase 2 runs, Q1 was actively streaming and cancelled mid-stream (`status: 'cancelled'`, `doneAt: null`), whereas in the `5c092319` baseline runs Q1 had already completed in 4 chunks (`4.5 s` / `4.4 s`) before Q2's `EndOfTurn`. Because `codex-cli` spawns a subprocess per request, overlapping cancellation/turn startup plus CLI variance explains the `3.5 s`–`8.0 s` range; no stale chunks leaked into the replacement answer.
+- **Separation of evidence:** The table above contains full Windows Electron app (`dev:agent` WASAPI loopback) measurements only. Transport-level socket probes and mocked `IntelligenceEngine` tests (`Meeting.test.mjs`) are tracked separately under **New tests** and **Independent Phase 2 review**.
+
+### Key decisions
+
+- **Eager threshold = 0.5** (URL param `eager_eot_threshold=0.5`), separate from confirmed threshold (0.95). Chosen to start drafts early without changing the confirmed-turn window. Document-only decision; not user-configurable yet.
+- **Turn-key scoping per connection:** `${sessionId}:c${connectionSequence}:t${turnIndex}`. Old connection's drafts cannot be adopted after reconnect even if `turnIndex` coincidentally matches.
+- **Private draft route key:** `getLiveBrainAiRouteKey()` tries `getDirectAssistSelection()` → `getCurrentProvider()/getCurrentModelId()` → `'unknown:unknown'`. A provider-model change (from Settings or model selector) cancels all active drafts before the model-changed IPC broadcast.
+- **Post-text failure guard:** once `visibleTextShown` is set on an adopted draft, `AnswerWriter.write()` does not start a second fallback `runLiveBrainAnswer` — the existing answer stream handles its own failure path.
+- **`noteWriterClarification` and `endProviderTurn`** are new `ResponseOrchestrator` public methods added in this phase. `noteWriterClarification` is called when the `AnswerWriter`'s `onComplete` callback reveals the completed text starts with `Ask:` (the AnswerWriter already streamed it; the orchestrator only sets `askPending` and starts the clarification timer). `endProviderTurn` is called on provider switch, reconnect, or fatal error to clear the in-flight writer turn state so the next provider starts clean.
+
+### Validation
+
+- **`npm run test:live-brain`:** 126/126 pass, 0 fail (up from 118 before this phase; 8 new tests added).
+- **`npm run typecheck:electron`:** clean.
+- **`npm run typecheck:premium`:** clean.
+- **`npm run typecheck:ts7`:** clean.
+- **`npm run test:lib`:** 3246/3261 pass, 15 skipped (unchanged).
+- **`npm run test:components`:** 1002/1004 pass, 2 skipped (unchanged).
+- **`npm run build:electron`:** passed (exit 0).
+- **Windows Electron replay:** verified on `deepgram-flux` (`flux-general-multi`) + `codex-cli` (`codex-cli`) across S1, S2, S4 (`n=2` reps each, plus `n=1` S1 smoke test) vs fresh `5c092319` baseline (`n=2` reps each).
+- **Requires physical macOS verification.** Shared capture and Live Brain code reviewed; macOS was not executed.
+
+### Independent Phase 2 review
+
+Fixed a private-draft path that could abort an active Assist request before confirmation. Draft adoption now respects manual answer ownership, and a pre-text retry rechecks generation ownership after waiting for the automatic slot. The first Windows replay captured no confirmed turns. The later replay corrected the overlay selector and supersedes that result. The compiled adapter replayed the same 1.2-second paused WAV against live Flux and reported eager → resumed → eager → one confirmed decision. The second eager event preceded confirmation by 1,279 ms on this transport run. That interval measures opportunity for overlap, without measuring model generation or the overlay. The independent Electron build and 126 Live Brain tests, premium type check, and diff whitespace check passed.
+
+The final review recalculated first-text and replacement times from both saved Electron JSON summaries. All six Phase 2 runs reused a draft. The paused clips each yielded one answer and discarded five resumed drafts across the two runs. Both original correction streams were superseded and both replacements completed. The replay demonstrates faster first text for the complete and paused questions on this route. It does not establish a correction-latency improvement.
 
 ## Open risks
 

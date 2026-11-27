@@ -2843,6 +2843,7 @@ export class AppState {
    * renderer re-render twice for one change.
    */
   public sendModelChanged(modelId: string): void {
+    this.intelligenceManager.cancelLiveBrainDrafts('provider_switched');
     const targets = [
       this.getWindowHelper().getOverlayWindow(),
       this.modelSelectorWindowHelper.getWindow(),

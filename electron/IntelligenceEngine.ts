@@ -5,12 +5,32 @@
 import type { WhatToAnswerQuestionEvent } from '../src/types/whatToAnswerQuestion';
 import type { SessionWriteDecision } from './llm/FinalAnswerGenerationPolicy';
 import type { AutoAnswerCancelReason, AutoAnswerDispatchResult } from './premium/autoAnswer';
-import type { LiveBrainAnswerRequest } from './premium/liveBrain';
+import type {
+    LiveBrainAdoptedDraft,
+    LiveBrainAnswerRequest,
+    LiveBrainDraftRequest,
+    LiveBrainPrivateDraft,
+} from './premium/liveBrain';
 import { DISPATCH_MAX_MS, DISPATCH_STALL_MS } from './llm/automaticAnswerTiming';
 import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 
 /** What an automatic trigger resolved to (Auto Answer retries or reports anything not completed). */
 export type AutomaticAnswerResult = AutoAnswerDispatchResult;
+
+interface InternalPrivateLiveBrainDraft {
+    readonly draftId: number;
+    readonly sessionId: string;
+    readonly turnKey: string;
+    readonly question: string;
+    readonly routeKey: string;
+    readonly abortController: AbortController;
+    adopted: boolean;
+    visibleTextShown: boolean;
+    phase: 'buffering' | 'completed_private' | 'adopted' | 'failed' | 'cancelled';
+    rawChunks: string[];
+    adoptHandler?: (liveReq: LiveBrainAnswerRequest, generationId: number) => boolean;
+    resolveWaitAdopt?: (verdict: 'adopt' | 'abort') => void;
+}
 import { LiveHelperLLM, LIVE_HELPER_EMPTY, LIVE_HELPER_WINDOW_SECONDS, catchUpWindowSeconds, liveHelperDisplayKind, type LiveHelperAction } from './llm/liveHelpers';
 import { CustomButtonLLM, CUSTOM_BUTTON_EMPTY, CUSTOM_BUTTON_WINDOW_SECONDS } from './llm/customButtons';
 import type { CustomButtonActionV2 } from './llm/promptSystemV2';
@@ -742,6 +762,8 @@ export class IntelligenceEngine extends EventEmitter {
     // active meeting, so detectAndEmitDynamicActions becomes a no-op safely.
     private dynamicActionEngine: DynamicActionEngine | null = null;
     private currentSessionId: string | null = null;
+    private nextLiveBrainDraftId = 0;
+    private readonly activeLiveBrainDrafts = new Set<{ cancel: (reason: string) => void }>();
 
     /**
      * THE conversation-ring key for every surface, computed in one place.
@@ -2085,13 +2107,134 @@ export class IntelligenceEngine extends EventEmitter {
         }, options.speechStoppedAt);
     }
 
+    getLiveBrainAiRouteKey(): string {
+        try {
+            const sel = (this.llmHelper as any)?.getDirectAssistSelection?.();
+            if (sel?.provider && sel?.model) return `${sel.provider}:${sel.model}`;
+        } catch { /* fall through */ }
+        try {
+            const provider = this.llmHelper?.getCurrentProvider?.() ?? 'unknown';
+            const model = (this.llmHelper as any)?.getCurrentModelId?.() ?? this.llmHelper?.getCurrentModel?.() ?? 'unknown';
+            return `${provider}:${model}`;
+        } catch {
+            return 'unknown:unknown';
+        }
+    }
+
+    cancelLiveBrainDrafts(reason = 'cancelled'): void {
+        for (const draft of [...this.activeLiveBrainDrafts]) {
+            draft.cancel(reason);
+        }
+    }
+
+    startLiveBrainDraft(request: LiveBrainDraftRequest, _context: string): LiveBrainPrivateDraft | null {
+        const question = request.question?.trim();
+        if (!question) return null;
+        const draftId = ++this.nextLiveBrainDraftId;
+        const routeKey = this.getLiveBrainAiRouteKey();
+        const abortController = new AbortController();
+        const turnOut: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } = {};
+        const outcomeOut: WhatToSayOutcomeOut = {
+            value: { status: 'failed', retryable: true, reason: 'generation_not_completed' },
+        };
+        const startedUnder = this.conversationSessionId();
+        const control: InternalPrivateLiveBrainDraft = {
+            draftId,
+            sessionId: request.sessionId,
+            turnKey: request.turnKey,
+            question,
+            routeKey,
+            abortController,
+            adopted: false,
+            visibleTextShown: false,
+            phase: 'buffering',
+            rawChunks: [],
+        };
+        const entry = {
+            cancel: (reason: string) => handle.cancel(reason),
+        };
+        this.activeLiveBrainDrafts.add(entry);
+
+        const run = this.runWhatShouldISayInner(question, 0.85, undefined, {
+            skipCooldown: true,
+            promptInstruction: 'If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.',
+            ...(request.liveBrainNotebook ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
+            privateDraft: control,
+            turnOut,
+            outcomeOut,
+        });
+
+        const done: Promise<AutomaticAnswerResult> = run.then((answer): AutomaticAnswerResult => {
+            if (!control.adopted) {
+                return { status: control.phase === 'cancelled' ? 'cancelled' : 'failed' };
+            }
+            const declined = turnOut.writeDecision?.policy === 'do_not_store';
+            if (answer && !declined) {
+                this.recordLiveTurn(answer, undefined, question, 0, undefined, 'meeting', { startedUnder });
+            }
+            const outcome = outcomeOut.value;
+            if (outcome?.status === 'success') return { status: 'completed' };
+            if (outcome?.status === 'cancelled') return { status: 'cancelled' };
+            if (control.visibleTextShown) return { status: 'completed' };
+            return { status: 'failed', retryable: outcome?.retryable !== false };
+        }, (): AutomaticAnswerResult => ({ status: 'failed', retryable: true }))
+            .finally(() => {
+                this.activeLiveBrainDrafts.delete(entry);
+            });
+
+        const handle: LiveBrainPrivateDraft = {
+            draftId,
+            sessionId: request.sessionId,
+            turnKey: request.turnKey,
+            question,
+            routeKey,
+            canAdopt: () => !control.adopted
+                && !abortController.signal.aborted
+                && (control.phase === 'buffering' || control.phase === 'completed_private')
+                && this.getLiveBrainAiRouteKey() === routeKey,
+            adopt: (liveReq: LiveBrainAnswerRequest): LiveBrainAdoptedDraft | null => {
+                if (!handle.canAdopt() || this.isManualAnswerActive()) return null;
+                const generationId = ++this.nextGenerationId;
+                if (liveReq.signal.aborted) {
+                    handle.cancel(String(liveReq.signal.reason || 'cancelled'));
+                    return null;
+                }
+                if (!control.adoptHandler || !control.adoptHandler(liveReq, generationId)) {
+                    return null;
+                }
+                this.activeLiveBrainDrafts.delete(entry);
+                return {
+                    generationId,
+                    done,
+                    visibleTextShown: () => control.visibleTextShown,
+                };
+            },
+            cancel: (reason: string) => {
+                if (control.adopted) return;
+                if (control.phase !== 'failed' && control.phase !== 'cancelled') {
+                    control.phase = 'cancelled';
+                }
+                if (!abortController.signal.aborted) abortController.abort(reason);
+                control.resolveWaitAdopt?.('abort');
+                this.activeLiveBrainDrafts.delete(entry);
+            },
+        };
+        return handle;
+    }
+
     runLiveBrainAnswer(request: LiveBrainAnswerRequest, context: string): { generationId: number; done: Promise<AutomaticAnswerResult> } {
         // Reserve the exact renderer ID now, even if an aborted automatic run
         // still has to release the slot before this one can start.
-        const generationId = ++this.nextGenerationId;
+        const reusingGeneration = request.reuseGenerationId !== undefined
+            && request.reuseGenerationId === this.currentGenerationId;
+        const generationId = reusingGeneration ? request.reuseGenerationId! : ++this.nextGenerationId;
         const run = async (): Promise<AutomaticAnswerResult> => {
             if (this.automaticTriggerSettled) await this.automaticTriggerSettled;
-            if (request.signal.aborted || generationId <= this.currentGenerationId) return { status: 'cancelled' };
+            if (request.signal.aborted || (reusingGeneration
+                ? generationId !== this.currentGenerationId
+                : generationId <= this.currentGenerationId)) {
+                return { status: 'cancelled' };
+            }
             const cancel = () => this.cancelAutomaticAnswer(request.signal.reason as AutoAnswerCancelReason);
             request.signal.addEventListener('abort', cancel, { once: true });
             try {
@@ -2680,7 +2823,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }; privateDraft?: InternalPrivateLiveBrainDraft; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2806,79 +2949,184 @@ export class IntelligenceEngine extends EventEmitter {
             }
         }
 
-        if (this.assistCancellationToken) {
+        const privateDraft = options?.privateDraft;
+        if (!privateDraft && this.assistCancellationToken) {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
         }
 
+        const isPrivateDraft = Boolean(privateDraft);
+        let liveReqRef: LiveBrainAnswerRequest | null = null;
+        let onLiveSignalAbort: (() => void) | null = null;
+        let pendingDesignQuestion: string | null = null;
+        let fgToken: string | null = null;
+        const acquireFg = () => {
+            if (fgToken || isSpeculative) return;
+            try {
+                const { ForegroundGate } = require('./services/ForegroundGate') as typeof import('./services/ForegroundGate');
+                fgToken = ForegroundGate.begin('wta');
+            } catch { /* advisory only */ }
+        };
+        const releaseFg = () => {
+            if (!fgToken) return;
+            try {
+                const { ForegroundGate } = require('./services/ForegroundGate') as typeof import('./services/ForegroundGate');
+                ForegroundGate.end(fgToken);
+            } catch { /* noop */ }
+            fgToken = null;
+        };
+
         // A WTA request owns exactly one provider AbortSignal. Superseding it
         // must cancel the upstream request immediately; generation IDs remain
         // the delivery/persistence backstop for already queued work.
-        if (this.whatToAnswerCancellationToken) {
-            this.whatToAnswerCancellationToken.abort('superseded');
+        // An unadopted Flux private draft keeps any visible answer and shared
+        // cancellation token untouched until EndOfTurn confirms it.
+        if (!privateDraft) {
+            if (this.whatToAnswerCancellationToken) {
+                this.whatToAnswerCancellationToken.abort('superseded');
+            }
+            for (const controller of this.whatToAnswerBackgroundCancellationTokens) {
+                controller.abort('superseded');
+            }
+            this.whatToAnswerBackgroundCancellationTokens.clear();
         }
-        for (const controller of this.whatToAnswerBackgroundCancellationTokens) {
-            controller.abort('superseded');
+        const whatToAnswerCancellationToken = privateDraft
+            ? privateDraft.abortController
+            : new AbortController();
+        if (!privateDraft) {
+            this.whatToAnswerCancellationToken = whatToAnswerCancellationToken;
         }
-        this.whatToAnswerBackgroundCancellationTokens.clear();
-        const whatToAnswerCancellationToken = new AbortController();
-        this.whatToAnswerCancellationToken = whatToAnswerCancellationToken;
-        // Allocate the generation id before the first await. If an older request
-        // resumes after this point, it can only observe itself as superseded; it
-        // must never mint a newer id and overtake this request.
-        const generationId = options?.liveBrain?.generationId ?? this.advanceGeneration();
-        this.currentGenerationId = generationId;
-        this.debugLiveBrainFirstText = options?.liveBrain?.onFirstText
-            ? { generationId, record: options.liveBrain.onFirstText } : undefined;
-        if (options?.turnOut) options.turnOut.generationId = generationId;
-        this.armSpeechStopTiming(generationId, options?.speechStoppedAt);
+        // Allocate the generation id before the first await for live runs; private
+        // drafts mint it synchronously at adoption so unconfirmed drafts leak nothing.
+        let generationId = privateDraft ? 0 : (options?.liveBrain?.generationId ?? this.advanceGeneration());
+        let automaticQuestion = (!privateDraft && this.automaticGenerationId === generationId && !isSpeculative)
+            ? question?.trim()
+            : undefined;
+        let currentTrace: PiLatencyTrace | null = null;
+        if (!privateDraft) {
+            this.currentGenerationId = generationId;
+            this.debugLiveBrainFirstText = options?.liveBrain?.onFirstText
+                ? { generationId, record: options.liveBrain.onFirstText } : undefined;
+            if (options?.turnOut) options.turnOut.generationId = generationId;
+            this.armSpeechStopTiming(generationId, options?.speechStoppedAt);
+        }
+        const claimAdoptedDraft = (liveReq: LiveBrainAnswerRequest, assignedGenerationId: number) => {
+            if (this.whatToAnswerCancellationToken && this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken) {
+                this.whatToAnswerCancellationToken.abort('superseded');
+            }
+            for (const controller of this.whatToAnswerBackgroundCancellationTokens) {
+                controller.abort('superseded');
+            }
+            this.whatToAnswerBackgroundCancellationTokens.clear();
+            this.whatToAnswerCancellationToken = whatToAnswerCancellationToken;
+            liveReqRef = liveReq;
+            generationId = assignedGenerationId;
+            this.currentGenerationId = generationId;
+            this.automaticGenerationId = generationId;
+            this.nextRunIsAutomatic = false;
+            if (options?.turnOut) options.turnOut.generationId = generationId;
+            this.armSpeechStopTiming(generationId, liveReq.speechStoppedAt);
+            this.debugLiveBrainFirstText = liveReq.onFirstText
+                ? { generationId, record: liveReq.onFirstText } : undefined;
+            this.claimSpokenTurn(this.spokenTurnFor(question, options?.sourceSegments), true, generationId);
+            automaticQuestion = question?.trim();
+            if (automaticQuestion) {
+                this.emit('what_to_answer_question', {
+                    generationId,
+                    question: automaticQuestion,
+                    pending: true,
+                    ...(liveReq.replacesAutomaticAnswer ? { updated: true } : {}),
+                    ...(liveReq.suppressQuestionRow ? { liveBrainAnswerStart: true } : {}),
+                });
+            }
+            this.setMode('what_to_say');
+            this.lastTriggerTime = Date.now();
+            this.lastTriggerQuestion = question ?? null;
+            if (currentTrace) this.lastTrace = currentTrace;
+            if (pendingDesignQuestion) {
+                this.session.noteDesignQuestion(pendingDesignQuestion);
+                pendingDesignQuestion = null;
+            }
+            acquireFg();
+            onLiveSignalAbort = () => {
+                whatToAnswerCancellationToken.abort(liveReq.signal.reason);
+            };
+            if (liveReq.signal.aborted) onLiveSignalAbort();
+            else liveReq.signal.addEventListener('abort', onLiveSignalAbort, { once: true });
+        };
+        if (privateDraft) {
+            privateDraft.adoptHandler = (liveReq, assignedGenerationId) => {
+                if (privateDraft.adopted
+                    || privateDraft.phase === 'failed'
+                    || privateDraft.phase === 'cancelled'
+                    || whatToAnswerCancellationToken.signal.aborted
+                    || privateDraft.routeKey !== this.getLiveBrainAiRouteKey()) {
+                    return false;
+                }
+                privateDraft.adopted = true;
+                privateDraft.phase = 'adopted';
+                claimAdoptedDraft(liveReq, assignedGenerationId);
+                return true;
+            };
+        }
         const showWtaAnswer = (answer: string, answeredQuestion: string, score: number,
             delivered: boolean, sourceLabel?: string, stopReason?: string) => {
+            if (privateDraft && !privateDraft.adopted) return;
             const out = options?.outcomeOut;
             const deliveredNow = delivered && Boolean(answer.trim()) && this.currentGenerationId === generationId;
             if (out?.value) out.value = { ...out.value, delivered: deliveredNow };
             const outcome = out?.value;
-            if (delivered) this.noteFirstVisibleText(generationId, answer, 'final');
-            if (deliveredNow) options?.liveBrain?.onComplete?.(answer);
+            if (delivered) {
+                if (privateDraft) privateDraft.visibleTextShown = true;
+                this.noteFirstVisibleText(generationId, answer, 'final');
+            }
+            if (deliveredNow) (liveReqRef?.onComplete ?? options?.liveBrain?.onComplete)?.(answer);
             this.emit('suggested_answer', answer, answeredQuestion, score, generationId, sourceLabel, stopReason, outcome);
         };
         // Stamp the run's identity before any await: a manual press racing in
         // mints a newer id and the automatic/speculative one is no longer live.
-        this.automaticGenerationId = this.nextRunIsAutomatic ? generationId : null;
-        this.speculativeGenerationId = isSpeculative ? generationId : null;
-        this.nextRunIsAutomatic = false;
+        if (!privateDraft) {
+            this.automaticGenerationId = this.nextRunIsAutomatic ? generationId : null;
+            this.speculativeGenerationId = isSpeculative ? generationId : null;
+            this.nextRunIsAutomatic = false;
+        }
         // A question passed in by Auto Answer (the judge's text) or a prefetch
         // (the candidate) was HEARD, not typed. Only a typed or pressed question
         // plans as manual input: stamping heard ones manual_input changed the
         // answer type, voice and speakability, so the same question asked by
         // Auto Answer and by the hotkey was planned differently (forensics
         // 2026-11-13, F-ACC-11).
-        const questionTyped = Boolean(question) && !isSpeculative && this.automaticGenerationId !== generationId;
+        const questionTyped = Boolean(question) && !isSpeculative && !privateDraft && this.automaticGenerationId !== generationId;
         // This run owns the interviewer's latest turn (see spokenAnswer). Any
         // other run starting now superseded the previous owner, which releases
         // the turn from its own finally.
-        if (this.automaticGenerationId === generationId && !isSpeculative) {
-            this.claimSpokenTurn(this.spokenTurnFor(question, options?.sourceSegments), true, generationId);
-        } else if (manualSpoken && (spokenQuestion || !this.whatToAnswerLLM)) {
-            this.claimSpokenTurn(spokenQuestion ? this.spokenTurnFor(spokenQuestion) : this.latestSpokenTurn(), false, generationId);
+        if (!privateDraft) {
+            if (this.automaticGenerationId === generationId && !isSpeculative) {
+                this.claimSpokenTurn(this.spokenTurnFor(question, options?.sourceSegments), true, generationId);
+            } else if (manualSpoken && (spokenQuestion || !this.whatToAnswerLLM)) {
+                this.claimSpokenTurn(spokenQuestion ? this.spokenTurnFor(spokenQuestion) : this.latestSpokenTurn(), false, generationId);
+            }
         }
         const isWtaSuperseded = () => (
-            this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken
-            || this.currentGenerationId !== generationId
+            (privateDraft && !privateDraft.adopted)
+                ? whatToAnswerCancellationToken.signal.aborted
+                : (this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken || this.currentGenerationId !== generationId)
         );
 
-        const automaticQuestion = this.automaticGenerationId === generationId && !isSpeculative ? question?.trim() : undefined;
-        if (automaticQuestion) {
-            this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true,
-                ...(options?.replacesAutomaticAnswer ? { updated: true } : {}),
-                ...(options?.liveBrain?.suppressQuestionRow ? { liveBrainAnswerStart: true } : {}) });
-        }
-        this.setMode('what_to_say');
-        // Speculative runs don't stamp lastTriggerTime at start — the cooldown slot
-        // is reserved for the real trigger. We stamp it only on successful completion.
-        if (!isSpeculative) {
-            this.lastTriggerTime = now;
-            this.lastTriggerQuestion = question ?? null;
+        if (!privateDraft) {
+            automaticQuestion = this.automaticGenerationId === generationId && !isSpeculative ? question?.trim() : undefined;
+            if (automaticQuestion) {
+                this.emit('what_to_answer_question', { generationId, question: automaticQuestion, pending: true,
+                    ...(options?.replacesAutomaticAnswer ? { updated: true } : {}),
+                    ...(options?.liveBrain?.suppressQuestionRow ? { liveBrainAnswerStart: true } : {}) });
+            }
+            this.setMode('what_to_say');
+            // Speculative runs don't stamp lastTriggerTime at start — the cooldown slot
+            // is reserved for the real trigger. We stamp it only on successful completion.
+            if (!isSpeculative) {
+                this.lastTriggerTime = now;
+                this.lastTriggerQuestion = question ?? null;
+            }
         }
         // Record the question text so handleSuggestionTrigger can do Jaccard comparison.
         // Bound expiry even while the stream is running so stale speculative
@@ -2902,7 +3150,8 @@ export class IntelligenceEngine extends EventEmitter {
             hasImages: Boolean(imagePaths && imagePaths.length > 0),
             speculative: isSpeculative,
         });
-        this.lastTrace = trace;
+        currentTrace = trace;
+        if (!privateDraft) this.lastTrace = trace;
 
         // ── REQUEST SNAPSHOT (audit findings #6 + #3 + #9) ─────────────────
         // Capture the active mode ONCE here, at t0, before any `await` boundary.
@@ -3050,21 +3299,7 @@ export class IntelligenceEngine extends EventEmitter {
         // embedding/RAG drains while a live answer is in flight. Speculative
         // prefetch doesn't gate (no user is waiting on it). Auto-expires in
         // 60s even if a return path is missed.
-        let fgToken: string | null = null;
-        if (!isSpeculative) {
-            try {
-                const { ForegroundGate } = require('./services/ForegroundGate') as typeof import('./services/ForegroundGate');
-                fgToken = ForegroundGate.begin('wta');
-            } catch { /* advisory only */ }
-        }
-        const releaseFg = () => {
-            if (!fgToken) return;
-            try {
-                const { ForegroundGate } = require('./services/ForegroundGate') as typeof import('./services/ForegroundGate');
-                ForegroundGate.end(fgToken);
-            } catch { /* noop */ }
-            fgToken = null;
-        };
+        if (!privateDraft || privateDraft.adopted) acquireFg();
 
         // Method-scope so the abort/sentinel/error paths below (and the catch)
         // can tell whether a streaming row was opened that must be discarded /
@@ -3078,6 +3313,10 @@ export class IntelligenceEngine extends EventEmitter {
             }
 
             if (!this.whatToAnswerLLM) {
+                if (privateDraft && !privateDraft.adopted) {
+                    privateDraft.phase = 'failed';
+                    return null;
+                }
                 if (!this.answerLLM) {
                     if (isSpeculative) { this.speculativeText = null; this.speculativeTextExpiry = Infinity; }
                     this.setMode('idle');
@@ -3306,6 +3545,10 @@ export class IntelligenceEngine extends EventEmitter {
             if (!question?.trim() && !extractedQuestion.latestQuestion && !lastInterviewerTurn
                 && !preparedTranscript.trim() && !_wtaHasVisualContext) {
                 if (isSpeculative) return null;
+                if (privateDraft && !privateDraft.adopted) {
+                    privateDraft.phase = 'failed';
+                    return null;
+                }
                 this.setMode('idle');
                 const noContextMsg = "I don't have anything to answer yet — no conversation, screen capture, or question has come in. Ask something or start the meeting audio, then press again.";
                 this.session.addAssistantMessage(noContextMsg, undefined, 'what_to_answer');
@@ -3421,6 +3664,10 @@ export class IntelligenceEngine extends EventEmitter {
                         return null;
                     }
                     if (fr.isClarification && fr.clarificationText && !isSpeculative && !_wtaHasVisualContext) {
+                        if (privateDraft && !privateDraft.adopted) {
+                            privateDraft.phase = 'failed';
+                            return null;
+                        }
                         piTelemetry.emit('wta_context_free_clarification', { surface: 'what_to_answer', via: (fr as any).resolvedVia ?? 'clarification' });
                         setOutcome('success');
                         this.session.addAssistantMessage(fr.clarificationText, undefined, 'what_to_answer');
@@ -4728,6 +4975,10 @@ export class IntelligenceEngine extends EventEmitter {
                     hasReferenceFiles: Boolean((snapshotModeInfo as any)?.hasReferenceFiles),
                 })) {
                 try {
+                    if (privateDraft && !privateDraft.adopted) {
+                        privateDraft.phase = 'failed';
+                        return null;
+                    }
                     const { buildSourceClarification, buildContextOsTrace, logContextOsTrace } = contextOsStatic;
                     // Evidence-execution-repair (2026-07-12): prefer the legacy,
                     // mode-aware sourceOwnership.resolveSourceOwnership() decision
@@ -4947,7 +5198,8 @@ export class IntelligenceEngine extends EventEmitter {
                         const mayFollowUp = !turn.request.enabled && Boolean(turn.request.undecided?.parentArtifactId) && turn.request.attachActiveDesign;
                         this.speculativeDesignNote = isCreate ? { question: answerPlan.question } : isFollowUp ? { followUp: true } : mayFollowUp ? { mayFollowUp: true } : null;
                     } else if (isCreate) {
-                        this.session.noteDesignQuestion(answerPlan.question);
+                        if (privateDraft && !privateDraft.adopted) pendingDesignQuestion = answerPlan.question;
+                        else this.session.noteDesignQuestion(answerPlan.question);
                     }
                     return turn;
                 } catch { return null; }
@@ -5438,6 +5690,10 @@ export class IntelligenceEngine extends EventEmitter {
             // provider failure or the runaway cap was still written to the
             // session transcript and usage, and fed to the NEXT turn as
             // prior_assistant_responses evidence.
+            if (privateDraft && !privateDraft.adopted && this.getLiveBrainAiRouteKey() !== privateDraft.routeKey) {
+                privateDraft.phase = 'failed';
+                return null;
+            }
             const wtaTruncation: { truncated: boolean; reason?: string } = { truncated: false };
             const answerTranscript = options?.liveBrainNotebook ? `${options.liveBrainNotebook}\n\n${preparedTranscript}` : preparedTranscript;
             const stream = this.whatToAnswerLLM.generateStream(answerTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise, requestSnapshot, whatToAnswerCancellationToken.signal, wtaTruncation);
@@ -5590,6 +5846,7 @@ export class IntelligenceEngine extends EventEmitter {
 
             const emitChunk = (chunk: string) => {
                 commitFirstTokenMeasurement();
+                if (privateDraft) privateDraft.visibleTextShown = true;
                 emittedStreamingToken = true;
                 openedStreamRow = true;
                 if (trace.markFirstUseful({ via: 'stream', answerType: answerPlan.answerType })) {
@@ -5681,6 +5938,37 @@ export class IntelligenceEngine extends EventEmitter {
                     : fullAnswer;
                 console.log(`[IntelligenceEngine] Adopted prefetch now streaming live (${fullAnswer.length} chars already generated)`);
             };
+            const pushTokenToLivePipeline = (token: string): void => {
+                if (codingGate) {
+                    const gated = codingGate.push(token);
+                    if (gated) {
+                        const visible = specStripper ? specStripper.push(gated) : gated;
+                        if (visible) emitChunk(visible);
+                    }
+                } else {
+                    paintBuffered(token);
+                }
+            };
+            if (privateDraft) {
+                privateDraft.adoptHandler = (liveReq, assignedGenerationId) => {
+                    if (privateDraft.adopted
+                        || privateDraft.phase === 'failed'
+                        || privateDraft.phase === 'cancelled'
+                        || whatToAnswerCancellationToken.signal.aborted
+                        || privateDraft.routeKey !== this.getLiveBrainAiRouteKey()) {
+                        return false;
+                    }
+                    privateDraft.adopted = true;
+                    privateDraft.phase = 'adopted';
+                    claimAdoptedDraft(liveReq, assignedGenerationId);
+                    const buffered = privateDraft.rawChunks.splice(0, privateDraft.rawChunks.length);
+                    for (const bufferedToken of buffered) {
+                        pushTokenToLivePipeline(bufferedToken);
+                    }
+                    privateDraft.resolveWaitAdopt?.('adopt');
+                    return true;
+                };
+            }
             if (isSpeculative) {
                 // Adoption may land between two tokens (or during a provider
                 // pause); paint what exists NOW instead of waiting for the next
@@ -5795,6 +6083,10 @@ export class IntelligenceEngine extends EventEmitter {
                     // surfaces feed one map and must mean the same thing.
                     if (!isSpeculative) noteFirstToken();
                     fullAnswer += token;
+                    if (privateDraft && !privateDraft.adopted) {
+                        privateDraft.rawChunks.push(token);
+                        return;
+                    }
                     if (isSpeculative) {
                         // A speculative prefetch never streams to the UI — the
                         // judge may still say no — UNTIL the dispatch adopts it
@@ -5802,15 +6094,7 @@ export class IntelligenceEngine extends EventEmitter {
                         if (this.speculativeAdoptedGenerationId !== generationId) return;
                         if (!speculativeStreamingLive) unmuteAdoptedStream(token);
                     }
-                    if (codingGate) {
-                        const gated = codingGate.push(token);
-                        if (gated) {
-                            const visible = specStripper ? specStripper.push(gated) : gated;
-                            if (visible) emitChunk(visible);
-                        }
-                    } else {
-                        paintBuffered(token);
-                    }
+                    pushTokenToLivePipeline(token);
                 },
             }).finally(() => {
                 // The adoption hook is only meaningful while THIS stream runs,
@@ -6054,7 +6338,50 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             };
 
+            if (privateDraft && !privateDraft.adopted) {
+                const unusableDraft = streamAborted
+                    || whatToAnswerCancellationToken.signal.aborted
+                    || (liveDeadlineFired && !fullAnswer.trim())
+                    || !fullAnswer
+                    || fullAnswer.trim().length < 5
+                    || wtaTruncation.truncated
+                    || IntelligenceEngine.isNonAnswerSentinel(fullAnswer)
+                    || isLeakedSchemaStub(fullAnswer)
+                    || isProviderTransportError(fullAnswer)
+                    || isLeakedInternalTagBlock(fullAnswer)
+                    || this.getLiveBrainAiRouteKey() !== privateDraft.routeKey;
+                if (unusableDraft) {
+                    privateDraft.phase = whatToAnswerCancellationToken.signal.aborted ? 'cancelled' : 'failed';
+                    return null;
+                }
+                privateDraft.phase = 'completed_private';
+                const waitVerdict = await new Promise<'adopt' | 'abort'>((resolve) => {
+                    if (whatToAnswerCancellationToken.signal.aborted || privateDraft.phase !== 'completed_private') {
+                        resolve('abort');
+                        return;
+                    }
+                    const finish = (verdict: 'adopt' | 'abort') => {
+                        whatToAnswerCancellationToken.signal.removeEventListener('abort', onAbort);
+                        resolve(verdict);
+                    };
+                    const onAbort = () => finish('abort');
+                    whatToAnswerCancellationToken.signal.addEventListener('abort', onAbort, { once: true });
+                    privateDraft.resolveWaitAdopt = finish;
+                });
+                privateDraft.resolveWaitAdopt = undefined;
+                if (waitVerdict !== 'adopt' || !privateDraft.adopted || isWtaSuperseded()) {
+                    return null;
+                }
+            }
+
             if (streamAborted) return yieldToSupersedingRun(true);
+
+            if (privateDraft && privateDraft.adopted && !openedStreamRow && !privateDraft.visibleTextShown
+                && (liveDeadlineFired || !fullAnswer || fullAnswer.trim().length < 5 || wtaTruncation.truncated)) {
+                setOutcome('failed', 'early_draft_failure', true);
+                if (!isWtaSuperseded()) this.setMode('idle');
+                return null;
+            }
 
             if (!fullAnswer || fullAnswer.trim().length < 5) {
                 // ALWAYS ANSWER (2026-09-07): an empty or aborted stream is retried
@@ -7890,6 +8217,7 @@ export class IntelligenceEngine extends EventEmitter {
                 const gatedTail = codingGate.finish();
                 const tail = specStripper ? (specStripper.push(gatedTail) + specStripper.finish()) : gatedTail;
                 if (tail) {
+                    if (privateDraft) privateDraft.visibleTextShown = true;
                     this.noteFirstVisibleText(generationId, tail, 'tail');
                     this.emit('suggested_answer_token', tail, question || 'inferred', confidence, generationId);
                 }
@@ -7909,6 +8237,7 @@ export class IntelligenceEngine extends EventEmitter {
                             unpainted = stripPlanningPreamble(fullAnswer).text;
                         } catch { /* paint unmodified */ }
                     }
+                    if (privateDraft) privateDraft.visibleTextShown = true;
                     this.noteFirstVisibleText(generationId, unpainted, 'tail');
                     this.emit('suggested_answer_token', unpainted, question || 'inferred', confidence, generationId);
                 }
@@ -8195,12 +8524,10 @@ export class IntelligenceEngine extends EventEmitter {
             return fullAnswer;
 
         } catch (error) {
-            // `raceStreamWithDeadline` self-aborts this request's controller when a
-            // first-token/stall deadline fires. That is transport cleanup, not a
-            // supersession: a later post-deadline exception must still reach the
-            // normal error fallback instead of being silently discarded as stale.
-            // Only controller ownership / generation identity prove that another
-            // request or reset replaced this turn.
+            if (privateDraft && !privateDraft.adopted) {
+                privateDraft.phase = whatToAnswerCancellationToken.signal.aborted ? 'cancelled' : 'failed';
+                return null;
+            }
             if (isWtaSuperseded()) {
                 recordWtaCancellation();
                 if (isSpeculative && this.currentGenerationId === generationId && this.ownsSpeculativeSlot(generationId)) {
@@ -8208,6 +8535,11 @@ export class IntelligenceEngine extends EventEmitter {
                     this.speculativeTextExpiry = Infinity;
                 }
                 if (openedStreamRow && this.currentGenerationId === generationId) this.emit('suggested_answer_discard', 'superseded', generationId);
+                return null;
+            }
+            if (privateDraft && privateDraft.adopted && !openedStreamRow && !privateDraft.visibleTextShown) {
+                setOutcome('failed', 'early_draft_failure', true);
+                this.setMode('idle');
                 return null;
             }
             try {
@@ -8238,19 +8570,27 @@ export class IntelligenceEngine extends EventEmitter {
             }
             return buildGracefulRetry(question);
         } finally {
-            // Only the request that still owns the slot may clear it. An older
-            // cancelled request must not sever the newer request's controller.
-            if (this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) {
-                this.whatToAnswerCancellationToken = null;
+            if (onLiveSignalAbort && liveReqRef) {
+                (liveReqRef as LiveBrainAnswerRequest).signal.removeEventListener('abort', onLiveSignalAbort);
             }
-            // An adopted prefetch settled its claim at reveal. For other runs,
-            // ownership follows delivery, independently of the history policy.
-            this.settleSpokenTurn(generationId, !isSpeculative && options?.outcomeOut?.value?.delivered === true);
-            if (automaticQuestion || isSpeculative) {
-                this.emit('what_to_answer_question', {
-                    generationId, pending: false,
-                    failed: Boolean(automaticQuestion && options?.outcomeOut?.value?.status === 'failed' && !options.outcomeOut.value.delivered),
-                });
+            if (!privateDraft || privateDraft.adopted) {
+                // Only the request that still owns the slot may clear it. An older
+                // cancelled request must not sever the newer request's controller.
+                if (this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) {
+                    this.whatToAnswerCancellationToken = null;
+                }
+                // An adopted prefetch settled its claim at reveal. For other runs,
+                // ownership follows delivery, independently of the history policy.
+                this.settleSpokenTurn(generationId, !isSpeculative && options?.outcomeOut?.value?.delivered === true);
+                if (automaticQuestion || isSpeculative) {
+                    const earlyFallback = Boolean(privateDraft && options?.outcomeOut?.value?.reason === 'early_draft_failure' && !privateDraft.visibleTextShown);
+                    if (!earlyFallback) {
+                        this.emit('what_to_answer_question', {
+                            generationId, pending: false,
+                            failed: Boolean(automaticQuestion && options?.outcomeOut?.value?.status === 'failed' && !options.outcomeOut.value.delivered),
+                        });
+                    }
+                }
             }
             // Resume background drains on EVERY exit path (answer, abort, error).
             releaseFg();
@@ -9978,6 +10318,7 @@ export class IntelligenceEngine extends EventEmitter {
         this.debugSpeechStop = undefined;
         this.debugLiveBrainFirstText = undefined;
         this.automaticTrigger?.abort('engine_reset');
+        this.cancelLiveBrainDrafts('engine_reset');
         this.speculativeRun = null;
         this.speculativeAdoptHook = null;
         this.spokenAnswer?.settle(false);

@@ -8,6 +8,7 @@ import type {
     LiveBrainSettingsResult,
 } from '../../src/types/liveBrainSettings';
 import type { AutoAnswerDispatchResult } from './autoAnswer';
+export type { AutoAnswerDispatchResult };
 
 export interface DeepgramThinkConfig {
     thinkMode: DeepgramThinkMode;
@@ -29,10 +30,37 @@ export interface LiveBrainAnswerRequest {
     liveBrainNotebook?: string;
     speechStoppedAt?: number;
     suppressQuestionRow?: boolean;
+    reuseGenerationId?: number;
+}
+
+export interface LiveBrainDraftRequest {
+    sessionId: string;
+    turnKey: string;
+    question: string;
+    liveBrainNotebook?: string;
+}
+
+export interface LiveBrainAdoptedDraft {
+    generationId: number;
+    done: Promise<AutoAnswerDispatchResult>;
+    visibleTextShown: () => boolean;
+}
+
+export interface LiveBrainPrivateDraft {
+    readonly draftId: number;
+    readonly sessionId: string;
+    readonly turnKey: string;
+    readonly question: string;
+    readonly routeKey: string;
+    canAdopt(): boolean;
+    adopt(request: LiveBrainAnswerRequest): LiveBrainAdoptedDraft | null;
+    cancel(reason: string): void;
 }
 
 export interface LiveBrainAnswerEngine {
     runLiveBrainAnswer(request: LiveBrainAnswerRequest): { generationId: number; done: Promise<AutoAnswerDispatchResult> };
+    startLiveBrainDraft?(request: LiveBrainDraftRequest): LiveBrainPrivateDraft | null;
+    getLiveBrainAiRouteKey?(): string;
 }
 
 export interface LiveBrainMeetingOptions {
@@ -51,6 +79,8 @@ export interface LiveBrainMeetingOptions {
     engine: {
         setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void;
         runLiveBrainAnswer?: LiveBrainAnswerEngine['runLiveBrainAnswer'];
+        startLiveBrainDraft?: LiveBrainAnswerEngine['startLiveBrainDraft'];
+        getLiveBrainAiRouteKey?: LiveBrainAnswerEngine['getLiveBrainAiRouteKey'];
     };
     pipeline?: { activate(): void; cancel(): void };
     summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;

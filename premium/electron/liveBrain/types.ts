@@ -24,11 +24,14 @@ export type LiveBrainEvent =
     | { type: 'interviewer_speech_started'; at: number }
     | { type: 'interviewer_speech_stopped'; at: number }
     | { type: 'interviewer_transcript'; text: string; final: boolean; at: number }
+    | { type: 'eager_end_of_turn'; turnKey: string; question: string; at: number }
+    | { type: 'turn_resumed'; turnKey: string; at: number }
     | {
         type: 'decision';
         decisionId: string;
         action: 'answer' | 'ask' | 'wait';
         question?: string;
+        turnKey?: string;
         clarification?: string;
         kind?: 'new' | 'follow_up' | 'correction';
         at: number;
