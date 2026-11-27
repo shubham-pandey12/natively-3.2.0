@@ -253,3 +253,87 @@ test('ElevenLabs audio transcripts use the shared overlay path and spoken sentin
     await until(() => overlay.some(event => event.clarification?.includes('Who are the users?')));
     assert.ok(!overlay.some(event => event.responseText?.text.includes('No action.')));
 });
+
+test('3 drops after 30 s ready each reset failures so 4th drop still retries', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    const { brain, connections, events } = await rig(t, 'openai-realtime', { backoffMs: [5, 5, 5] });
+    await brain.start(testContext());
+    for (let i = 0; i < 4; i++) {
+        await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === i + 1);
+        t.mock.timers.tick(30_000);
+        connections[i].socket.terminate();
+    }
+    await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === 5);
+    assert.equal(events.some(e => e.type === 'error' && e.fatal), false);
+    assert.equal(events.filter(e => e.type === 'error' && !e.fatal).length, 4);
+});
+
+test('bare close 1008 is protocol fatal without retry while 1006 is network retry', async t => {
+    const r1 = await rig(t, 'openai-realtime', { backoffMs: [5, 5] });
+    await r1.brain.start(testContext());
+    r1.connections[0].socket.close(1008);
+    await until(() => r1.events.some(e => e.type === 'error'));
+    await delay(30);
+    assert.deepEqual(r1.events.filter(e => e.type === 'error'), [{ type: 'error', code: 'protocol', fatal: true }]);
+    assert.equal(r1.connections.length, 1);
+
+    const r2 = await rig(t, 'openai-realtime', { backoffMs: [5, 5] });
+    await r2.brain.start(testContext());
+    r2.connections[0].socket.terminate();
+    await until(() => r2.events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+    assert.deepEqual(r2.events.filter(e => e.type === 'error'), [{ type: 'error', code: 'network', fatal: false }]);
+});
+
+test('response.done failed with no delta and no error emits response_silent to clear Thinking', async t => {
+    const { brain, connections, events } = await rig(t, 'openai-realtime');
+    await brain.start(testContext());
+    const { socket } = connections[0];
+    created(socket, 'empty-fail');
+    done(socket, 'empty-fail', 'failed');
+    await until(() => events.some(e => e.type === 'response_silent'));
+    assert.equal(events.some(e => e.type === 'error'), false);
+});
+
+test('bufferedAmount above 1 MiB drops audio and sustained backpressure triggers network retry', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    const { brain, connections, events } = await rig(t, 'openai-realtime', { backoffMs: [5, 5] });
+    await brain.start(testContext());
+    const { messages } = connections[0];
+    Object.defineProperty(brain.socket, 'bufferedAmount', { get: () => 2 * 1024 * 1024, configurable: true });
+    brain.pushInterviewerAudio(new Int16Array(2400).fill(100), 24000);
+    await delay(20);
+    assert.equal(messages.some(m => m.type === 'input_audio_buffer.append'), false);
+    assert.equal(events.some(e => e.type === 'error'), false);
+    t.mock.timers.tick(5_001);
+    brain.pushInterviewerAudio(new Int16Array(2400).fill(100), 24000);
+    await until(() => events.some(e => e.type === 'error' && e.code === 'network' && !e.fatal));
+    await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+});
+
+test('stop() inside degraded listener emits no further events and schedules no retry', async t => {
+    const { brain, connections, events } = await rig(t, 'openai-realtime', { backoffMs: [5, 5] });
+    await brain.start(testContext());
+    brain.onEvent(event => {
+        if (event.type === 'status' && event.status === 'degraded') void brain.stop();
+    });
+    connections[0].socket.terminate();
+    await until(() => events.some(e => e.type === 'status' && e.status === 'closed'));
+    await delay(30);
+    const closedIndex = events.findIndex(e => e.type === 'status' && e.status === 'closed');
+    assert.equal(events.length, closedIndex + 1);
+    assert.equal(events.some(e => e.type === 'error'), false);
+    assert.equal(connections.length, 1);
+});
+
+test('response.done cancelled with no visible delta does not emit response_silent', async t => {
+    const { brain, connections, events } = await rig(t, 'openai-realtime');
+    await brain.start(testContext());
+    const { socket } = connections[0];
+    created(socket, 'cancelled-empty');
+    done(socket, 'cancelled-empty', 'cancelled');
+    created(socket, 'follow-up');
+    send(socket, 'response.output_text.delta', { response_id: 'follow-up', delta: 'Answer' });
+    done(socket, 'follow-up', 'completed');
+    await until(() => events.some(e => e.type === 'response_done' && e.status === 'completed'));
+    assert.equal(events.some(e => e.type === 'response_silent'), false);
+});

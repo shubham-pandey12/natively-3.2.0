@@ -1,3 +1,4 @@
+import { REALTIME_READY_RESET_MS } from '../../../electron/audio/realtimeTransport';
 import { InterviewNotebook, renderRecentTurns } from './InterviewNotebook';
 import { createResponseParser } from './responseParser';
 import type { OrchestratorDisposition, ResponseClock } from './ResponseOrchestrator';
@@ -21,6 +22,7 @@ interface Lease {
     model: string;
     reason: string;
     since: number;
+    readyAt?: number;
     ready: boolean;
     controller: AbortController;
     seeded?: ConversationTurn[];
@@ -283,6 +285,7 @@ export class BrainSupervisor<Timer> {
 
     private ready(lease: Lease): void {
         const id = lease.brain.id;
+        lease.readyAt = this.options.clock.now();
         const began = this.rolloverAt;
         if (began !== undefined) {
             this.options.onRollover?.({ brain: id, reason: lease.reason, elapsedMs: this.options.clock.now() - began });
@@ -362,6 +365,11 @@ export class BrainSupervisor<Timer> {
             const standby = this.standby;
             this.standby = undefined;
             this.release(standby);
+        }
+        if (retryFresh && lease.brain.id === 'amazon-sonic'
+            && lease.readyAt !== undefined
+            && this.options.clock.now() - lease.readyAt >= REALTIME_READY_RESET_MS) {
+            this.retriedFresh.delete('amazon-sonic');
         }
         if (retryFresh && !this.retriedFresh.has(lease.brain.id)) {
             this.retriedFresh.add(lease.brain.id);

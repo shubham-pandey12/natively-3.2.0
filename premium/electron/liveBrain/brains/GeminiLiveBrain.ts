@@ -1,4 +1,6 @@
 import WebSocket from 'ws';
+import { streamingStttWsOptions } from '../../../../electron/audio/dnsHelpers';
+import { wsDataToString } from '../../../../electron/audio/realtimeTransport';
 import { DEFAULT_GEMINI_LIVE_MODEL } from '../../../../src/types/liveBrainSettings';
 import { CLARIFICATION_ASSUMPTION } from '../instructions';
 import type { ResponseClock } from '../ResponseOrchestrator';
@@ -29,6 +31,7 @@ const SILENCE_FILL_AFTER_MS = 300; // tolerate capture jitter before filling
 const SILENCE_FILL_MAX_MS = 1_000; // per tick, so a stall can't flood the socket
 const ROLLOVER_MARGIN_MS = 1_000;
 const MIN_DEFERRED_ROLLOVER_MS = 1_500;
+const LATE_TRANSCRIPT_WINDOW_MS = 1_500;
 
 export interface GeminiLiveOptions {
     apiKey: string;
@@ -37,6 +40,7 @@ export interface GeminiLiveOptions {
     setupTimeoutMs?: number;
     backoffMs?: readonly number[];
     rolloverClock?: ResponseClock<ReturnType<typeof setTimeout>>;
+    createSocket?: (url: string, options: WebSocket.ClientOptions) => WebSocket;
 }
 
 interface GeminiMessage {
@@ -48,6 +52,7 @@ interface GeminiMessage {
         inputTranscription?: { text?: string; finished?: boolean };
         interimInputTranscription?: { text?: string };
         outputTranscription?: { text?: string };
+        generationComplete?: boolean;
         turnComplete?: boolean;
         interactionStatus?: string;
     };
@@ -71,9 +76,17 @@ function classify(code?: number, detail = ''): LiveBrainErrorCode {
 }
 
 function classifyQuietly(code?: number, detail = ''): LiveBrainErrorCode {
-    if (/quota|billing|daily limit/i.test(detail)) return 'quota';
-    if (code === 401 || code === 403 || /api.key|unauthenticated|permission.denied|invalid credential/i.test(detail)) return 'auth';
-    if (code === 429 || code === 1013 || /rate.limit|resource.exhausted/i.test(detail)) return 'rate_limited';
+    const isHardQuota = /billing|daily[- ]?limit|quota[- ]?(?:exhausted|exceeded)|(?:exhausted|exceeded|insufficient)[- ]?quota|insufficient[- ]?funds|credit[- ]?balance/i.test(detail)
+        && !/per[- ]?minute/i.test(detail);
+    if (isHardQuota) return 'quota';
+    if (code === 401 || code === 403 || /api[-_. ]?key|unauthenticated|permission[-_. ]?denied|invalid[-_. ]?credential/i.test(detail)) return 'auth';
+    if (code === 404 || /\bNOT_FOUND\b/i.test(detail)
+        || /model\b[^.\n]*\bnot\s+found|unsupported\s+model|model\b[^.\n]*\bnot\s+supported/i.test(detail)
+        || (code === 400 && /\bFAILED_PRECONDITION\b/i.test(detail))
+        || /(?:location|region)\b[^.\n]*\bnot\s+supported|unsupported\s+(?:location|region)/i.test(detail)) {
+        return 'unsupported';
+    }
+    if (code === 429 || code === 1013 || /rate[-_. ]?limit|resource[-_. ]?exhausted|too\s+many\s+requests/i.test(detail)) return 'rate_limited';
     if (code === 1002 || code === 1003 || code === 1007 || code === 1008
         || (code !== undefined && code >= 400 && code < 500)) return 'protocol';
     return 'network';
@@ -100,6 +113,9 @@ export class GeminiLiveBrain implements LiveBrain {
     private responseId?: string;
     private discardOutput = false;
     private turnInterrupted = false;
+    private generationCompleted = false;
+    private lastTurnClosedAt?: number;
+    private lifecycleGeneration = 0;
     private bufferedAudio: Buffer[] = [];
     private bufferedBytes = 0;
     private bufferLimit = AUDIO_BUFFER_BYTES;
@@ -190,30 +206,35 @@ export class GeminiLiveBrain implements LiveBrain {
         this.emit({ type: 'status', status: 'connecting' });
         if (!this.context) return;
         try {
+            this.lifecycleGeneration++;
             const timeout = this.options.setupTimeoutMs ?? 8_000;
-            const socket = new WebSocket(this.options.endpoint ?? ENDPOINT, {
+            const url = this.options.endpoint ?? ENDPOINT;
+            const wsOptions = streamingStttWsOptions({
                 headers: { 'x-goog-api-key': this.options.apiKey },
                 handshakeTimeout: timeout,
                 maxPayload: 4 * 1024 * 1024,
-            });
+            }) as WebSocket.ClientOptions;
+            const socket = this.options.createSocket ? this.options.createSocket(url, wsOptions) : new WebSocket(url, wsOptions);
             this.socket = socket;
             this.setupTimer = setTimeout(() => { if (this.socket === socket) this.fail('timeout'); }, timeout);
             socket.on('open', () => {
                 if (this.socket !== socket || !this.context) return;
                 const model = this.options.model?.trim() || DEFAULT_GEMINI_LIVE_MODEL;
                 this.resuming = Boolean(this.resumeHandle);
-                this.send({ setup: {
-                    model: model.startsWith('models/') ? model : `models/${model}`,
-                    generationConfig: { responseModalities: ['AUDIO'] },
-                    realtimeInputConfig: { automaticActivityDetection: GEMINI_AUTOMATIC_ACTIVITY_DETECTION },
-                    systemInstruction: { parts: [{ text: this.context.instructions }] },
-                    inputAudioTranscription: {},
-                    outputAudioTranscription: {},
-                    sessionResumption: this.resumeHandle ? { handle: this.resumeHandle } : {},
-                    contextWindowCompression: { slidingWindow: {} },
-                } });
+                this.send({
+                    setup: {
+                        model: model.startsWith('models/') ? model : `models/${model}`,
+                        generationConfig: { responseModalities: ['AUDIO'] },
+                        realtimeInputConfig: { automaticActivityDetection: GEMINI_AUTOMATIC_ACTIVITY_DETECTION },
+                        systemInstruction: { parts: [{ text: this.context.instructions }] },
+                        inputAudioTranscription: {},
+                        outputAudioTranscription: {},
+                        sessionResumption: this.resumeHandle ? { handle: this.resumeHandle } : {},
+                        contextWindowCompression: { slidingWindow: {} },
+                    }
+                });
             });
-            socket.on('message', data => { if (this.socket === socket) this.onMessage(data.toString()); });
+            socket.on('message', data => { if (this.socket === socket) this.onMessage(wsDataToString(data)); });
             socket.on('unexpected-response', (_, response) => {
                 let detail = '';
                 const finish = () => {
@@ -235,7 +256,13 @@ export class GeminiLiveBrain implements LiveBrain {
         }
     }
 
+    private isCurrentLifecycle(socket: WebSocket | undefined, generation: number): boolean {
+        return Boolean(this.context) && this.socket === socket && this.lifecycleGeneration === generation;
+    }
+
     private onMessage(raw: string): void {
+        const socket = this.socket;
+        const generation = this.lifecycleGeneration;
         let message: GeminiMessage;
         try { message = JSON.parse(raw); } catch { this.fail('protocol'); return; }
         if (!message || typeof message !== 'object') { this.fail('protocol'); return; }
@@ -257,6 +284,8 @@ export class GeminiLiveBrain implements LiveBrain {
             this.speaking = false;
             this.discardOutput = false;
             this.turnInterrupted = false;
+            this.generationCompleted = false;
+            this.lastTurnClosedAt = undefined;
             this.flushCandidate();
             this.streamStartedAt = Date.now();
             this.audioSentMs = 0;
@@ -266,62 +295,111 @@ export class GeminiLiveBrain implements LiveBrain {
             this.startup?.ready();
             this.startup = undefined;
             this.emit({ type: 'status', status: 'ready' });
+            if (!this.isCurrentLifecycle(socket, generation)) return;
         }
         if (this.readyAt === undefined) return;
         const at = Date.now();
         const content = message.serverContent;
         const interim = content?.interimInputTranscription?.text;
         const transcript = content?.inputTranscription;
+        const output = content?.outputTranscription?.text;
+        if (this.lastTurnClosedAt !== undefined && at - this.lastTurnClosedAt > LATE_TRANSCRIPT_WINDOW_MS) {
+            this.lastTurnClosedAt = undefined;
+        }
+        const explicitNewSpeech = Boolean(
+            content?.interrupted
+            || message.voiceActivity?.type === 'ACTIVITY_START'
+            || (typeof interim === 'string' && interim.trim())
+            || (!this.discardOutput && typeof output === 'string' && output.length)
+        );
+        if (explicitNewSpeech) {
+            this.lastTurnClosedAt = undefined;
+        }
+        const isLateTranscript = this.lastTurnClosedAt !== undefined
+            && !explicitNewSpeech
+            && typeof transcript?.text === 'string'
+            && transcript.text.length > 0;
+        if (isLateTranscript) {
+            console.debug('[LiveBrain] Dropped late inputTranscription after turnComplete');
+            if (transcript?.finished === true) this.lastTurnClosedAt = undefined;
+        }
         if (content?.interrupted) {
             this.turnInterrupted = true;
             this.discardOutput = true;
+            this.generationCompleted = false;
             this.finishResponse('cancelled');
+            if (!this.isCurrentLifecycle(socket, generation)) return;
         }
         if (content?.interrupted || message.voiceActivity?.type === 'ACTIVITY_START'
             || (typeof interim === 'string' && interim.trim())
-            || (!this.responseId && typeof transcript?.text === 'string' && transcript.text.trim())) {
+            || (!isLateTranscript && !this.responseId && typeof transcript?.text === 'string' && transcript.text.trim())) {
             this.providerTurnActive = true;
-            if (!this.speaking) this.emit({ type: 'interviewer_speech_started', at });
+            if (!this.speaking) {
+                this.emit({ type: 'interviewer_speech_started', at });
+                if (!this.isCurrentLifecycle(socket, generation)) return;
+            }
             this.speaking = true;
         }
         if (typeof interim === 'string' && interim.trim()) {
             this.emit({ type: 'interviewer_transcript', text: interim, final: false, at });
+            if (!this.isCurrentLifecycle(socket, generation)) return;
         }
         // Gemini sends the interviewer's words as small pieces, usually without
         // `finished`. Join them and emit one final turn per question, so the
         // notebook records "How would you design a cache?" and not " a cache?".
-        if (typeof transcript?.text === 'string' && transcript.text) {
+        if (!isLateTranscript && typeof transcript?.text === 'string' && transcript.text) {
             this.inputTranscript += transcript.text;
             if (this.inputTranscript.trim()) {
                 this.emit({ type: 'interviewer_transcript', text: this.inputTranscript.replace(/\s+/g, ' ').trim(), final: false, at });
+                if (!this.isCurrentLifecycle(socket, generation)) return;
             }
         }
-        if (transcript?.finished === true) this.flushInputTranscript(at);
-        const output = content?.outputTranscription?.text;
+        if (!isLateTranscript && transcript?.finished === true) {
+            this.flushInputTranscript(at);
+            if (!this.isCurrentLifecycle(socket, generation)) return;
+        }
         if (this.speaking && !content?.interrupted
-            && (message.voiceActivity?.type === 'ACTIVITY_END' || transcript?.finished
+            && (message.voiceActivity?.type === 'ACTIVITY_END' || (!isLateTranscript && transcript?.finished)
                 || (!this.discardOutput && output) || (content?.turnComplete && !this.turnInterrupted))) {
             this.stopSpeaking(at);
+            if (!this.isCurrentLifecycle(socket, generation)) return;
         }
         // modelTurn audio is ignored. The transcription is already incremental.
         if (!this.discardOutput && typeof output === 'string' && output.length) {
             this.providerTurnActive = true;
             this.failures = 0;
             if (!this.responseId) {
+                this.generationCompleted = false;
                 this.flushInputTranscript(at);
+                if (!this.isCurrentLifecycle(socket, generation)) return;
                 const namespace = this.context?.responseNamespace ?? this.context?.sessionId;
                 this.responseId = `${namespace}:${++this.responseSequence}`;
                 this.emit({ type: 'response_started', responseId: this.responseId, at });
+                if (!this.isCurrentLifecycle(socket, generation)) return;
             }
-            if (this.responseId) this.emit({ type: 'response_delta', responseId: this.responseId, text: output });
+            if (this.responseId) {
+                this.emit({ type: 'response_delta', responseId: this.responseId, text: output });
+                if (!this.isCurrentLifecycle(socket, generation)) return;
+            }
+        }
+        if (content?.generationComplete && !this.discardOutput && this.responseId) {
+            this.generationCompleted = true;
         }
         if (content?.turnComplete) {
             this.flushInputTranscript(at);
+            if (!this.isCurrentLifecycle(socket, generation)) return;
             const interrupted = this.turnInterrupted;
-            if (this.responseId) this.finishResponse('completed');
-            else if (!interrupted && content.interactionStatus !== 'IN_PROGRESS') this.emit({ type: 'response_silent' });
+            if (this.responseId) {
+                this.finishResponse('completed');
+                if (!this.isCurrentLifecycle(socket, generation)) return;
+            } else if (!interrupted && content.interactionStatus !== 'IN_PROGRESS') {
+                this.emit({ type: 'response_silent' });
+                if (!this.isCurrentLifecycle(socket, generation)) return;
+            }
             this.discardOutput = false;
             this.turnInterrupted = false;
+            this.generationCompleted = false;
+            if (!interrupted) this.lastTurnClosedAt = at;
             if (!interrupted && content.interactionStatus !== 'IN_PROGRESS') {
                 this.providerTurnActive = false;
                 this.flushCandidate();
@@ -342,11 +420,8 @@ export class GeminiLiveBrain implements LiveBrain {
             const seconds = Number(String(message.goAway.timeLeft ?? '').replace(/s$/, ''));
             const inMs = Number.isFinite(seconds) ? Math.max(0, seconds * 1_000) : 0;
             this.emit({ type: 'session_expiring', inMs, ...(this.resumeHandle ? {} : { resumable: false }) });
+            if (!this.isCurrentLifecycle(socket, generation)) return;
             if (this.resumeHandle) this.scheduleRollover(inMs);
-            else if (!this.rolloverTimer) {
-                this.rolloverAt = this.rolloverClock.now() + Math.max(0, inMs - 500);
-                this.rolloverTimer = this.rolloverClock.setTimeout(() => this.rollover(), Math.max(0, inMs - 500));
-            }
         }
     }
 
@@ -399,13 +474,14 @@ export class GeminiLiveBrain implements LiveBrain {
     }
 
     private fail(code: LiveBrainErrorCode): void {
-        if (!this.context) return;
+        const context = this.context;
+        if (!context) return;
         if (this.readyAt !== undefined && Date.now() - this.readyAt >= 30_000) this.failures = 0;
         this.disconnect();
         const delay = (this.options.backoffMs ?? BACKOFF_MS)[this.failures++];
-        const fatal = code === 'auth' || code === 'quota' || delay === undefined;
+        const fatal = code === 'auth' || code === 'quota' || code === 'protocol' || code === 'unsupported' || delay === undefined;
         if (fatal) {
-            const detail = this.resuming && code !== 'auth' && code !== 'quota' ? 'session_resumption_failed' : undefined;
+            const detail = this.resuming && code !== 'auth' && code !== 'quota' && code !== 'unsupported' ? 'session_resumption_failed' : undefined;
             this.release();
             this.startup?.fail(new GeminiLiveError(code));
             this.startup = undefined;
@@ -414,7 +490,7 @@ export class GeminiLiveBrain implements LiveBrain {
         }
         this.reconnectTimer = setTimeout(() => { this.reconnectTimer = undefined; this.connect(); }, delay);
         this.emit({ type: 'error', code, fatal: false });
-        if (this.context) this.emit({ type: 'status', status: 'degraded' });
+        if (this.context === context) this.emit({ type: 'status', status: 'degraded' });
     }
 
     /** Rolls the socket over. `replay` re-sends the recent interviewer audio
@@ -486,11 +562,14 @@ export class GeminiLiveBrain implements LiveBrain {
         if (graceful && socket?.readyState === WebSocket.OPEN) socket.close(1000);
         else socket?.terminate();
         if (this.responseId) {
-            this.finishResponse(graceful ? 'cancelled' : 'failed');
+            const status = graceful ? 'cancelled' : this.generationCompleted ? 'completed' : 'failed';
+            this.generationCompleted = false;
+            this.finishResponse(status);
         }
     }
 
     private release(graceful = false): void {
+        this.lifecycleGeneration++;
         this.context?.signal.removeEventListener('abort', this.abort);
         this.context = undefined;
         clearTimeout(this.reconnectTimer);
@@ -504,10 +583,12 @@ export class GeminiLiveBrain implements LiveBrain {
         this.resumeHandle = undefined;
         this.resuming = false;
         this.inputTranscript = '';
+        this.lastTurnClosedAt = undefined;
         this.speaking = false;
         this.providerTurnActive = false;
         this.discardOutput = false;
         this.turnInterrupted = false;
+        this.generationCompleted = false;
         this.failures = 0;
     }
 

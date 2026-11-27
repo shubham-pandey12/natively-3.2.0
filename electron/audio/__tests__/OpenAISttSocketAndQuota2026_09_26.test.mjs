@@ -257,4 +257,14 @@ describe('16 → 24 kHz upsampling interpolates', () => {
     const out = stt._resamplePcm16(input, 24000);
     assert.deepEqual([0, 1, 2, 3].map((i) => out.readInt16LE(i * 2)), [0, 200, 400, 600]);
   });
+
+  test('odd-length PCM16 buffer drops the trailing byte without throwing and matches even-length output', () => {
+    const stt = new OpenAIStreamingSTT('sk');
+    stt.inputSampleRate = 24000;
+    stt.numChannels = 1;
+    const even = Buffer.from([0x10, 0x00]);
+    const odd = Buffer.from([0x10, 0x00, 0xff]);
+    assert.deepEqual(stt._resamplePcm16(odd, 24000), stt._resamplePcm16(even, 24000));
+    assert.equal(stt._resamplePcm16(Buffer.from([0xff]), 24000).length, 0);
+  });
 });

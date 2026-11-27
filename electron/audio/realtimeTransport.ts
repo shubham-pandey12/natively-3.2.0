@@ -2,6 +2,56 @@ import type WebSocket from 'ws';
 import { streamingStttWsOptions } from './dnsHelpers';
 
 export const WS_SAMPLE_RATE = 24_000;
+export const REALTIME_READY_RESET_MS = 30_000;
+export const REALTIME_MAX_BUFFERED_BYTES = 1024 * 1024;
+export const REALTIME_BACKPRESSURE_FAIL_MS = 5_000;
+
+export function isProtocolCloseCode(code?: number): boolean {
+    return code === 1002 || code === 1003 || code === 1007 || code === 1008;
+}
+
+/**
+ * Deepgram's servers make outbound HTTPS requests to BYO think endpoints, so
+ * loopback, link-local, RFC1918 private IPs, and non-HTTPS URLs cannot work.
+ */
+export function isPublicHttpsUrl(raw: string): boolean {
+    try {
+        const parsed = new URL(raw.trim());
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) return false;
+        const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+        if (!host || !host.includes('.') || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === '::1' || host === '[::1]') return false;
+        if (/^(?:127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)) return false;
+        if (/^(?:fc|fd|fe80)/i.test(host.replace(/^\[|\]$/g, ''))) return false;
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export class SocketBackpressureTracker {
+    private since?: number;
+    private logged = false;
+
+    constructor(private readonly label: string) {}
+
+    reset(): void {
+        this.since = undefined;
+        this.logged = false;
+    }
+
+    shouldDrop(socket: Pick<WebSocket, 'bufferedAmount'>, now = Date.now()): 'send' | 'drop' | 'fail' {
+        if (socket.bufferedAmount > REALTIME_MAX_BUFFERED_BYTES) {
+            if (this.since === undefined) this.since = now;
+            if (!this.logged) {
+                this.logged = true;
+                console.warn(`[LiveBrain] ${this.label} dropping audio chunk due to socket backpressure (bufferedAmount > 1 MiB)`);
+            }
+            return now - this.since > REALTIME_BACKPRESSURE_FAIL_MS ? 'fail' : 'drop';
+        }
+        this.reset();
+        return 'send';
+    }
+}
 
 export function bearerRealtimeHeaders(apiKey: string): Record<string, string> {
     return { Authorization: `Bearer ${apiKey}` };
@@ -13,6 +63,15 @@ export function realtimeSocketOptions(headers: Record<string, string>): WebSocke
 
 export function realtimeReconnectDelay(attempt: number): number {
     return Math.min(1_000 * Math.pow(2, attempt), 30_000);
+}
+
+/** Normalize ws `message` payload (`string | Buffer | ArrayBuffer | Buffer[]`) to UTF-8 text. */
+export function wsDataToString(raw: WebSocket.Data): string {
+    if (typeof raw === 'string') return raw;
+    if (Array.isArray(raw)) return Buffer.concat(raw).toString('utf8');
+    if (Buffer.isBuffer(raw)) return raw.toString('utf8');
+    if (raw instanceof ArrayBuffer) return Buffer.from(raw).toString('utf8');
+    return Buffer.from(raw as ArrayBufferView).toString('utf8');
 }
 
 /**
@@ -59,8 +118,8 @@ export function openAiHandshakeVerdict(status: number, body: string): Error | nu
  * The pipeline outputs Int16LE PCM, potentially at a higher sample rate (e.g. 48kHz).
  */
 export function resampleRealtimePcm16(chunk: Buffer, inputSampleRate: number, numChannels: number, targetRate: number): Buffer {
-    // Safe read from unaligned memory
-    const numSamples = chunk.length / 2;
+    // Safe read from unaligned memory; drop any trailing odd byte.
+    const numSamples = Math.floor(chunk.length / 2);
     const inputS16 = new Int16Array(numSamples);
     for (let i = 0; i < numSamples; i++) {
         inputS16[i] = chunk.readInt16LE(i * 2);
@@ -97,15 +156,15 @@ export function resampleRealtimePcm16(chunk: Buffer, inputSampleRate: number, nu
     // left distortion only 10-13 dB below speech at 2-3 kHz (22-29 dB now).
     // Whole-number ratios (48 → 24 kHz, 48 → 16 kHz) land on frac 0 and
     // come out exactly as before. Output length is unchanged.
-    const factor       = inputSampleRate / targetRate;
+    const factor = inputSampleRate / targetRate;
     const outputLength = Math.floor(monoS16.length / factor);
-    const outputS16    = new Int16Array(outputLength);
-    const lastIndex    = monoS16.length - 1;
+    const outputS16 = new Int16Array(outputLength);
+    const lastIndex = monoS16.length - 1;
     for (let i = 0; i < outputLength; i++) {
-        const pos  = i * factor;
-        const k    = Math.floor(pos);
-        const a    = monoS16[k];
-        const b    = monoS16[Math.min(k + 1, lastIndex)];
+        const pos = i * factor;
+        const k = Math.floor(pos);
+        const a = monoS16[k];
+        const b = monoS16[Math.min(k + 1, lastIndex)];
         outputS16[i] = Math.round(a + (b - a) * (pos - k));
     }
     return Buffer.from(outputS16.buffer);

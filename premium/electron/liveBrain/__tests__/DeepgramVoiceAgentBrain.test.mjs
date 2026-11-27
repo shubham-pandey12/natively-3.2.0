@@ -175,12 +175,21 @@ test('keeps multiple text chunks in one answer and rejects late output after a c
     assert.equal(connections[0].jsonMessages.some(m => m.type === 'response.cancel'), false);
 });
 
-test('KeepAlive is sent every 8 seconds', async t => {
-    t.mock.timers.enable({ apis: ['setInterval'] });
+test('KeepAlive is sent every 8 seconds while idle and suppressed during continuous audio', async t => {
+    t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 10_000 });
     const { brain, connections } = await createRig(t);
     await brain.start(makeContext());
 
-    t.mock.timers.tick(8_000);
+    // Continuous audio for 20 s -> no KeepAlive sent.
+    for (let i = 0; i < 20; i++) {
+        t.mock.timers.tick(1_000);
+        brain.pushInterviewerAudio(new Int16Array(320).fill(200), 16_000);
+    }
+    await delay(10);
+    assert.equal(connections[0].jsonMessages.filter(m => m.type === 'KeepAlive').length, 0);
+
+    // Idle >= 8 s -> KeepAlive sent (timer phase at +4 s and +12 s from last audio).
+    t.mock.timers.tick(12_000);
     const keepAlives1 = await until(() => connections[0].jsonMessages.filter(m => m.type === 'KeepAlive').length >= 1);
     assert.equal(keepAlives1, true);
 
@@ -388,4 +397,134 @@ test('rollover replays notebook and recentTurns via agent.context.messages and T
     assert.match(badThink.message, /Deepgram key valid, but Think model failed/);
 
     assert.equal(createLiveBrain('deepgram-voice-agent', { apiKey }).id, 'deepgram-voice-agent');
+});
+
+test('bare close 1008 is fatal protocol without retry while 1006 is network retry', async t => {
+    const r1 = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await r1.brain.start(makeContext());
+    r1.connections[0].socket.close(1008);
+    await until(() => r1.events.some(e => e.type === 'error'));
+    await delay(30);
+    assert.deepEqual(r1.events.filter(e => e.type === 'error'), [{ type: 'error', code: 'protocol', fatal: true }]);
+    assert.equal(r1.connections.length, 1);
+
+    const r2 = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await r2.brain.start(makeContext());
+    r2.connections[0].socket.terminate();
+    await until(() => r2.events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+    assert.deepEqual(r2.events.filter(e => e.type === 'error'), [{ type: 'error', code: 'network', fatal: false }]);
+});
+
+test('3 drops each after 30 s ready reset failures so 4th drop still retries', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    const { brain, connections, events } = await createRig(t, { brainOptions: { backoffMs: [5, 5, 5] } });
+    await brain.start(makeContext());
+    for (let i = 0; i < 4; i++) {
+        await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === i + 1);
+        t.mock.timers.tick(30_000);
+        connections[i].socket.terminate();
+    }
+    await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === 5);
+    assert.equal(events.some(e => e.type === 'error' && e.fatal), false);
+    assert.equal(events.filter(e => e.type === 'error' && !e.fatal).length, 4);
+});
+
+test('bufferedAmount > 1 MiB drops audio while JSON control still sends, and sustained > 5 s fails with network', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    const { brain, connections, events } = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await brain.start(makeContext());
+    const conn = connections[0];
+    Object.defineProperty(brain.socket, 'bufferedAmount', { get: () => 2 * 1024 * 1024, configurable: true });
+    brain.pushInterviewerAudio(new Int16Array(320).fill(100), 16_000);
+    await delay(20);
+    assert.equal(conn.binaryFrames.length, 0);
+    assert.equal(events.some(e => e.type === 'error'), false);
+
+    assert.equal(brain.injectUserMessage('Hello'), true);
+    await until(() => conn.jsonMessages.some(m => m.type === 'InjectUserMessage'));
+
+    t.mock.timers.tick(5_001);
+    brain.pushInterviewerAudio(new Int16Array(320).fill(100), 16_000);
+    await until(() => events.some(e => e.type === 'error' && e.code === 'network' && !e.fatal));
+    await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+});
+
+test('stop() inside non-fatal error listener emits no degraded after closed and schedules no retry', async t => {
+    const { brain, connections, events } = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await brain.start(makeContext());
+    brain.onEvent(event => {
+        if (event.type === 'error' && !event.fatal) void brain.stop();
+    });
+    connections[0].socket.terminate();
+    await until(() => events.some(e => e.type === 'status' && e.status === 'closed'));
+    await delay(30);
+    const closedIdx = events.findIndex(e => e.type === 'status' && e.status === 'closed');
+    assert.equal(events.length, closedIdx + 1);
+    assert.equal(events.some(e => e.type === 'status' && e.status === 'degraded'), false);
+    assert.equal(connections.length, 1);
+});
+
+test('stop() inside ready listener rejects start() and does not resolve as ready', async t => {
+    const { brain, events } = await createRig(t);
+    brain.onEvent(event => {
+        if (event.type === 'status' && event.status === 'ready') void brain.stop();
+    });
+    await assert.rejects(() => brain.start(makeContext()));
+    assert.equal(events.at(-1)?.status, 'closed');
+});
+
+test('Error ASR_CONNECTION_CLOSED triggers non-fatal retry', async t => {
+    const { brain, connections, events } = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await brain.start(makeContext());
+    sendJson(connections[0].socket, { type: 'Error', code: 'ASR_CONNECTION_CLOSED', description: 'ASR connection closed' });
+    await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+    assert.deepEqual(events.filter(e => e.type === 'error'), [{ type: 'error', code: 'network', fatal: false }]);
+});
+
+test('BYO rejects private/localhost URL and unknown provider before connect without logging secret', async t => {
+    const secret = 'Bearer super-secret-byo-token-xyz';
+    const logged = [];
+    const origLog = console.log;
+    const origWarn = console.warn;
+    const origError = console.error;
+    console.log = (...args) => { logged.push(args.map(String).join(' ')); };
+    console.warn = (...args) => { logged.push(args.map(String).join(' ')); };
+    console.error = (...args) => { logged.push(args.map(String).join(' ')); };
+    try {
+        const { brain: b1, connections: c1 } = await createRig(t, {
+            brainOptions: {
+                deepgramThink: {
+                    thinkMode: 'byo',
+                    managedProvider: 'open_ai',
+                    managedModel: 'gpt-4o-mini',
+                    byoKeyProvider: 'custom',
+                    byoModel: 'llama3',
+                    byoCustomUrl: 'https://127.0.0.1:11434/v1',
+                    byoCustomHeader: secret,
+                },
+            },
+        });
+        await assert.rejects(() => b1.start(makeContext()), { code: 'unsupported' });
+        assert.equal(c1.length, 0);
+
+        const { brain: b2, connections: c2 } = await createRig(t, {
+            brainOptions: {
+                deepgramThink: {
+                    thinkMode: 'byo',
+                    managedProvider: 'open_ai',
+                    managedModel: 'gpt-4o-mini',
+                    byoKeyProvider: 'ollama',
+                    byoApiKey: secret,
+                    byoModel: 'llama3',
+                },
+            },
+        });
+        await assert.rejects(() => b2.start(makeContext()), { code: 'unsupported' });
+        assert.equal(c2.length, 0);
+        assert.equal(logged.some(line => line.includes(secret)), false);
+    } finally {
+        console.log = origLog;
+        console.warn = origWarn;
+        console.error = origError;
+    }
 });

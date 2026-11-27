@@ -85,7 +85,7 @@ export interface LiveBrainMeetingOptions {
         startLiveBrainDraft?: LiveBrainAnswerEngine['startLiveBrainDraft'];
         getLiveBrainAiRouteKey?: LiveBrainAnswerEngine['getLiveBrainAiRouteKey'];
     };
-    pipeline?: { activate(): void; cancel(): void };
+    pipeline?: { activate(pending?: { text: string; at: number }): void; cancel(): void };
     summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
     onFailure(code: string): void;
@@ -99,7 +99,7 @@ export interface LiveBrainMeetingSession {
     noteSpeechStop(at: number): void;
     isPipeline?(): boolean;
     pipelineContext?(): string;
-    observePipelineTranscript?(text: string, final: boolean, at: number): void;
+    observePipelineTranscript?(text: string, final: boolean, at: number): boolean | void;
     observePipelineOutput?(output: { generationId: number; type: 'token' | 'answer' | 'discard' | 'failed'; text?: string }): void;
     cancelAnswer(reason: 'manual_answer'): void;
 }

@@ -35,7 +35,11 @@ export class PipelineBrain implements LiveBrain {
         if (!this.active || output.generationId <= this.latestClosed
             || (this.generation !== undefined && output.generationId < this.generation)) return;
         if (output.type === 'discard' || output.type === 'failed') {
-            if (this.generation === output.generationId) this.finish(output.type === 'failed' ? 'failed' : 'cancelled');
+            if (this.generation === output.generationId) {
+                this.finish(output.type === 'failed' ? 'failed' : 'cancelled');
+            } else if (this.generation === undefined) {
+                this.emit({ type: 'response_silent' });
+            }
             this.latestClosed = Math.max(this.latestClosed, output.generationId);
             return;
         }
@@ -43,14 +47,17 @@ export class PipelineBrain implements LiveBrain {
         const responseId = `pipeline:${output.generationId}`;
         if (this.generation !== output.generationId) {
             this.finish('cancelled');
+            if (!this.active) return;
             this.generation = output.generationId;
             this.emit({ type: 'response_started', responseId, at: Date.now() });
+            if (!this.active || this.generation !== output.generationId) return;
         }
         const delta = output.type === 'answer' && output.text.startsWith(this.text)
             ? output.text.slice(this.text.length) : output.type === 'token' ? output.text : '';
         if (delta) {
             this.text += delta.slice(0, Math.max(0, 16_000 - this.text.length));
             this.emit({ type: 'response_delta', responseId, text: delta });
+            if (!this.active || this.generation !== output.generationId) return;
         }
         if (output.type === 'answer') this.finish('completed', output.text);
     }

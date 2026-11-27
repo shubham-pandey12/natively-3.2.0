@@ -261,3 +261,29 @@ test('a cancelled answer that already showed text is kept in the notebook; an em
     assert.deepEqual(assistant.map(turn => turn.text), ['I would add an index and a timeout.']);
     h.supervisor.stop();
 });
+
+test('Sonic fresh-start allowance resets after 30 s ready, while two quick failures fall back', async () => {
+    const h1 = rig('amazon-sonic', 0, ['amazon-sonic']);
+    h1.supervisor.start();
+    await flush();
+    h1.realtime[0].emit({ type: 'error', code: 'network', fatal: true });
+    await flush();
+    assert.equal(h1.supervisor.current, h1.realtime[1]);
+    h1.clock.advance(30_000);
+    h1.realtime[1].emit({ type: 'error', code: 'network', fatal: true });
+    await flush();
+    assert.equal(h1.supervisor.current, h1.realtime[2]);
+    h1.supervisor.stop();
+
+    const h2 = rig('amazon-sonic', 0, ['amazon-sonic']);
+    h2.supervisor.start();
+    await flush();
+    h2.realtime[0].emit({ type: 'error', code: 'network', fatal: true });
+    await flush();
+    assert.equal(h2.supervisor.current, h2.realtime[1]);
+    h2.clock.advance(5_000);
+    h2.realtime[1].emit({ type: 'error', code: 'network', fatal: true });
+    await flush();
+    assert.equal(h2.supervisor.current.id, 'pipeline');
+    h2.supervisor.stop();
+});

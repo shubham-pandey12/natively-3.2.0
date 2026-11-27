@@ -111,23 +111,8 @@ const DEEPGRAM_BYO_MODELS = new Map<string, LiveBrainModel[]>([
     ]],
 ]);
 
-/**
- * Deepgram's servers make outbound HTTPS requests to BYO think endpoints, so
- * loopback, link-local, RFC1918 private IPs, and non-HTTPS URLs cannot work.
- */
-export function isPublicHttpsUrl(raw: string): boolean {
-    try {
-        const parsed = new URL(raw.trim());
-        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) return false;
-        const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
-        if (!host || !host.includes('.') || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === '::1' || host === '[::1]') return false;
-        if (/^(?:127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(host)) return false;
-        if (/^(?:fc|fd|fe80)/i.test(host.replace(/^\[|\]$/g, ''))) return false;
-        return true;
-    } catch {
-        return false;
-    }
-}
+import { isPublicHttpsUrl } from '../audio/realtimeTransport';
+export { isPublicHttpsUrl };
 
 /**
  * Everything that differs per realtime provider. Exhaustive over

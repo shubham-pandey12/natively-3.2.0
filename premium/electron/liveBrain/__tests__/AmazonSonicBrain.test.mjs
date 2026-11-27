@@ -110,3 +110,136 @@ test('Sonic classifies stream failures for the supervisor without logging AWS er
     t.output.end();
     await t.inputDone();
 });
+
+test('start() transport rejecting AccessDenied emits error{auth,fatal:true} before status closed with nothing after', async () => {
+    const brain = new AmazonSonicBrain({
+        sonicRegion: 'us-east-1',
+        transport: async () => { throw Object.assign(new Error('Access denied'), { name: 'AccessDeniedException' }); },
+    });
+    const seen = [];
+    brain.onEvent(event => seen.push(event));
+    await assert.rejects(() => brain.start(context), { code: 'auth' });
+    assert.deepEqual(seen, [
+        { type: 'status', status: 'connecting' },
+        { type: 'error', code: 'auth', fatal: true },
+        { type: 'status', status: 'closed' },
+    ]);
+});
+
+test('stop() inside connecting listener never invokes transport and leaves no interval', async () => {
+    let transportCalls = 0;
+    const brain = new AmazonSonicBrain({
+        sonicRegion: 'us-east-1',
+        transport: async () => { transportCalls++; return new PassThrough({ objectMode: true }); },
+    });
+    const seen = [];
+    brain.onEvent(event => {
+        seen.push(event);
+        if (event.type === 'status' && event.status === 'connecting') void brain.stop();
+    });
+    await assert.rejects(() => brain.start(context), { code: 'network' });
+    assert.equal(transportCalls, 0);
+    assert.equal(brain.timer, undefined);
+    assert.deepEqual(seen, [
+        { type: 'status', status: 'connecting' },
+        { type: 'status', status: 'closed' },
+    ]);
+});
+
+test('stop() inside response_started listener emits no delta afterwards', async () => {
+    const t = rig();
+    const brain = new AmazonSonicBrain({ sonicRegion: 'us-east-1', transport: t.transport });
+    const seen = [];
+    brain.onEvent(event => {
+        seen.push(event);
+        if (event.type === 'response_started') void brain.stop();
+    });
+    await brain.start(context);
+    t.emit('completionStart', { completionId: 'c1' });
+    startText(t, 'c1', 'a1', 'ASSISTANT', 'SPECULATIVE');
+    text(t, 'c1', 'a1', 'Should not emit');
+    await delay(0);
+    assert.equal(seen.some(e => e.type === 'response_delta'), false);
+    assert.equal(seen.at(-1)?.status, 'closed');
+    t.output.end();
+    await t.inputDone();
+});
+
+test('malformed additionalModelFields does not fail and is treated as final', async () => {
+    const t = rig();
+    const brain = new AmazonSonicBrain({ sonicRegion: 'us-east-1', transport: t.transport });
+    const seen = [];
+    brain.onEvent(event => seen.push(event));
+    await brain.start(context);
+    t.emit('completionStart', { completionId: 'c1' });
+    t.emit('contentStart', {
+        completionId: 'c1', contentId: 'b1', role: 'ASSISTANT', type: 'TEXT',
+        additionalModelFields: '{not-valid-json',
+    });
+    text(t, 'c1', 'b1', 'Final fallback.');
+    endText(t, 'c1', 'b1');
+    t.emit('completionEnd', { completionId: 'c1', stopReason: 'END_TURN' });
+    await delay(0);
+    assert.equal(seen.some(e => e.type === 'error'), false);
+    assert.deepEqual(seen.filter(e => e.type === 'response_delta').map(e => e.text), ['Final fallback.']);
+    await brain.stop();
+    t.output.end();
+    await t.inputDone();
+});
+
+test('queue stuck > 64 for > 5 s fails with network and drained queue resets timer', async tMock => {
+    tMock.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    const t = rig();
+    const brain = new AmazonSonicBrain({ sonicRegion: 'us-east-1', transport: t.transport });
+    const seen = [];
+    brain.onEvent(event => seen.push(event));
+    await brain.start(context);
+
+    // Fill queue > 64 and advance 4 s -> no failure yet.
+    brain.queue = new Array(65).fill({ chunk: { bytes: Buffer.alloc(0) } });
+    brain.flushAudio();
+    tMock.mock.timers.tick(4_000);
+    brain.flushAudio();
+    assert.equal(seen.some(e => e.type === 'error'), false);
+
+    // Drain queue -> resets backpressure timer.
+    brain.queue = [];
+    brain.flushAudio();
+
+    // Refill > 64 and advance 4 s -> still no failure because timer reset.
+    brain.queue = new Array(65).fill({ chunk: { bytes: Buffer.alloc(0) } });
+    brain.flushAudio();
+    tMock.mock.timers.tick(4_000);
+    brain.flushAudio();
+    assert.equal(seen.some(e => e.type === 'error'), false);
+
+    // Exceed 5 s sustained -> fails with network before closed.
+    tMock.mock.timers.tick(1_001);
+    brain.flushAudio();
+    assert.deepEqual(seen.filter(e => e.type === 'error'), [{ type: 'error', code: 'network', fatal: true }]);
+    t.output.end();
+    await t.inputDone();
+});
+
+test('speculative preview streams one delta and differing FINAL overrides response_done finalText', async () => {
+    const t = rig();
+    const brain = new AmazonSonicBrain({ sonicRegion: 'us-east-1', transport: t.transport });
+    const seen = [];
+    brain.onEvent(event => seen.push(event));
+    await brain.start(context);
+    t.emit('completionStart', { completionId: 'c1' });
+    startText(t, 'c1', 's1', 'ASSISTANT', 'SPECULATIVE');
+    text(t, 'c1', 's1', 'Use Redis.');
+    endText(t, 'c1', 's1');
+    startText(t, 'c1', 'f1', 'ASSISTANT', 'FINAL');
+    text(t, 'c1', 'f1', 'Use Postgres.');
+    endText(t, 'c1', 'f1');
+    t.emit('completionEnd', { completionId: 'c1', stopReason: 'END_TURN' });
+    await delay(0);
+    assert.deepEqual(seen.filter(e => e.type === 'response_delta').map(e => e.text), ['Use Redis.']);
+    const done = seen.find(e => e.type === 'response_done');
+    assert.deepEqual(done, { type: 'response_done', responseId: 'generation:c1', status: 'completed', finalText: 'Use Postgres.' });
+    await brain.stop();
+    t.output.end();
+    await t.inputDone();
+});

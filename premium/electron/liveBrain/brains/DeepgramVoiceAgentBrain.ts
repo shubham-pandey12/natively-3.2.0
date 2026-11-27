@@ -1,5 +1,13 @@
 import WebSocket from 'ws';
-import { realtimeReconnectDelay, realtimeSocketOptions, resampleRealtimePcm16 } from '../../../../electron/audio/realtimeTransport';
+import {
+    isProtocolCloseCode,
+    isPublicHttpsUrl,
+    REALTIME_READY_RESET_MS,
+    realtimeReconnectDelay,
+    realtimeSocketOptions,
+    resampleRealtimePcm16,
+    SocketBackpressureTracker,
+} from '../../../../electron/audio/realtimeTransport';
 import { safeDetachAndClose } from '../../../../electron/audio/wsSafeTeardown';
 import type { DeepgramThinkConfig } from '../../../../electron/premium/liveBrain';
 import { DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL, DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER } from '../../../../src/types/liveBrainSettings';
@@ -15,6 +23,15 @@ const SILENCE_FILL_AFTER_MS = 300;
 const SILENCE_FILL_INTERVAL_MS = 100;
 const KEEPALIVE_INTERVAL_MS = 8_000;
 const MAX_RETRIES = 3;
+
+// Retryable transient/server-side error codes per
+// https://developers.deepgram.com/docs/voice-agent-errors-warnings
+const RETRYABLE_DEEPGRAM_ERROR_CODES = new Set([
+    'ASR_CONNECTION_CLOSED',
+    'FAILED_TO_START_LISTENING',
+    'INTERNAL_SERVER_ERROR',
+    'MAXIMUM_SESSION_LENGTH_REACHED',
+]);
 
 export interface DeepgramVoiceAgentOptions {
     apiKey: string;
@@ -115,8 +132,13 @@ export function resolveByoEndpoint(
                 headers: { Authorization: `Bearer ${key}` },
             };
         default: {
+            if (provider !== 'custom' && !provider.startsWith('custom:')) {
+                throw new DeepgramVoiceAgentError('unsupported', 'Unsupported BYO Think provider.');
+            }
             const url = (customUrl || '').trim();
-            if (!url) throw new DeepgramVoiceAgentError('unsupported', 'Configure a compatible custom Think endpoint.');
+            if (!url || !isPublicHttpsUrl(url)) {
+                throw new DeepgramVoiceAgentError('unsupported', 'Configure a public HTTPS Think endpoint.');
+            }
             const model = byoModel?.trim();
             if (!model) throw new DeepgramVoiceAgentError('unsupported', 'Choose a model ID for the custom Think endpoint.');
             const headers: Record<string, string> = {};
@@ -145,7 +167,7 @@ function classify(status: number | undefined, detail: string, fallback: LiveBrai
         || /invalid_auth|invalid.credential|invalid.api.key|authentication|unauthenticated|permission.denied|unauthorized/i.test(detail)) return 'auth';
     if (status === 429 || status === 1013 || /rate.limit|too.many.requests|concurrency/i.test(detail)) return 'rate_limited';
     if (/invalid_settings|model.not.available|model.not.found|unsupported/i.test(detail)) return 'unsupported';
-    if (status !== undefined && status >= 400 && status < 500) return 'protocol';
+    if (isProtocolCloseCode(status) || (status !== undefined && status >= 400 && status < 500)) return 'protocol';
     return fallback;
 }
 
@@ -160,6 +182,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
     private audioTimer?: ReturnType<typeof setInterval>;
     private keepAliveTimer?: ReturnType<typeof setInterval>;
     private ready = false;
+    private readyAt?: number;
     private speaking = false;
     private failures = 0;
     private sequence = 0;
@@ -169,6 +192,8 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
     private interrupted = false;
     private audio = Buffer.alloc(0);
     private audioThrough = 0;
+    private lastBinarySentAt = 0;
+    private readonly backpressure = new SocketBackpressureTracker(this.id);
 
     constructor(private readonly options: DeepgramVoiceAgentOptions) {}
 
@@ -180,6 +205,20 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
     start(context: LiveBrainStartContext): Promise<void> {
         if (this.context) return Promise.reject(new DeepgramVoiceAgentError('protocol'));
         if (context.signal.aborted) return Promise.reject(new DeepgramVoiceAgentError('network'));
+        const thinkCfg = this.options.deepgramThink;
+        if (thinkCfg?.thinkMode === 'byo') {
+            try {
+                resolveByoEndpoint(
+                    thinkCfg.byoKeyProvider,
+                    thinkCfg.byoApiKey,
+                    thinkCfg.byoModel,
+                    thinkCfg.byoCustomUrl,
+                    thinkCfg.byoCustomHeader,
+                );
+            } catch (err) {
+                return Promise.reject(err);
+            }
+        }
         this.context = context;
         this.failures = 0;
         context.signal.addEventListener('abort', this.onAbort, { once: true });
@@ -355,7 +394,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
             let event: DeepgramWireMessage;
             try { event = JSON.parse(data.toString()); }
             catch { this.handleFailure('protocol'); return; }
-            if (event && typeof event === 'object') this.onMessage(event);
+            if (event && typeof event === 'object') this.onMessage(event, socket);
         });
         socket.on('unexpected-response', (_request, response) => {
             const chunks: Buffer[] = [];
@@ -382,7 +421,9 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         });
     }
 
-    private onMessage(event: DeepgramWireMessage): void {
+    private onMessage(event: DeepgramWireMessage, socket: WebSocket): void {
+        const context = this.context;
+        if (!context || this.socket !== socket) return;
         if (event.type === 'Warning') {
             const code = event.code ?? event.warn_code;
             if (code === 'MAXIMUM_SESSION_LENGTH_APPROACHING') {
@@ -393,8 +434,9 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
             return;
         }
         if (event.type === 'Error') {
-            const detail = `${event.code ?? ''} ${event.description ?? event.message ?? ''}`.trim();
-            const fallback = event.code === 'INTERNAL_SERVER_ERROR' || event.code === 'MAXIMUM_SESSION_LENGTH_REACHED'
+            const errCode = event.code ?? event.error?.code;
+            const detail = `${errCode ?? ''} ${event.description ?? event.message ?? event.error?.message ?? ''}`.trim();
+            const fallback = errCode && RETRYABLE_DEEPGRAM_ERROR_CODES.has(errCode)
                 ? 'network' : 'protocol';
             this.handleFailure(classify(undefined, detail, fallback));
             return;
@@ -412,7 +454,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
                     this.handleFailure(code, err instanceof DeepgramVoiceAgentError ? err.message : undefined);
                 }
             } else if (event.type === 'SettingsApplied') {
-                this.becomeReady();
+                this.becomeReady(context, socket);
             }
             return;
         }
@@ -422,6 +464,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
                 this.speaking = true;
                 this.injectedText = undefined;
                 this.emit({ type: 'interviewer_speech_started', at });
+                if (this.context !== context || this.socket !== socket) return;
                 this.cancelResponse('barge_in');
                 break;
             case 'ConversationText': {
@@ -430,18 +473,23 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
                 if (event.role === 'user') {
                     if (text === this.injectedText) break;
                     this.injectedText = undefined;
-                    if (this.activeResponseId) this.cancelResponse('new_turn');
+                    if (this.activeResponseId) {
+                        this.cancelResponse('new_turn');
+                        if (this.context !== context || this.socket !== socket) return;
+                    }
                     this.speaking = false;
                     this.awaitingAnswer = true;
                     this.emit({ type: 'interviewer_transcript', text, final: true, at });
+                    if (this.context !== context || this.socket !== socket) return;
                     this.emit({ type: 'interviewer_speech_stopped', at });
                 } else if (event.role === 'assistant' && this.awaitingAnswer && !this.speaking) {
                     this.failures = 0;
                     const continuing = this.activeResponseId !== undefined;
                     if (!continuing) {
-                        const namespace = this.context?.responseNamespace ?? this.context?.sessionId;
+                        const namespace = context.responseNamespace ?? context.sessionId;
                         this.activeResponseId = `${namespace}:${++this.sequence}`;
                         this.emit({ type: 'response_started', responseId: this.activeResponseId, at });
+                        if (this.context !== context || this.socket !== socket) return;
                     }
                     if (this.activeResponseId) {
                         this.emit({ type: 'response_delta', responseId: this.activeResponseId, text: continuing ? ` ${text}` : text });
@@ -460,24 +508,36 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         }
     }
 
-    private becomeReady(): void {
+    private becomeReady(context: LiveBrainStartContext, socket: WebSocket): void {
         this.clearSetupTimer();
         this.ready = true;
+        this.readyAt = Date.now();
         this.interrupted = false;
         this.injectedText = undefined;
         this.audioThrough = Date.now();
-        this.keepAliveTimer = setInterval(() => this.sendJson({ type: 'KeepAlive' }), KEEPALIVE_INTERVAL_MS);
+        this.lastBinarySentAt = Date.now();
+        this.keepAliveTimer = setInterval(() => {
+            if (Date.now() - this.lastBinarySentAt >= KEEPALIVE_INTERVAL_MS) {
+                this.sendJson({ type: 'KeepAlive' });
+            }
+        }, KEEPALIVE_INTERVAL_MS);
         this.audioTimer = setInterval(() => this.fillSparseSilence(), SILENCE_FILL_INTERVAL_MS);
         const startup = this.startup;
-        this.startup = undefined;
         this.emit({ type: 'status', status: 'ready' });
+        if (this.context !== context || this.socket !== socket) return;
+        this.startup = undefined;
         startup?.resolve();
     }
 
     private handleFailure(code: LiveBrainErrorCode, detail?: string): void {
-        if (!this.context) return;
+        const context = this.context;
+        if (!context) return;
+        if (this.readyAt !== undefined && Date.now() - this.readyAt >= REALTIME_READY_RESET_MS) {
+            this.failures = 0;
+        }
         this.closeSocket();
         this.cancelResponse(code);
+        if (this.context !== context) return;
         this.ready = false;
         this.speaking = false;
         this.audio = Buffer.alloc(0);
@@ -486,27 +546,30 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         const backoff = this.options.backoffMs;
         const limit = backoff ? backoff.length : MAX_RETRIES;
         const fatal = !retryable || attempt >= limit;
-        this.emit({ type: 'error', code, fatal, ...(detail ? { detail } : {}) });
         if (fatal) {
             this.dispose(new DeepgramVoiceAgentError(code, detail));
+            this.emit({ type: 'error', code, fatal: true, ...(detail ? { detail } : {}) });
             return;
         }
+        this.emit({ type: 'error', code, fatal: false, ...(detail ? { detail } : {}) });
+        if (this.context !== context) return;
         const delay = backoff ? backoff[attempt] : realtimeReconnectDelay(attempt);
         this.emit({ type: 'status', status: 'degraded', detail: code });
+        if (this.context !== context) return;
         this.retryTimer = setTimeout(() => {
             this.retryTimer = undefined;
-            this.connect();
+            if (this.context === context) this.connect();
         }, delay);
     }
 
-    private enqueueAudio(pcm: Buffer): void {
+    private enqueueAudio(pcm: Buffer, isSilence = false): void {
         if (!pcm.length || !this.socket || this.socket.readyState !== WebSocket.OPEN) return;
         this.audioThrough = Date.now();
         this.audio = Buffer.concat([this.audio, pcm]);
         while (this.audio.length >= DEEPGRAM_FRAME_BYTES) {
             const frame = this.audio.subarray(0, DEEPGRAM_FRAME_BYTES);
             this.audio = this.audio.subarray(DEEPGRAM_FRAME_BYTES);
-            this.sendBinary(frame);
+            this.sendBinary(frame, isSilence);
         }
     }
 
@@ -516,7 +579,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         if (lagMs <= SILENCE_FILL_AFTER_MS) return;
         const padMs = Math.min(lagMs, 1_000);
         const padBytes = Math.floor((padMs * DEEPGRAM_BYTES_PER_MS) / 2) * 2;
-        if (padBytes > 0) this.enqueueAudio(Buffer.alloc(padBytes));
+        if (padBytes > 0) this.enqueueAudio(Buffer.alloc(padBytes), true);
     }
 
     private sendJson(payload: Record<string, unknown>): boolean {
@@ -529,10 +592,18 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         }
     }
 
-    private sendBinary(frame: Buffer): void {
-        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    private sendBinary(frame: Buffer, isSilence = false): void {
+        const socket = this.socket;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const verdict = this.backpressure.shouldDrop(socket);
+        if (verdict === 'fail') {
+            this.handleFailure('network');
+            return;
+        }
+        if (verdict === 'drop') return;
         try {
-            this.socket.send(frame, { binary: true });
+            socket.send(frame, { binary: true });
+            if (!isSilence) this.lastBinarySentAt = Date.now();
         } catch {
             // Close/error listeners handle socket drop.
         }
@@ -551,6 +622,9 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         this.retryTimer = undefined;
         this.audioTimer = undefined;
         this.keepAliveTimer = undefined;
+        this.readyAt = undefined;
+        this.lastBinarySentAt = 0;
+        this.backpressure.reset();
         const socket = this.socket;
         this.socket = undefined;
         if (socket) safeDetachAndClose(socket);

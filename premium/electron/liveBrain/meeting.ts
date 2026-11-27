@@ -32,7 +32,7 @@ import type { LiveBrainStatus } from '../../../src/types/whatToAnswerQuestion';
 import { buildProviderInstructions } from './instructions';
 import { toPcm16kMono } from './interviewerAudio';
 import { createLiveBrainOverlayPort } from './overlayPort';
-import { ResponseOrchestrator } from './ResponseOrchestrator';
+import { isFillerOnly, ResponseOrchestrator } from './ResponseOrchestrator';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainStartContext } from './types';
 
 const DEFAULT_MODELS: Record<LiveBrain['id'], string> = {
@@ -84,6 +84,16 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
     let supervisor!: BrainSupervisor<Parameters<typeof clearTimeout>[0]>;
     let writerRun: symbol | undefined;
     let lastWriterStopAt: number | undefined;
+    let pendingQuestion: { text: string; at: number } | undefined;
+    let turnAnswered = false;
+    let pipelineDedupe: { normalized: string; expiresAt: number } | undefined;
+    const normalizeQuestion = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase();
+    const notePendingQuestion = (text: string, at: number) => {
+        if (turnAnswered) return;
+        const clean = text.replace(/\s+/g, ' ').trim();
+        if (!clean || isFillerOnly(clean)) return;
+        pendingQuestion = { text: clean, at };
+    };
     const settleWriterRun = (run: symbol, outcomeStatus: 'completed' | 'cancelled' | 'failed') => {
         if (writerRun !== run) return;
         writerRun = undefined;
@@ -250,7 +260,16 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 supervisor.setExternalWriting(false);
                 orchestrator.endProviderTurn();
             }
-            if (data.to === 'pipeline') options.pipeline?.activate();
+            if (data.to === 'pipeline') {
+                const pending = pendingQuestion;
+                pendingQuestion = undefined;
+                turnAnswered = false;
+                const freshPending = pending && clock.now() - pending.at <= 20_000 ? pending : undefined;
+                pipelineDedupe = freshPending
+                    ? { normalized: normalizeQuestion(freshPending.text), expiresAt: clock.now() + 5_000 }
+                    : undefined;
+                options.pipeline?.activate(freshPending);
+            }
         },
         onRollover: data => diagnostic('rollover', data),
         onEvent(event, id, model) {
@@ -264,7 +283,27 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             }
             if (event.type === 'error' && event.fatal && !options.pipeline) { options.onFailure(event.code); return; }
             const backup = id === 'pipeline' && preferred !== 'pipeline';
-            if (event.type === 'response_started') presented = false;
+            if (id !== 'pipeline') {
+                if (event.type === 'interviewer_speech_started') turnAnswered = false;
+                if (event.type === 'response_started') {
+                    presented = false;
+                    turnAnswered = true;
+                    pendingQuestion = undefined;
+                }
+                if (event.type === 'decision' && (event.action === 'answer' || event.action === 'ask')) {
+                    turnAnswered = true;
+                    pendingQuestion = undefined;
+                }
+                if (event.type === 'response_silent') {
+                    turnAnswered = true;
+                    pendingQuestion = undefined;
+                }
+                if (event.type === 'interviewer_transcript' && event.final) {
+                    notePendingQuestion(event.text, event.at);
+                }
+            } else if (event.type === 'response_started') {
+                presented = false;
+            }
             if (event.type === 'status') {
                 if (event.status === 'ready') showStatus(id !== preferred ? 'Backup brain' : 'Listening');
                 if (event.status === 'connecting' || event.status === 'degraded') {
@@ -342,9 +381,25 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         pipelineContext() { return supervisor.pipelineContext; },
         observePipelineTranscript(text, final, at) {
             const brain = supervisor.current;
-            if (brain instanceof PipelineBrain) brain.interviewerTranscript(text, final, at);
+            if (brain instanceof PipelineBrain) {
+                if (final && pipelineDedupe) {
+                    const now = clock.now();
+                    if (now > pipelineDedupe.expiresAt) {
+                        pipelineDedupe = undefined;
+                    } else if (normalizeQuestion(text) === pipelineDedupe.normalized) {
+                        pipelineDedupe = undefined;
+                        return true;
+                    }
+                }
+                brain.interviewerTranscript(text, final, at);
+                return false;
+            }
             // D14: the existing STT is the backup text for the interviewer bubble.
-            else if (brain && final) orchestrator.noteSttTranscript(text, at);
+            else if (brain && final) {
+                orchestrator.noteSttTranscript(text, at);
+                notePendingQuestion(text, at);
+            }
+            return false;
         },
         observePipelineOutput(output) {
             const brain = supervisor.current;

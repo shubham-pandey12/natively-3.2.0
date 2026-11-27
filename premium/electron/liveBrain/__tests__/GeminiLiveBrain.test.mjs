@@ -375,3 +375,141 @@ test('fragmented interviewer transcription becomes one final turn when Gemini st
     await until(() => events.some(event => event.type === 'response_done'));
     assert.equal(events.filter(event => event.type === 'interviewer_transcript' && event.final).length, 1);
 });
+
+test('error classification: 404 unsupported fatal, 429 per-minute quota retries, billing quota fatal', async t => {
+    const r404 = await rig(t, {
+        replyToSetup: socket => send(socket, { error: { code: 404, status: 'NOT_FOUND', message: 'models/bad is not found' } }),
+    });
+    await assert.rejects(r404.brain.start(ctx()), { code: 'unsupported' });
+    assert.equal(r404.connections.length, 1);
+    assert.deepEqual(r404.events.find(e => e.type === 'error'), { type: 'error', code: 'unsupported', fatal: true });
+
+    const r429 = await rig(t, {
+        backoffMs: [5, 5],
+        replyToSetup(socket, attempt) {
+            if (attempt === 1) send(socket, { error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'per-minute quota exceeded' } });
+            else send(socket, { setupComplete: {} });
+        },
+    });
+    await r429.brain.start(ctx());
+    assert.equal(r429.connections.length, 2);
+    assert.deepEqual(r429.events.find(e => e.type === 'error'), { type: 'error', code: 'rate_limited', fatal: false });
+
+    const rBilling = await rig(t, {
+        replyToSetup: socket => send(socket, { error: { code: 429, message: 'billing quota exceeded' } }),
+    });
+    await assert.rejects(rBilling.brain.start(ctx()), { code: 'quota' });
+    assert.equal(rBilling.connections.length, 1);
+    assert.deepEqual(rBilling.events.find(e => e.type === 'error'), { type: 'error', code: 'quota', fatal: true });
+});
+
+test('late input transcription after turnComplete does not bleed into the next question', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, speech('Question A?'));
+    send(socket, output('Answer A.'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.some(e => e.type === 'response_done'));
+    send(socket, speech('Question A?'));
+    send(socket, speech('Question B?'));
+    send(socket, output('Answer B.'));
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => events.filter(e => e.type === 'response_done').length === 2);
+    const finals = events.filter(e => e.type === 'interviewer_transcript' && e.final).map(e => e.text);
+    assert.equal(finals.at(-1), 'Question B?');
+});
+
+test('goAway without resumption handle emits session_expiring and does not open a local rollover socket', async t => {
+    const clock = new FakeClock();
+    const { brain, events, connections } = await rig(t, { rolloverClock: clock });
+    await brain.start(ctx());
+    send(connections[0].socket, { goAway: { timeLeft: '5s' } });
+    await until(() => events.some(e => e.type === 'session_expiring'));
+    assert.deepEqual(events.find(e => e.type === 'session_expiring'), { type: 'session_expiring', inMs: 5_000, resumable: false });
+    clock.advance(10_000);
+    await delay(30);
+    assert.equal(connections.length, 1);
+});
+
+test('stop() from inside interviewer_speech_started listener emits no events after closed', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    brain.onEvent(event => {
+        if (event.type === 'interviewer_speech_started') void brain.stop();
+    });
+    send(connections[0].socket, {
+        voiceActivity: { type: 'ACTIVITY_START' },
+        serverContent: { inputTranscription: { text: 'Hello', finished: true }, outputTranscription: { text: 'Hi' }, turnComplete: true },
+    });
+    await until(() => events.some(e => e.type === 'status' && e.status === 'closed'));
+    await delay(20);
+    const closedIndex = events.findIndex(e => e.type === 'status' && e.status === 'closed');
+    assert.equal(events.length, closedIndex + 1);
+});
+
+test('socket close after generationComplete before turnComplete emits response_done completed', async t => {
+    const { brain, events, connections } = await rig(t, { backoffMs: [5] });
+    await brain.start(ctx());
+    const { socket } = connections[0];
+    send(socket, output('Complete visible answer'));
+    send(socket, { serverContent: { generationComplete: true } });
+    await until(() => events.some(e => e.type === 'response_delta'));
+    socket.terminate();
+    await until(() => events.some(e => e.type === 'response_done'));
+    assert.deepEqual(events.find(e => e.type === 'response_done'), { type: 'response_done', responseId: 'mock:1', status: 'completed' });
+});
+
+test('Gemini socket is constructed with IPv4-first lookup, handshakeTimeout, headers, and 4 MiB maxPayload', async t => {
+    const { WebSocket } = require('ws');
+    const server = new (require('ws').WebSocketServer)({ host: '127.0.0.1', port: 0 });
+    await once(server, 'listening');
+    server.on('connection', socket => {
+        socket.on('message', () => send(socket, { setupComplete: {} }));
+    });
+    let capturedOptions;
+    const brain = new GeminiLiveBrain({
+        apiKey: 'fake-gemini-key-for-tests',
+        endpoint: `ws://127.0.0.1:${server.address().port}`,
+        setupTimeoutMs: 7_500,
+        createSocket: (url, opts) => {
+            capturedOptions = opts;
+            return new WebSocket(url, opts);
+        },
+    });
+    t.after(async () => {
+        await brain.stop();
+        for (const socket of server.clients) socket.terminate();
+        await new Promise(resolve => server.close(resolve));
+    });
+    await brain.start(ctx());
+    assert.equal(typeof capturedOptions.lookup, 'function');
+    assert.equal(capturedOptions.family, 4);
+    assert.equal(capturedOptions.handshakeTimeout, 7_500);
+    assert.equal(capturedOptions.maxPayload, 4 * 1024 * 1024);
+    assert.equal(capturedOptions.headers['x-goog-api-key'], 'fake-gemini-key-for-tests');
+});
+
+test('1008 during resumption emits fatal protocol with session_resumption_failed; without handle has no detail', async t => {
+    const rWithHandle = await rig(t, {
+        replyToSetup(socket, attempt) {
+            if (attempt === 1) send(socket, { setupComplete: {} });
+            else socket.close(1008);
+        },
+    });
+    await rWithHandle.brain.start(ctx());
+    send(rWithHandle.connections[0].socket, { sessionResumptionUpdate: { resumable: true, newHandle: 'stale-handle' } });
+    send(rWithHandle.connections[0].socket, { goAway: { timeLeft: '1s' } });
+    await until(() => rWithHandle.events.some(e => e.type === 'error' && e.fatal));
+    assert.deepEqual(rWithHandle.events.find(e => e.type === 'error' && e.fatal), {
+        type: 'error', code: 'protocol', fatal: true, detail: 'session_resumption_failed',
+    });
+
+    const rNoHandle = await rig(t, {
+        replyToSetup: socket => socket.close(1008),
+    });
+    await assert.rejects(rNoHandle.brain.start(ctx()), { code: 'protocol' });
+    assert.deepEqual(rNoHandle.events.find(e => e.type === 'error'), {
+        type: 'error', code: 'protocol', fatal: true,
+    });
+});

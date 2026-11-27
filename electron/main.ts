@@ -4619,7 +4619,8 @@ export class AppState {
       if (micEcho) console.log(`[STT] mic final repeats the interviewer (${segment.text.length} chars): not counted as the user`);
 
       const transcriptAt = Date.now();
-      if (speaker === 'interviewer') this.liveBrainRouting.activeSession?.observePipelineTranscript?.(segment.text, segment.isFinal, transcriptAt);
+      const duplicatePipelineFinal = speaker === 'interviewer'
+        && this.liveBrainRouting.activeSession?.observePipelineTranscript?.(segment.text, segment.isFinal, transcriptAt) === true;
       if (!micEcho) {
         if (speaker === 'user' && segment.isFinal) this.liveBrainRouting.activeSession?.addCandidateText(segment.text, transcriptAt);
         this.intelligenceManager.handleTranscript({
@@ -4650,7 +4651,7 @@ export class AppState {
         console.log(`[STT:${speaker}${segment.isFinal ? '' : '~'}] ${segment.text}`);
       }
 
-      if (this.isAutoAnswerActive()) {
+      if (!duplicatePipelineFinal && this.isAutoAnswerActive()) {
         try { this.trainingUploader().noteAutoAnswerRan(); } catch { /* never a blocker */ }
         this.simpleAutoAnswer.ingest({
           speaker,
@@ -10880,9 +10881,18 @@ export class AppState {
   private startMeetingLiveBrain(): void {
     if (this.liveBrainRouting.enabled) return;
     this.cancelAutoAnswer();
-    const activatePipeline = () => {
-      if (this.isAutoAnswerAvailable()) this.warmAutoAnswerJudge();
-      else {
+    const activatePipeline = (pending?: { text: string; at: number }) => {
+      if (this.isAutoAnswerAvailable()) {
+        this.warmAutoAnswerJudge();
+        if (pending) {
+          const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
+          void this.intelligenceManager.runAutoAnswer({ text: pending.text, replacesAutomaticAnswer: false }, {
+            context: '',
+            reuseSpeculative: false,
+            ...(notebook ? { liveBrainNotebook: notebook } : {}),
+          }).catch((error) => console.warn('[Main] Pipeline fallback answer failed:', error));
+        }
+      } else {
         try {
           const { Notification } = require('electron') as typeof import('electron');
           if (Notification.isSupported()) new Notification({

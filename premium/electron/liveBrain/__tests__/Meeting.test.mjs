@@ -963,3 +963,121 @@ test('Flux clarification timeout answers through the writer and reconnect cancel
     await flush();
     assert.equal(h.streamCalls.length, 3);
 });
+
+test('U5e-1: unanswered STT final before fatal realtime failure hands off once to pipeline, dedupes within 5s, and skips >20s', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 100_000 });
+    const { PipelineBrain } = require('../../../../dist-electron/premium/electron/liveBrain/brains/PipelineBrain.js');
+    const engine = Object.create(IntelligenceEngine.prototype);
+    engine.setAutomaticAnswerOutdated = () => {};
+
+    // 1. Fresh pending STT final handed off to pipeline.activate and deduped within 5 s.
+    const { brain: b1 } = rig();
+    const activated1 = [];
+    const routing1 = new LiveBrainRouting();
+    routing1.start(onFailure => createMeeting({
+        sessionId: 'u5e1-fresh', apiKey: 'fake', engine, onFailure,
+        pipeline: { activate: pending => activated1.push(pending), cancel() {} },
+        emitQuestion: () => {},
+    }, b1), () => assert.fail('Supervisor owns fallback'));
+
+    routing1.activeSession.observePipelineTranscript('What is a mutex?', true, 100_000);
+    b1.emit({ type: 'error', code: 'auth', fatal: true });
+    assert.equal(routing1.pipelineOverride(true), true);
+    assert.deepEqual(activated1, [{ text: 'What is a mutex?', at: 100_000 }]);
+
+    t.mock.timers.tick(2_000);
+    const deduped = routing1.activeSession.observePipelineTranscript('  what is a mutex? ', true, 102_000);
+    assert.equal(deduped, true);
+    routing1.stop();
+
+    // 2. Question older than 20 s at fallback is not submitted.
+    const { brain: b2 } = rig();
+    const activated2 = [];
+    const routing2 = new LiveBrainRouting();
+    routing2.start(onFailure => createMeeting({
+        sessionId: 'u5e1-stale', apiKey: 'fake', engine, onFailure,
+        pipeline: { activate: pending => activated2.push(pending), cancel() {} },
+        emitQuestion: () => {},
+    }, b2), () => assert.fail('Supervisor owns fallback'));
+    routing2.activeSession.observePipelineTranscript('What is a mutex?', true, 102_000);
+    t.mock.timers.tick(20_001);
+    b2.emit({ type: 'error', code: 'auth', fatal: true });
+    assert.deepEqual(activated2, [undefined]);
+    routing2.stop();
+
+    // 3. PipelineBrain stop() inside response_started emits no delta after response_done;
+    //    failed before any token emits response_silent once.
+    const p1 = new PipelineBrain(() => {});
+    const events1 = [];
+    p1.onEvent(e => {
+        events1.push(e);
+        if (e.type === 'response_started') void p1.stop();
+    });
+    await p1.start({ sessionId: 'p1', instructions: '', notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 }, recentTurns: [], signal: new AbortController().signal });
+    p1.observe({ type: 'token', generationId: 1, text: 'Hello' });
+    assert.deepEqual(events1.map(e => e.type), ['status', 'response_started', 'response_done']);
+
+    const p2 = new PipelineBrain(() => {});
+    const events2 = [];
+    p2.onEvent(e => events2.push(e));
+    await p2.start({ sessionId: 'p2', instructions: '', notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 }, recentTurns: [], signal: new AbortController().signal });
+    p2.observe({ type: 'failed', generationId: 2 });
+    assert.deepEqual(events2.filter(e => e.type === 'response_silent'), [{ type: 'response_silent' }]);
+});
+
+test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; filler/silent skipped; STT-before-brain answered once', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 200_000 });
+    const engine = Object.create(IntelligenceEngine.prototype);
+    engine.setAutomaticAnswerOutdated = () => {};
+
+    // 1. interviewer_speech_started -> final -> response_started -> late STT backup final -> fatal failure: NO pipeline answer.
+    const { brain: b1 } = rig();
+    const activated1 = [];
+    const routing1 = new LiveBrainRouting();
+    routing1.start(onFailure => createMeeting({
+        sessionId: 'u5e1-bug-a', apiKey: 'fake', engine, onFailure,
+        pipeline: { activate: pending => activated1.push(pending), cancel() {} },
+        emitQuestion: () => {},
+    }, b1), () => assert.fail('Supervisor owns fallback'));
+
+    b1.emit({ type: 'interviewer_speech_started', at: 200_000 });
+    b1.emit({ type: 'interviewer_transcript', text: 'What is a mutex?', final: true, at: 200_100 });
+    b1.emit({ type: 'response_started', responseId: 'r1', at: 200_200 });
+    routing1.activeSession.observePipelineTranscript('What is a mutex?', true, 200_300);
+    b1.emit({ type: 'error', code: 'auth', fatal: true });
+    assert.deepEqual(activated1, [undefined]);
+    routing1.stop();
+
+    // 2. final "Okay." -> response_silent -> fatal failure within 20 s -> NO pipeline answer.
+    const { brain: b2 } = rig();
+    const activated2 = [];
+    const routing2 = new LiveBrainRouting();
+    routing2.start(onFailure => createMeeting({
+        sessionId: 'u5e1-bug-b', apiKey: 'fake', engine, onFailure,
+        pipeline: { activate: pending => activated2.push(pending), cancel() {} },
+        emitQuestion: () => {},
+    }, b2), () => assert.fail('Supervisor owns fallback'));
+
+    b2.emit({ type: 'interviewer_speech_started', at: 200_000 });
+    b2.emit({ type: 'interviewer_transcript', text: 'Okay.', final: true, at: 200_100 });
+    b2.emit({ type: 'response_silent' });
+    b2.emit({ type: 'error', code: 'auth', fatal: true });
+    assert.deepEqual(activated2, [undefined]);
+    routing2.stop();
+
+    // 3. STT backup final arrives before brain final, no response yet, then failure -> exactly one pipeline answer.
+    const { brain: b3 } = rig();
+    const activated3 = [];
+    const routing3 = new LiveBrainRouting();
+    routing3.start(onFailure => createMeeting({
+        sessionId: 'u5e1-stt-first', apiKey: 'fake', engine, onFailure,
+        pipeline: { activate: pending => activated3.push(pending), cancel() {} },
+        emitQuestion: () => {},
+    }, b3), () => assert.fail('Supervisor owns fallback'));
+
+    routing3.activeSession.observePipelineTranscript('What is a mutex?', true, 200_000);
+    b3.emit({ type: 'interviewer_transcript', text: 'What is a mutex?', final: true, at: 200_100 });
+    b3.emit({ type: 'error', code: 'auth', fatal: true });
+    assert.deepEqual(activated3, [{ text: 'What is a mutex?', at: 200_100 }]);
+    routing3.stop();
+});

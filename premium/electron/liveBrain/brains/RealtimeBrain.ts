@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { openAiHandshakeVerdict, realtimeReconnectDelay, realtimeSocketOptions, resampleRealtimePcm16, SEND_THRESHOLD_SAMPLES, WS_SAMPLE_RATE } from '../../../../electron/audio/realtimeTransport';
+import { openAiHandshakeVerdict, realtimeReconnectDelay, realtimeSocketOptions, resampleRealtimePcm16, SEND_THRESHOLD_SAMPLES, WS_SAMPLE_RATE, wsDataToString } from '../../../../electron/audio/realtimeTransport';
 import { safeDetachAndClose } from '../../../../electron/audio/wsSafeTeardown';
 import { CLARIFICATION_ASSUMPTION } from '../instructions';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainEvent, LiveBrainStartContext } from '../types';
@@ -43,6 +43,9 @@ const FRAME_BYTES = SEND_THRESHOLD_SAMPLES * 2;
 const BYTES_PER_MS = WS_SAMPLE_RATE * 2 / 1_000;
 const SILENCE_FILL_AFTER_MS = 300;
 const MAX_RETRIES = 3;
+const READY_RESET_MS = 30_000;
+const MAX_AUDIO_BUFFERED_BYTES = 1024 * 1024;
+const BACKPRESSURE_FAIL_MS = 5_000;
 
 export class RealtimeBrainError extends Error {
     constructor(readonly code: LiveBrainErrorCode) {
@@ -56,7 +59,8 @@ function classify(status: number | undefined, detail: string, fallback: LiveBrai
         || /invalid.api.key|authentication|unauthenticated|permission.denied|invalid.credential/i.test(detail)) return 'auth';
     if (status === 429 || status === 1013 || /rate.limit|too.many.requests|concurrency/i.test(detail)) return 'rate_limited';
     if (/model.not.found|unsupported.model|model.not.supported/i.test(detail)) return 'unsupported';
-    if (status !== undefined && status >= 400 && status < 500) return 'protocol';
+    if (status === 1002 || status === 1003 || status === 1007 || status === 1008
+        || (status !== undefined && status >= 400 && status < 500)) return 'protocol';
     return fallback;
 }
 
@@ -71,6 +75,7 @@ export class RealtimeBrain implements LiveBrain {
     private retryTimer?: ReturnType<typeof setTimeout>;
     private audioTimer?: ReturnType<typeof setInterval>;
     private ready = false;
+    private readyAt?: number;
     private speaking = false;
     private failures = 0;
     private sequence = 0;
@@ -78,6 +83,8 @@ export class RealtimeBrain implements LiveBrain {
     private readonly finishedResponses = new Set<string>();
     private audio = Buffer.alloc(0);
     private audioThrough = 0;
+    private backpressureSince?: number;
+    private backpressureLogged = false;
 
     constructor(private readonly provider: RealtimeProvider, private readonly options: RealtimeBrainOptions) {
         this.id = provider.id;
@@ -166,7 +173,7 @@ export class RealtimeBrain implements LiveBrain {
         socket.on('message', data => {
             if (this.socket !== socket) return;
             let event: WireEvent;
-            try { event = JSON.parse(data.toString()); }
+            try { event = JSON.parse(wsDataToString(data)); }
             catch { this.handleFailure('protocol'); return; }
             if (event && typeof event === 'object') this.onMessage(event);
         });
@@ -290,7 +297,7 @@ export class RealtimeBrain implements LiveBrain {
         this.finishedResponses.add(response.providerId);
         if (status === 'completed') this.failures = 0;
         if (response.visibleId) this.emit({ type: 'response_done', responseId: response.visibleId, status });
-        else if (status === 'completed') this.emit({ type: 'response_silent' });
+        else if (status !== 'cancelled') this.emit({ type: 'response_silent' });
         if (error) this.handleFailure(this.classifyError(error));
     }
 
@@ -301,6 +308,7 @@ export class RealtimeBrain implements LiveBrain {
     private becomeReady(): void {
         clearTimeout(this.setupTimer);
         this.ready = true;
+        this.readyAt = Date.now();
         this.audioThrough = Date.now();
         this.audioTimer = setInterval(() => {
             // The capture path can deliver sparse silence, especially on Windows.
@@ -319,9 +327,27 @@ export class RealtimeBrain implements LiveBrain {
         const audio = Buffer.concat([this.audio, pcm]);
         let offset = 0;
         for (; this.ready && offset + FRAME_BYTES <= audio.length; offset += FRAME_BYTES) {
-            this.send({ type: 'input_audio_buffer.append', audio: audio.subarray(offset, offset + FRAME_BYTES).toString('base64') });
+            this.sendAudioFrame(audio.subarray(offset, offset + FRAME_BYTES));
         }
         if (this.ready) this.audio = Buffer.from(audio.subarray(offset));
+    }
+
+    private sendAudioFrame(frame: Buffer): void {
+        const socket = this.socket;
+        if (socket?.readyState !== WebSocket.OPEN) return;
+        if (socket.bufferedAmount > MAX_AUDIO_BUFFERED_BYTES) {
+            const now = Date.now();
+            if (this.backpressureSince === undefined) this.backpressureSince = now;
+            if (!this.backpressureLogged) {
+                this.backpressureLogged = true;
+                console.warn(`[LiveBrain] ${this.id} dropping audio chunk due to socket backpressure (bufferedAmount > 1 MiB)`);
+            }
+            if (now - this.backpressureSince > BACKPRESSURE_FAIL_MS) this.handleFailure('network');
+            return;
+        }
+        this.backpressureSince = undefined;
+        this.backpressureLogged = false;
+        this.send({ type: 'input_audio_buffer.append', audio: frame.toString('base64') });
     }
 
     private addContext(text: string): boolean {
@@ -338,7 +364,9 @@ export class RealtimeBrain implements LiveBrain {
     }
 
     private handleFailure(code: LiveBrainErrorCode): void {
-        if (!this.context) return;
+        const context = this.context;
+        if (!context) return;
+        if (this.readyAt !== undefined && Date.now() - this.readyAt >= READY_RESET_MS) this.failures = 0;
         const retryable = code === 'network' || code === 'timeout' || code === 'rate_limited';
         const delays = this.options.backoffMs;
         const delay = delays ? delays[this.failures] : this.failures < MAX_RETRIES ? realtimeReconnectDelay(this.failures) : undefined;
@@ -346,15 +374,17 @@ export class RealtimeBrain implements LiveBrain {
         const response = this.response;
         this.closeSocket();
         if (response?.visibleId) this.emit({ type: 'response_done', responseId: response.visibleId, status: 'failed' });
-        if (!this.context) return;
+        if (this.context !== context) return;
         if (retry) {
             this.failures++;
+            this.emit({ type: 'status', status: 'degraded' });
+            if (this.context !== context) return;
+            this.emit({ type: 'error', code, fatal: false });
+            if (this.context !== context) return;
             this.retryTimer = setTimeout(() => {
                 this.retryTimer = undefined;
-                this.connect();
+                if (this.context === context) this.connect();
             }, delay);
-            this.emit({ type: 'status', status: 'degraded' });
-            this.emit({ type: 'error', code, fatal: false });
             return;
         }
         this.dispose(new RealtimeBrainError(code));
@@ -363,10 +393,13 @@ export class RealtimeBrain implements LiveBrain {
 
     private closeSocket(): void {
         this.ready = false;
+        this.readyAt = undefined;
         this.speaking = false;
         this.response = undefined;
         this.finishedResponses.clear();
         this.audio = Buffer.alloc(0);
+        this.backpressureSince = undefined;
+        this.backpressureLogged = false;
         clearTimeout(this.setupTimer);
         clearInterval(this.audioTimer);
         safeDetachAndClose(this.socket);

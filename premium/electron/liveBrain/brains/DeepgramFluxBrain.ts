@@ -1,5 +1,12 @@
 import WebSocket from 'ws';
-import { realtimeReconnectDelay, realtimeSocketOptions, resampleRealtimePcm16 } from '../../../../electron/audio/realtimeTransport';
+import {
+    isProtocolCloseCode,
+    REALTIME_READY_RESET_MS,
+    realtimeReconnectDelay,
+    realtimeSocketOptions,
+    resampleRealtimePcm16,
+    SocketBackpressureTracker,
+} from '../../../../electron/audio/realtimeTransport';
 import { safeDetachAndClose } from '../../../../electron/audio/wsSafeTeardown';
 import { DEFAULT_DEEPGRAM_FLUX_MODEL } from '../../../../src/types/liveBrainSettings';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainEvent, LiveBrainStartContext } from '../types';
@@ -34,6 +41,7 @@ export interface DeepgramFluxOptions {
 interface FluxWireMessage {
     type?: string;
     event?: string;
+    sequence_id?: number;
     turn_index?: number;
     transcript?: string;
     code?: string;
@@ -53,7 +61,7 @@ function classify(status: number | undefined, detail: string, fallback: LiveBrai
         || /invalid_auth|invalid.credential|invalid.api.key|authentication|unauthenticated|permission.denied|unauthorized/i.test(detail)) return 'auth';
     if (status === 429 || status === 1013 || /rate.limit|too.many.requests|concurrency/i.test(detail)) return 'rate_limited';
     if (/invalid_settings|model.not.available|model.not.found|unsupported/i.test(detail)) return 'unsupported';
-    if (status !== undefined && status >= 400 && status < 500) return 'protocol';
+    if (isProtocolCloseCode(status) || (status !== undefined && status >= 400 && status < 500)) return 'protocol';
     return fallback;
 }
 
@@ -72,19 +80,22 @@ export class DeepgramFluxBrain implements LiveBrain {
     private retryTimer?: ReturnType<typeof setTimeout>;
     private audioTimer?: ReturnType<typeof setInterval>;
     private ready = false;
+    private readyAt?: number;
     private speaking = false;
     private failures = 0;
     private sequence = 0;
     private connectionSequence = 0;
     private currentConnectionKey = '';
+    private lastSequenceId?: number;
     private activeTurnIndex?: number;
     private lastFinalizedTurnIndex?: number;
     private lastPartialText = '';
     private activeEager: { turnKey: string; transcript: string } | null = null;
     private audio = Buffer.alloc(0);
     private audioThrough = 0;
+    private readonly backpressure = new SocketBackpressureTracker(this.id);
 
-    constructor(private readonly options: DeepgramFluxOptions) {}
+    constructor(private readonly options: DeepgramFluxOptions) { }
 
     onEvent(listener: (event: LiveBrainEvent) => void): () => void {
         this.listeners.add(listener);
@@ -122,10 +133,10 @@ export class DeepgramFluxBrain implements LiveBrain {
     }
 
     /** Candidate speech stays on Natively's existing mic/notebook context path. */
-    addCandidateText(_text: string, _at: number): void {}
+    addCandidateText(_text: string, _at: number): void { }
 
     /** Answer generation is handled downstream by AnswerWriter / ResponseOrchestrator. */
-    cancelResponse(_reason: string): void {}
+    cancelResponse(_reason: string): void { }
 
     buildEndpointUrl(): URL {
         const url = new URL(this.options.endpoint ?? DEEPGRAM_FLUX_ENDPOINT);
@@ -173,6 +184,7 @@ export class DeepgramFluxBrain implements LiveBrain {
         // per connection instance so reconnects never adopt an earlier socket's draft.
         const namespace = context.responseNamespace ?? context.sessionId ?? this.id;
         this.currentConnectionKey = `${namespace}:c${++this.connectionSequence}`;
+        this.lastSequenceId = undefined;
         this.activeTurnIndex = undefined;
         this.lastFinalizedTurnIndex = undefined;
         this.lastPartialText = '';
@@ -196,7 +208,7 @@ export class DeepgramFluxBrain implements LiveBrain {
             let event: FluxWireMessage;
             try { event = JSON.parse(data.toString()); }
             catch { this.handleFailure('protocol'); return; }
-            if (event && typeof event === 'object') this.onMessage(event);
+            if (event && typeof event === 'object') this.onMessage(event, socket);
         });
         socket.on('unexpected-response', (_request, response) => {
             const chunks: Buffer[] = [];
@@ -223,7 +235,24 @@ export class DeepgramFluxBrain implements LiveBrain {
         });
     }
 
-    private onMessage(event: FluxWireMessage): void {
+    private cancelActiveEagerIfTurnAdvanced(
+        turnIndex: number,
+        at: number,
+        context: LiveBrainStartContext,
+        socket: WebSocket,
+    ): boolean {
+        if (!this.activeEager || this.activeTurnIndex === undefined || turnIndex <= this.activeTurnIndex) {
+            return true;
+        }
+        const staleTurnKey = this.activeEager.turnKey;
+        this.activeEager = null;
+        this.emit({ type: 'turn_resumed', turnKey: staleTurnKey, at });
+        return this.context === context && this.socket === socket;
+    }
+
+    private onMessage(event: FluxWireMessage, socket: WebSocket): void {
+        const context = this.context;
+        if (!context || this.socket !== socket) return;
         if (event.type === 'Error') {
             const detail = `${event.code ?? ''} ${event.description ?? event.message ?? ''}`.trim();
             const fallback = event.code === 'INTERNAL_SERVER_ERROR' ? 'network' : 'protocol';
@@ -231,10 +260,14 @@ export class DeepgramFluxBrain implements LiveBrain {
             return;
         }
         if (!this.ready) {
-            if (event.type === 'Connected') this.becomeReady();
+            if (event.type === 'Connected') this.becomeReady(context, socket);
             return;
         }
         if (event.type !== 'TurnInfo') return;
+        if (typeof event.sequence_id === 'number') {
+            if (this.lastSequenceId !== undefined && event.sequence_id <= this.lastSequenceId) return;
+            this.lastSequenceId = event.sequence_id;
+        }
 
         const at = Date.now();
         const turnIndex = event.turn_index;
@@ -247,6 +280,7 @@ export class DeepgramFluxBrain implements LiveBrain {
         switch (event.event) {
             case 'StartOfTurn':
                 if (!this.speaking || turnIndex !== this.activeTurnIndex) {
+                    if (!this.cancelActiveEagerIfTurnAdvanced(turnIndex, at, context, socket)) return;
                     this.speaking = true;
                     this.activeTurnIndex = turnIndex;
                     this.lastPartialText = '';
@@ -257,11 +291,13 @@ export class DeepgramFluxBrain implements LiveBrain {
             case 'Update':
                 if (transcript) {
                     if (!this.speaking || turnIndex !== this.activeTurnIndex) {
+                        if (!this.cancelActiveEagerIfTurnAdvanced(turnIndex, at, context, socket)) return;
                         this.lastPartialText = '';
                         this.speaking = true;
                         this.activeTurnIndex = turnIndex;
                         this.activeEager = null;
                         this.emit({ type: 'interviewer_speech_started', at });
+                        if (this.context !== context || this.socket !== socket) return;
                     }
                     this.emitPartialTranscript(transcript, at);
                 }
@@ -269,12 +305,15 @@ export class DeepgramFluxBrain implements LiveBrain {
             case 'EagerEndOfTurn':
                 if (transcript) {
                     if (!this.speaking || turnIndex !== this.activeTurnIndex) {
+                        if (!this.cancelActiveEagerIfTurnAdvanced(turnIndex, at, context, socket)) return;
                         this.lastPartialText = '';
                         this.speaking = true;
                         this.activeTurnIndex = turnIndex;
                         this.emit({ type: 'interviewer_speech_started', at });
+                        if (this.context !== context || this.socket !== socket) return;
                     }
                     this.emitPartialTranscript(transcript, at);
+                    if (this.context !== context || this.socket !== socket) return;
                     const turnKey = this.turnKeyFor(turnIndex);
                     if (this.activeEager?.turnKey !== turnKey || this.activeEager.transcript !== transcript) {
                         this.activeEager = { turnKey, transcript };
@@ -285,12 +324,15 @@ export class DeepgramFluxBrain implements LiveBrain {
             case 'TurnResumed': {
                 if (transcript) {
                     if (!this.speaking || turnIndex !== this.activeTurnIndex) {
+                        if (!this.cancelActiveEagerIfTurnAdvanced(turnIndex, at, context, socket)) return;
                         this.lastPartialText = '';
                         this.speaking = true;
                         this.activeTurnIndex = turnIndex;
                         this.emit({ type: 'interviewer_speech_started', at });
+                        if (this.context !== context || this.socket !== socket) return;
                     }
                     this.emitPartialTranscript(transcript, at);
+                    if (this.context !== context || this.socket !== socket) return;
                 }
                 const turnKey = this.turnKeyFor(turnIndex);
                 this.activeEager = null;
@@ -304,14 +346,16 @@ export class DeepgramFluxBrain implements LiveBrain {
                 this.speaking = false;
                 this.activeTurnIndex = undefined;
                 this.lastPartialText = '';
-                this.failures = 0;
                 if (!transcript) {
                     this.emit({ type: 'response_silent' });
                     break;
                 }
+                this.failures = 0;
                 this.emit({ type: 'interviewer_transcript', text: transcript, final: true, at });
+                if (this.context !== context || this.socket !== socket) return;
                 this.emit({ type: 'interviewer_speech_stopped', at });
-                const namespace = this.context?.responseNamespace ?? this.context?.sessionId ?? this.id;
+                if (this.context !== context || this.socket !== socket) return;
+                const namespace = context.responseNamespace ?? context.sessionId ?? this.id;
                 this.emit({
                     type: 'decision',
                     decisionId: `${namespace}:${++this.sequence}`,
@@ -325,19 +369,25 @@ export class DeepgramFluxBrain implements LiveBrain {
         }
     }
 
-    private becomeReady(): void {
+    private becomeReady(context: LiveBrainStartContext, socket: WebSocket): void {
         this.clearSetupTimer();
         this.ready = true;
+        this.readyAt = Date.now();
         this.audioThrough = Date.now();
         this.audioTimer = setInterval(() => this.fillSparseSilence(), SILENCE_FILL_INTERVAL_MS);
         const startup = this.startup;
-        this.startup = undefined;
         this.emit({ type: 'status', status: 'ready' });
+        if (this.context !== context || this.socket !== socket) return;
+        this.startup = undefined;
         startup?.resolve();
     }
 
     private handleFailure(code: LiveBrainErrorCode): void {
-        if (!this.context) return;
+        const context = this.context;
+        if (!context) return;
+        if (this.readyAt !== undefined && Date.now() - this.readyAt >= REALTIME_READY_RESET_MS) {
+            this.failures = 0;
+        }
         this.closeSocket();
         this.ready = false;
         this.speaking = false;
@@ -351,16 +401,19 @@ export class DeepgramFluxBrain implements LiveBrain {
         const backoff = this.options.backoffMs;
         const limit = backoff ? backoff.length : MAX_RETRIES;
         const fatal = !retryable || attempt >= limit;
-        this.emit({ type: 'error', code, fatal });
         if (fatal) {
             this.dispose(new DeepgramFluxError(code));
+            this.emit({ type: 'error', code, fatal: true });
             return;
         }
+        this.emit({ type: 'error', code, fatal: false });
+        if (this.context !== context) return;
         const delay = backoff ? backoff[attempt] : realtimeReconnectDelay(attempt);
         this.emit({ type: 'status', status: 'degraded', detail: code });
+        if (this.context !== context) return;
         this.retryTimer = setTimeout(() => {
             this.retryTimer = undefined;
-            this.connect();
+            if (this.context === context) this.connect();
         }, delay);
     }
 
@@ -395,9 +448,16 @@ export class DeepgramFluxBrain implements LiveBrain {
     }
 
     private sendBinary(frame: Buffer): void {
-        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+        const socket = this.socket;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const verdict = this.backpressure.shouldDrop(socket);
+        if (verdict === 'fail') {
+            this.handleFailure('network');
+            return;
+        }
+        if (verdict === 'drop') return;
         try {
-            this.socket.send(frame, { binary: true });
+            socket.send(frame, { binary: true });
         } catch {
             // Close/error listeners handle socket drop.
         }
@@ -414,6 +474,9 @@ export class DeepgramFluxBrain implements LiveBrain {
         if (this.audioTimer !== undefined) clearInterval(this.audioTimer);
         this.retryTimer = undefined;
         this.audioTimer = undefined;
+        this.readyAt = undefined;
+        this.lastSequenceId = undefined;
+        this.backpressure.reset();
         const socket = this.socket;
         this.socket = undefined;
         if (socket) safeDetachAndClose(socket);

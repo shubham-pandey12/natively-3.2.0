@@ -369,3 +369,119 @@ test('Phase 5: Flux holds captured S3 filler sequence while streaming real quest
         ['A cache with TTL?', unsegmented]);
     assert.equal(events.filter(e => e.type === 'decision').at(-1).question, 'A cache?');
 });
+
+test('bare close 1008 is fatal protocol without retry while 1006 is network retry', async t => {
+    const r1 = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await r1.brain.start(makeContext());
+    r1.connections[0].socket.close(1008);
+    await until(() => r1.events.some(e => e.type === 'error'));
+    await delay(30);
+    assert.deepEqual(r1.events.filter(e => e.type === 'error'), [{ type: 'error', code: 'protocol', fatal: true }]);
+    assert.equal(r1.connections.length, 1);
+
+    const r2 = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await r2.brain.start(makeContext());
+    r2.connections[0].socket.terminate();
+    await until(() => r2.events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+    assert.deepEqual(r2.events.filter(e => e.type === 'error'), [{ type: 'error', code: 'network', fatal: false }]);
+});
+
+test('3 drops each after 30 s ready reset failures so 4th drop retries, and empty EndOfTurn does not reset failures', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    const { brain, connections, events } = await createRig(t, { brainOptions: { backoffMs: [5, 5, 5] } });
+    await brain.start(makeContext());
+    for (let i = 0; i < 4; i++) {
+        await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === i + 1);
+        t.mock.timers.tick(30_000);
+        connections[i].socket.terminate();
+    }
+    await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === 5);
+    assert.equal(events.some(e => e.type === 'error' && e.fatal), false);
+    assert.equal(events.filter(e => e.type === 'error' && !e.fatal).length, 4);
+
+    // Quick drops (< 30 s) with empty EndOfTurn in between must NOT reset failures.
+    const r2 = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await r2.brain.start(makeContext());
+    for (let i = 0; i < 3; i++) {
+        await until(() => r2.events.filter(e => e.type === 'status' && e.status === 'ready').length === i + 1);
+        sendJson(r2.connections[i].socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 0, transcript: '   ' });
+        await until(() => r2.events.filter(e => e.type === 'response_silent').length === i + 1);
+        r2.connections[i].socket.terminate();
+    }
+    await until(() => r2.events.some(e => e.type === 'error' && e.fatal));
+    assert.equal(r2.connections.length, 3);
+});
+
+test('bufferedAmount > 1 MiB drops audio while CloseStream still sends, and sustained > 5 s fails with network', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 10_000 });
+    const { brain, connections, events } = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await brain.start(makeContext());
+    const conn = connections[0];
+    Object.defineProperty(brain.socket, 'bufferedAmount', { get: () => 2 * 1024 * 1024, configurable: true });
+    brain.pushInterviewerAudio(new Int16Array(1_280).fill(100), 16_000);
+    await delay(20);
+    assert.equal(conn.binaryFrames.length, 0);
+    assert.equal(events.some(e => e.type === 'error'), false);
+
+    t.mock.timers.tick(5_001);
+    brain.pushInterviewerAudio(new Int16Array(1_280).fill(100), 16_000);
+    await until(() => events.some(e => e.type === 'error' && e.code === 'network' && !e.fatal));
+    await until(() => events.filter(e => e.type === 'status' && e.status === 'ready').length === 2);
+
+    Object.defineProperty(brain.socket, 'bufferedAmount', { get: () => 2 * 1024 * 1024, configurable: true });
+    await brain.stop();
+    await until(() => connections[1].jsonMessages.some(m => m.type === 'CloseStream'));
+});
+
+test('stop() inside non-fatal error listener emits no degraded after closed and schedules no retry', async t => {
+    const { brain, connections, events } = await createRig(t, { brainOptions: { backoffMs: [5, 5] } });
+    await brain.start(makeContext());
+    brain.onEvent(event => {
+        if (event.type === 'error' && !event.fatal) void brain.stop();
+    });
+    connections[0].socket.terminate();
+    await until(() => events.some(e => e.type === 'status' && e.status === 'closed'));
+    await delay(30);
+    const closedIdx = events.findIndex(e => e.type === 'status' && e.status === 'closed');
+    assert.equal(events.length, closedIdx + 1);
+    assert.equal(events.some(e => e.type === 'status' && e.status === 'degraded'), false);
+    assert.equal(connections.length, 1);
+});
+
+test('stop() inside ready listener rejects start() and does not resolve as ready', async t => {
+    const { brain, events } = await createRig(t);
+    brain.onEvent(event => {
+        if (event.type === 'status' && event.status === 'ready') void brain.stop();
+    });
+    await assert.rejects(() => brain.start(makeContext()));
+    assert.equal(events.at(-1)?.status, 'closed');
+});
+
+test('EagerEndOfTurn(turn 0) followed by StartOfTurn(turn 1) emits turn_resumed for turn 0', async t => {
+    const { brain, connections, events } = await createRig(t);
+    await brain.start(makeContext());
+    const { socket } = connections[0];
+
+    sendJson(socket, { type: 'TurnInfo', event: 'StartOfTurn', sequence_id: 1, turn_index: 0, transcript: '' });
+    sendJson(socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', sequence_id: 2, turn_index: 0, transcript: 'How would you scale' });
+    await until(() => events.some(e => e.type === 'eager_end_of_turn'));
+    const eager = events.find(e => e.type === 'eager_end_of_turn');
+
+    sendJson(socket, { type: 'TurnInfo', event: 'StartOfTurn', sequence_id: 3, turn_index: 1, transcript: '' });
+    await until(() => events.some(e => e.type === 'turn_resumed' && e.turnKey === eager.turnKey));
+});
+
+test('replayed older sequence_id EagerEndOfTurn after TurnResumed is dropped', async t => {
+    const { brain, connections, events } = await createRig(t);
+    await brain.start(makeContext());
+    const { socket } = connections[0];
+
+    sendJson(socket, { type: 'TurnInfo', event: 'StartOfTurn', sequence_id: 1, turn_index: 0, transcript: '' });
+    sendJson(socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', sequence_id: 2, turn_index: 0, transcript: 'How would you design' });
+    sendJson(socket, { type: 'TurnInfo', event: 'TurnResumed', sequence_id: 3, turn_index: 0, transcript: 'How would you design a queue' });
+    // Replayed older sequence_id must be ignored.
+    sendJson(socket, { type: 'TurnInfo', event: 'EagerEndOfTurn', sequence_id: 2, turn_index: 0, transcript: 'How would you design' });
+    await until(() => events.some(e => e.type === 'turn_resumed'));
+    await delay(20);
+    assert.equal(events.filter(e => e.type === 'eager_end_of_turn').length, 1);
+});
