@@ -77,6 +77,8 @@ export type IntelligenceFlagKey =
   // whose only UI caller was removed 2026-09-25 — reusing it would have shipped
   // this feature silently off.
   | 'systemDesignDiagrams'
+  // Shared plain-English response cleanup across Auto Answer, text replies, and Live Brain (default OFF).
+  | 'sharedResponseCleanup'
   | 'hindsightMemory'              // Phase 16 — long-term memory provider on at all
   | 'hindsightLiveRecall'          // Phase 16 — last to enable (live recall in answers)
   | 'hindsightPostMeetingRetain'   // Phase 16 — async retain after meetings/lectures
@@ -716,6 +718,7 @@ const FLAGS: Record<IntelligenceFlagKey, FlagSpec> = {
   // silently exercised by every dev-context test run the way the Context OS
   // rollout flags intentionally are.
   answerRelevanceGuardLive: { env: 'NATIVELY_ANSWER_RELEVANCE_GUARD_LIVE', setting: 'answerRelevanceGuardLiveEnabled', default: false },
+  sharedResponseCleanup: { env: 'NATIVELY_SHARED_RESPONSE_CLEANUP', setting: 'sharedResponseCleanupEnabled', default: false },
   // Promoted to unconditional `true` (2026-08-30, user-directed override).
   // NOTE the tradeoff this flag's own comment documents: awaiting the AOT
   // pipeline before ingestDocument() returns for a JD makes JD upload

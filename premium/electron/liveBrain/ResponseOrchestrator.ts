@@ -135,6 +135,7 @@ export class ResponseOrchestrator<Timer> {
         answerWriter?: AnswerWriterPort;
         requestClarificationAnswer?: () => void;
         getContextSnapshot?: () => { baseNotebook: string; constraints: readonly string[] };
+        cleanupText?: (text: string) => string;
         overlay: LiveBrainOverlayPort;
         clock: ResponseClock<Timer>;
     }) { }
@@ -681,6 +682,12 @@ export class ResponseOrchestrator<Timer> {
             else this.ports.overlay.showAsk({ askId: response.id, clarification, askStreaming: false });
         }
         if (response?.generationId === undefined) return;
+        if (completed && response.kind === 'answer' && !response.suppressed && this.ports.cleanupText && response.text.trim()) {
+            try {
+                const cleaned = this.ports.cleanupText(response.text);
+                if (cleaned.trim()) response.text = cleaned;
+            } catch { /* cleanup never blocks live delivery */ }
+        }
         if (this.current?.generationId === response.generationId) {
             this.current.completedAt = this.ports.clock.now();
         }

@@ -95,6 +95,7 @@ import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import * as contextOsStatic from './intelligence/context-os';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { applyAnswerContract } from './intelligence/OutputShapeNormalizer';
+import { cleanupResponse } from './llm/responseCleanup';
 import { LiveTranscriptBrain } from './intelligence/LiveTranscriptBrain';
 import { recordAttribution } from './intelligence/IntelligenceAttribution';
 // Type-only (fully erased at runtime, adds no require()). `getKnowledgeOrchestrator()`
@@ -1978,6 +1979,7 @@ export class IntelligenceEngine extends EventEmitter {
         //   • Without one (the legacy answerLLM path): record only. Reshaping text
         //     against a guessed plan could flatten an answer the model was asked to
         //     structure; recording still lets the NEXT answer be checked against it.
+        let humanizedAlready = false;
         if (isIntelligenceFlagEnabled('answerDiversityGuard')) {
             try {
                 if (finished.answerType) {
@@ -1989,11 +1991,18 @@ export class IntelligenceEngine extends EventEmitter {
                         question: finished.question || '',
                         guard: this.wtaDiversityGuard,
                     });
-                    if (shaped.changed && shaped.text.trim().length >= 10) text = shaped.text;
+                    if (shaped.changed && shaped.text.trim().length >= 10) {
+                        text = shaped.text;
+                        humanizedAlready = shaped.applied.includes('humanized_spoken_answer');
+                    }
                 } else {
                     this.wtaDiversityGuard.record(text, 'unknown_answer', finished.question || '');
                 }
             } catch { /* the guard never blocks an answer */ }
+        }
+        if (isIntelligenceFlagEnabled('sharedResponseCleanup') && !humanizedAlready && finished.answerType && !finished.answerIsNotice && !finished.stopReason) {
+            const cleaned = cleanupResponse({ text, mode: 'spoken', answerType: finished.answerType });
+            if (cleaned.text.trim().length >= 10) text = cleaned.text;
         }
         // Two shapes of adoption (2026-09-22):
         //  - adopted AFTER it finished, or adopted mid-stream but nothing crossed
@@ -8331,6 +8340,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // full version, matching what manual chat's always-on guard already does).
                 // All gate internally on answer type, so a coding/lecture/technical answer is
                 // a no-op. Flag-OFF → byte-for-byte unchanged.
+                let humanizedAlready = false;
                 if (isIntelligenceFlagEnabled('answerDiversityGuard')) {
                     const shaped = applyAnswerContract({
                         answer: finalWtaAnswer,
@@ -8340,7 +8350,10 @@ export class IntelligenceEngine extends EventEmitter {
                         question: question || '',
                         guard: this.wtaDiversityGuard,
                     });
-                    if (shaped.changed && shaped.text.trim().length >= 10) finalWtaAnswer = shaped.text;
+                    if (shaped.changed && shaped.text.trim().length >= 10) {
+                        finalWtaAnswer = shaped.text;
+                        humanizedAlready = shaped.applied.includes('humanized_spoken_answer');
+                    }
                     // Code-review finding (2026-07-28): without this, a live repetition-guard
                     // bug (detected-but-not-repaired) ran silently for as long as the flag
                     // was on, with zero signal in traces. Emit regardless of whether a repair
@@ -8352,6 +8365,16 @@ export class IntelligenceEngine extends EventEmitter {
                             reason: shaped.repetition.reason,
                             repaired: shaped.applied.includes('diversity_repair'),
                         });
+                    }
+                }
+                if (isIntelligenceFlagEnabled('sharedResponseCleanup') && !humanizedAlready && !isCoding && !answerIsNotice && (!wtaTruncation.truncated || streamedAnswerReplaced) && finalWtaAnswer) {
+                    const cleaned = cleanupResponse({
+                        text: finalWtaAnswer,
+                        mode: 'spoken',
+                        answerType: answerPlan.answerType,
+                    });
+                    if (cleaned.changed && cleaned.text.trim().length >= 10) {
+                        finalWtaAnswer = cleaned.text;
                     }
                 }
             } catch { /* normalizer never blocks the answer */ }

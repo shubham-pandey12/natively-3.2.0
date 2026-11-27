@@ -46,6 +46,8 @@ export { resolveCodingPromptSignals, screenPromotedCodingSignals, detectSupplied
 export type { ExplicitCodingContract, PriorCodingTurn } from "./codingFollowup";
 export { shouldHumanize, shouldHumanizeOutput, detectCorporateFiller, humanizeDirectiveFor, HUMANIZE_DIRECTIVE, humanizeSpokenAnswer, humanizeForAnswerType } from "./humanLikeness";
 export type { CorporateFillerVerdict, HumanizeSpokenAnswerOptions } from "./humanLikeness";
+export { cleanupResponse } from "./responseCleanup";
+export type { ResponseCleanupInput, ResponseCleanupMode, ResponseCleanupResult } from "./responseCleanup";
 export {
   countSpokenWordsExcludingCode, estimateSpeakSeconds, decideSpeakability,
   trimToSpeakable, applySpeakabilityBudget, compressTechnicalConcept,

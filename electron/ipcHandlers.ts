@@ -147,6 +147,7 @@ import { PiLatencyTrace, tracerNow } from './services/telemetry/PiLatencyTracer'
 import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import { ProfileTreeService } from './intelligence/ProfileTreeService';
 import { isIntelligenceFlagEnabled, getSourceOwnerEnforcementStage } from './intelligence/intelligenceFlags';
+import { cleanupResponse } from './llm/responseCleanup';
 import { recordAttribution, hindsightModeFor, type AttributionInput } from './intelligence/IntelligenceAttribution';
 import { routeContext, isBackwardLookingQuery } from './intelligence/ContextRouter';
 import { SearchOrchestrator, bestTranscriptLinePerMeeting, type SearchCandidate } from './intelligence/SearchOrchestrator';
@@ -3560,6 +3561,17 @@ export function initializeIpcHandlers(appState: AppState): void {
               }
             }
             const v3Truncated = v3Stream.outcome.truncated === true;
+            if (!v3Truncated && finalText.trim() && !manualDiagramTurn?.signals) {
+              try {
+                if (isIntelligenceFlagEnabled('sharedResponseCleanup')) {
+                  const cleaned = cleanupResponse({ text: finalText, mode: 'text' });
+                  if (cleaned.changed && cleaned.text.trim().length >= 10) {
+                    finalText = cleaned.text;
+                    piTelemetry.emit('pi_context_policy_applied', { via: 'shared_response_cleanup_v3' });
+                  }
+                }
+              } catch { /* cleanup never blocks typed reply */ }
+            }
             if (v3Truncated) {
               console.warn('[IPC] manual chat answer is INCOMPLETE — not storing it as conversation history', {
                 streamId: myStreamId,
@@ -6697,7 +6709,13 @@ export function initializeIpcHandlers(appState: AppState): void {
               // strict no-op for any non-spoken type (humanizeForAnswerType gates on
               // shouldHumanize). The prompt directive does the real work up front; this
               // is the last-mile backstop so a stray idiom never reaches the user.
-              const humanized = humanizeForAnswerType(answerPlan.answerType, fullResponse);
+              const humanized = isIntelligenceFlagEnabled('sharedResponseCleanup')
+                ? cleanupResponse({
+                    text: fullResponse,
+                    mode: 'text',
+                    answerType: answerPlan.answerType,
+                  })
+                : humanizeForAnswerType(answerPlan.answerType, fullResponse);
               if (humanized.changed && humanized.text.trim().length >= 10) {
                 fullResponse = humanized.text;
                 finalText = humanized.text;

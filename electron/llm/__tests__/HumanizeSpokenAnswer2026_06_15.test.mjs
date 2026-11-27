@@ -370,6 +370,16 @@ describe('humanizeSpokenAnswer — Phase 1 cleanup regression cases', () => {
       text: 'I have strong backend skills.',
       changed: true,
     });
+
+    const coordinated = 'The candidate has 6 years of Go experience and brings a unique blend of backend depth.';
+    const coordinatedOut = humanizeForAnswerType('jd_fit_answer', coordinated);
+    assert.equal(
+      coordinatedOut.text,
+      'The candidate has 6 years of Go experience and brings a mix of backend depth.',
+    );
+    assert.doesNotMatch(coordinatedOut.text, /\bI have\b.*\band brings\b/i);
+    const qualified = 'The candidate has Go experience and also mentors new hires.';
+    assert.equal(humanizeForAnswerType('jd_fit_answer', qualified).text, qualified);
   });
 
   test('gating and code/math/numeric-range protection remain intact', () => {

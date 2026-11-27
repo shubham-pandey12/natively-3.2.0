@@ -1,0 +1,583 @@
+[
+  {
+    "id": "AA-01",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "experience_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "The service is robust and scalable. Based on my resume, I leveraged my technical rigor to cut p95 latency from 800ms to 300ms.",
+    "chunks": [
+      { "text": "The service is robust and scalable. ", "delayMs": 120 },
+      { "text": "Based on my resume, ", "delayMs": 95 },
+      { "text": "I leveraged my technical rigor ", "delayMs": 110 },
+      { "text": "to cut p95 latency from 800ms to 300ms.", "delayMs": 130 }
+    ],
+    "reference": "The service is reliable and scalable. I used careful engineering to cut p95 latency from 800ms to 300ms.",
+    "mustPreserve": ["800ms", "300ms", "p95", "reliable", "scalable"],
+    "mustNotIntroduce": ["Based on my resume", "technical rigor", "leveraged"]
+  },
+  {
+    "id": "AA-02",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "project_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "The pipeline turns raw data into actionable intelligence for the analytics team.",
+    "chunks": [
+      { "text": "The pipeline turns raw data ", "delayMs": 100 },
+      { "text": "into actionable intelligence ", "delayMs": 115 },
+      { "text": "for the analytics team.", "delayMs": 90 }
+    ],
+    "reference": "The pipeline turns raw data into useful information for the analytics team.",
+    "mustPreserve": ["turns raw data into", "analytics team"],
+    "mustNotIntroduce": ["messy", "actionable intelligence"]
+  },
+  {
+    "id": "AA-03",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "project_followup_answer",
+    "speakerContext": "candidate",
+    "category": "followup",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "This estimate is based on the provided context and our Q4 load test of 12,000 RPS.",
+    "chunks": [
+      { "text": "This estimate is based on the provided context ", "delayMs": 140 },
+      { "text": "and our Q4 load test of 12,000 RPS.", "delayMs": 110 }
+    ],
+    "reference": "This estimate is based on the provided context and our Q4 load test of 12,000 RPS.",
+    "mustPreserve": ["This estimate is based on the provided context", "Q4", "12,000 RPS"],
+    "mustNotIntroduce": ["This estimate is."]
+  },
+  {
+    "id": "AA-04",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "project_answer",
+    "speakerContext": "candidate",
+    "category": "preservation",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "Here the candidate is rejected if it fails validation, which keeps bad writes out of Postgres.",
+    "chunks": [
+      { "text": "Here the candidate is rejected ", "delayMs": 105 },
+      { "text": "if it fails validation, ", "delayMs": 95 },
+      { "text": "which keeps bad writes out of Postgres.", "delayMs": 110 }
+    ],
+    "reference": "Here the candidate is rejected if it fails validation, which keeps bad writes out of Postgres.",
+    "mustPreserve": ["Here the candidate is rejected if it fails validation", "Postgres"],
+    "mustNotIntroduce": ["I'm rejected", "I am rejected"]
+  },
+  {
+    "id": "AA-05",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "jd_fit_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "The candidate has 6 years of Go experience and brings a unique blend of backend depth.",
+    "chunks": [
+      { "text": "The candidate has 6 years of Go experience ", "delayMs": 110 },
+      { "text": "and brings a unique blend of backend depth.", "delayMs": 105 }
+    ],
+    "reference": "The candidate has 6 years of Go experience and brings a mix of backend depth.",
+    "mustPreserve": ["6 years", "Go", "The candidate has", "and brings", "mix"],
+    "mustNotIntroduce": ["I have 6 years of Go experience and brings", "unique blend"]
+  },
+  {
+    "id": "AA-06",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "technical_concept_answer",
+    "speakerContext": "assistant",
+    "category": "technical",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "Consistent hashing maps keys onto a ring so adding a node only moves $O(K/N)$ keys on average.",
+    "chunks": [
+      { "text": "Consistent hashing maps keys onto a ring ", "delayMs": 100 },
+      { "text": "so adding a node only moves $O(K/N)$ keys on average.", "delayMs": 120 }
+    ],
+    "reference": "Consistent hashing maps keys onto a ring so adding a node only moves $O(K/N)$ keys on average.",
+    "mustPreserve": ["Consistent hashing", "$O(K/N)$"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "AA-07",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "coding_question_answer",
+    "speakerContext": "assistant",
+    "category": "preservation",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "Use a sliding window in `maxWindow()`:\n```ts\n// range 1—10 stays untouched\nreturn best;\n```",
+    "chunks": [
+      { "text": "Use a sliding window in `maxWindow()`:\n", "delayMs": 90 },
+      { "text": "```ts\n// range 1—10 stays untouched\nreturn best;\n```", "delayMs": 140 }
+    ],
+    "reference": "Use a sliding window in `maxWindow()`:\n```ts\n// range 1—10 stays untouched\nreturn best;\n```",
+    "mustPreserve": ["`maxWindow()`", "```ts\n// range 1—10 stays untouched\nreturn best;\n```"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "AA-08",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "behavioral_interview_answer",
+    "speakerContext": "candidate",
+    "category": "already_good",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "I owned the checkout migration from Stripe v2 to v3, and we cut failed webhooks from 1.8% to 0.2%.",
+    "chunks": [
+      { "text": "I owned the checkout migration from Stripe v2 to v3, ", "delayMs": 120 },
+      { "text": "and we cut failed webhooks from 1.8% to 0.2%.", "delayMs": 110 }
+    ],
+    "reference": "I owned the checkout migration from Stripe v2 to v3, and we cut failed webhooks from 1.8% to 0.2%.",
+    "mustPreserve": ["Stripe v2", "v3", "1.8%", "0.2%"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "AA-09",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "experience_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "We shipped a seamless experience across 5—10 regions; it drove business objectives without extra headcount.",
+    "chunks": [
+      { "text": "We shipped a seamless experience across 5—10 regions; ", "delayMs": 130 },
+      { "text": "it drove business objectives without extra headcount.", "delayMs": 110 }
+    ],
+    "reference": "We shipped a smooth experience across 5-10 regions. It helped our goals without extra headcount.",
+    "mustPreserve": ["5-10", "smooth experience", "without extra headcount"],
+    "mustNotIntroduce": ["seamless experience", "business objectives", "5—10"]
+  },
+  {
+    "id": "AA-10",
+    "path": "auto_answer",
+    "route": "runWhatShouldISayInner",
+    "mode": "spoken",
+    "answerType": "sales_answer",
+    "speakerContext": "assistant",
+    "category": "wordy",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "That gives your team a competitive advantage and more leverage in renewal talks.",
+    "chunks": [
+      { "text": "That gives your team a competitive advantage ", "delayMs": 100 },
+      { "text": "and more leverage in renewal talks.", "delayMs": 95 }
+    ],
+    "reference": "That gives your team a leg up and more leverage in renewal talks.",
+    "mustPreserve": ["a leg up", "more leverage", "renewal talks"],
+    "mustNotIntroduce": ["competitive advantage", "aleg up", "more use"]
+  },
+  {
+    "id": "TR-01",
+    "path": "text_reply",
+    "route": "v3_typed_chat",
+    "mode": "text",
+    "answerType": "experience_answer",
+    "speakerContext": "candidate",
+    "category": "structured",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "### Summary\n- Built a robust and scalable billing worker in Node.js.\n- Cut retry errors by 42%.",
+    "chunks": [
+      { "text": "### Summary\n", "delayMs": 70 },
+      { "text": "- Built a robust and scalable billing worker in Node.js.\n", "delayMs": 120 },
+      { "text": "- Cut retry errors by 42%.", "delayMs": 80 }
+    ],
+    "reference": "### Summary\n- Built a reliable and scalable billing worker in Node.js.\n- Cut retry errors by 42%.",
+    "mustPreserve": ["### Summary", "Node.js", "42%", "reliable and scalable"],
+    "mustNotIntroduce": ["robust and scalable"]
+  },
+  {
+    "id": "TR-02",
+    "path": "text_reply",
+    "route": "legacy_typed_chat",
+    "mode": "text",
+    "answerType": "project_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "Our ETL job turns raw data into actionable intelligence — the dashboard refreshes every 15 minutes.",
+    "chunks": [
+      { "text": "Our ETL job turns raw data into actionable intelligence — ", "delayMs": 125 },
+      { "text": "the dashboard refreshes every 15 minutes.", "delayMs": 95 }
+    ],
+    "reference": "Our ETL job turns raw data into useful information, the dashboard refreshes every 15 minutes.",
+    "mustPreserve": ["ETL", "turns raw data into useful information", "15 minutes"],
+    "mustNotIntroduce": ["messy", "actionable intelligence"]
+  },
+  {
+    "id": "TR-03",
+    "path": "text_reply",
+    "route": "v3_typed_chat",
+    "mode": "text",
+    "answerType": "technical_concept_answer",
+    "speakerContext": "assistant",
+    "category": "technical",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "Call `retryWithBackoff()` with jitter. The total wait follows $$T = \\sum_{i=0}^{k-1} b \\cdot 2^i$$ ms.",
+    "chunks": [
+      { "text": "Call `retryWithBackoff()` with jitter. ", "delayMs": 90 },
+      { "text": "The total wait follows $$T = \\sum_{i=0}^{k-1} b \\cdot 2^i$$ ms.", "delayMs": 130 }
+    ],
+    "reference": "Call `retryWithBackoff()` with jitter. The total wait follows $$T = \\sum_{i=0}^{k-1} b \\cdot 2^i$$ ms.",
+    "mustPreserve": ["`retryWithBackoff()`", "$$T = \\sum_{i=0}^{k-1} b \\cdot 2^i$$"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "TR-04",
+    "path": "text_reply",
+    "route": "v3_typed_chat",
+    "mode": "text",
+    "answerType": "follow_up_answer",
+    "speakerContext": "assistant",
+    "category": "followup",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "These numbers are based on the provided context and the Q3 benchmark.",
+    "chunks": [
+      { "text": "These numbers are based on the provided context ", "delayMs": 110 },
+      { "text": "and the Q3 benchmark.", "delayMs": 85 }
+    ],
+    "reference": "These numbers are based on the provided context and the Q3 benchmark.",
+    "mustPreserve": ["These numbers are based on the provided context", "Q3"],
+    "mustNotIntroduce": ["These numbers are."]
+  },
+  {
+    "id": "TR-05",
+    "path": "text_reply",
+    "route": "legacy_typed_chat",
+    "mode": "text",
+    "answerType": "general_meeting_answer",
+    "speakerContext": "assistant",
+    "category": "preservation",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "The candidate has strong distributed-systems skills, and the panel recommends moving forward.",
+    "chunks": [
+      { "text": "The candidate has strong distributed-systems skills, ", "delayMs": 115 },
+      { "text": "and the panel recommends moving forward.", "delayMs": 100 }
+    ],
+    "reference": "The candidate has strong distributed-systems skills, and the panel recommends moving forward.",
+    "mustPreserve": ["The candidate has strong distributed-systems skills", "panel"],
+    "mustNotIntroduce": ["I have"]
+  },
+  {
+    "id": "TR-06",
+    "path": "text_reply",
+    "route": "v3_typed_chat",
+    "mode": "text",
+    "answerType": "system_design_answer",
+    "speakerContext": "assistant",
+    "category": "already_good",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "1. Write events to Kafka partitioned by `tenant_id`.\n2. Consumer workers batch inserts into ClickHouse every 5 seconds.",
+    "chunks": [
+      { "text": "1. Write events to Kafka partitioned by `tenant_id`.\n", "delayMs": 100 },
+      { "text": "2. Consumer workers batch inserts into ClickHouse every 5 seconds.", "delayMs": 110 }
+    ],
+    "reference": "1. Write events to Kafka partitioned by `tenant_id`.\n2. Consumer workers batch inserts into ClickHouse every 5 seconds.",
+    "mustPreserve": ["Kafka", "`tenant_id`", "ClickHouse", "5 seconds"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "TR-07",
+    "path": "text_reply",
+    "route": "legacy_typed_chat",
+    "mode": "text",
+    "answerType": "negotiation_answer",
+    "speakerContext": "candidate",
+    "category": "preservation",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "The budget range is $5M to $20M, with a 10—20 ms SLA; that gives me more leverage to negotiate.",
+    "chunks": [
+      { "text": "The budget range is $5M to $20M, ", "delayMs": 95 },
+      { "text": "with a 10—20 ms SLA; ", "delayMs": 85 },
+      { "text": "that gives me more leverage to negotiate.", "delayMs": 90 }
+    ],
+    "reference": "The budget range is $5M to $20M, with a 10-20 ms SLA. That gives me more leverage to negotiate.",
+    "mustPreserve": ["$5M", "$20M", "10-20 ms", "more leverage"],
+    "mustNotIntroduce": ["more use"]
+  },
+  {
+    "id": "TR-08",
+    "path": "text_reply",
+    "route": "v3_typed_chat",
+    "mode": "text",
+    "answerType": "coding_question_answer",
+    "speakerContext": "assistant",
+    "category": "preservation",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "```python\ndef score_candidate(x):\n    # robust and scalable check\n    return x > 0\n```",
+    "chunks": [
+      { "text": "```python\ndef score_candidate(x):\n", "delayMs": 80 },
+      { "text": "    # robust and scalable check\n    return x > 0\n```", "delayMs": 105 }
+    ],
+    "reference": "```python\ndef score_candidate(x):\n    # robust and scalable check\n    return x > 0\n```",
+    "mustPreserve": ["```python\ndef score_candidate(x):\n    # robust and scalable check\n    return x > 0\n```"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "TR-09",
+    "path": "text_reply",
+    "route": "legacy_typed_chat",
+    "mode": "text",
+    "answerType": "jd_fit_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "Based on my resume, I have a proven track record of delivering actionable insights for enterprise teams.",
+    "chunks": [
+      { "text": "Based on my resume, ", "delayMs": 80 },
+      { "text": "I have a proven track record ", "delayMs": 95 },
+      { "text": "of delivering actionable insights for enterprise teams.", "delayMs": 115 }
+    ],
+    "reference": "I have a track record of delivering useful takeaways for enterprise teams.",
+    "mustPreserve": ["track record", "useful takeaways", "enterprise teams"],
+    "mustNotIntroduce": ["Based on my resume", "proven track record", "actionable insights"]
+  },
+  {
+    "id": "TR-10",
+    "path": "text_reply",
+    "route": "v3_typed_chat",
+    "mode": "text",
+    "answerType": "unknown_answer",
+    "speakerContext": "unknown",
+    "category": "already_good",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "Yes, `pgvector` supports HNSW indexes starting in version 0.5.0.",
+    "chunks": [
+      { "text": "Yes, `pgvector` supports HNSW indexes ", "delayMs": 90 },
+      { "text": "starting in version 0.5.0.", "delayMs": 85 }
+    ],
+    "reference": "Yes, `pgvector` supports HNSW indexes starting in version 0.5.0.",
+    "mustPreserve": ["`pgvector`", "HNSW", "0.5.0"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "LB-01",
+    "path": "live_brain",
+    "route": "gemini_live_realtime",
+    "mode": "spoken",
+    "answerType": "general_meeting_answer",
+    "speakerContext": "assistant",
+    "category": "control_message",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "No action.",
+    "chunks": [
+      { "text": "No ", "delayMs": 60 },
+      { "text": "action.", "delayMs": 75 }
+    ],
+    "reference": "No action.",
+    "mustPreserve": ["No action."],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "LB-02",
+    "path": "live_brain",
+    "route": "openai_realtime",
+    "mode": "spoken",
+    "answerType": "general_meeting_answer",
+    "speakerContext": "assistant",
+    "category": "control_message",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "[[NO_ACTION]]",
+    "chunks": [
+      { "text": "[[NO_", "delayMs": 55 },
+      { "text": "ACTION]]", "delayMs": 65 }
+    ],
+    "reference": "[[NO_ACTION]]",
+    "mustPreserve": ["[[NO_ACTION]]"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "LB-03",
+    "path": "live_brain",
+    "route": "deepgram_flux_answer_writer",
+    "mode": "spoken",
+    "answerType": "general_meeting_answer",
+    "speakerContext": "assistant",
+    "category": "control_message",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "Ask: Are we optimizing for read latency or write throughput?",
+    "chunks": [
+      { "text": "Ask: ", "delayMs": 70 },
+      { "text": "Are we optimizing for read latency ", "delayMs": 110 },
+      { "text": "or write throughput?", "delayMs": 95 }
+    ],
+    "reference": "Ask: Are we optimizing for read latency or write throughput?",
+    "mustPreserve": ["Ask: Are we optimizing for read latency or write throughput?"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "LB-04",
+    "path": "live_brain",
+    "route": "openai_realtime",
+    "mode": "spoken",
+    "answerType": "general_meeting_answer",
+    "speakerContext": "assistant",
+    "category": "control_message",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "[[ASK]] Which cloud provider are we targeting?",
+    "chunks": [
+      { "text": "[[ASK]] ", "delayMs": 65 },
+      { "text": "Which cloud provider are we targeting?", "delayMs": 100 }
+    ],
+    "reference": "[[ASK]] Which cloud provider are we targeting?",
+    "mustPreserve": ["[[ASK]] Which cloud provider are we targeting?"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "LB-05",
+    "path": "live_brain",
+    "route": "deepgram_flux_answer_writer",
+    "mode": "spoken",
+    "answerType": "experience_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "I built a robust and scalable ingestion service that turns raw data into actionable intelligence.",
+    "chunks": [
+      { "text": "I built a robust and scalable ", "delayMs": 110 },
+      { "text": "ingestion service that turns raw data ", "delayMs": 120 },
+      { "text": "into actionable intelligence.", "delayMs": 105 }
+    ],
+    "reference": "I built a reliable and scalable ingestion service that turns raw data into useful information.",
+    "mustPreserve": ["reliable and scalable", "turns raw data into useful information"],
+    "mustNotIntroduce": ["messy", "robust and scalable", "actionable intelligence"]
+  },
+  {
+    "id": "LB-06",
+    "path": "live_brain",
+    "route": "gemini_live_realtime",
+    "mode": "spoken",
+    "answerType": "project_followup_answer",
+    "speakerContext": "candidate",
+    "category": "followup",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "That latency target is based on the provided context — we keep p99 under 40ms with MongoDB.",
+    "chunks": [
+      { "text": "That latency target is based on the provided context — ", "delayMs": 135 },
+      { "text": "we keep p99 under 40ms with MongoDB.", "delayMs": 115 }
+    ],
+    "reference": "That latency target is based on the provided context, we keep p99 under 40ms with MongoDB.",
+    "mustPreserve": ["based on the provided context", "p99", "40ms", "MongoDB"],
+    "mustNotIntroduce": ["That latency target is."]
+  },
+  {
+    "id": "LB-07",
+    "path": "live_brain",
+    "route": "deepgram_flux_answer_writer",
+    "mode": "spoken",
+    "answerType": "project_followup_answer",
+    "speakerContext": "candidate",
+    "category": "already_good",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "I chose Redis because 90% of redirects hit hot keys, and a 60-second TTL keeps memory bounded.",
+    "chunks": [
+      { "text": "I chose Redis because 90% of redirects hit hot keys, ", "delayMs": 125 },
+      { "text": "and a 60-second TTL keeps memory bounded.", "delayMs": 105 }
+    ],
+    "reference": "I chose Redis because 90% of redirects hit hot keys, and a 60-second TTL keeps memory bounded.",
+    "mustPreserve": ["Redis", "90%", "60-second TTL"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "LB-08",
+    "path": "live_brain",
+    "route": "pipeline_fallback",
+    "mode": "spoken",
+    "answerType": "technical_concept_answer",
+    "speakerContext": "assistant",
+    "category": "technical",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "Read-through caching with `Redis` cuts p95 from 50—100 ms down to 4 ms.",
+    "chunks": [
+      { "text": "Read-through caching with `Redis` ", "delayMs": 95 },
+      { "text": "cuts p95 from 50—100 ms down to 4 ms.", "delayMs": 110 }
+    ],
+    "reference": "Read-through caching with `Redis` cuts p95 from 50—100 ms down to 4 ms.",
+    "mustPreserve": ["`Redis`", "p95", "4 ms"],
+    "mustNotIntroduce": []
+  },
+  {
+    "id": "LB-09",
+    "path": "live_brain",
+    "route": "amazon_sonic",
+    "mode": "spoken",
+    "answerType": "project_answer",
+    "speakerContext": "candidate",
+    "category": "preservation",
+    "sourceKind": "synthetic_from_repro",
+    "timingsSynthetic": true,
+    "original": "Here the candidate is rejected if it fails validation before writing to DynamoDB.",
+    "chunks": [
+      { "text": "Here the candidate is rejected ", "delayMs": 100 },
+      { "text": "if it fails validation ", "delayMs": 90 },
+      { "text": "before writing to DynamoDB.", "delayMs": 95 }
+    ],
+    "reference": "Here the candidate is rejected if it fails validation before writing to DynamoDB.",
+    "mustPreserve": ["Here the candidate is rejected if it fails validation", "DynamoDB"],
+    "mustNotIntroduce": ["I'm rejected", "I am rejected"]
+  },
+  {
+    "id": "LB-10",
+    "path": "live_brain",
+    "route": "deepgram_voice_agent",
+    "mode": "spoken",
+    "answerType": "experience_answer",
+    "speakerContext": "candidate",
+    "category": "wordy",
+    "sourceKind": "synthetic",
+    "timingsSynthetic": true,
+    "original": "According to the JD, I bring deep expertise and a data-driven mindset to move the needle.",
+    "chunks": [
+      { "text": "According to the JD, ", "delayMs": 85 },
+      { "text": "I bring deep expertise ", "delayMs": 95 },
+      { "text": "and a data-driven mindset to move the needle.", "delayMs": 115 }
+    ],
+    "reference": "I bring real experience and a habit of checking the numbers to make a real difference.",
+    "mustPreserve": ["real experience", "habit of checking the numbers", "make a real difference"],
+    "mustNotIntroduce": ["According to the JD", "deep expertise", "data-driven mindset", "move the needle"]
+  }
+]

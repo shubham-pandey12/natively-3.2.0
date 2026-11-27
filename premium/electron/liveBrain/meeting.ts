@@ -1,3 +1,5 @@
+import { isIntelligenceFlagEnabled } from '../../../electron/intelligence/intelligenceFlags';
+import { cleanupResponse } from '../../../electron/llm/responseCleanup';
 import { notePromptDebugLiveBrain, isPromptDebugEnabled, notePromptDebugAnswerTiming } from '../../../electron/llm/promptDebug';
 import type {
     AutoAnswerDispatchResult,
@@ -192,6 +194,11 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             baseNotebook: supervisor?.notebookContext ?? '',
             constraints: notebook.snapshot().constraints,
         }),
+        cleanupText: (text: string) => (
+            isIntelligenceFlagEnabled('sharedResponseCleanup')
+                ? cleanupResponse({ text, mode: 'spoken' }).text
+                : text
+        ),
         overlay: createLiveBrainOverlayPort({
             emitQuestion: event => {
                 if (event.responseText?.text.trim() || event.clarification?.trim()) {

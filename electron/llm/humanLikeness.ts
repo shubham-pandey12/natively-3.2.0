@@ -239,6 +239,12 @@ export interface HumanizeSpokenAnswerOptions {
    */
   speaker?: 'candidate' | 'assistant' | 'third_person' | 'unknown';
   answerType?: AnswerType;
+  /**
+   * Output surface mode:
+   * - `'spoken'` (default): normalizes semicolons and em-dashes for reading aloud.
+   * - `'text'`: preserves semicolons and Markdown list indentation for written replies.
+   */
+  mode?: 'spoken' | 'text';
 }
 
 function isCandidateVoiceContext(options?: HumanizeSpokenAnswerOptions): boolean {
@@ -251,9 +257,14 @@ function isCandidateVoiceContext(options?: HumanizeSpokenAnswerOptions): boolean
   return false;
 }
 
+// A conjunction may introduce a second verb with the same subject. Keep the
+// original perspective when changing the first verb could break agreement later.
+const POSSIBLE_COORDINATION_RE = /\b(?:and|but|or|nor)\b/i;
+
 function rewriteCandidateNarration(text: string): string {
   return text.replace(/[^.!?\n]+(?:[.!?]+|\n|$)/g, (sentence) => {
     if (THIRD_PERSON_CANDIDATE_GUARD_RE.test(sentence)) return sentence;
+    if (POSSIBLE_COORDINATION_RE.test(sentence)) return sentence;
     let out = sentence;
     for (const { re, to } of CANDIDATE_NARRATION_REWRITES) {
       out = out.replace(re, (m, offset: number) => out.slice(0, offset).trim() ? m : withCase(m, to));
@@ -298,14 +309,22 @@ export function humanizeSpokenAnswer(
   //    depth, strip any pre-existing PUA sentinel chars from the input first so a model's
   //    own (astronomically unlikely) U+E000/U+E001 bytes can never be read as a slot.
   const protectedChunks: string[] = [];
+  const restoreProtected = (value: string) => value.replace(
+    SENT_RESTORE_RE, (_m, index: string) => protectedChunks[Number(index)] ?? '',
+  );
   let text = answer.split(SENT_OPEN).join('').split(SENT_CLOSE).join('');
   const protect = (re: RegExp) => {
     text = text.replace(re, (m) => {
-      protectedChunks.push(m);
+      protectedChunks.push(restoreProtected(m));
       return `${SENT_OPEN}${protectedChunks.length - 1}${SENT_CLOSE}`;
     });
   };
   protect(HFENCE_RE);
+  if (options?.mode) {
+    protect(/^[ \t]*~{3,}[^\n]*\n[\s\S]*?(?:^[ \t]*~{3,}[ \t]*$|(?![\s\S]))/gm);
+    protect(/!?\[[^\]\n]*\]\([^\n]*?\)|https?:\/\/[^\s<>]+/g);
+  }
+  if (options?.mode === 'text') protect(/^(?: {4}|\t)[^\n]*/gm);
   protect(BLOCK_MATH_RE);
   protect(INLINE_CODE_RE);
   protect(INLINE_MATH_RE);
@@ -327,16 +346,18 @@ export function humanizeSpokenAnswer(
     text = text.replace(re, (m) => withCase(m, to));
   }
 
-  // 5. Punctuation that reads as an AI tell in spoken prose.
+  const mode = options?.mode ?? 'spoken';
+
+  // 5. Punctuation that reads as an AI tell in prose.
   //    em/en dash between digits -> hyphen (keep numeric ranges like 5-10).
   text = text.replace(/(\d)\s*[—–]\s*(\d)/g, '$1-$2');
-  //    em/en dash between words -> comma.
-  text = text.replace(/\s*[—–]\s*/g, ', ');
-  //    spaced double-hyphen used as a dash -> comma.
-  text = text.replace(/\s+--\s+/g, ', ');
-  //    semicolon -> split into a new sentence (capitalise the next word).
-  text = text.replace(/;\s+(\w)/g, (_m, c: string) => '. ' + c.toUpperCase());
-  text = text.replace(/;\s*$/gm, '.');
+  if (mode === 'spoken') {
+    // Convert spoken pauses to commas or sentence breaks.
+    text = text.replace(/\s*[—–]\s*/g, ', ');
+    text = text.replace(/\s+--\s+/g, ', ');
+    text = text.replace(/;\s+(\w)/g, (_m, c: string) => '. ' + c.toUpperCase());
+    text = text.replace(/;\s*$/gm, '.');
+  }
 
   // 6. (Removed 2026-06-15) Mid-sentence **bold** is now KEPT. Sparing bold of the 1-3
   //    load-bearing key terms is a deliberate scanning aid so the user can recreate the
@@ -356,6 +377,10 @@ export function humanizeSpokenAnswer(
     (_m, a: string, head: string) => `${a} ${head}`,
   );
 
+  if (mode === 'text') {
+    return restoreProtected(text);
+  }
+
   // 8. If a deletion left a lowercase sentence start at the very top, fix it.
   text = text.replace(/^(\s*)([a-z])/, (_m, ws: string, c: string) => ws + c.toUpperCase());
 
@@ -364,14 +389,14 @@ export function humanizeSpokenAnswer(
   //    block contents. The sentinel carries no surrounding spaces, so adjacency
   //    ("price is $20k", "see `foo` now") survives the tidy + restore.
   text = text
-    .replace(/[ \t]{2,}/g, ' ')           // collapse runs of spaces/tabs (in prose only)
+    .replace(/[ \t]{2,}/g, ' ')
     .replace(/ +([,.!?])/g, '$1')         // no space before punctuation (spaces only)
     .replace(/,\s*,/g, ',')               // doubled commas
-    .replace(/\n[ \t]+/g, '\n')           // leading indent on wrapped lines
     .replace(/\n{3,}/g, '\n\n');
+  text = text.replace(/\n[ \t]+/g, '\n'); // leading indent on wrapped lines
 
   // 10. Restore protected chunks LAST (byte-for-byte), after all prose normalization.
-  text = text.replace(SENT_RESTORE_RE, (_m, i: string) => protectedChunks[Number(i)] ?? '');
+  text = restoreProtected(text);
 
   return text.trim();
 }
