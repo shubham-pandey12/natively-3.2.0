@@ -232,6 +232,10 @@ Acceptance: same scenario behaviour as Gemini in mocks; STT tests unchanged.
 
 ---
 
+## Next provider phase — Amazon Sonic (D18)
+
+Implement the separately configured AWS bidirectional streaming transport and text-only overlay behavior approved on 2026-11-27. The AWS SDK for JavaScript is allowed for this phase. Reuse captured audio, prompts, and supervisor. Verify both active models and regional support against AWS model cards, cover protocol and routing in mocked tests, and record live verification separately. The existing Phase 7 tuning scope remains pending.
+
 ## Phase 7 — Tuning & physical validation  *(≈3–4 days)*
 
 Tasks:

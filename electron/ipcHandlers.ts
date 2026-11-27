@@ -885,6 +885,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         // vendor-namespaced, so `openrouter/openai/gpt-oss-120b` is BOTH a
         // known Groq id and an `includes('openai')` match — classified late it
         // would be gated by, and billed to, the wrong provider's key.
+        if (modelId.startsWith('bedrock/')) return 'bedrock';
         if (modelId.startsWith('openrouter/')) return 'openrouter';
         // MUST stay above EVERY vendor check below, for a sharper version of the
         // same reason: Fluxion is a reseller, so its catalogue ids are not merely
@@ -965,6 +966,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         if (modelId.startsWith('litellm/')) return has(cm.getLitellmBaseURL());
         if (modelId.startsWith('nvidia_nim/')) return has(cm.getNvidiaNimApiKey());
         // Above the groq/openai lines for the reason providerFamily() gives.
+        if (modelId.startsWith('bedrock/')) return Boolean(cm.getBedrockConnection());
         if (modelId.startsWith('openrouter/')) return has(cm.getOpenrouterApiKey());
         // Above the gemini/groq/openai/claude/deepseek lines for the reason
         // providerFamily() gives — all five would otherwise claim a Fluxion id.
@@ -12595,6 +12597,84 @@ export function initializeIpcHandlers(appState: AppState): void {
       // the user discovering it later in a meeting.
       return { success: true, sttProviderCleared: sttWasNvidia };
     } catch (error: any) { return { success: false, error: error.message }; }
+  });
+
+  safeHandle('bedrock:settings', async () => {
+    const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
+    const cm = CredentialsManager.getInstance();
+    const connection = cm.getBedrockConnection();
+    return { configured: !!connection, region: connection?.region ?? 'us-east-1', auth: connection?.auth ?? 'aws',
+      hasApiKey: !!connection?.apiKey, models: cm.getBedrockModels(), options: cm.getBedrockOptions() };
+  });
+
+  safeHandle('bedrock:set-connection', async (_, next: import('../src/types/bedrock').BedrockConnection | null) => {
+    const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
+    const { validateBedrockConnection } = await import('./llm/BedrockProvider');
+    const cm = CredentialsManager.getInstance();
+    try {
+      const connection = next ? {
+        region: next.region.trim().toLowerCase(), auth: next.auth,
+        apiKey: next.auth === 'bearer' ? next.apiKey?.trim() || cm.getBedrockConnection()?.apiKey : undefined,
+      } : undefined;
+      if (connection) validateBedrockConnection(connection);
+      if (!cm.setBedrockConnection(connection)) return { success: false, error: 'The credential store is unavailable.' };
+      if (!connection) await refreshRuntimeDefaultIfUnavailable();
+      broadcastCredentialsChanged();
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Invalid connection settings.' };
+    }
+  });
+
+  safeHandle('bedrock:refresh-models', async () => {
+    const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
+    const { listBedrockModels, describeBedrockError } = await import('./llm/BedrockProvider');
+    const cm = CredentialsManager.getInstance();
+    const connection = cm.getBedrockConnection();
+    if (!connection) return { success: false, error: 'Save your Bedrock connection first.' };
+    try {
+      const { models, warnings } = await listBedrockModels(connection, AbortSignal.timeout(15_000));
+      if (!models.length && warnings.length) return { success: false, error: warnings.join(' ') };
+      // Keep the last catalogue for a source when that endpoint failed to refresh.
+      const failedSources = new Set(warnings.map(warning => warning.startsWith('Foundation') ? 'foundation'
+        : warning.startsWith('Inference') ? 'profile' : 'mantle'));
+      const merged = [...models, ...cm.getBedrockModels().filter(model => failedSources.has(model.source))];
+      if (!cm.setBedrockModels(connection, merged)) return { success: false, error: 'The connection changed or the credential store is unavailable.' };
+      broadcastLiveCatalogUpdated('bedrock', merged.map(model => ({ id: `bedrock/${model.id}`, label: model.label })));
+      return { success: true, models: merged, warnings };
+    } catch (error) {
+      return { success: false, error: describeBedrockError(error).message };
+    }
+  });
+
+  safeHandle('bedrock:set-model-options', async (_, id: string, options: import('../src/types/bedrock').BedrockModelOptions) => {
+    const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
+    const { validateBedrockModel, validateBedrockOptions } = await import('./llm/BedrockProvider');
+    try {
+      validateBedrockModel(id);
+      validateBedrockOptions(options);
+      if (!CredentialsManager.getInstance().setBedrockModelOptions(id, options)) return { success: false, error: 'The credential store is unavailable.' };
+      broadcastLiveCatalogUpdated('bedrock');
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Invalid model settings.' };
+    }
+  });
+
+  safeHandle('bedrock:test-model', async (_, id: string) => {
+    const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
+    const { defaultBedrockOptions, streamBedrock } = await import('./llm/BedrockProvider');
+    const cm = CredentialsManager.getInstance();
+    const connection = cm.getBedrockConnection();
+    if (!connection) return { success: false, error: 'Save your Bedrock connection first.' };
+    try {
+      const options = Object.hasOwn(cm.getBedrockOptions(), id) ? cm.getBedrockOptions()[id]
+        : defaultBedrockOptions(id, cm.getBedrockModels().find(model => model.id === id));
+      for await (const _ of streamBedrock(connection, id, options, { text: 'Reply with OK.' }, AbortSignal.timeout(30_000))) { /* Drain to verify completion. */ }
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Bedrock model test failed.' };
+    }
   });
 
   safeHandle('set-openrouter-api-key', async (_, apiKey: string) => {

@@ -69,8 +69,9 @@ export interface LiveBrainMeetingOptions {
     sessionId: string;
     apiKey?: string;
     provider?: LiveBrainProvider;
-    resolveProvider?(provider: LiveBrainKeyProvider): { apiKey?: string; model: string; deepgramThink?: DeepgramThinkConfig };
+    resolveProvider?(provider: Exclude<LiveBrainProvider, 'pipeline'>): { apiKey?: string; model: string; deepgramThink?: DeepgramThinkConfig; sonicRegion?: string };
     model?: string;
+    sonicRegion?: string;
     deepgramThink?: DeepgramThinkConfig;
     promptVariant?: LiveBrainPromptVariant;
     profileContext?: string;
@@ -154,7 +155,8 @@ interface LiveBrainPremium {
     testConnection(options: {
         apiKey: string;
         model?: string;
-        provider?: LiveBrainKeyProvider;
+        provider?: Exclude<LiveBrainProvider, 'pipeline'>;
+        sonicRegion?: string;
         deepgramThink?: DeepgramThinkConfig;
         testAiRoute?: () => Promise<import('../../src/types/liveBrainSettings').FluxAiRouteTestStatus>;
     }): Promise<LiveBrainSettingsResult>;

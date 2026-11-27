@@ -47,6 +47,24 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemi
     return { clock, notebook, supervisor, realtime, attempted, seen, switches, rollovers };
 }
 
+test('Amazon Sonic reconnects with notebook context and rolls over before the eight-minute limit', async () => {
+    const h = rig('amazon-sonic', 0, ['amazon-sonic']);
+    h.supervisor.start();
+    await flush();
+    const first = h.realtime[0];
+    first.emit({ type: 'interviewer_transcript', text: 'Use streaming and a single database.', final: true, at: h.clock.now() });
+    first.emit({ type: 'error', code: 'network', fatal: true });
+    await flush();
+    const second = h.realtime[1];
+    assert.equal(h.supervisor.current, second);
+    assert.match(second.starts[0].instructions, /single database/);
+    h.clock.advance(7.5 * MIN);
+    await flush();
+    assert.equal(h.supervisor.current, h.realtime[2]);
+    assert.match(h.realtime[2].starts[0].instructions, /single database/);
+    h.supervisor.stop();
+});
+
 test('70 minutes of simulated rollovers preserve context and wait for the active answer', async () => {
     const h = rig('gemini-live', 550);
     const start = h.clock.now();

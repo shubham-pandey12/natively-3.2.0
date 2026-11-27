@@ -10,6 +10,7 @@ const ROLLOVER_MS = {
     'elevenlabs-realtime': 8.5 * 60_000,
     'deepgram-voice-agent': 110 * 60_000,
     'deepgram-flux': 50 * 60_000,
+    'amazon-sonic': 7.5 * 60_000,
 };
 const MAX_AUDIO_SAMPLES = 160_000; // 10 s of 16 kHz PCM
 const MAX_RESPONSE_CHARS = 16_000; // notebook only; the overlay receives the entire stream
@@ -82,7 +83,9 @@ export class BrainSupervisor<Timer> {
     start(): void {
         if (!this.stopped) return;
         const preferred = this.options.preferred;
-        if (preferred !== 'pipeline' && !REALTIME.some(id => id === preferred)) throw new Error(`Unsupported live brain: ${String(preferred)}`);
+        if (preferred !== 'pipeline' && preferred !== 'amazon-sonic' && !REALTIME.some(id => id === preferred)) {
+            throw new Error(`Unsupported live brain: ${String(preferred)}`);
+        }
         this.stopped = false;
         this.options.notebook.clear();
         this.attempted.clear();
@@ -197,7 +200,8 @@ export class BrainSupervisor<Timer> {
         if (this.stopped || (lease !== this.active && lease !== this.standby)) return;
         if (event.type === 'error' && event.fatal) {
             if (lease === this.active) this.options.onEvent(event, lease.brain.id, lease.model);
-            this.fail(lease, event.code, event.detail === 'session_resumption_failed');
+            this.fail(lease, event.code, event.detail === 'session_resumption_failed'
+                || (lease.brain.id === 'amazon-sonic' && (event.code === 'network' || event.code === 'timeout')));
             return;
         }
         if (event.type === 'status' && event.status === 'ready') {

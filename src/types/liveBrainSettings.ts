@@ -1,5 +1,5 @@
 export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'deepgram-voice-agent' | 'deepgram-flux';
-export type LiveBrainProvider = LiveBrainKeyProvider | 'pipeline';
+export type LiveBrainProvider = LiveBrainKeyProvider | 'amazon-sonic' | 'pipeline';
 export type LiveBrainPromptVariant = 'full' | 'trimmed';
 export type DeepgramThinkMode = 'managed' | 'byo';
 export type DeepgramManagedProvider = 'open_ai' | 'anthropic' | 'google' | 'nvidia';
@@ -9,6 +9,12 @@ export const DEFAULT_ELEVENLABS_REALTIME_MODEL = 'eleven_realtime_v1_mini';
 export const DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER: DeepgramManagedProvider = 'open_ai';
 export const DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL = 'gpt-4o-mini';
 export const DEFAULT_DEEPGRAM_FLUX_MODEL = 'flux-general-multi';
+export const DEFAULT_AMAZON_SONIC_MODEL = 'amazon.nova-2-5-sonic';
+export const AMAZON_SONIC_REGIONS = ['us-east-1', 'us-west-2', 'eu-north-1', 'ap-northeast-1'] as const;
+export const AMAZON_SONIC_MODELS = [
+    { id: DEFAULT_AMAZON_SONIC_MODEL, label: 'Nova 2.5 Sonic' },
+    { id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic' },
+] as const;
 
 export interface FluxAiRouteStatus {
     provider: string;
@@ -58,11 +64,13 @@ export interface LiveBrainConfig {
     promptVariant: LiveBrainPromptVariant | null;
     deepgram?: DeepgramSettingsConfig;
     fluxAiRoute?: FluxAiRouteStatus;
+    sonicRegion?: string;
 }
 
 export type LiveBrainOptions =
     | { provider: LiveBrainKeyProvider; model: string }
     | { provider: LiveBrainKeyProvider; useAiProvidersKey: boolean }
+    | { provider: 'amazon-sonic'; region: string; model: string }
     | {
         provider: 'deepgram-voice-agent';
         thinkMode?: DeepgramThinkMode;

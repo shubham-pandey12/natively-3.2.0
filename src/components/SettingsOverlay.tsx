@@ -5,7 +5,7 @@ import { CalendarSettings } from './settings/CalendarSettings';
 import { ConnectionsSettings } from './settings/ConnectionsSettings';
 import packageJson from '../../package.json';
 import {
-    X, Mic, Speaker, Monitor, Keyboard, User, LifeBuoy, LogOut, Upload,
+    X, Mic, Speaker, Monitor, Keyboard, User, LifeBuoy, LogOut, Upload, AudioLines,
     ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
     Camera, RotateCcw, Eye, Layout, MessageSquare, Crop,
     ChevronDown, ChevronUp, Check, BadgeCheck, Power, Palette, Calendar, Ghost, Sun, Moon, RefreshCw, Info, Globe, FlaskConical, Terminal, Download, Settings, Activity, ExternalLink, Trash2,
@@ -19,7 +19,7 @@ import { analytics } from '../lib/analytics/analytics.service';
 import { AboutSection } from './AboutSection';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HelpSettings } from './settings/HelpSettings';
-import { AIProvidersSettings, AIP_CSS, AipModelList, AipPassedCheck, AipSwitch } from './settings/AIProvidersSettings';
+import { AIProvidersSettings, AIP_CSS, AipModelList, AipPassedCheck, AipSwitch, ModelSelect } from './settings/AIProvidersSettings';
 import { SpeechDictionarySettings } from './settings/SpeechDictionarySettings';
 import { RoomSpeakersSettings } from './settings/RoomSpeakersSettings';
 import { FollowMicDeviceSettings } from './settings/FollowMicDeviceSettings';
@@ -43,6 +43,9 @@ import type {
     LiveBrainSettingsResult,
 } from '../types/liveBrainSettings';
 import {
+    AMAZON_SONIC_MODELS,
+    AMAZON_SONIC_REGIONS,
+    DEFAULT_AMAZON_SONIC_MODEL,
     DEFAULT_DEEPGRAM_FLUX_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     DEFAULT_ELEVENLABS_REALTIME_MODEL,
@@ -710,7 +713,7 @@ const LiveBrainProviderSettings = () => {
     };
 
     const changeProvider = async (value: string) => {
-        if (!isLiveBrainKeyProvider(value) && value !== 'pipeline') return;
+        if (!isLiveBrainKeyProvider(value) && value !== 'pipeline' && value !== 'amazon-sonic') return;
         setKeyDraft('');
         setCustomHeaderDraft('');
         await saveOptionChange(() => api.setLiveBrainProvider(value));
@@ -796,12 +799,94 @@ const LiveBrainProviderSettings = () => {
                                     { id: 'elevenlabs-realtime', label: t('ElevenLabs Realtime'), badge: provider === 'elevenlabs-realtime' && config.hasKey ? 'Saved' : null, desc: t('Eleven Realtime v1 API'), color: 'teal', icon: <BrandMark provider="elevenlabs" />, neutralTile: true },
                                     { id: 'deepgram-voice-agent', label: t('Deepgram Voice Agent'), badge: provider === 'deepgram-voice-agent' && config.hasKey ? 'Saved' : null, desc: t('Deepgram Voice Agent API'), color: 'purple', icon: <BrandMark provider="deepgram" />, neutralTile: true },
                                     { id: 'deepgram-flux', label: t('Deepgram Flux + My AI Provider'), badge: provider === 'deepgram-flux' && config.hasKey ? 'Saved' : null, desc: t('Flux STT + your active AI Provider'), color: 'purple', icon: <BrandMark provider="deepgram" />, neutralTile: true },
+                                    { id: 'amazon-sonic', label: t('Amazon Sonic'), badge: provider === 'amazon-sonic' && config.sonicRegion ? 'Saved' : null, desc: t('Amazon Bedrock realtime speech API'), color: 'blue', icon: <AudioLines />, neutralTile: true },
                                     { id: 'pipeline', label: t('Existing pipeline'), badge: null, desc: t('The Auto Answer engine; no extra key'), color: 'blue', icon: <BrandMark provider="natively" />, neutralTile: true },
                                 ]}
                             />
                         </div>
                     </div>
 
+                    {provider === 'amazon-sonic' && (
+                        <div className="aip-root settings-swap-in" data-theme={theme} style={{ ['--aip-card-bg' as string]: 'var(--bg-card)' } as React.CSSProperties}>
+                            <div className="aip-card aip-provider bg-bg-card">
+                                <div className="aip-provider-head">
+                                    <span className="aip-tile aip-tile--mark" aria-hidden="true">
+                                        <AudioLines size={16} />
+                                    </span>
+                                    <h4 className="aip-card-title truncate min-w-0">{t('Amazon Sonic')}</h4>
+                                    <div className="ml-auto flex items-center gap-2 shrink-0">
+                                        <button
+                                            onClick={() => window.electronAPI?.openExternal('https://console.aws.amazon.com/bedrock/')}
+                                            className="aip-btn"
+                                            data-size="sm"
+                                            data-variant="ghost"
+                                            title="Amazon Bedrock Console"
+                                        >
+                                            <span className="uppercase tracking-wide">{t('AWS Console')}</span>
+                                            <ExternalLink size={12} strokeWidth={1.75} />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <p className="aip-meta">{t('Amazon Sonic uses your AWS SDK credentials. Interviewer audio is sent to AWS and answers appear as text.')}</p>
+
+                                <div className="aip-provider-row">
+                                    <label className="aip-meta shrink-0">{t('AWS Region')}</label>
+                                    <ModelSelect
+                                        value={config.sonicRegion ?? ''}
+                                        onChange={region => void setOption({ provider: 'amazon-sonic', region, model: config.model || DEFAULT_AMAZON_SONIC_MODEL })}
+                                        options={AMAZON_SONIC_REGIONS.map(region => ({ id: region, name: region }))}
+                                        placeholder={t('Select a Region')}
+                                        containerClassName="relative flex-1 min-w-0"
+                                        className="!w-full"
+                                    />
+                                </div>
+
+                                <div className="aip-provider-row">
+                                    <button
+                                        onClick={() => void testConnection()}
+                                        disabled={!config.sonicRegion || optionsSaving || testStatus === 'testing'}
+                                        className="aip-btn shrink-0"
+                                        data-tone={testStatus === 'success' ? 'ok' : testStatus === 'error' ? 'danger' : undefined}
+                                        title={note || t('Test Connection')}
+                                    >
+                                        <SizedLabelSwap
+                                            id={testStatus}
+                                            sizers={[
+                                                t('Test Connection'),
+                                                <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Testing...')}</span>,
+                                                <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Passed')}</span>,
+                                                <span className="inline-flex items-center gap-1.5"><span className="w-3" />{t('Error')}</span>,
+                                            ]}
+                                        >
+                                            {testStatus === 'testing' ? <span className="inline-flex items-center gap-1.5"><Loader2 size={12} strokeWidth={1.75} className="aip-spinner" />{t('Testing...')}</span> :
+                                                testStatus === 'success' ? <span className="inline-flex items-center gap-1.5"><AipPassedCheck />{t('Passed')}</span> :
+                                                    testStatus === 'error' ? <span className="inline-flex items-center gap-1.5"><AlertCircle size={12} strokeWidth={1.75} />{t('Error')}</span> :
+                                                        t('Test Connection')}
+                                        </SizedLabelSwap>
+                                    </button>
+                                    <AipModelList
+                                        pickOnly
+                                        catalogIsComplete
+                                        models={[...AMAZON_SONIC_MODELS]}
+                                        enabled={[]}
+                                        onToggle={() => {}}
+                                        onReset={() => {}}
+                                        defaultId={config.model || DEFAULT_AMAZON_SONIC_MODEL}
+                                        onSetDefault={(model) => void setOption({
+                                            provider: 'amazon-sonic',
+                                            region: config.sonicRegion ?? 'us-east-1',
+                                            model,
+                                        })}
+                                    />
+                                </div>
+
+                                {testDetail && testStatus === 'success' && <p className="aip-meta settings-swap-in" role="status">{testDetail}</p>}
+                                {note && <p className="aip-meta aip-danger-fg aip-provider-note settings-swap-in" role="alert">{note}</p>}
+                                <style>{AIP_CSS}</style>
+                            </div>
+                        </div>
+                    )}
                     {keyProvider && (
                         <div key={keyProvider} className="aip-root settings-swap-in" data-theme={theme} style={{ ['--aip-card-bg' as string]: 'var(--bg-card)' } as React.CSSProperties}>
                             <div className="aip-card aip-provider bg-bg-card">
@@ -1106,7 +1191,7 @@ const LiveBrainProviderSettings = () => {
                         </div>
                     )}
 
-                    {!keyProvider && note && <p className="text-xs text-text-secondary" role="alert">{note}</p>}
+                    {!keyProvider && provider !== 'amazon-sonic' && note && <p className="text-xs text-text-secondary" role="alert">{note}</p>}
 
                     <CustomSelect
                         label={t('Instruction variant')}

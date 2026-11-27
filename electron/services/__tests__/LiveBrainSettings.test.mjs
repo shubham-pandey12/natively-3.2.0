@@ -126,6 +126,21 @@ test('Live Brain settings persist and only the Gemini handshake receives the res
         assert.equal(restarted.invoke('set-provider', 'pipeline').success, true);
         assert.equal(restarted.invoke('set-enabled', true).success, true);
         assert.equal((await restarted.invoke('test-connection')).error, 'not_available_yet');
+        assert.equal(restarted.invoke('set-enabled', false).success, true);
+        assert.equal(restarted.invoke('set-provider', 'amazon-sonic').success, true);
+        assert.equal(restarted.invoke('set-enabled', true).error, 'sonic_region_required');
+        assert.equal(restarted.invoke('set-options', { provider: 'amazon-sonic', region: 'eu-west-1', model: 'amazon.nova-2-5-sonic' }).success, false);
+        assert.equal(restarted.invoke('set-options', { provider: 'amazon-sonic', region: 'eu-north-1', model: 'amazon.nova-2-5-sonic' }).success, true);
+        restarted.credentials.setBedrockConnection({ region: 'us-east-2', auth: 'bearer', apiKey: 'text-provider-key' });
+        assert.equal(restarted.invoke('get-config').sonicRegion, 'eu-north-1');
+        assert.equal(restarted.invoke('get-config').hasKey, false);
+        assert.equal(restarted.invoke('set-enabled', true).success, true);
+        assert.equal((await restarted.invoke('test-connection')).success, true);
+        assert.deepEqual(restarted.connections.at(-1), {
+            apiKey: '', provider: 'amazon-sonic', sonicRegion: 'eu-north-1', model: 'amazon.nova-2-5-sonic',
+        });
+        assert.deepEqual((await restarted.invoke('list-models')).models.map(model => model.id),
+            ['amazon.nova-2-5-sonic', 'amazon.nova-2-sonic-v1:0']);
     } finally {
         if (originalGeminiEnv === undefined) delete process.env.GEMINI_API_KEY;
         else process.env.GEMINI_API_KEY = originalGeminiEnv;

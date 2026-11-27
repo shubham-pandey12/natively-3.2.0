@@ -49,6 +49,8 @@ export function hasOwnAiKey(creds, routes) {
   }
   // A keyless 9Router: its base URL, not a key, is the presence gate.
   if (typeof creds.ninerouterBaseURL === 'string' && creds.ninerouterBaseURL.trim().length > 0) return true;
+  if (creds.bedrock && typeof creds.bedrock === 'object' && typeof creds.bedrock.region === 'string'
+    && (creds.bedrock.auth === 'aws' || (creds.bedrock.auth === 'bearer' && Boolean(creds.bedrock.apiKey)))) return true;
   // Sign-in routes: ChatGPT (Codex) and Antigravity OAuth. A refresh token is
   // what keeps the sign-in alive. Ollama is not counted: it has a default URL
   // and no opt-in field, so its presence says nothing.

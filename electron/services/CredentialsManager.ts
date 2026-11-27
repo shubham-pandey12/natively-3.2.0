@@ -186,6 +186,9 @@ export interface StoredCredentials {
      * first, the same shape NVIDIA NIM uses for `sttProviderCleared`.
      */
     openrouterApiKey?: string;
+    bedrock?: import('../../src/types/bedrock').BedrockConnection;
+    bedrockModels?: import('../../src/types/bedrock').BedrockModel[];
+    bedrockOptions?: Record<string, import('../../src/types/bedrock').BedrockModelOptions>;
     /**
      * Fluxion AI gateway key. Unlike openrouterApiKey this backs CHAT ONLY —
      * Fluxion exposes no embeddings or rerank endpoint — so there is no
@@ -1360,6 +1363,41 @@ export class CredentialsManager {
 
     public getOpenrouterApiKey(): string | undefined {
         return this.credentials.openrouterApiKey;
+    }
+
+    public getBedrockConnection() { return this.credentials.bedrock; }
+    public getBedrockModels() { return this.credentials.bedrockModels ?? []; }
+    public getBedrockOptions() { return this.credentials.bedrockOptions ?? {}; }
+
+    public setBedrockConnection(connection: StoredCredentials['bedrock']): boolean {
+        if (this.refuseWriteWhileDegraded('set Bedrock connection')) return false;
+        const previous = this.credentials.bedrock;
+        const previousModels = this.credentials.bedrockModels;
+        if (previous?.region === connection?.region && previous?.auth === connection?.auth && previous?.apiKey === connection?.apiKey) return true;
+        this.credentials.bedrock = connection;
+        this.credentials.bedrockModels = undefined;
+        if (this.saveCredentials()) return true;
+        this.credentials.bedrock = previous;
+        this.credentials.bedrockModels = previousModels;
+        return false;
+    }
+
+    public setBedrockModels(connection: NonNullable<StoredCredentials['bedrock']>, models: NonNullable<StoredCredentials['bedrockModels']>): boolean {
+        if (this.credentials.bedrock !== connection || this.refuseWriteWhileDegraded('set Bedrock catalogue')) return false;
+        const previous = this.credentials.bedrockModels;
+        this.credentials.bedrockModels = models;
+        if (this.saveCredentials()) return true;
+        this.credentials.bedrockModels = previous;
+        return false;
+    }
+
+    public setBedrockModelOptions(id: string, options: import('../../src/types/bedrock').BedrockModelOptions): boolean {
+        if (this.refuseWriteWhileDegraded('set Bedrock model options')) return false;
+        const previous = this.credentials.bedrockOptions;
+        this.credentials.bedrockOptions = { ...this.getBedrockOptions(), [id]: options };
+        if (this.saveCredentials()) return true;
+        this.credentials.bedrockOptions = previous;
+        return false;
     }
 
     public setOpenrouterApiKey(key: string): boolean {

@@ -40,6 +40,7 @@ const REPO_ROOT = resolve(__dirname, '../../..');
 const GUARDED_FILES = [
   'src/components/SettingsOverlay.tsx',
   'src/components/settings/AIProvidersSettings.tsx',
+  'src/components/settings/BedrockSettingsCard.tsx',
   'src/components/settings/CalendarSettings.tsx',
   'src/components/settings/ConnectionsSettings.tsx',
   'src/components/settings/ConnectorMark.tsx',

@@ -7,15 +7,17 @@ import type {
     LiveBrainMeetingSession,
 } from '../../../electron/premium/liveBrain';
 import {
+    DEFAULT_AMAZON_SONIC_MODEL,
     DEFAULT_DEEPGRAM_FLUX_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     DEFAULT_ELEVENLABS_REALTIME_MODEL,
     DEFAULT_OPENAI_REALTIME_MODEL,
     type FluxAiRouteTestStatus,
-    type LiveBrainKeyProvider,
+    type LiveBrainProvider,
     type LiveBrainSettingsResult,
 } from '../../../src/types/liveBrainSettings';
 import { AnswerWriter } from './AnswerWriter';
+import { AmazonSonicBrain, AmazonSonicError, type AmazonSonicOptions } from './brains/AmazonSonicBrain';
 import { DeepgramFluxBrain, DeepgramFluxError } from './brains/DeepgramFluxBrain';
 import { DeepgramVoiceAgentBrain, DeepgramVoiceAgentError } from './brains/DeepgramVoiceAgentBrain';
 import { DEFAULT_GEMINI_LIVE_MODEL, GeminiLiveBrain, GeminiLiveError, type GeminiLiveOptions } from './brains/GeminiLiveBrain';
@@ -37,6 +39,7 @@ const DEFAULT_MODELS: Record<LiveBrain['id'], string> = {
     'elevenlabs-realtime': DEFAULT_ELEVENLABS_REALTIME_MODEL,
     'deepgram-voice-agent': DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     'deepgram-flux': DEFAULT_DEEPGRAM_FLUX_MODEL,
+    'amazon-sonic': DEFAULT_AMAZON_SONIC_MODEL,
     pipeline: 'pipeline',
 };
 
@@ -220,6 +223,9 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 injected = undefined;
                 return { brain, model };
             }
+            if (id === 'amazon-sonic') {
+                return config?.sonicRegion ? { brain: createLiveBrain(id, { apiKey: '', model, sonicRegion: config.sonicRegion }), model } : undefined;
+            }
             if (!config?.apiKey || (id === 'deepgram-flux' && !answerWriter)) return undefined;
             const deepgramThink = id === 'deepgram-voice-agent'
                 ? (config.deepgramThink ?? options.deepgramThink)
@@ -357,14 +363,15 @@ const connectionError: Record<LiveBrainErrorCode, string> = {
 };
 
 export async function testConnection(
-    options: GeminiLiveOptions & {
-        provider?: LiveBrainKeyProvider;
+    options: GeminiLiveOptions & AmazonSonicOptions & {
+        provider?: Exclude<LiveBrainProvider, 'pipeline'>;
         deepgramThink?: DeepgramThinkConfig;
         thinkTimeoutMs?: number;
         testAiRoute?: () => Promise<FluxAiRouteTestStatus>;
     },
 ): Promise<LiveBrainSettingsResult> {
     const provider = options.provider ?? 'gemini-live';
+    if (provider === 'amazon-sonic') return testSonicConnection(options);
     const config = { ...options, setupTimeoutMs: options.setupTimeoutMs ?? 5_000, backoffMs: [] };
     if (provider === 'deepgram-voice-agent') {
         return testDeepgramConnection(config);
@@ -381,6 +388,34 @@ export async function testConnection(
         const code = error instanceof GeminiLiveError || error instanceof RealtimeBrainError ? error.code : 'protocol';
         const message = provider === 'gemini-live' ? connectionError[code] : realtimeConnectionError(code, name);
         return { success: false, error: code, message };
+    } finally {
+        await brain.stop();
+    }
+}
+
+async function testSonicConnection(options: AmazonSonicOptions): Promise<LiveBrainSettingsResult> {
+    const brain = new AmazonSonicBrain(options);
+    try {
+        await brain.start(startContext('connection-test', 'Reply with exactly OK to the test message.', new AbortController().signal));
+        const code = await new Promise<LiveBrainErrorCode | null>(resolve => {
+            const finish = (error: LiveBrainErrorCode | null) => {
+                clearTimeout(timer);
+                unsubscribe();
+                resolve(error);
+            };
+            const timer = setTimeout(() => finish('timeout'), 10_000);
+            const unsubscribe = brain.onEvent(event => {
+                if (event.type === 'response_delta' && event.text.trim()) finish(null);
+                if (event.type === 'error') finish(event.code);
+            });
+            brain.sendTestPrompt();
+        });
+        return code ? { success: false, error: code, message: realtimeConnectionError(code, 'Amazon Sonic') }
+            : { success: true, message: 'Amazon Sonic connected and replied.' };
+    } catch (error) {
+        const code = error instanceof AmazonSonicError ? error.code : 'protocol';
+        const detail = error instanceof AmazonSonicError ? error.detail : undefined;
+        return { success: false, error: code, message: [realtimeConnectionError(code, 'Amazon Sonic'), detail].filter(Boolean).join(' ') };
     } finally {
         await brain.stop();
     }

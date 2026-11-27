@@ -39,6 +39,7 @@ const GROUP_LABELS: Record<string, string> = {
     deepseek: 'DeepSeek',
     nvidia_nim: 'NVIDIA NIM',
     openrouter: 'OpenRouter',
+    bedrock: 'Amazon Bedrock',
     fluxion: 'Sidrune',
     agentrouter: 'AgentRouter',
     antigravity: 'Antigravity',

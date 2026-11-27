@@ -119,8 +119,9 @@ export function resolveVisionAuto(q: VisionQuery, facts: VisionFacts = {}): Visi
     }
     // OpenRouter publishes input_modalities per model and refuses images to the
     // ones it lists as text-only, so its answer is trusted both ways (2026-10-01).
+    case 'bedrock':
     case 'openrouter': {
-      const reported = facts.providerReportsVision?.('openrouter', model);
+      const reported = facts.providerReportsVision?.(q.provider, model);
       if (reported === true && failedTest(q, facts)) return answer(false, 'test');
       if (reported !== undefined) return answer(reported, 'provider');
       return fromTestThenNames(q, facts);

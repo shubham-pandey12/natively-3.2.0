@@ -333,6 +333,11 @@ export interface ElectronAPI extends LiveBrainSettingsApi {
   getAvailableLiteLLMModels: () => Promise<string[]>
   refreshLiteLLMModels: () => Promise<string[]>
   getCloudFetchedModels: () => Promise<{ models: Record<string, { id: string; label: string }[]>; fetchedAt: Record<string, number> }>
+  getBedrockSettings: () => Promise<import('./bedrock').BedrockSettings>
+  setBedrockConnection: (connection: import('./bedrock').BedrockConnection | null) => Promise<{ success: boolean; error?: string }>
+  refreshBedrockModels: () => Promise<{ success: boolean; error?: string; models?: import('./bedrock').BedrockModel[]; warnings?: string[] }>
+  setBedrockModelOptions: (id: string, options: import('./bedrock').BedrockModelOptions) => Promise<{ success: boolean; error?: string }>
+  testBedrockModel: (id: string) => Promise<{ success: boolean; error?: string }>
   getDisabledProviders: () => Promise<string[]>
   setDisabledProviders: (providers: string[]) => Promise<{ success: boolean; error?: string }>
   setCloudEnabledModels: (provider: string, models: string[]) => Promise<{ success: boolean; error?: string }>

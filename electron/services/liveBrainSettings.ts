@@ -6,6 +6,9 @@ import type { AppState } from '../main';
 import { loadLiveBrainPremium, type DeepgramThinkConfig } from '../premium/liveBrain';
 import curl2Json from '@bany/curl-to-json';
 import {
+    AMAZON_SONIC_MODELS,
+    AMAZON_SONIC_REGIONS,
+    DEFAULT_AMAZON_SONIC_MODEL,
     DEFAULT_DEEPGRAM_FLUX_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_MODEL,
     DEFAULT_DEEPGRAM_VOICE_AGENT_THINK_PROVIDER,
@@ -23,6 +26,7 @@ import type {
     LiveBrainKeyProvider,
     LiveBrainModel,
     LiveBrainModelsResult,
+    LiveBrainProvider,
     LiveBrainSettingsResult,
 } from '../../src/types/liveBrainSettings';
 
@@ -358,6 +362,7 @@ function inspectDeepgramSettings(settings: SettingsManager, credentials: Credent
 }
 
 const FLUX_AI_PROVIDER_LABELS: Record<string, string> = {
+    bedrock: 'Amazon Bedrock',
     openai: 'OpenAI',
     claude: 'Anthropic (Claude)',
     gemini: 'Google Gemini',
@@ -424,6 +429,10 @@ export function inspectFluxAiRoute(
     let configured = true;
     let reason: string | undefined;
     switch (provider) {
+        case 'bedrock':
+            configured = Boolean(creds.bedrock);
+            if (!configured) reason = 'Configure Amazon Bedrock in AI Providers.';
+            break;
         case 'openai':
             configured = Boolean(creds.openaiApiKey?.trim());
             if (!configured) reason = 'Add an OpenAI API key in AI Providers.';
@@ -576,7 +585,7 @@ export async function testFluxAiRoute(
 
 function inspectConfig(settings: SettingsManager, credentials: CredentialsReader,
     envKey: (provider: LiveBrainKeyProvider) => string | undefined = devEnvKey,
-    forProvider?: LiveBrainKeyProvider,
+    forProvider?: Exclude<LiveBrainProvider, 'pipeline'>,
     llmHelper?: FluxLlmHelper): {
     config: LiveBrainConfig;
     keyIsWellFormed: boolean;
@@ -586,6 +595,14 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
 } {
     const provider = forProvider ?? settings.get('liveBrainProvider') ?? 'gemini-live';
     const promptVariant = settings.get('liveBrainPromptVariant') ?? null;
+    if (provider === 'amazon-sonic') {
+        const sonicRegion = settings.get('liveBrainSonicRegion');
+        return { keyIsWellFormed: Boolean(sonicRegion), config: {
+            provider, promptVariant, sonicRegion, hasKey: false, hasDedicatedKey: false,
+            maskedSuffix: null, useAiProvidersKey: false, usingAiProvidersKey: false, keySource: null,
+            model: settings.get('liveBrainSonicModel') ?? DEFAULT_AMAZON_SONIC_MODEL,
+        } };
+    }
     if (!isKeyProvider(provider)) {
         return {
             keyIsWellFormed: false,
@@ -633,12 +650,13 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
 }
 
 /** Main-process only. IPC exposes inspectConfig().config, never usableKey or byoApiKey. */
-export function resolveLiveBrainRuntime(forProvider?: LiveBrainKeyProvider): Pick<LiveBrainConfig, 'provider' | 'model' | 'promptVariant'> & { apiKey?: string; deepgramThink?: DeepgramThinkConfig } {
+export function resolveLiveBrainRuntime(forProvider?: Exclude<LiveBrainProvider, 'pipeline'>): Pick<LiveBrainConfig, 'provider' | 'model' | 'promptVariant'> & { apiKey?: string; deepgramThink?: DeepgramThinkConfig; sonicRegion?: string } {
     const { config, usableKey, deepgramThink } = inspectConfig(SettingsManager.getInstance(), CredentialsManager.getInstance(), devEnvKey, forProvider);
-    if (config.provider !== 'pipeline' && !isKeyProvider(config.provider)) {
+    if (config.provider !== 'pipeline' && config.provider !== 'amazon-sonic' && !isKeyProvider(config.provider)) {
         throw new Error(`Unsupported live brain: ${String(config.provider)}`);
     }
-    return { provider: config.provider, model: config.model, promptVariant: config.promptVariant, apiKey: usableKey, ...(deepgramThink ? { deepgramThink } : {}) };
+    return { provider: config.provider, model: config.model, promptVariant: config.promptVariant, apiKey: usableKey,
+        ...(config.sonicRegion ? { sonicRegion: config.sonicRegion } : {}), ...(deepgramThink ? { deepgramThink } : {}) };
 }
 
 export function registerLiveBrainSettingsIpc(
@@ -673,6 +691,9 @@ export function registerLiveBrainSettingsIpc(
         if (typeof enabled !== 'boolean') return { success: false, error: 'Expected a boolean.' };
         if (enabled) {
             const { config: { provider, hasKey }, keyIsWellFormed } = inspect();
+            if (provider === 'amazon-sonic' && !keyIsWellFormed) {
+                return { success: false, error: 'sonic_region_required', message: 'Save an AWS Region for Amazon Sonic first.' };
+            }
             if (isKeyProvider(provider) && !keyIsWellFormed) {
                 const { vendor } = PROVIDERS[provider];
                 return {
@@ -691,7 +712,7 @@ export function registerLiveBrainSettingsIpc(
 
     safeHandle('live-brain:get-config', () => inspect().config);
     safeHandle('live-brain:set-provider', (_, provider) => {
-        if (!isKeyProvider(provider) && provider !== 'pipeline') {
+        if (!isKeyProvider(provider) && provider !== 'pipeline' && provider !== 'amazon-sonic') {
             return { success: false, error: 'Unknown Live Brain provider.' };
         }
         return saved(settings().set('liveBrainProvider', provider));
@@ -719,6 +740,13 @@ export function registerLiveBrainSettingsIpc(
         if (options && typeof options === 'object') {
             if ('promptVariant' in options && (options.promptVariant === 'full' || options.promptVariant === 'trimmed')) {
                 return saved(settings().set('liveBrainPromptVariant', options.promptVariant));
+            }
+            if ('provider' in options && options.provider === 'amazon-sonic') {
+                if (!('region' in options) || !AMAZON_SONIC_REGIONS.some(region => region === options.region)
+                    || !('model' in options) || !AMAZON_SONIC_MODELS.some(model => model.id === options.model)) {
+                    return { success: false, error: 'Select a supported AWS Region and Sonic model.' };
+                }
+                return saved(settings().setValues({ liveBrainSonicRegion: options.region as string, liveBrainSonicModel: options.model as string }));
             }
             if ('provider' in options && isKeyProvider(options.provider)) {
                 const spec = PROVIDERS[options.provider];
@@ -787,7 +815,12 @@ export function registerLiveBrainSettingsIpc(
     });
 
     safeHandle('live-brain:test-connection', async () => {
-        const { config: { provider, hasKey, model, keySource }, usableKey, deepgramThink } = inspect();
+        const { config: { provider, hasKey, model, keySource, sonicRegion }, usableKey, deepgramThink } = inspect();
+        if (provider === 'amazon-sonic') {
+            if (!sonicRegion) return { success: false, error: 'no_region', message: 'Save an AWS Region for Amazon Sonic first.' };
+            return loadPremium()?.testConnection({ apiKey: '', provider, model, sonicRegion })
+                ?? { success: false, error: 'unavailable', message: 'Amazon Sonic is unavailable in this build.' };
+        }
         if (isKeyProvider(provider)) {
             if (provider === 'deepgram-flux') {
                 const routeTest = () => testFluxAiRoute(llmHelper(), credentials());
@@ -839,6 +872,7 @@ export function registerLiveBrainSettingsIpc(
 
     safeHandle('live-brain:list-models', async (): Promise<LiveBrainModelsResult> => {
         const { config: { provider, deepgram }, usableKey } = inspect();
+        if (provider === 'amazon-sonic') return { success: true, models: [...AMAZON_SONIC_MODELS] };
         if (provider === 'openai-realtime') return { success: true, models: OPENAI_REALTIME_MODELS };
         if (provider === 'elevenlabs-realtime') return { success: true, models: ELEVENLABS_REALTIME_MODELS };
         if (provider === 'deepgram-voice-agent') {

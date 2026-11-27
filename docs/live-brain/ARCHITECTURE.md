@@ -37,6 +37,8 @@ It listens to the interviewer continuously, understands like a strong conversati
 | D16 | **Deepgram Voice Agent as a fourth realtime provider (2026-11-26, user decision).** Add `deepgram-voice-agent` as an optional Live Brain provider (`DeepgramVoiceAgentBrain`, standalone implementation — not extending `RealtimeBrain`). Two think modes: (A) Deepgram-managed (`open_ai`, `anthropic`, `google`, `nvidia`) — only the Deepgram key is needed, 25,000-char prompt cap (`buildDeepgramInstructions`); (B) BYO endpoint — user's existing AI Provider key sent in `agent.think.endpoint.headers` (no Deepgram prompt cap; `agent.think.provider` still required by the Deepgram schema). Provider+model picker in the Live Brain card; selection sent in `agent.think` on session open. Codex, Antigravity, and local Ollama (`localhost`/`127.0.0.1`) are excluded because Deepgram's servers cannot reach private/localhost endpoints. Listening uses Flux Multilingual inside the Voice Agent session. Audio: 16 kHz `linear16` PCM raw binary WebSocket frames (output audio discarded per D6). `KeepAlive` every 8 s; rollover at ~110 min (`agent.context.messages` seeded from `InterviewNotebook`). |
 | D17 | **Deepgram Flux + My AI Provider as a fifth provider / second Deepgram mode (2026-11-27, user decision).** Add `'deepgram-flux'` alongside `'deepgram-voice-agent'` (D16 preserved untouched). `DeepgramFluxBrain` connects directly to `wss://api.deepgram.com/v2/listen` (`flux-general-multi`, 16 kHz mono `linear16` PCM in 80 ms / 2,560-byte binary frames, sparse-capture zero padding, `CloseStream` on close; `/v2/listen` rejects `KeepAlive`). No TTS audio is generated or received. `TurnInfo` `Update` updates the live interviewer bubble (`interviewer_transcript`); `EagerEndOfTurn` additionally fires `eager_end_of_turn` to start a **private LLM draft** (Phase 2: §4.4); `TurnResumed` continues the same turn and cancels any active draft; one confirmed, non-empty `EndOfTurn` per monotonic `turn_index` emits `interviewer_transcript` (`final: true`), `interviewer_speech_stopped`, and `decision: { action: 'answer', turnKey }`. On `EndOfTurn`, `AnswerWriter` adopts the in-flight or buffered private draft if the session, turn-key, transcript, and AI route still match, otherwise falls back to a fresh `runLiveBrainAnswer`. Answers stream from Natively via `AnswerWriter` → `IntelligenceEngine.runLiveBrainAnswer` using the active AI Provider and model (including Codex CLI, Antigravity, local Ollama, and gateways), reusing `InterviewNotebook`, `SessionTracker`, prompt contracts, filler filtering, cancellation, and generation guards without duplicating the interviewer bubble. |
 
+**D18 (2026-11-27).** Amazon Nova Sonic is an optional Live Brain provider (`amazon-sonic`), independent of the Bedrock AI Provider. Use the AWS SDK credential chain and a separately selected Region and model. Send existing interviewer PCM over Bedrock bidirectional streaming, display interviewer and assistant text, and discard returned audio in keeping with D6. Reuse the notebook, interruption handling, rollover, reconnect, and fallback. Nova Sonic v1 reached end of life, so offer active Sonic models documented for the selected Region.
+
 ### Non-goals
 
 - Text-to-speech, audio playback, voice output of any kind.
@@ -118,6 +120,7 @@ switch (config.brain) {
   case 'elevenlabs-realtime':  return new ElevenLabsRealtimeBrain(deps);
   case 'deepgram-voice-agent': return new DeepgramVoiceAgentBrain(deps);
   case 'deepgram-flux':        return new DeepgramFluxBrain(deps);
+  case 'amazon-sonic':         return new AmazonSonicBrain(deps);
   case 'pipeline':             return new PipelineBrain(deps);
   default: { const never: never = config.brain; throw new Error(`Unsupported live brain: ${never}`); }
 }
@@ -131,7 +134,7 @@ switch (config.brain) {
 // premium/electron/liveBrain/types.ts  (normative shape; names may be refined in Phase 2,
 // but any change must be reflected here)
 
-export type LiveBrainId = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'deepgram-voice-agent' | 'deepgram-flux' | 'pipeline';
+export type LiveBrainId = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'deepgram-voice-agent' | 'deepgram-flux' | 'amazon-sonic' | 'pipeline';
 
 export interface LiveBrainStartContext {
   sessionId: string;              // one per meeting; reset on new meeting

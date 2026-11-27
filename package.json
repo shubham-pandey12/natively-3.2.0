@@ -444,6 +444,8 @@
     "@anthropic-ai/sdk": "^0.127.0",
     "@astryxdesign/core": "^0.7.11",
     "@astryxdesign/theme-neutral": "^0.7.11",
+    "@aws-sdk/client-bedrock": "^3.1178.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1178.0",
     "@bany/curl-to-json": "^1.2.10",
     "@deepgram/sdk": "^3.13.0",
     "@google-cloud/speech": "^8.1.1",

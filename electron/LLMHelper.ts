@@ -165,6 +165,7 @@ const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
 const GROQ_MODEL = GROQ_PRIMARY_MODEL
 import { GROQ_VISION_MODEL, isRetiredModelId as isRetiredGroqModelId } from './llm/groqModels'
 import { DEEPSEEK_DEFAULT_MODEL, deepseekWireModel, isDeepseekModelId } from './llm/deepseekModels'
+import { BEDROCK_PREFIX, defaultBedrockOptions, isBedrockModel } from '../src/types/bedrock'
 import { isOpenAiModelId } from './llm/openaiModels'
 import {
   AGENTROUTER_DEFAULT_MODEL,
@@ -264,11 +265,11 @@ const CODEX_FAST_MIN_BUDGET_MS = 3000
 // 'natively' is an Auto candidate only (its server fast tier). It is never a
 // Background Model: resolveFastModelFamily() does not return it, so the picker
 // cannot offer it and callFastModel never sees it.
-type FastModelFamily = 'openai' | 'groq' | 'gemini' | 'deepseek' | 'claude' | 'codex' | 'natively'
+type FastModelFamily = 'openai' | 'groq' | 'gemini' | 'deepseek' | 'claude' | 'codex' | 'natively' | 'bedrock'
   | 'openrouter' | 'litellm' | 'nvidia_nim' | 'ninerouter' | 'fluxion' | 'agentrouter'
 // Background Model families on an endpoint the user supplies — the same set
 // activeModelIsUserEndpoint() names for an Active Model.
-const FAST_PICK_USER_ENDPOINT_FAMILIES: ReadonlySet<FastModelFamily> = new Set(['litellm', 'nvidia_nim', 'openrouter', 'fluxion', 'ninerouter', 'agentrouter'])
+const FAST_PICK_USER_ENDPOINT_FAMILIES: ReadonlySet<FastModelFamily> = new Set(['bedrock', 'litellm', 'nvidia_nim', 'openrouter', 'fluxion', 'ninerouter', 'agentrouter'])
 /** Per-call overrides for streamWithAgentRouter (the fast-model seam's small cap and temperature 0). */
 type AgentRouterCallOptions = { maxTokens?: number; temperature?: number }
 const OPENAI_JUDGE_MODEL = "gpt-5.5"
@@ -1422,7 +1423,7 @@ export class LLMHelper {
     // `if (family && ...)`, so an absent entry removes the guard silently
     // rather than failing. The client getter is the primary guard; this is the
     // backstop for any path that reaches the provider without passing it.
-    ninerouter: 'ninerouter',
+    ninerouter: 'ninerouter', bedrock: 'bedrock',
     agentrouter: 'agentrouter',
     antigravity: 'antigravity', custom_curl: 'custom', custom_provider: 'custom',
   };
@@ -2383,7 +2384,7 @@ export class LLMHelper {
   // these named entry points so the surface stays auditable.
 
   public async runVisionRequest(
-    providerId: 'natively' | 'openai' | 'claude' | 'gemini_flash_lite' | 'gemini_flash' | 'gemini_pro' | 'groq_scout' | 'custom' | 'litellm' | 'nvidia_nim' | 'openrouter' | 'fluxion' | 'ninerouter' | 'agentrouter' | 'deepseek' | 'curl' | 'ollama' | 'oauth_model',
+    providerId: 'natively' | 'openai' | 'claude' | 'gemini_flash_lite' | 'gemini_flash' | 'gemini_pro' | 'groq_scout' | 'custom' | 'litellm' | 'nvidia_nim' | 'openrouter' | 'bedrock' | 'fluxion' | 'ninerouter' | 'agentrouter' | 'deepseek' | 'curl' | 'ollama' | 'oauth_model',
     userPrompt: string,
     systemPrompt: string,
     imagePath: string,
@@ -2391,7 +2392,7 @@ export class LLMHelper {
     // signature stays back-compatible, but VisionProviderRegistry always passes
     // both — without them the chain's own deadline could not reach the provider
     // and each method's private default silently became the real bound.
-    opts?: { signal?: AbortSignal; timeoutMs?: number },
+    opts?: { signal?: AbortSignal; timeoutMs?: number; modelId?: string },
   ): Promise<string> {
     switch (providerId) {
       case 'natively':
@@ -2422,6 +2423,8 @@ export class LLMHelper {
         return this.generateWithNvidiaNim(userPrompt, systemPrompt, [imagePath]);
       case 'openrouter':
         return this.generateWithOpenRouter(userPrompt, systemPrompt, [imagePath]);
+      case 'bedrock':
+        return this.generateWithBedrock(userPrompt, systemPrompt, [imagePath], opts?.signal, opts?.modelId);
       case 'fluxion':
         return this.generateWithFluxion(userPrompt, systemPrompt, [imagePath]);
       case 'ninerouter':
@@ -2598,6 +2601,7 @@ export class LLMHelper {
 
   // --- Model Type Checkers ---
   private isOpenAiModel(modelId: string): boolean {
+    if (isBedrockModel(modelId)) return false;
     // Groq hosts OpenAI's open-weight models under 'openai/gpt-oss-…', so the
     // bare "openai" substring matched them and routed the picker's new Groq
     // models to api.openai.com (404 model_not_found on every turn — code-
@@ -4424,6 +4428,37 @@ ${IMAGE_TRUST_TRAILER}`;
     return parts;
   }
 
+  private async *streamWithBedrock(
+    text: string, system?: string, imagePaths?: string[], signal?: AbortSignal, model = this.currentModelId,
+  ): AsyncGenerator<string> {
+    if (this.isLocalOnlyMode) throw new Error('Cloud providers disabled in local-only mode');
+    this.assertOutboundScopes('bedrock', text, imagePaths);
+    if (!isBedrockModel(model)) throw new Error('Select an Amazon Bedrock model.');
+    const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
+    const cm = CredentialsManager.getInstance();
+    const connection = cm.getBedrockConnection();
+    if (!connection) throw new Error('Configure Amazon Bedrock in AI Providers.');
+    const id = model.slice(BEDROCK_PREFIX.length);
+    const metadata = cm.getBedrockModels().find(candidate => candidate.id === id);
+    const saved = cm.getBedrockOptions();
+    const options = Object.hasOwn(saved, id) ? saved[id] : defaultBedrockOptions(id, metadata);
+    const images = imagePaths?.length ? await Promise.all(imagePaths.map(path => this.processImage(path))) : undefined;
+    const { streamBedrock } = await import('./llm/BedrockProvider');
+    yield* streamBedrock(connection, id, options, { text, system, images }, signal);
+  }
+
+  private async generateWithBedrock(text: string, system?: string, imagePaths?: string[], signal?: AbortSignal, model?: string): Promise<string> {
+    let answer = '';
+    for await (const chunk of this.streamWithBedrock(text, system, imagePaths, signal, model)) answer += chunk;
+    return answer;
+  }
+
+  private bedrockImageCapability(model: string): boolean | undefined {
+    const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
+    return CredentialsManager.getInstance().getBedrockModels()
+      .find(candidate => candidate.id === model.slice(BEDROCK_PREFIX.length))?.image;
+  }
+
   /**
    * Stable cache key for OpenAI's prompt-prefix caching. Hashing the system
    * prompt ties the key to the actual cached prefix bytes: mode/language/
@@ -5418,6 +5453,9 @@ let isMultimodal = !!(imagePaths?.length);
       }
 
       // --- Direct Routing based on Selected Model ---
+      if (isBedrockModel(this.currentModelId)) {
+        return this.processResponse(await this.generateWithBedrock(cloudUserContent, openaiSystemPrompt, cloudImagePaths));
+      }
       if (this.currentModelId === 'natively') {
         const { CredentialsManager } = require('./services/CredentialsManager');
         const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
@@ -5689,6 +5727,7 @@ let isMultimodal = !!(imagePaths?.length);
     // prompt's meeting turns, for a prefixed id OpenAI rejects. Supporting them
     // properly needs per-gateway clients plus routing-prefix stripping; until
     // then they resolve to no family rather than leak. MUST stay first.
+    if (isBedrockModel(modelId)) return 'bedrock';
     if (this.isOpenRouterModel(modelId)) return 'openrouter';
     if (this.isLiteLLMModel(modelId)) return 'litellm';
     if (this.isNvidiaNimModel(modelId)) return 'nvidia_nim';
@@ -5762,6 +5801,7 @@ let isMultimodal = !!(imagePaths?.length);
       // fast_mode rides on groqFastTextMode, which is on whenever this runs.
       case 'natively': stream = this.streamWithNatively(userContent, skipSystemPrompt ? undefined : baseSystemPrompt, undefined, abortSignal); break;
       case 'openrouter': stream = this.streamWithOpenRouter(userContent, openaiShaped, undefined, abortSignal, modelId); break;
+      case 'bedrock': stream = this.streamWithBedrock(userContent, openaiShaped, undefined, abortSignal, modelId); break;
       case 'litellm': stream = this.streamWithLiteLLM(userContent, openaiShaped, undefined, abortSignal, modelId); break;
       case 'nvidia_nim': stream = this.streamWithNvidiaNim(userContent, openaiShaped, undefined, abortSignal, modelId); break;
       case 'ninerouter': stream = this.streamWithNinerouter(userContent, openaiShaped, undefined, abortSignal, modelId); break;
@@ -5784,6 +5824,7 @@ let isMultimodal = !!(imagePaths?.length);
       case 'codex': return this.isCodexAvailable();
       case 'natively': return this.hasNatively();
       case 'openrouter': return !!this.openrouterClient;
+      case 'bedrock': return !this.isProviderDisabled('bedrock') && this.directProviderHasCredential('bedrock');
       case 'litellm': return !!this.litellmClient;
       case 'nvidia_nim': return !!this.nvidiaNimClient;
       case 'ninerouter': return !!this.ninerouterClient;
@@ -6148,6 +6189,7 @@ let isMultimodal = !!(imagePaths?.length);
    */
   private judgeGatewayModel(): string | null {
     const family = this.resolveFastModelFamily(this.currentModelId);
+    if (family === 'bedrock') return this.directProviderHasCredential('bedrock') ? this.currentModelId : null;
     if (family === 'openrouter') return this.openrouterClient ? OPENROUTER_JUDGE_MODEL : null;
     if (family === 'fluxion') return (this.fluxionOpenAIClient || this.fluxionAnthropicClient) ? this.currentModelId : null;
     // NOT the selected model: see AGENTROUTER_JUDGE_MODEL. The judge runs on
@@ -6230,6 +6272,10 @@ let isMultimodal = !!(imagePaths?.length);
       // and DeepSeek needs thinking disabled or its reasoning eats the 256-token
       // cap. The adapter returns quietly on abort, so the budget is checked
       // afterwards — a timed-out call must not hand back a partial verdict.
+      if (family === 'bedrock') {
+        if (!this.directProviderHasCredential('bedrock')) return notDispatchable();
+        return finish(await this.generateWithBedrock(message, undefined, undefined, timer, modelId));
+      }
       if (family === 'agentrouter') {
         if (!this.hasAgentRouterCredential()) return notDispatchable();
         let text = '';
@@ -9418,6 +9464,7 @@ let isMultimodal = !!(imagePaths?.length);
       sel && selReads && sel.provider === provider ? sel.model : null;
     const selectedOpenai = selectedDirect('openai');
     const selectedClaude = selectedDirect('claude');
+    const selectedBedrock = sel?.provider === 'bedrock' && readsImages(this.visionVerdict(sel), true) ? sel.model : null;
     // `models/gemini-…` is the same model as `gemini-…`.
     const selectedGemini = selectedDirect('gemini')?.replace(/^models\//, '') ?? null;
     const selectedGroq = selectedDirect('groq');
@@ -9425,6 +9472,10 @@ let isMultimodal = !!(imagePaths?.length);
     const groqVisionModel = selectedGroq && !isRetiredGroqModelId(selectedGroq) ? selectedGroq : GROQ_VISION_MODEL;
 
     if (!localOnly) {
+      if (selectedBedrock && this.directProviderHasCredential('bedrock') && !this.isProviderDisabled('bedrock')) {
+        cloud.push({ id: 'bedrock', name: 'Amazon Bedrock', isLocal: false, priority: prio++, ttftTimeoutMs: PRO_TTFT_MS,
+          open: sig => this.streamWithBedrock(userContent, systemPrompt, imagePaths, sig, selectedBedrock) });
+      }
       if (this.openaiClient) {
         cloud.push({ id: 'openai', name: 'OpenAI', isLocal: false, priority: prio++, ttftTimeoutMs: FLASH_TTFT_MS,
           open: (sig, att) => this.streamWithOpenaiMultimodal(userContent, imagePaths, systemPrompt, tierModel(ModelFamily.OPENAI, att), sig) });
@@ -9611,7 +9662,7 @@ let isMultimodal = !!(imagePaths?.length);
     // every one of those seats ("only when it is the model the user picked").
     const localSelection = this.useOllama || !!this.customProvider || !!this.activeCurlProvider;
     if (localSelection) {
-      const SELECTED_ONLY = new Set(['litellm', 'nvidia_nim', 'ninerouter', 'openrouter', 'fluxion', 'agentrouter']);
+      const SELECTED_ONLY = new Set(['bedrock', 'litellm', 'nvidia_nim', 'ninerouter', 'openrouter', 'fluxion', 'agentrouter']);
       for (let i = cloud.length - 1; i >= 0; i--) if (SELECTED_ONLY.has(cloud[i].id)) cloud.splice(i, 1);
     }
 
@@ -9670,6 +9721,7 @@ let isMultimodal = !!(imagePaths?.length);
       if (this.isLiteLLMModel(this.currentModelId)) { const l = cloud.find(p => p.id === 'litellm'); if (l) front.push(l); }
       if (this.isNvidiaNimModel(this.currentModelId)) { const n = cloud.find(p => p.id === 'nvidia_nim'); if (n) front.push(n); }
       if (this.isOpenRouterModel(this.currentModelId)) { const o = cloud.find(p => p.id === 'openrouter'); if (o) front.push(o); }
+      if (selectedBedrock) { const b = cloud.find(p => p.id === 'bedrock'); if (b) front.push(b); }
       if (this.isNinerouterModel(this.currentModelId)) { const n9 = cloud.find(p => p.id === 'ninerouter'); if (n9) front.push(n9); }
       // Fluxion belongs here for a sharper version of the same reason. Its rung
       // IS seated in `cloud`, but at the end of the priority order, and
@@ -11751,6 +11803,15 @@ let isMultimodal = !!(imagePaths?.length);
     }
 
     // 3. Cloud Provider Routing
+    if (isBedrockModel(this.currentModelId)) {
+      const model = this.currentModelId;
+      yield* this.streamSelectedProviderWithFailover({
+        id: 'bedrock', name: 'Amazon Bedrock',
+        open: sig => this.streamWithBedrock(userContent, finalSystemPrompt, undefined, sig, model),
+        userContent, finalSystemPrompt, thinkingBudget, abortSignal,
+      });
+      return;
+    }
 
     // OpenAI
     if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
@@ -14318,7 +14379,7 @@ let isMultimodal = !!(imagePaths?.length);
     // AgentRouter joins for the reason Fluxion does: a reseller that picks its
     // upstream channel after accepting the request, whose Claude/GPT pool can
     // be cold or exhausted, so it takes the user-endpoint budget.
-    return this.isLiteLLMModel(this.currentModelId) || this.isNvidiaNimModel(this.currentModelId) || this.isOpenRouterModel(this.currentModelId) || this.isFluxionModel(this.currentModelId) || this.isNinerouterModel(this.currentModelId) || this.isAgentRouterModel(this.currentModelId);
+    return isBedrockModel(this.currentModelId) || this.isLiteLLMModel(this.currentModelId) || this.isNvidiaNimModel(this.currentModelId) || this.isOpenRouterModel(this.currentModelId) || this.isFluxionModel(this.currentModelId) || this.isNinerouterModel(this.currentModelId) || this.isAgentRouterModel(this.currentModelId);
   }
 
   /**
@@ -14691,8 +14752,9 @@ let isMultimodal = !!(imagePaths?.length);
     }
   }
 
-  public getCurrentProvider(): "ollama" | "gemini" | "custom" | "codex-cli" | "antigravity" {
+  public getCurrentProvider(): "ollama" | "gemini" | "custom" | "codex-cli" | "antigravity" | "bedrock" {
     if (this.customProvider) return "custom";
+    if (!this.useOllama && !this.activeCurlProvider && isBedrockModel(this.currentModelId)) return "bedrock";
     if (!this.useOllama && !this.activeCurlProvider && this.isAntigravityModel(this.currentModelId)) return "antigravity";
     if (this.isCodexCliModel(this.currentModelId)) return "codex-cli";
     return this.useOllama ? "ollama" : "gemini";
@@ -14747,6 +14809,7 @@ let isMultimodal = !!(imagePaths?.length);
     // vendor segment (`ninerouter/openai/gpt-5`,
     // `ninerouter/gemini/gemini-3.6-flash`), so every predicate below would
     // claim one if this did not come first.
+    if (isBedrockModel(selected)) return { provider: 'bedrock', model: selected };
     if (this.isNinerouterModel(selected)) return { provider: 'ninerouter', model: selected };
     if (this.isGroqModel(selected)) return { provider: 'groq', model: selected };
     if (this.isOpenAiModel(selected)) return { provider: 'openai', model: selected };
@@ -14900,6 +14963,7 @@ let isMultimodal = !!(imagePaths?.length);
 
   private directProviderHasCredential(provider: DirectAssistProvider): boolean {
     switch (provider) {
+      case 'bedrock': return Boolean(require('./services/CredentialsManager').CredentialsManager.getInstance().getBedrockConnection());
       case 'natively': return this.hasNatively();
       case 'gemini': return !!this.client;
       case 'openai': return !!this.openaiClient;
@@ -14935,6 +14999,7 @@ let isMultimodal = !!(imagePaths?.length);
       this.openrouterClient ||
       this.litellmClient ||
       this.ninerouterClient ||
+      (isBedrockModel(this.currentModelId) && this.directProviderHasCredential('bedrock')) ||
       this.hasFluxionCredential() ||
       this.hasAgentRouterCredential() ||
       this.hasNatively() ||
@@ -15006,7 +15071,8 @@ let isMultimodal = !!(imagePaths?.length);
       ollamaReportsVision: (m) => this.ollamaVisionCache.get(m),
       ninerouterVisionModels: selection.provider === 'ninerouter' ? [...this.ninerouterVisionModels] : undefined,
       customProvider: selection.provider === 'curl' ? curl : custom,
-      providerReportsVision: (provider, routed) => storedVisionAnswer(provider, routed, this.visionStoreBaseURL(provider)),
+      providerReportsVision: (provider, routed) => provider === 'bedrock' ? this.bedrockImageCapability(routed)
+        : storedVisionAnswer(provider, routed, this.visionStoreBaseURL(provider)),
       testedVision: (provider, routed) => storedVisionTest(provider, routed, this.visionStoreBaseURL(provider))?.reads,
       overriddenVision: (provider, routed) => this.userVisionOverride(provider, routed),
     };
@@ -15263,6 +15329,7 @@ let isMultimodal = !!(imagePaths?.length);
       // the rest (2026-10-01). With its catalogue saying "no", Direct Assist
       // gives its own clear refusal instead of forwarding into OpenRouter's 404;
       // with no catalogue yet it forwards, as every gateway below does.
+      case 'bedrock': return readsImages(this.visionVerdict(selection), true);
       case 'openrouter': {
         const reads = readsImages(this.visionVerdict(selection, custom, curl), true);
         // Refusing on the catalogue's "no": make sure it isn't a stale one (a
@@ -15571,6 +15638,9 @@ let isMultimodal = !!(imagePaths?.length);
         return;
       case 'nvidia_nim':
         yield* this.streamWithNvidiaNim(directUserPrompt, request.systemPrompt, imagePaths, abortSignal, model);
+        return;
+      case 'bedrock':
+        yield* this.streamWithBedrock(directUserPrompt, request.systemPrompt, imagePaths, abortSignal, model);
         return;
       case 'openrouter':
         // `model` is still prefixed; streamWithOpenRouter strips exactly the one
@@ -16014,6 +16084,7 @@ let isMultimodal = !!(imagePaths?.length);
   private selectedModelTextCall(): { name: string; run: (user: string, system: string) => Promise<string> } | null {
     const m = this.currentModelId;
     if (!m || this.useOllama || this.customProvider || this.activeCurlProvider) return null;
+    if (isBedrockModel(m) && this.directProviderHasCredential('bedrock')) return { name: 'Amazon Bedrock', run: (u, sys) => this.generateWithBedrock(u, sys, undefined, undefined, m) };
     if (this.isOpenAiModel(m) && this.openaiClient) return { name: 'OpenAI', run: (u, sys) => this.generateWithOpenai(u, sys) };
     if (this.isClaudeModel(m) && this.claudeClient) return { name: 'Claude', run: (u, sys) => this.generateWithClaude(u, sys) };
     if (this.isDeepseekModel(m) && this.deepseekClient) return { name: 'DeepSeek', run: (u, sys) => this.generateWithDeepseek(u, sys) };

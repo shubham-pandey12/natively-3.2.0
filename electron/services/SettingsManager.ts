@@ -60,6 +60,8 @@ export interface AppSettings {
     liveBrainGeminiModel?: string;
     liveBrainOpenaiModel?: string;
     liveBrainElevenlabsModel?: string;
+    liveBrainSonicRegion?: string;
+    liveBrainSonicModel?: string;
     liveBrainDeepgramThinkMode?: 'managed' | 'byo';
     liveBrainDeepgramManagedProvider?: 'open_ai' | 'anthropic' | 'google' | 'nvidia';
     liveBrainDeepgramManagedModel?: string;

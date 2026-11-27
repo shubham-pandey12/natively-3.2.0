@@ -177,6 +177,12 @@ const ModelSelectorWindow = () => {
                     models.push({ id: 'natively', name: 'Natively API', type: 'cloud', provider: 'natively' });
                 }
 
+                const bedrock = await window.electronAPI?.getBedrockSettings?.().catch(() => undefined);
+                if (bedrock?.configured) {
+                    const rows = new Map(bedrock.models.map(model => [model.id, model.label]));
+                    for (const id of Object.keys(bedrock.options)) if (!rows.has(id)) rows.set(id, id);
+                    for (const [id, name] of rows) models.push({ id: `bedrock/${id}`, name, type: 'cloud', provider: 'bedrock' });
+                }
                 // Cloud Models — standard models + unique preferred models
                 for (const [prov, cfg] of Object.entries(STANDARD_CLOUD_MODELS)) {
                     if (!cfg.hasKeyCheck(creds)) continue;
@@ -314,7 +320,7 @@ const ModelSelectorWindow = () => {
         // A background re-fetch of a live catalogue changes the rows without
         // touching credentials, so it needs its own reload.
         const unsubCatalogue = window.electronAPI?.onLiveCatalogUpdated?.((data) => {
-            if (data?.provider && LIVE_CATALOGUE_PROVIDERS.has(data.provider)) loadModels();
+            if (data?.provider && (data.provider === 'bedrock' || LIVE_CATALOGUE_PROVIDERS.has(data.provider))) loadModels();
         });
         return () => {
             cancelled = true;

@@ -6,6 +6,7 @@ import { Plus, Trash2, Edit2, AlertCircle, Save, ChevronDown, Check, RefreshCw, 
 import { CODEX_CLI_MODEL, cloudModelRows, codexCliSelectorId, codexModelOptions, type CodexModelCatalogResult, isModelAllowed, isOptInModelProvider, litellmModelLabel, gatewayModelLabel, ninerouterThinkingOptions, STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
+import { BedrockSettingsCard } from './BedrockSettingsCard';
 import { PICKER_MENU_WIDTH, Presence, SettingsMenu, SettingsMotionReady, SwapLabel, capPickerLabel, useMotionReadyAfter } from './SettingsRow';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useToggleInit } from './useToggleInit';
@@ -2749,7 +2750,7 @@ const showFullNameIfCut = (event: React.MouseEvent<HTMLButtonElement>) => {
     row.title = name.scrollWidth > name.clientWidth ? name.textContent ?? '' : '';
 };
 
-const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, placeholder, className = "", containerClassName = "relative", maxLabelChars, menuClassName = "w-full", minLabel }) => {
+export const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, placeholder, className = "", containerClassName = "relative", maxLabelChars, menuClassName = "w-full", minLabel }) => {
     const t = useT();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = React.useRef<HTMLDivElement>(null);
@@ -4261,8 +4262,8 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
             .catch((e: unknown) => console.error('Failed to move the Codex default model:', e));
     };
 
-    const handleToggleModel = async (provider: string, modelId: string) => {
-        const universe = effectiveModels(provider).map(m => m.id);
+    const handleToggleModel = async (provider: string, modelId: string, modelIds?: string[]) => {
+        const universe = modelIds ?? effectiveModels(provider).map(m => m.id);
         const current = cloudEnabledModels[provider] || [];
         const optIn = isOptInModelProvider(provider);
         // An empty allow-list means "all", so the first un-check has to materialise
@@ -5679,6 +5680,26 @@ export const AIProvidersSettings: React.FC<AIProvidersSettingsProps> = ({
                 </div>
 
                 <div className="aip-cq space-y-4">
+                    <BedrockSettingsCard
+                        defaultModel={defaultModel}
+                        disabled={disabledProviders.includes('bedrock')}
+                        enabledModels={cloudEnabledModels.bedrock ?? []}
+                        onToggleDisabled={enabled => void handleToggleProvider('bedrock', enabled)}
+                        onToggleModel={(id, ids) => void handleToggleModel('bedrock', id, ids)}
+                        onResetModels={() => void handleResetModels('bedrock')}
+                        onDefault={async id => {
+                            const enabled = cloudEnabledModels.bedrock ?? [];
+                            if (enabled.length && !enabled.includes(id)) {
+                                const next = [...enabled, id];
+                                const saved = await window.electronAPI.setCloudEnabledModels('bedrock', next);
+                                if (!saved.success) throw new Error(saved.error);
+                                setCloudEnabledModelsState(previous => ({ ...previous, bedrock: next }));
+                            }
+                            const result = await window.electronAPI.setDefaultModel(id);
+                            if (!result.success) throw new Error(result.error);
+                            setDefaultModel(id);
+                        }}
+                    />
 
                     {CLOUD_PROVIDERS.map(({ id, name, placeholder, url }) => {
                         const [keyValue, setKeyValue] = keyFields[id];

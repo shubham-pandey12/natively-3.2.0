@@ -106,6 +106,19 @@ export function buildVisionProviders(
     providers.push(litellm(credentials, inputs));
     providers.push(nvidiaNim(credentials, inputs));
     providers.push(openrouter(credentials, inputs));
+    const bedrockSelection = readActiveSelection();
+    const bedrockConnection = bedrockSelection?.provider === 'bedrock' ? credentials.getBedrockConnection?.() : undefined;
+    if (bedrockSelection && bedrockConnection) {
+      const { model } = bedrockSelection;
+      const image = credentials.getBedrockModels().find(row => row.id === model.slice('bedrock/'.length))?.image;
+      const facts = { ...registryVisionFacts(), providerReportsVision: () => image };
+      providers.push({
+        id: 'bedrock', modelId: model, displayName: 'Amazon Bedrock', isLocal: false, isConfigured: true,
+        supportsVision: readsImages(resolveVision({ provider: 'bedrock', model }, facts), true),
+        scopeAllowsScreenshots: true, hint: 'generic',
+        invoke: params => callLLMHelperVision('bedrock', params, model),
+      });
+    }
     providers.push(fluxion(credentials, inputs));
     providers.push(agentrouter(credentials, inputs));
     // Unlike the four above, this one knows per model whether it can read an
@@ -661,7 +674,7 @@ function selectionIsLocal(): boolean {
 export function selectionRung(): { id: string; key: string } | null {
   const selection = readActiveSelection();
   if (!selection) return null;
-  const GATEWAYS = ['litellm', 'nvidia_nim', 'openrouter', 'fluxion', 'agentrouter', 'ninerouter', 'deepseek'];
+  const GATEWAYS = ['bedrock', 'litellm', 'nvidia_nim', 'openrouter', 'fluxion', 'agentrouter', 'ninerouter', 'deepseek'];
   const id = GATEWAYS.includes(selection.provider) ? selection.provider
     : selection.provider === 'custom' || selection.provider === 'curl' ? selection.provider
     : null;
@@ -711,7 +724,7 @@ export function isOllamaVisionModel(modelId: string): boolean {
  * We funnel everything through LLMHelper.streamChat so the auth, retries, and
  * per-provider payload shape are handled in one place.
  */
-async function callLLMHelperVision(providerId: string, params: VisionInvocationParams): Promise<string> {
+async function callLLMHelperVision(providerId: string, params: VisionInvocationParams, modelId?: string): Promise<string> {
   const helper = await getActiveLLMHelper();
   if (!helper) throw new Error('LLMHelper not initialized');
   // `signal` and `timeoutMs` used to stop here. VisionProviderFallbackChain
@@ -727,7 +740,7 @@ async function callLLMHelperVision(providerId: string, params: VisionInvocationP
     params.userPrompt,
     params.systemPrompt,
     params.optimized.path,
-    { signal: params.signal, timeoutMs: params.timeoutMs },
+    { signal: params.signal, timeoutMs: params.timeoutMs, ...(modelId ? { modelId } : {}) },
   );
 }
 

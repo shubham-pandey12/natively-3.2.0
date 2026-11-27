@@ -67,6 +67,12 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                         cModels.push({ id: pm, name: prettifyModelId(pm), desc: `${prov.charAt(0).toUpperCase() + prov.slice(1)} • Preferred`, provider: prov });
                     }
                 }
+                const bedrock = await window.electronAPI?.getBedrockSettings?.().catch(() => undefined);
+                if (bedrock?.configured) {
+                    const rows = new Map(bedrock.models.map(model => [model.id, model.label]));
+                    for (const id of Object.keys(bedrock.options)) if (!rows.has(id)) rows.set(id, id);
+                    for (const [id, name] of rows) cModels.push({ id: `bedrock/${id}`, name, desc: 'Amazon Bedrock', provider: 'bedrock' });
+                }
                 setCloudModels(cModels);
             } catch (e) {
                 console.error("Failed to load models:", e);

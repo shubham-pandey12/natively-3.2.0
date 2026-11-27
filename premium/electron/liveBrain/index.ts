@@ -5,10 +5,11 @@ import { OpenAIRealtimeBrain } from './brains/OpenAIRealtimeBrain';
 import { ElevenLabsRealtimeBrain } from './brains/ElevenLabsRealtimeBrain';
 import { DeepgramVoiceAgentBrain, type DeepgramVoiceAgentOptions } from './brains/DeepgramVoiceAgentBrain';
 import { DeepgramFluxBrain, type DeepgramFluxOptions } from './brains/DeepgramFluxBrain';
+import { AmazonSonicBrain, type AmazonSonicOptions } from './brains/AmazonSonicBrain';
 
 export function createLiveBrain(
     id: LiveBrainId | 'gemini',
-    deps: GeminiLiveOptions & DeepgramVoiceAgentOptions & DeepgramFluxOptions & { cancelPipeline?: () => void },
+    deps: GeminiLiveOptions & DeepgramVoiceAgentOptions & DeepgramFluxOptions & AmazonSonicOptions & { cancelPipeline?: () => void },
 ): LiveBrain {
     switch (id) {
         case 'gemini':
@@ -22,6 +23,8 @@ export function createLiveBrain(
             return new DeepgramVoiceAgentBrain(deps);
         case 'deepgram-flux':
             return new DeepgramFluxBrain(deps);
+        case 'amazon-sonic':
+            return new AmazonSonicBrain(deps);
         case 'pipeline':
             return new PipelineBrain(deps.cancelPipeline ?? (() => {}));
         default: {

@@ -16,7 +16,7 @@ interface FetchedModel {
 }
 
 interface ProviderCardProps {
-    providerId: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek' | 'nvidia_nim' | 'openrouter' | 'fluxion' | 'agentrouter';
+    providerId: 'gemini' | 'groq' | 'openai' | 'claude' | 'deepseek' | 'nvidia_nim' | 'openrouter' | 'fluxion' | 'agentrouter' | 'bedrock';
     /** Provider switched off in Settings — keeps the key, hides the models. */
     isDisabled?: boolean;
     onToggleDisabled?: (enabled: boolean) => void;
@@ -69,6 +69,9 @@ interface ProviderCardProps {
      * panel's state already lives.
      */
     extraControls?: React.ReactNode;
+    credentialControls?: React.ReactNode;
+    connectionReady?: boolean;
+    fetchModels?: () => Promise<void>;
 }
 
 export const ProviderCard: React.FC<ProviderCardProps> = ({
@@ -99,7 +102,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
     keyPlaceholder,
     keyUrl,
     onPreferredModelChange,
-    extraControls,
+    extraControls, credentialControls, connectionReady = hasStoredKey, fetchModels,
 }) => {
     const t = useT();
     const [isFetching, setIsFetching] = useState(false);
@@ -139,6 +142,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
             // Deliberately does NOT save a typed-but-unsaved key. Save is the only
             // thing that saves; discovery uses the stored key.
             // Fetch models using the key (or stored key)
+            if (fetchModels) { await fetchModels(); return; }
             const keyToUse = apiKey.trim() || '';
             // @ts-ignore
             const result = await window.electronAPI?.fetchProviderModels(providerId, keyToUse);
@@ -232,7 +236,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                     {/* Only once a key is stored — nothing to switch off before that. The
                         key is never touched; this only hides the provider's models. */}
                     {onToggleDisabled && (
-                        <Presence kind="control" id={hasStoredKey ? 'switch' : null}>
+                        <Presence kind="control" id={connectionReady ? 'switch' : null}>
                             <AipSwitch
                                 checked={!isDisabled}
                                 onChange={() => onToggleDisabled(isDisabled)}
@@ -244,7 +248,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                 </div>
             </div>
 
-            <div className="aip-provider-row">
+            {credentialControls ?? <div className="aip-provider-row">
                 <div className="aip-provider-field">
                     {/* One 32px shell: glyph + input + Save as an inset segment. */}
                     <div className="aip-field">
@@ -303,7 +307,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                     </Presence>
                 </div>
 
-            </div>
+            </div>}
 
             {extraControls}
 
@@ -315,7 +319,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                 instead of shoving every card below down 48px in one frame. Kept
                 mounted while closed, like every .aip-reveal: visibility keeps it
                 out of the tab order and away from screen readers. */}
-            <div className="aip-reveal aip-reveal--row" data-open={hasStoredKey ? 'true' : 'false'} data-instant={motionReady ? undefined : 'true'}>
+            <div className="aip-reveal aip-reveal--row" data-open={connectionReady ? 'true' : 'false'} data-instant={motionReady ? undefined : 'true'}>
             <div>
                 <div className="aip-provider-row">
                     <button
@@ -348,7 +352,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                     {/* Beside the key field, not under it. >= 1, not > 1: this is the only
                         discovery entry point, so gating it on "more than one model" left the
                         three 1-preset providers unable to fetch anything at all. */}
-                    {!isDisabled && onToggleModel && selectableModels && selectableModels.length >= 1 && (
+                    {!isDisabled && onToggleModel && selectableModels && (selectableModels.length >= 1 || fetchModels) && (
                         <AipModelList
                             // Without this every cloud card defaulted to `optIn`
                             // false, so OpenRouter's empty allow-list would have
@@ -368,7 +372,7 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                             refreshing={isFetching}
                             onRefresh={handleFetchModels}
                             onFirstOpen={() => {
-                                if (hasStoredKey && !hasCatalog) handleFetchModels();
+                                if (connectionReady && !hasCatalog) handleFetchModels();
                             }}
                             lastFetchedAt={fetchedAt}
                         />

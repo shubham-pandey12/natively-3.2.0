@@ -13,6 +13,7 @@ export const DIRECT_ASSIST_PROVIDERS = [
   'deepseek',
   'nvidia_nim',
   'openrouter',
+  'bedrock',
   'fluxion',
   'agentrouter',
   'litellm',
