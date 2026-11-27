@@ -4,7 +4,14 @@ import { createResponseParser } from './responseParser';
 import type { OrchestratorDisposition, ResponseClock } from './ResponseOrchestrator';
 import type { ConversationTurn, LiveBrain, LiveBrainEvent, LiveBrainId, LiveBrainStartContext } from './types';
 
-const REALTIME = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent', 'deepgram-flux'] as const;
+const FALLBACK_ORDER: readonly LiveBrainId[] = [
+    'gemini-live',
+    'elevenlabs-realtime',
+    'deepgram-flux',
+    'deepgram-voice-agent',
+    'openai-realtime',
+    'amazon-sonic',
+];
 const ROLLOVER_MS = {
     'gemini-live': 13.5 * 60_000,
     'openai-realtime': 50 * 60_000,
@@ -189,7 +196,9 @@ export class BrainSupervisor<Timer> {
 
     private select(reason: string, from?: LiveBrainId): void {
         const preferred = this.options.preferred;
-        const ids: readonly LiveBrainId[] = preferred === 'pipeline' ? ['pipeline'] : [preferred, ...REALTIME, 'pipeline'];
+        const ids: readonly LiveBrainId[] = preferred === 'pipeline'
+            ? ['pipeline']
+            : [preferred, ...FALLBACK_ORDER.filter(id => id !== preferred), 'pipeline'];
         for (const id of ids) {
             if (this.attempted.has(id)) continue;
             this.attempted.add(id);

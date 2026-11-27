@@ -513,7 +513,7 @@ Validation of the `set` payload in main: boolean only; reject anything else.
 | Test connection | button | Opens a short session, reports OK / auth error / quota / unsupported model. Deepgram Voice Agent also verifies the configured Think model with `InjectUserMessage`. Deepgram Flux tests both the `/v2/listen` WebSocket and the configured Natively AI route separately, distinguishing configured vs verified reply. |
 | Status | text | Last error (auth, quota, rate limit) in plain words. |
 
-Fallback order (§9) is automatic and needs no setting: selected provider → the other realtime providers that have a usable key, in the order Gemini Live, OpenAI Realtime, ElevenLabs Realtime, Deepgram Voice Agent, Deepgram Flux (skipping the failed one) → Existing pipeline.
+Fallback order (§9) is automatic and needs no setting: selected provider first, then the other usable providers in this order: Gemini Live, ElevenLabs Realtime, Deepgram Flux, Deepgram Voice Agent, OpenAI Realtime, Amazon Sonic → Existing pipeline. Skip the failed provider and providers without usable credentials.
 
 ### Storage & wiring (mirror Speech Provider keys)
 
