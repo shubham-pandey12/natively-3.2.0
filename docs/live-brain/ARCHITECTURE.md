@@ -21,7 +21,7 @@ It listens to the interviewer continuously, understands like a strong conversati
 | D1 | Personal use, not commercial. |
 | D2 | Main realtime brain: **Google Gemini Live (free tier)**. Paid APIs are acceptable. |
 | D3 | Answers follow the **current Natively instructions and response style** — reuse existing prompts/contracts; do not invent a new answer style. |
-| D4 | **Clarifying questions are required** (one short question, only when it materially changes the answer). |
+| D4 | **Clarifying questions are required** (only when the reply materially changes the answer). **Revised 2026-11-27 (user decision):** up to three clarifications per original interviewer question, suggested one at a time; each must follow from the previous reply. A clarification counts when the interviewer replies to it (non-filler) while it is pending; a skipped suggestion does not count. The cap is enforced in app code (ResponseOrchestrator) at the `Ask:` sentinel, for every route; a fourth `Ask:` is dropped and the brain is asked to answer under a stated assumption. A correction keeps the count; a new question resets it. Filler never counts; "you decide" counts and makes Natively proceed. The normal path makes no extra model call; when a fourth or repeated `Ask:` is suppressed, at most one recovery generation answers under a stated assumption. D4 applies to every route eventually; Phase 6 (IMPLEMENTATION_PLAN Later phase 6) implements it for Deepgram Flux and the pipeline fallback behind `liveBrainMultiClarify`, and the realtime brains keep a single `Ask:` until a later phase. |
 | D5 | Privacy is not a concern for this user (audio may be sent to Google/OpenAI). Still show a one-line notice in settings. |
 | D6 | **Natively never plays or produces audio.** Text is the only assistant output. |
 | D7 | Backup: OpenAI Realtime (optional, paid key) → today's Natively pipeline (always available). |
@@ -333,7 +333,7 @@ The list below describes the full single-model instruction set, still used by Op
 1. **The current Natively answer prompt** used for spoken interview answers today — resolved through the same code path `WhatToAnswerLLM` uses (`UNIVERSAL_WHAT_TO_ANSWER_PROMPT`, which embeds `HUMAN_SPOKEN_ANSWER_CONTRACT` and `SPOKEN_ANSWER_CONTRACT`, plus mode prompt e.g. `MODE_TECHNICAL_INTERVIEW_PROMPT`). **Do not copy-paste prompt text into new files — import/compose it.**
 2. **Live-session preamble** (new, short): you are listening to a live interview; the audio you hear is the interviewer; lines starting `Candidate said:` are the candidate; write what the candidate should say next; text only.
 3. **Output protocol** (new, short — §6).
-4. **Clarification rule** (new, short): ask only if missing information materially changes the answer; one short question; never ask what was already answered; never repeat a clarification; if the interviewer moves on, answer with a stated assumption.
+4. **Clarification rule** (new, short): ask only if missing information materially changes the answer; one short question at a time, at most three per original question (D4); never ask what was already answered; never repeat a clarification; if the interviewer moves on, answer with a stated assumption.
 5. **Correction rule** (new, one line): the newest interviewer instruction overrides earlier requirements.
 6. **Profile context** (existing): resume/profile, job description, custom context, interview mode — the same sources the current answer path uses.
 7. **Notebook** (on rollover/fallback only): `NotebookSnapshot` rendered as text (§8).

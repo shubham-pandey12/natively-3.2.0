@@ -1,19 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { BedrockApi, BedrockModelOptions, BedrockSettings } from '../../types/bedrock';
-import { defaultBedrockOptions } from '../../types/bedrock';
+import type { BedrockSettings } from '../../types/bedrock';
 import { ProviderCard } from './ProviderCard';
 import { ModelSelect } from './AIProvidersSettings';
 
-const apis: Record<BedrockApi, string> = {
-    converse: 'Converse',
-    invoke: 'InvokeModel (native JSON)',
-    'runtime-chat': 'Runtime Chat Completions',
-    'runtime-responses': 'Runtime Responses',
-    'runtime-messages': 'Runtime Claude Messages',
-    'mantle-chat': 'Mantle Chat Completions',
-    'mantle-responses': 'Mantle Responses',
-    'mantle-messages': 'Mantle Claude Messages',
-};
 const AWS_BEDROCK_REGIONS = [
     { id: 'us-east-1', name: 'US East (N. Virginia) · us-east-1' },
     { id: 'us-east-2', name: 'US East (Ohio) · us-east-2' },
@@ -47,13 +36,6 @@ const CUSTOM_REGION_ID = '__custom__';
 const input = 'aip-input w-full rounded-md border border-border-subtle bg-bg-input px-2 py-1.5';
 const button = 'aip-btn';
 
-function jsonObject(value: string): Record<string, unknown> | undefined {
-    if (!value.trim()) return undefined;
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Model settings must be JSON objects.');
-    return parsed;
-}
-
 interface Props {
     defaultModel: string;
     disabled: boolean;
@@ -69,10 +51,6 @@ export function BedrockSettingsCard({ defaultModel, disabled, enabledModels, onT
     const [useCustomRegion, setUseCustomRegion] = useState(false);
     const [auth, setAuth] = useState<BedrockSettings['auth']>('bearer');
     const [key, setKey] = useState('');
-    const [model, setModel] = useState('');
-    const [options, setOptions] = useState<BedrockModelOptions>({ api: 'converse' });
-    const [parameters, setParameters] = useState('');
-    const [nativeInput, setNativeInput] = useState('');
     const [status, setStatus] = useState('');
     const [busy, setBusy] = useState(false);
     const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -88,16 +66,6 @@ export function BedrockSettingsCard({ defaultModel, disabled, enabledModels, onT
         }).catch(() => { if (mounted) setStatus('Bedrock settings could not be loaded.'); });
         return () => { mounted = false; };
     }, []);
-
-    const select = (id: string) => {
-        setModel(id);
-        const metadata = settings?.models.find(row => row.id === id);
-        const saved = settings && Object.hasOwn(settings.options, id) ? settings.options[id] : undefined;
-        const next = saved ?? defaultBedrockOptions(id, metadata);
-        setOptions(next);
-        setParameters(next.parameters ? JSON.stringify(next.parameters, null, 2) : '');
-        setNativeInput(next.nativeInput ? JSON.stringify(next.nativeInput, null, 2) : '');
-    };
 
     const run = async (action: () => Promise<string>) => {
         setBusy(true);
@@ -137,35 +105,19 @@ export function BedrockSettingsCard({ defaultModel, disabled, enabledModels, onT
         setTestStatus('testing');
         await run(async () => {
             try {
-                const eligible = rows.filter(row => !enabledModels.length || enabledModels.includes(row.id));
-                const active = eligible.find(row => row.id === defaultModel)
-                    ?? eligible.find(row => /^bedrock\/(?:[a-z]+\.)?amazon\.nova-(?:2-)?(?:lite|micro)(?:-|:)/.test(row.id))
-                    ?? eligible[0];
-                if (!active) throw new Error('Discover models or add a model ID before testing.');
-                const result = await window.electronAPI.testBedrockModel(active.id.slice('bedrock/'.length));
-                if (!result.success) {
-                    throw new Error(`Tested ${active.id.slice('bedrock/'.length)} in ${settings?.region ?? region}. ${result.error ?? 'The request failed.'}`);
-                }
+                // The backend tries the selected model, resolves inference-profile IDs itself,
+                // and falls back to Amazon Nova so a valid key always passes.
+                const chosen = rows.some(row => row.id === defaultModel) ? defaultModel.slice('bedrock/'.length) : undefined;
+                const result = await window.electronAPI.testBedrockModel(chosen);
+                if (!result.success) throw new Error(`${settings?.region ?? region}: ${result.error ?? 'The request failed.'}`);
                 setTestStatus('success');
-                return '';
+                return result.warning ?? '';
             } catch (error) {
                 setTestStatus('error');
                 throw error;
             }
         });
     };
-
-    const saveModel = () => run(async () => {
-        const id = model.trim();
-        if (!id) throw new Error('Enter a model ID or ARN.');
-        const result = await window.electronAPI.setBedrockModelOptions(id, {
-            ...options, parameters: jsonObject(parameters),
-            nativeInput: options.api === 'invoke' ? jsonObject(nativeInput) : undefined,
-        });
-        if (!result.success) throw new Error(result.error);
-        setSettings(await window.electronAPI.getBedrockSettings());
-        return '';
-    });
 
     const catalogue = new Map(settings?.models.map(row => [row.id, row.label]));
     for (const id of Object.keys(settings?.options ?? {})) if (!catalogue.has(id)) catalogue.set(id, id);
@@ -211,44 +163,6 @@ export function BedrockSettingsCard({ defaultModel, disabled, enabledModels, onT
                     options={[{ id: 'bearer', name: 'Bedrock API key' }, { id: 'aws', name: 'AWS credentials (SDK credential chain)' }]} /></div>
                 {auth === 'bearer' && settings.hasApiKey && (region.trim().toLowerCase() !== settings.region || auth !== settings.auth) &&
                     <button className={button} disabled={busy} onClick={() => void saveConnection()}>Save AWS settings</button>}
-                {settings.configured && !disabled && <details className="space-y-2">
-                <summary className="aip-meta cursor-pointer">Advanced model settings</summary>
-                <ModelSelect value={model} onChange={select} placeholder="Select a model or inference profile"
-                    options={[...catalogue].map(([id, name]) => ({ id, name }))} />
-                <label className="block">Model ID or ARN<input className={input} value={model} onChange={e => select(e.target.value)} /></label>
-                <div>Inference API<ModelSelect value={options.api} onChange={api => setOptions({ ...options, api: api as BedrockApi })}
-                    options={Object.entries(apis).map(([id, name]) => ({ id, name }))} /></div>
-                <label className="flex items-center gap-2"><input type="checkbox" checked={options.streaming !== false}
-                    onChange={e => setOptions({ ...options, streaming: e.target.checked })} /> Stream responses</label>
-                {options.api === 'converse' && <label className="flex items-center gap-2"><input type="checkbox" checked={options.systemInUserMessage ?? false}
-                    onChange={e => setOptions({ ...options, systemInUserMessage: e.target.checked })} /> Put system instructions in the user message</label>}
-                {(options.api === 'mantle-chat' || options.api === 'mantle-responses') && <div>Mantle endpoint path
-                    <ModelSelect value={String(options.mantleOpenAiPath ?? 'auto')}
-                        onChange={value => setOptions({ ...options, mantleOpenAiPath: value === 'auto' ? undefined : value === 'true' })}
-                        options={[{ id: 'auto', name: 'Automatic' }, { id: 'false', name: '/v1' }, { id: 'true', name: '/openai/v1' }]} />
-                </div>}
-                {options.api !== 'invoke' && <div className="grid grid-cols-3 gap-2">
-                    {([['maxTokens', 'Max tokens'], ['temperature', 'Temperature'], ['topP', 'Top P']] as const).map(([field, label]) =>
-                        <label key={field}>{label}<input className={input} type="number" step={field === 'maxTokens' ? 1 : 0.01}
-                            value={options[field] ?? ''} onChange={e => setOptions({ ...options, [field]: e.target.value ? Number(e.target.value) : undefined })} /></label>)}
-                </div>}
-                <label className="block">Model parameters and reasoning (JSON)
-                    <textarea className={input} rows={2} value={parameters} onChange={e => setParameters(e.target.value)} />
-                </label>
-                <a className="underline" href="https://docs.aws.amazon.com/bedrock/latest/userguide/models-api-compatibility.html"
-                    onClick={e => { e.preventDefault(); void window.electronAPI.openExternal(e.currentTarget.href); }}>
-                    AWS model API compatibility
-                </a>
-                {options.api === 'invoke' && <>
-                    <label className="block">Native request (JSON)
-                        <textarea className={input} rows={3} value={nativeInput} onChange={e => setNativeInput(e.target.value)} />
-                    </label>
-                    <p>{'Use ${prompt}, ${system}, or ${image.0} inside strings, and "$images" for an array of base64 images.'}</p>
-                    <label className="block">Response text path<input className={input} value={options.nativeTextPath ?? ''}
-                        placeholder="content.0.text" onChange={e => setOptions({ ...options, nativeTextPath: e.target.value })} /></label>
-                </>}
-                <button className={button} disabled={busy || !model.trim()} onClick={() => void saveModel()}>Save model settings</button>
-                </details>}
             </details>}
         />
     );

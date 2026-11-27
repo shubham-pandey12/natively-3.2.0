@@ -96,7 +96,8 @@ const KNOWN_AWS_CAUSES: Array<[RegExp, string]> = [
     [/(?:don't|do not) have access to the model|model access/i, 'Your AWS account has not been granted access to this model in this Region. Enable it in the Bedrock console (Model access).'],
     [/model identifier is invalid|model.*not found|could not resolve the foundation model/i, 'This model ID does not exist in the selected Region.'],
     [/end of (?:its )?life|legacy|no longer (?:available|supported)/i, 'This model version is retired. Choose a current model.'],
-    [/not authorized to perform/i, 'The IAM identity lacks permission for this Bedrock action.'],
+    [/operation not allowed/i, 'AWS blocked model calls for this AWS account. This is an account-level restriction, not an app or model problem: use an API key from an account that can call Bedrock (try the model in the Bedrock Playground there first), or ask AWS Support to enable Bedrock for this account.'],
+    [/not authorized to perform/i,'The IAM identity lacks permission for this Bedrock action.'],
 ];
 
 /** Maps AWS's error text to a known, safe explanation; raw AWS bodies are never echoed. */
@@ -124,7 +125,10 @@ export function describeBedrockError(error: unknown): Error {
     const code = status && name !== 'Error' ? `${status} ${name}` : (status ?? name);
     const awsMessage = awsErrorDetail(aws?.message);
     const result = new Error(`Amazon Bedrock (${code}). ${awsMessage ? `${awsMessage} ` : ''}${detail}`);
-    return Object.assign(result, { status, provider: 'bedrock' });
+    // Raw AWS text (key-redacted) is kept off .message; only the user-initiated connection test shows it.
+    const awsRaw = typeof aws?.message === 'string'
+        ? aws.message.replace(/\s+/g, ' ').replace(/(?:ABSK|AKIA|ASIA)[A-Za-z0-9+/=]{8,}/g, '[redacted]').slice(0, 400) : undefined;
+    return Object.assign(result, { status, provider: 'bedrock', awsRaw });
 }
 
 export async function listBedrockModels(connection: BedrockConnection, signal: AbortSignal, requestHandler?: BedrockRuntimeClientConfig['requestHandler']) {
@@ -205,27 +209,74 @@ function nativeBody(value: unknown, prompt: BedrockPrompt): unknown {
     return value;
 }
 
+const PROFILE_PREFIX = /^(?:us|eu|apac|jp|au|ca|us-gov|global)\./;
+const resolvedModelIds = new Map<string, string>();
+
+/** Geography prefix of cross-region inference profiles for a Region. */
+export function bedrockGeoPrefix(region: string): string | undefined {
+    if (region.startsWith('us-gov-')) return 'us-gov';
+    if (region.startsWith('us-')) return 'us';
+    if (region.startsWith('eu-')) return 'eu';
+    if (region === 'ap-northeast-1' || region === 'ap-northeast-3') return 'jp';
+    if (region.startsWith('ap-southeast-2') || region.startsWith('ap-southeast-4')) return 'au';
+    if (region.startsWith('ap-')) return 'apac';
+    if (region.startsWith('ca-')) return 'ca';
+    return undefined;
+}
+
+/**
+ * Model IDs to try, in order, so users never have to know whether a model needs an
+ * inference profile: the ID as given, then the Region's geography profile, then the
+ * global profile, then the bare foundation model ID.
+ */
+export function bedrockModelCandidates(modelId: string, region: string): string[] {
+    if (modelId.startsWith('arn:')) return [modelId];
+    const base = modelId.replace(PROFILE_PREFIX, '');
+    const geo = bedrockGeoPrefix(region);
+    return [...new Set([resolvedModelIds.get(`${region}|${modelId}`), modelId,
+        geo ? `${geo}.${base}` : undefined, region.startsWith('ap-') && geo !== 'apac' ? `apac.${base}` : undefined,
+        `global.${base}`, base].filter((id): id is string => Boolean(id)))];
+}
+
+function retryableWithAnotherId(error: unknown): boolean {
+    const failure = error as { name?: string; status?: number; $metadata?: { httpStatusCode?: number } } | undefined;
+    const status = failure?.status ?? failure?.$metadata?.httpStatusCode;
+    return status === 400 || status === 404 || /validation|notfound/i.test(failure?.name ?? '');
+}
+
 export async function* streamBedrock(
     connection: BedrockConnection, selectedModel: string, options: BedrockModelOptions, prompt: BedrockPrompt, signal?: AbortSignal,
     requestHandler?: BedrockRuntimeClientConfig['requestHandler'],
 ): AsyncGenerator<string> {
     validateBedrockModel(selectedModel);
     validateBedrockOptions(options);
-    const modelId = selectedModel.replace(/^mantle:/, '');
+    const mantle = selectedModel.startsWith('mantle:');
+    const requested = selectedModel.replace(/^mantle:/, '');
+    const candidates = mantle ? [requested] : bedrockModelCandidates(requested, connection.region);
+    let modelId = candidates[0];
     const abortSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000);
     let emitted = false;
-    try {
-        for await (const text of readAnswer()) {
-            abortSignal.throwIfAborted();
-            if (!text) continue;
-            emitted = true;
-            yield text;
+    for (let index = 0; index < candidates.length; index++) {
+        modelId = candidates[index];
+        try {
+            for await (const text of readAnswer()) {
+                abortSignal.throwIfAborted();
+                if (!text) continue;
+                emitted = true;
+                yield text;
+            }
+            if (!mantle) resolvedModelIds.set(`${connection.region}|${requested}`, modelId);
+            break;
+        } catch (error) {
+            if (abortSignal.aborted) throw abortSignal.reason;
+            if (!emitted && index < candidates.length - 1 && retryableWithAnotherId(error)) {
+                console.warn('[Bedrock] Retrying with another model ID', { tried: modelId, next: candidates[index + 1] });
+                continue;
+            }
+            const failure = describeBedrockError(error);
+            console.warn('[Bedrock]', failure.message, { errorName: (error as { name?: string })?.name, model: modelId, api: options.api });
+            throw failure;
         }
-    } catch (error) {
-        if (abortSignal.aborted) throw abortSignal.reason;
-        const failure = describeBedrockError(error);
-        console.warn('[Bedrock]', failure.message, { errorName: (error as { name?: string })?.name });
-        throw failure;
     }
     if (!emitted) throw new Error('Amazon Bedrock returned no answer text. Check the model, output-token limit, and response format.');
 

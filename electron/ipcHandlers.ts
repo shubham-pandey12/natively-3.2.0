@@ -12661,20 +12661,33 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle('bedrock:test-model', async (_, id: string) => {
+  safeHandle('bedrock:test-model', async (_, id?: string) => {
     const { CredentialsManager } = require('./services/CredentialsManager') as typeof import('./services/CredentialsManager');
     const { defaultBedrockOptions, streamBedrock } = await import('./llm/BedrockProvider');
     const cm = CredentialsManager.getInstance();
     const connection = cm.getBedrockConnection();
-    if (!connection) return { success: false, error: 'Save your Bedrock connection first.' };
-    try {
-      const options = Object.hasOwn(cm.getBedrockOptions(), id) ? cm.getBedrockOptions()[id]
-        : defaultBedrockOptions(id, cm.getBedrockModels().find(model => model.id === id));
-      for await (const _ of streamBedrock(connection, id, options, { text: 'Reply with OK.' }, AbortSignal.timeout(30_000))) { /* Drain to verify completion. */ }
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Bedrock model test failed.' };
+    if (!connection) return { success: false, error: 'Save your Bedrock API key first.' };
+    // The chosen model first, then known low-cost Amazon models, so the test proves the key works
+    // even when the chosen model is unavailable. Inference-profile IDs are resolved inside streamBedrock.
+    const candidates = [...new Set([id?.trim(), 'amazon.nova-2-lite-v1:0', 'amazon.nova-lite-v1:0', 'amazon.nova-micro-v1:0']
+      .filter((value): value is string => Boolean(value)))];
+    let firstError: string | undefined;
+    for (const candidate of candidates) {
+      try {
+        const options = Object.hasOwn(cm.getBedrockOptions(), candidate) ? cm.getBedrockOptions()[candidate]
+          : defaultBedrockOptions(candidate, cm.getBedrockModels().find(model => model.id === candidate));
+        for await (const _ of streamBedrock(connection, candidate, options, { text: 'Reply with OK.' }, AbortSignal.timeout(30_000))) { /* Drain to verify completion. */ }
+        return candidate === candidates[0] ? { success: true, model: candidate }
+          : { success: true, model: candidate, warning: `Your key works. ${candidates[0]} failed: ${firstError}` };
+      } catch (error) {
+        const awsRaw = (error as { awsRaw?: string })?.awsRaw;
+        const message = error instanceof Error ? error.message : 'Bedrock model test failed.';
+        firstError ??= awsRaw ? `${message} AWS response: "${awsRaw}"` : message;
+        // Auth failures will not change with another model.
+        if (/40[13] |AccessDenied|credentials/i.test(message) && !/access to the model|model access|marketplace|use case/i.test(awsRaw ?? '')) break;
+      }
     }
+    return { success: false, error: firstError ?? 'Bedrock model test failed.' };
   });
 
   safeHandle('set-openrouter-api-key', async (_, apiKey: string) => {

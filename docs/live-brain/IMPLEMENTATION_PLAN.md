@@ -303,6 +303,44 @@ Tasks:
 4. **Follow-up and clarification context.** Done. Added focused Flux turn context (`fluxTurnContext.ts`), grounded follow-ups, corrections, and pending clarification replies at the AI route boundary, omitted prior topics on unrelated new questions, and verified context staleness checks on early drafts. See PROGRESS.md.
 5. **Comparison and regressions.** Done. Compared both Deepgram modes on Windows, fixed the reproduced Flux question-row regressions, and traced Voice Agent early turns to provider behavior. Live clarification, OpenAI Realtime account access, and physical macOS coverage remain open. See PROGRESS.md.
 
+6. **Multi-turn clarification (D4 revised 2026-11-27).** Not started. Phase 6 implements D4 for **Deepgram Flux and the pipeline fallback only**. The realtime brains (Gemini, OpenAI, ElevenLabs, Voice Agent, Sonic) keep today's single-`Ask:` behaviour until a later phase.
+
+   **Flag.** New Live Brain setting `liveBrainMultiClarify`, off by default, read once per confirmed turn. It controls all four parts together: the prompt override, the exchange state, the pre-overlay `Ask:` gate, and the recovery call. Flag off means today's behaviour exactly: Flux can show one `Ask:`, pipeline never asks, the 10 s timer is unchanged.
+
+   **State owner.** A new `ClarificationExchange` class in `premium/electron/liveBrain/` (pure, injected clock, no Electron imports). `meeting.ts` creates one per meeting session and passes it to `ResponseOrchestrator` (Flux) and to the pipeline through the active-session accessor in `LiveBrainRouting` (same pattern as `pipelineContext()`). The pipeline writer and streaming path are unchanged: the Auto Answer `dispatch` in `electron/main.ts` asks the exchange for the turn's classification and composed context before calling `runAutoAnswer`. With the flag on, `ResponseOrchestrator.pendingClarification` / `askPending` become views of the exchange.
+   Per original question it holds: `exchangeId`, the original question plus applied corrections, the pending clarification (at most one), asked clarifications with their replies, the count (0-3), and whether the interviewer deferred ("you decide").
+
+   **Classifying a confirmed interviewer turn** (deterministic, no model call), in this order:
+   1. Filler (`isFillerOnly`): ignored. No slot, no reply recorded, does not resolve the pending ask, and does **not** cancel the 10 s timeout (today's `writerClarificationHeardSpeech` behaviour changes accordingly).
+   2. Deferral ("you decide", "your call", "go ahead", "whatever you think", "doesn't matter", "proceed"): resolves the pending ask, counts a slot, sets `deferred`. The next write answers the original question under a stated assumption; no further asks in this exchange.
+   3. Correction (`isCorrectionTurn`): updates the original question or constraint and keeps the count. A pending ask is dropped without counting.
+   4. New question (`isUnrelatedNewTopicForClarification` and not a correction): closes the old exchange without answering it; the new question starts a fresh exchange at count 0.
+   5. Anything else while an ask is pending, including a short "No.": a reply. It counts a slot and is recorded against that clarification.
+   With no pending ask, rules 3 and 4 work as today (follow-up, correction, new question).
+
+   **Timeout.** One pending ask at a time; the existing 10 s stated-assumption timer stays. If a real reply arrives while the timeout answer is still streaming, cancel it through the existing `answer_corrected` path and write again with the reply (the reply counts). After the timeout answer completes, a reply is an ordinary follow-up.
+
+   **Skipped suggestions.** A suggestion the interviewer never answers costs nothing. The same clarification (normalised text) is never shown twice in one exchange; a repeat is handled like a fourth ask.
+
+   **Candidate-initiated clarifications** (the candidate asking a different question aloud) are out of scope for Phase 6. No dependency on microphone speaker attribution.
+
+   **Prompt.** Both routes reach `runWhatShouldISay`. Today the writer adds an `Ask:` instruction (`IntelligenceEngine.ts`, `handleSuggestionTriggerInner`) while the V3 composer says "Never ask the user to repeat, rephrase or clarify..." (`context-intelligence/generation/prompt-composer.ts`). With the flag on and a Live Brain turn, pass an `allowClarification` option that omits that V3 line for this request only, and choose the instruction from the exchange:
+   - slots left and not deferred: "If a missing detail would materially change the answer and is not already in the conversation, start with Ask: and give one short clarification question. Otherwise answer directly."
+   - cap reached or deferred: "Do not ask a question. State any assumption that matters in one short clause, then answer."
+   The pipeline gets the same option (today it gets no `Ask:` instruction). Manual What to Answer and non-Live-Brain Auto Answer are unchanged.
+
+   **Context into the answer.** `fluxTurnContext` (and the pipeline's `liveBrainNotebook`) carries the original question, corrections, and every asked clarification with its reply. Retrieval queries the original question plus the resolved constraints, never the bare reply ("No."). Mode instructions and reference-file grounding apply unchanged. `exchangeId`, the count and `deferred` are part of the draft `contextKey`, so an eager draft built before a reply or under a different cap is never adopted.
+
+   **Pre-overlay `Ask:` gate.** One hook in `IntelligenceEngine`, used by both routes, where Live Brain tokens are first emitted as `suggested_answer_token`: the streaming token buffer in `runWhatShouldISayInner`, and the adopted-draft reveal in `completeSpeculativeRun`. Hold only until the opening is decided (up to about 16 characters; case-insensitive; tolerant of leading whitespace or markdown; split across chunks). If the opening cannot be `Ask:`, flush and stream normally. If it is `Ask:` and the exchange allows it, show the ask row and record the pending ask. If it is `Ask:` and the cap is reached, the exchange is deferred, or the question repeats an earlier one, nothing reaches the overlay: discard the generation and start the recovery call. `noteWriterClarification` stays for bookkeeping only.
+
+   **Recovery call.** At most one per exchange, only after a suppressed ask. It carries the original question, corrections and all resolved details with the "Do not ask" instruction. If it asks again, errors, or is cancelled, there is no further retry: an ask or error shows the existing answer-failure UI; a cancel shows nothing. The normal path never makes an extra model call.
+
+   **Reconnect and fallback in Phase 6.** Carry-over is deferred. On `endProviderTurn`, a Flux/pipeline handoff, or meeting stop, the exchange is closed: the pending timer is cancelled, a shown ask row stays as it is, and the next confirmed turn starts a fresh exchange. Late output from the closed exchange is dropped by the existing generation guard.
+
+   **Tests** (fake clock and mocked streams, for **both Flux and pipeline**): 0, 1, 2 and 3 clarifications; a fourth `Ask:` split across chunks is suppressed before any overlay token, followed by exactly one recovery call; a recovery that asks again shows the failure UI with no second retry; filler then "No." (filler costs no slot and keeps the timer; "No." resolves the right ask); deferral; a correction keeps the count and a new question resets it; a repeated clarification is suppressed; timeout racing a real reply; stale output from a cancelled generation; a draft rejected after the count changes; the final answer context includes every resolved constraint; the retrieval query uses the original question plus constraints; prompt-level tests for slots left, cap reached and flag off (V3 line present, no `Ask:` instruction on pipeline); flag off leaves clear-question streaming and retrieval identical; a request counter showing no extra model call on the normal path; the gate's first-text overhead measured on clear questions.
+
+   **Live acceptance** (Windows `dev:agent`, Flux + `codex-cli`, then forced pipeline fallback): S8 smoke (one ask appears; the timeout answers under an assumption) and S13 (scripted multi-turn: each reply uncovers a different consequential constraint; the final answer uses all of them; no fourth ask). Physical macOS verification is a separate open item.
+
 ---
 
 ## Test corpus (Phase 0 creates; all phases use)
@@ -321,6 +359,7 @@ Tasks:
 | S10 | 70-minute interview | Rollovers invisible; follow-ups keep context |
 | S11 | Network drop 10 s / socket kill / quota exhausted | Fallback; no stuck UI |
 | S12 | "mm-hmm", "okay", "right" during an answer | Answer not cancelled |
+| S13 | "How would you scale this order service?" then, one per ask: "10,000 requests per second, mostly reads." / "No, stock can be a few seconds stale." / "Single region." | `liveBrainMultiClarify` on: up to three asks, each following the last reply; never a fourth; the final answer uses every stated constraint |
 
 ---
 

@@ -182,3 +182,33 @@ test('Mantle Claude Messages sends native thinking options and omits thinking fr
         api: 'mantle-messages', streaming: false, parameters: { thinking: { type: 'adaptive' } },
     }, { text: 'Question' })), ['Visible']);
 });
+
+test('A bare model ID that needs an inference profile is retried with the Region geography profile', async () => {
+    const { bedrockModelCandidates } = require('../../../dist-electron/electron/llm/BedrockProvider');
+    assert.deepEqual(bedrockModelCandidates('amazon.nova-lite-v1:0', 'us-east-1'),
+        ['amazon.nova-lite-v1:0', 'us.amazon.nova-lite-v1:0', 'global.amazon.nova-lite-v1:0']);
+    assert.deepEqual(bedrockModelCandidates('global.amazon.nova-2-lite-v1:0', 'eu-west-1'),
+        ['global.amazon.nova-2-lite-v1:0', 'eu.amazon.nova-2-lite-v1:0', 'amazon.nova-2-lite-v1:0']);
+    assert.deepEqual(bedrockModelCandidates('arn:aws:bedrock:us-east-1:1:inference-profile/x', 'us-east-1'),
+        ['arn:aws:bedrock:us-east-1:1:inference-profile/x']);
+    const tried = [];
+    const requestHandler = {
+        async handle(request) {
+            const id = decodeURIComponent(request.path.split('/')[2]);
+            tried.push(id);
+            if (id !== 'us.amazon.nova-lite-v1:0') {
+                return { response: { statusCode: 400, headers: { 'content-type': 'application/json', 'x-amzn-errortype': 'ValidationException' },
+                    body: Readable.from([json({ message: 'on-demand throughput isn’t supported' })]) } };
+            }
+            return { response: { statusCode: 200, headers: { 'content-type': 'application/json' },
+                body: Readable.from([json({ output: { message: { role: 'assistant', content: [{ text: 'OK' }] } }, stopReason: 'end_turn' })]) } };
+        },
+        destroy() {},
+    };
+    const text = await collect(streamBedrock(connection, 'amazon.nova-lite-v1:0', { api: 'converse', streaming: false }, { text: 'hi' }, undefined, requestHandler));
+    assert.deepEqual(text, ['OK']);
+    assert.deepEqual(tried, ['amazon.nova-lite-v1:0', 'us.amazon.nova-lite-v1:0']);
+    tried.length = 0;
+    await collect(streamBedrock(connection, 'amazon.nova-lite-v1:0', { api: 'converse', streaming: false }, { text: 'hi' }, undefined, requestHandler));
+    assert.deepEqual(tried, ['us.amazon.nova-lite-v1:0'], 'the working ID is remembered');
+});

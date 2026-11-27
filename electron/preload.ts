@@ -2900,7 +2900,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   refreshBedrockModels: () => ipcRenderer.invoke('bedrock:refresh-models'),
   setBedrockModelOptions: (id: string, options: import('../src/types/bedrock').BedrockModelOptions) =>
     ipcRenderer.invoke('bedrock:set-model-options', id, options),
-  testBedrockModel: (id: string) => ipcRenderer.invoke('bedrock:test-model', id),
+  testBedrockModel: (id?: string) => ipcRenderer.invoke('bedrock:test-model', id),
   setModel: (modelId: string) => ipcRenderer.invoke('set-model', modelId),
   setDefaultModel: (modelId: string) => ipcRenderer.invoke('set-default-model', modelId),
   getFastModel: () => ipcRenderer.invoke('get-fast-model'),

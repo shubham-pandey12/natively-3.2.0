@@ -56,6 +56,9 @@ The full CI run stopped in the Electron test suite with failures. Six failing so
 
 ## Decisions log
 
+- 2026-11-27 — **D4 revised (user):** up to three clarifications per original question, one at a time, counted on the interviewer's reply, cap enforced in app code at the `Ask:` sentinel. Added as Later phase 6 in IMPLEMENTATION_PLAN.md (Flux + pipeline first).
+- 2026-11-27 — **Later phase 6 contract revised after review (user):** one recovery generation allowed after a suppressed fourth `Ask:`; a meeting-level `ClarificationExchange` shared by Flux and pipeline; a pre-overlay `Ask:` gate in IntelligenceEngine; flag `liveBrainMultiClarify`; candidate-initiated clarifications and reconnect carry-over deferred; S13 added.
+
 - 2026-11-25 — Design approved by user: Gemini Live free as main brain; current Natively response style; clarifications on; text-only output; OpenAI Realtime optional backup; pipeline always-available fallback; feature flag off by default.
 - 2026-11-25 — Activation: "Live Brain" switch in Settings → General directly below Auto Answer. On → Live Brain owns automatic answering (Auto Answer dispatch suppressed); Off → existing Natively unchanged. Independent of the Auto Answer switch; not Pro-gated; reuses existing Gemini/OpenAI keys; advanced options in Settings → Intelligence.
 - 2026-11-25 — UI: Live Brain answers use exactly the same overlay UI as Auto Answer (same row, styles, delivery). Only minimal additions from existing styles: "Ask:" label, dimmed outdated row + "Updated" label, interviewer-speaking marker. Settings row mirrors the Auto Answer row.
