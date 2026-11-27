@@ -322,16 +322,18 @@ test('D17: Deepgram Flux streams answers through IntelligenceEngine, cancels on 
     assert.equal(runs[0].options.liveBrain.suppressQuestionRow, true);
     assert.ok(overlay.some(e => e.liveBrainQuestion?.text === 'How do you scale reads?' && e.liveBrainQuestion.generationId === runs[0].options.liveBrain.generationId));
 
-    // Correction cancels generation 1 and feeds generation 2.
+    // Correction cancels generation 1 and feeds generation 2; outdated folds on replacement first text.
     flux.emit({ type: 'interviewer_transcript', text: 'Actually, assume write-heavy.', final: true, at: 30 });
     flux.emit({ type: 'decision', decisionId: 'f2', action: 'answer', question: 'Actually, assume write-heavy.', at: 31 });
     assert.deepEqual(cancellations, ['answer_corrected']);
-    assert.equal(outdated.length, 1);
+    assert.equal(outdated.length, 0);
     runs[0].resolve(null);
     await flush();
     assert.equal(runs.length, 2);
     assert.equal(overlay.filter(event => event.liveBrainStatus).at(-1)?.liveBrainStatus, 'Thinking');
     runs[1].options.outcomeOut.value = { status: 'success' };
+    runs[1].options.liveBrain.onFirstText?.(35);
+    assert.equal(outdated.length, 1);
     runs[1].options.liveBrain.onComplete?.('Use sharded write logs.');
     runs[1].resolve('Use sharded write logs.');
     await flush();
@@ -732,6 +734,66 @@ test('Phase 2: provider/route change, reconnect, and meeting end cancel active p
     await flush();
     assert.equal(h.answers.length, priorAnswerCount);
     assert.equal(h.sessionAssistantWrites.length, priorSessionWrites);
+});
+
+test('Phase 3: Flux filler mid-stream, correction before first token, stale drops, and fallback mid-replacement', async t => {
+    const h = fluxEngineRig(t);
+    const q1Gate = Promise.withResolvers();
+    const q2Gate = Promise.withResolvers();
+    const q3Gate = Promise.withResolvers();
+
+    h.queuedStreams.push(
+        async function* () {
+            yield 'First useful chunk for Redis.';
+            await q1Gate.promise;
+            yield ' Late stale chunk that must be dropped.';
+        },
+        async function* () {
+            await q2Gate.promise;
+            yield 'Replacement without cache.';
+        },
+        async function* () {
+            await q3Gate.promise;
+            yield 'Third attempt.';
+        },
+    );
+
+    // 1. Start streaming Q1 and verify filler ("M" partial -> "MM.") does NOT cancel Q1 or create a bubble.
+    h.flux.emit({ type: 'interviewer_transcript', text: 'How should we cache products?', final: true, at: 10 });
+    h.flux.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'How should we cache products?', turnKey: 'flux-p2:c1:t0', at: 11 });
+    await untilCondition(() => h.streamCalls.length === 1);
+    await untilCondition(() => h.overlay.some(e => e.liveBrainQuestion?.text === 'How should we cache products?'));
+
+    h.flux.emit({ type: 'interviewer_speech_started', at: 15 });
+    h.flux.emit({ type: 'interviewer_transcript', text: 'M', final: false, at: 16 });
+    h.flux.emit({ type: 'interviewer_transcript', text: 'MM.', final: true, at: 17 });
+    h.flux.emit({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'MM.', turnKey: 'flux-p2:c1:t1', at: 18 });
+    await flush();
+    assert.equal(h.streamCalls[0].signal.aborted, false);
+    assert.equal(h.overlay.some(e => e.liveBrainQuestion?.text === 'M' || e.liveBrainQuestion?.text === 'MM.'), false);
+
+    // 2. Confirmed correction mid-stream cancels Q1 and drops late Q1 text/completion.
+    h.flux.emit({ type: 'interviewer_speech_started', at: 20 });
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Actually, no caching allowed.', final: true, at: 25 });
+    h.flux.emit({ type: 'decision', decisionId: 'd3', action: 'answer', question: 'Actually, no caching allowed.', turnKey: 'flux-p2:c1:t2', at: 26 });
+    await untilCondition(() => h.streamCalls[0].signal.aborted);
+    q1Gate.resolve();
+    await untilCondition(() => h.streamCalls.length === 2);
+    assert.equal(h.answers.length, 0);
+
+    // 3. Before Q2 emits its first token, Q3 (correction) supersedes Q2.
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Use an index instead.', final: true, at: 30 });
+    h.flux.emit({ type: 'decision', decisionId: 'd4', action: 'answer', question: 'Use an index instead.', turnKey: 'flux-p2:c1:t3', at: 31 });
+    await untilCondition(() => h.streamCalls[1].signal.aborted);
+    q2Gate.resolve();
+    await untilCondition(() => h.streamCalls.length === 3);
+
+    // 4. Fatal error mid-replacement triggers fallback to pipeline without leaking Q3.
+    h.flux.emit({ type: 'error', code: 'network', fatal: true, at: 35 });
+    await untilCondition(() => h.streamCalls[2].signal.aborted);
+    q3Gate.resolve();
+    await flush();
+    assert.equal(h.answers.length, 0);
 });
 
 async function untilCondition(pred, timeoutMs = 2_000) {

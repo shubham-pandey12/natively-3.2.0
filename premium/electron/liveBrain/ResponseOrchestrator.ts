@@ -5,8 +5,12 @@ export type AnswerCompletion = 'completed' | 'cancelled' | 'failed';
 
 export interface AnswerWriterPort {
     write(
-        request: { question: string; replacesAutomaticAnswer: boolean; turnKey?: string },
-        options?: { suppressQuestionRow?: boolean },
+        request: {
+            question: string;
+            replacesAutomaticAnswer: boolean;
+            turnKey?: string;
+        },
+        options?: { suppressQuestionRow?: boolean; onFirstText?: (at: number) => void },
     ): {
         generationId: number;
         done: Promise<AnswerCompletion>;
@@ -45,6 +49,8 @@ interface CurrentAnswer {
     speaking: boolean;
     /** D14: the interviewer spoke while this answer's text was still streaming. */
     cutOff?: boolean;
+    /** Superseded answer to fold when the replacement first shows text. */
+    pendingOutdatedGenerationId?: number;
 }
 
 interface TextResponse {
@@ -89,9 +95,9 @@ const MID_STREAM_MS = 1_500;
 const STT_QUESTION_MAX_AGE_MS = 8_000;
 // D15: an interviewer turn made only of these words is filler. An answer to it
 // is not shown (the model sometimes repeats its previous answer after a filler
-// interrupted its audio turn).
-const FILLER_WORD = String.raw`(?:m+-?h+m+|h+m+|u+h+-?h+u+h+|uh+|um+|okay|ok|right|yeah|yep|yes|sure|got it|i see|alright|all right|cool|nice|good|great|thank you|thanks)`;
-const FILLER_ONLY = new RegExp(String.raw`^(?:${FILLER_WORD}[\s,.!?-]*)+$`, 'i');
+// interrupted its audio turn). Includes Flux/Gemini "MM." / "mm" / "M.M." / "M" variants.
+const FILLER_WORD = String.raw`(?:m+-?h+m+|m+\.m+|m+|h+m+|u+h+-?h+u+h+|uh+|um+|okay|ok|right|yeah|yep|yes|sure|got it|i see|alright|all right|cool|nice|good|great|thank you|thanks)`;
+const FILLER_ONLY = new RegExp(String.raw`^${FILLER_WORD}(?:[\s,.!?-]+${FILLER_WORD})*[\s,.!?-]*$`, 'i');
 
 export function isFillerOnly(text: string): boolean {
     return FILLER_ONLY.test(text.trim());
@@ -213,7 +219,7 @@ export class ResponseOrchestrator<Timer> {
     replaceWithExternalAnswer(): void {
         this.clearClarification();
         this.ports.answerWriter?.cancelDraft?.('external_answer');
-        this.replaceCurrent();
+        this.supersedeForNewTurn(true);
     }
 
     private handleDecision(event: Extract<LiveBrainEvent, { type: 'decision' }>): void {
@@ -233,9 +239,16 @@ export class ResponseOrchestrator<Timer> {
                     return;
                 }
                 this.clearClarification();
-                const replacesAutomaticAnswer = this.replaceCurrent();
+                const previous = this.current;
+                const deferWriterOutdated = previous?.source === 'writer' && previous.completedAt === undefined;
+                const replacesAutomaticAnswer = deferWriterOutdated
+                    ? this.cancelActiveWriterForCorrection()
+                    : this.supersedeForNewTurn(true);
+                const pendingOutdatedGenerationId = replacesAutomaticAnswer
+                    ? (previous?.pendingOutdatedGenerationId ?? previous?.generationId)
+                    : undefined;
                 this.closeTextResponse();
-                this.write(question, replacesAutomaticAnswer, event.turnKey);
+                this.write(question, replacesAutomaticAnswer, event.turnKey, pendingOutdatedGenerationId);
                 break;
             }
             case 'ask': {
@@ -367,7 +380,23 @@ export class ResponseOrchestrator<Timer> {
             if (clear) this.current = undefined;
             return false;
         }
+        if (previous?.source === 'writer' && previous.completedAt !== undefined && !previous.cutOff) {
+            this.setSpeaking(previous, false);
+            if (clear) this.current = undefined;
+            return false;
+        }
         return clear ? this.replaceCurrent() : this.markCurrentOutdated();
+    }
+
+    private cancelActiveWriterForCorrection(): boolean {
+        const previous = this.current;
+        if (!previous) return false;
+        this.setSpeaking(previous, false);
+        this.current = undefined;
+        if (previous.source === 'writer' && previous.completedAt === undefined) {
+            this.ports.answerWriter?.cancel('answer_corrected');
+        }
+        return true;
     }
 
     private replaceCurrent(): boolean {
@@ -380,27 +409,55 @@ export class ResponseOrchestrator<Timer> {
         return replaced;
     }
 
-    private write(question: string, replacesAutomaticAnswer: boolean, turnKey?: string): void {
+    private write(
+        question: string,
+        replacesAutomaticAnswer: boolean,
+        turnKey?: string,
+        pendingOutdatedGenerationId?: number,
+    ): void {
         const writer = this.ports.answerWriter;
         if (!writer) return;
         this.askPending = false;
         const bubble = this.question && this.question.generationId === undefined ? this.question : undefined;
         if (bubble) this.closeQuestion();
         const request = { question, replacesAutomaticAnswer, ...(turnKey ? { turnKey } : {}) };
-        const { generationId, done } = bubble
-            ? writer.write(request, { suppressQuestionRow: true })
+        const answer: CurrentAnswer = {
+            generationId: 0,
+            source: 'writer',
+            outdated: false,
+            speaking: false,
+            ...(pendingOutdatedGenerationId !== undefined ? { pendingOutdatedGenerationId: pendingOutdatedGenerationId } : {}),
+        };
+        const writeOptions: { suppressQuestionRow?: boolean; onFirstText?: (at: number) => void } = {
+            ...(bubble ? { suppressQuestionRow: true } : {}),
+            ...(pendingOutdatedGenerationId !== undefined ? {
+                onFirstText: () => {
+                    if (answer.generationId !== 0 && this.current !== answer) return;
+                    const toFold = answer.pendingOutdatedGenerationId;
+                    answer.pendingOutdatedGenerationId = undefined;
+                    if (toFold !== undefined) {
+                        this.ports.overlay.setOutdated(toFold, true);
+                    }
+                },
+            } : {}),
+        };
+        const { generationId, done } = Object.keys(writeOptions).length > 0
+            ? writer.write(request, writeOptions)
             : writer.write(request);
+        answer.generationId = generationId;
         if (bubble) {
             bubble.generationId = generationId;
             this.emitQuestion(bubble);
         }
-        const answer: CurrentAnswer = { generationId, source: 'writer', outdated: false, speaking: false };
         this.current = answer;
         const settle = (status: AnswerCompletion) => {
             if (this.current !== answer) return;
             this.setSpeaking(answer, false);
-            if (status === 'completed') answer.completedAt = this.ports.clock.now();
-            else this.current = undefined;
+            if (status === 'completed') {
+                answer.completedAt = this.ports.clock.now();
+                return;
+            }
+            this.current = undefined;
         };
         void done.then(settle, () => settle('failed'));
     }

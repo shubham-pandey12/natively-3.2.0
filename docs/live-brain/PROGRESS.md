@@ -21,6 +21,7 @@
 | 9 — Deepgram Flux + My AI Provider (D17) | ✅ Done | Implemented `'deepgram-flux'` standalone `/v2/listen` STT (`flux-general-multi`) routed into Natively's existing `AnswerWriter` / `IntelligenceEngine` streaming answer engine, supporting all configured AI Providers (OpenAI, Claude, Gemini, Groq, OpenRouter, Codex CLI, Antigravity, local Ollama, DeepSeek, NVIDIA NIM, custom). All builds, typechecks, unit/component tests, and Windows side-by-side live benchmarks passed. The later baseline covers Windows Electron replay. Physical macOS verification remains open. |
 | Baseline 1 — Flux vs GPT Realtime & Gemini Live | ✅ Done | Measured Windows Electron app (`dev:agent` WASAPI loopback) on 6 synthetic interview scenarios across `deepgram-flux` (`codex-cli` and `openai/gpt-4o-mini`) and `gemini-live` (`gemini-3.1-flash-live-preview`). OpenAI Realtime (`gpt-realtime-2.1`) setup was rejected on the available account and no Realtime model appeared in its model list. Documented the filler duplicate, completed-answer fold, and the clarification scenario that could not be reached. Physical macOS verification remains open. |
 | Baseline 2 — Flux Private Draft | ✅ Done | Verified on Windows Electron (`dev:agent` WASAPI loopback, `deepgram-flux` / `flux-general-multi` + `codex-cli`, Technical Interview, `full` prompt) vs fresh `5c092319` baseline worktree. S1 first overlay text dropped from `6,024` / `6,628 ms` to `2,471` / `2,863 ms` (smoke `2,322 ms`); S2 pause held with 2–3 `turn_resumed` draft discards and 1 final answer (`4,863` / `4,054 ms` vs `6,290` / `4,499 ms`); S4 cancelled Q1 cleanly with no stale chunks (`6,329` / `7,966 ms` vs `6,554` / `3,517 ms`, cause of the timing difference unverified). All 126 Live Brain tests, build, and typechecks pass. Physical macOS verification remains open. |
+| Baseline 3 — Flux Interruptions & Corrections | ✅ Done | Reproduced S3 filler bubble (`"Emma"` → `"MM"` → `"MM."` → `"Mhmm."`), added Flux short-opening-partial hold (`DeepgramFluxBrain.ts`) + deferred `setOutdated` until replacement first text (`ResponseOrchestrator.ts`), and reran S2–S5 (`n=2`, `deepgram-flux` + `codex-cli`). S3 produced `0/2` filler bubbles and `0` duplicate answers; S4 kept Q1 visible until replacement first text (`-21 ms` before overlay batch); S5 kept base answers visible (`outdated: false` in `2/2`); S2 held the 1.2 s pause (`5,909` / `5,714 ms`, `2/1/1` drafts). All `132/132` Live Brain tests, builds, typechecks, `test:lib`, and `test:components` pass. Physical macOS verification remains open. |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
 
@@ -821,6 +822,10 @@ Fixed a private-draft path that could abort an active Assist request before conf
 
 The final review recalculated first-text and replacement times from both saved Electron JSON summaries. All six Phase 2 runs reused a draft. The paused clips each yielded one answer and discarded five resumed drafts across the two runs. Both original correction streams were superseded and both replacements completed. The replay demonstrates faster first text for the complete and paused questions on this route. It does not establish a correction-latency improvement.
 
+### Independent Phase 3 review
+
+The Windows replay still recorded a filler-only question bubble in one of two runs. Neither run produced a duplicate answer. The 1.2-second paused clip held together, but first-text time rose to 7.44–7.53 s from Phase 2’s 4.05–4.86 s. The samples do not isolate the reason. Tightened the shared filler expression to require separators between filler words, avoiding ambiguous splits of long repeated letters. That initial review left Phase 3 open until the filler-bubble rerun below.
+
 ## Open risks
 
 - Gemini native-audio models may not support TEXT output → use output transcription (Phase 0 decides).
@@ -828,3 +833,99 @@ The final review recalculated first-text and replacement times from both saved E
 - ~15-min Gemini session limit → rollover correctness.
 - Timing changes in `SimpleAutoAnswer.ts` (Phase 1).
 - macOS cannot be physically tested by the user → `Requires physical macOS verification`.
+
+## Baseline Phase 3 — Improve Flux Interruptions and Corrections (Windows, 2026-11-27)
+
+Started from commit `28aec5aa` on `feat/live-brain`. Scope: `deepgram-flux` + My AI Provider (`ResponseOrchestrator.ts`, `AnswerWriter.ts`).
+
+### Changes made
+
+1. **Filler variants & partial growth (`premium/electron/liveBrain/ResponseOrchestrator.ts`):**
+   - Extended `FILLER_WORD` to match `m+` and `m+\.m+`, suppressing Flux/Gemini filler variants (`"MM."`, `"mm"`, `"M.M."`, `"Mhmm."`) and single-letter `"M"` partials in `emitQuestion`, `eager_end_of_turn`, and `handleDecision`.
+   - Partials that grow into real questions (e.g. `"M"` → `"Make it stateless."`) appear once they exceed filler; pending `Ask:` clarifications still allow `"Yes."`.
+2. **Completed answers preserved on ordinary follow-ups (`premium/electron/liveBrain/ResponseOrchestrator.ts`):**
+   - `handleDecision` (`case 'answer'`) and `replaceWithExternalAnswer()` now use `supersedeForNewTurn(true)` instead of `replaceCurrent()`, and `supersedeForNewTurn` treats `source: 'writer'` answers with `completedAt !== undefined && !cutOff` the same as completed `source: 'text'` answers — keeping them visible (`outdated: false`, `replacesAutomaticAnswer: false`) rather than folding them under the 20 s `RECENT_ANSWER_MS` rule.
+3. **Replacement pre-text failure preservation (`ResponseOrchestrator.ts`, `AnswerWriter.ts`):**
+   - `ResponseOrchestrator.write()` passes `onFirstText` via `AnswerWriter.write` options (wired for both fresh runs and adopted private drafts) and tracks `restoresOutdatedGenerationId`. If a replacement fails or is cancelled mid-fallback before showing useful text, `overlay.setOutdated(restoresOutdatedGenerationId, false)` restores the useful text already on screen.
+
+### New unit & regression tests (`131/131` passing in `npm run test:live-brain`)
+
+- `ResponseOrchestrator.test.mjs`:
+  - `Phase 3: a completed writer answer {1s, 10s, 25s} ago stays visible on an ordinary follow-up` (updated from the old 20 s rule; `ask` test updated to fold in-flight streaming answers).
+  - `Phase 3: Flux/Gemini filler variants and initial M partial are suppressed, while filler-like real questions pass` (`"MM."`, `"mm"`, `"M.M."`, `"Mhmm."`, `"M"` vs `"MySQL?"`, `"MongoDB or Postgres?"`, `"M.I.T.?"`, `"Make it stateless."`, `"Memory limit?"`, `"Okay, how does caching work?"`, `"Yes, what about offline?"`).
+  - `Phase 3: initial M partial growing into a real question shows normally, while M -> MM. stays hidden`.
+  - `Phase 3: replacement failure before showing text restores outdated flag; repeated corrections preserve original until text arrives`.
+- `Meeting.test.mjs`:
+  - `Phase 3: Flux filler mid-stream, correction before first token, stale drops, and fallback mid-replacement`.
+
+### Windows Electron replay — 2026-11-27
+
+Replayed Scenarios 2, 3, 4, and 5 (`n=2` reps each, fresh meetings) on `dev:agent` (`NATIVELY_E2E=1`, `NATIVELY_PROMPT_DEBUG=1`) with `deepgram-flux` (`flux-general-multi`) + `codex-cli` (`codex-cli`), Technical Interview mode, `promptVariant: full`:
+
+~~~powershell
+$env:NATIVELY_E2E='1'; $env:NATIVELY_PROMPT_DEBUG='1'; npm run dev:agent
+node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase3.mjs" --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli --reps 2 --only 2,3,4,5
+~~~
+
+| Scenario | Rep | EoT / EoT→1st / Speech→1st | Drafts (s/r/d) | Visible answers & state |
+|---|---:|---|---|---|---|
+| 2. 1.2 s pause (`n=2`) | 1 | `2,360` / `5,167` / **`7,531 ms`** | `2 / 0 / 2` | `1` answer (`286` chunks); no answer during pause |
+| 2. 1.2 s pause (`n=2`) | 2 | `3,094` / `4,347` / **`7,443 ms`** | `3 / 1 / 2` | `1` answer (`287` chunks); no answer during pause |
+| 3. `"Mm-hmm"` mid-stream (`n=2`) | 1 | Q1: `2,819` / `4,094` / **`6,916 ms`** | `3 / 1 / 2` | `1` answer (`232` chunks, `outdated: false`); zero duplicate/cancel; `q2: "MM."` (`gid: null`) appeared from an intermediate non-filler partial |
+| 3. `"Mm-hmm"` mid-stream (`n=2`) | 2 | Q1: `1,892` / `5,439` / **`7,333 ms`** | `3 / 1 / 2` | `1` answer (`204` chunks, `outdated: false`); zero filler bubble (`q1` only), zero duplicate/cancel |
+| 4. Correction mid-stream (`n=2`) | 1 | Corr: `2,244` / `3,479` / **`5,723 ms`** | `2 / 2 / 0` | Q1 (`262` chunks) cancelled (`doneMs: null`, `outdated: true`); replacement (`79` chunks, `updated: true`), zero stale chunks (`-606` to `-2,243 ms` vs Phase 2) |
+| 4. Correction mid-stream (`n=2`) | 2 | Corr: `2,228` / `3,001` / **`5,229 ms`** | `2 / 2 / 0` | Q1 (`245` chunks) completed at `8,265 ms` (294 ms before Corr EoT) so kept visible (`outdated: false`); Q2 (`67` chunks), zero stale chunks (`-1,100` to `-2,737 ms` vs Phase 2) |
+| 5. Follow-up after completed (`n=2`) | 1 | FU: `1,507` / `1,439` / **`2,946 ms`** | `2 / 2 / 0` | `2` answers (`264` + `62` chunks); **Base kept visible (`outdated: false`)** |
+| 5. Follow-up after completed (`n=2`) | 2 | FU: `1,564` / `1,411` / **`2,975 ms`** | `2 / 2 / 0` | `2` answers (`264` + `57` chunks); **Base kept visible (`outdated: false`)** |
+
+- **Separation of evidence:** The table above contains full Windows Electron app (`dev:agent` WASAPI loopback) measurements only. Unit/mocked integration tests (`ResponseOrchestrator.test.mjs`, `Meeting.test.mjs`) are tracked separately above.
+- **Note on S3 rep 1:** No duplicate answer or cancellation occurred, though `q2: "MM."` (`gid: null`) appeared once because an intermediate Flux partial briefly differed from the `m+` filler pattern before settling on `"MM."`.
+
+### Validation
+
+- **`npm run test:live-brain`:** `131/131` pass, `0` fail (includes `DeepgramVoiceAgentBrain.test.mjs`, `DeepgramFluxBrain.test.mjs`, `ResponseOrchestrator.test.mjs`, `Meeting.test.mjs`, `LiveBrainSettings.test.mjs`).
+- **`npm run build:electron`:** passed (exit 0).
+- **`npm run typecheck:electron`:** clean (exit 0).
+- **`npm run typecheck:premium`:** clean (exit 0).
+- **`npm run typecheck:ts7`:** clean (exit 0).
+- **`npm run test:lib`:** `3,246` pass, `15` skipped, `0` fail.
+- **`npm run test:components`:** `1,002` pass, `2` skipped, `0` fail.
+- **Tested physically on Windows:** `dev:agent` Windows Electron app (`deepgram-flux` + `codex-cli`).
+- **Reviewed but not executed on macOS. Requires physical macOS verification.**
+
+### Phase 3 verification follow-up (Windows, 2026-11-27)
+
+1. **S3 filler-bubble reproduction trace (`trace_s3.mjs`, `n=3` reps on `deepgram-flux` + `codex-cli`):**
+   - Rep 1 & Rep 2: `q2s=[]` (zero filler bubbles).
+   - Rep 3 reproduced `q2` with exact `liveBrainQuestion` sequence:
+     `{"dt":7797,"questionId":"q2","text":"Emma","done":false}` → `{"dt":7991,"questionId":"q2","text":"MM","done":false}` → `{"dt":8110,"questionId":"q2","text":"MM.","done":false}` → `{"dt":8310,"questionId":"q2","text":"Mhmm.","done":false}` → `{"dt":10056,"questionId":"q2","text":"Mhmm.","done":true}`.
+   - Cause: Flux emitted `"Emma"` as the first single-word partial for `"Mm-hmm."`, setting `bubble.shown = true` before revising to `"MM"` / `"MM."` / `"Mhmm."`.
+2. **Fixes applied:**
+   - **Flux short-opening-partial hold (`premium/electron/liveBrain/brains/DeepgramFluxBrain.ts`):** on `Update` when `lastPartialText` is empty, hold single-word partials shorter than 8 characters (`!/\s/.test(transcript) && transcript.length < 8`) until multi-word, `>= 8` chars, or `EndOfTurn` (`final: true`). Added `DeepgramFluxBrain.test.mjs` regression for `"Emma"` → `"MM"` → `"MM."` → `"Mhmm."` and `"Emma"` → `"Emma, how do you scale?"`.
+   - **Deferred `outdated` fold (`premium/electron/liveBrain/ResponseOrchestrator.ts`):** on confirmed correction of an in-flight `writer` answer, cancel the superseded stream (`answer_corrected`) and clear `speaking`, but keep the old answer visible (`outdated: false`) until `onFirstText` fires on the replacement. If the replacement fails before showing text, `setOutdated(..., true)` is never sent.
+3. **S2 paused-question latency check:**
+   - Earlier Phase 3 run (`7,531` / `7,443 ms`) had `2/0/2` drafts in rep 1 (final turn did not reuse a draft, `EoT → 1st = 5,167 ms`) and `EoT = 3,094 ms` + `EoT → 1st = 4,347 ms` in rep 2 (`codex-cli` subprocess variance).
+   - Rerun below (`2/1/1` drafts reused in both reps): **`5,909 ms`** (`EoT 2,097` + `EoT→1st 3,812 ms`) and **`5,714 ms`** (`EoT 2,950` + `EoT→1st 2,764 ms`), `1` answer each (`254` / `243` chunks), no premature answer during pause.
+4. **Rerun S2–S5 Windows Electron replay (`n=2` per scenario, `deepgram-flux` + `codex-cli`):**
+
+| Scenario | Rep | EoT / EoT→1st / Speech→1st | Drafts (s/r/d) | Visible answers & state |
+|---|---:|---|---|---|---|
+| 2. 1.2 s pause (`n=2`) | 1 | `2,097` / `3,812` / **`5,909 ms`** | `2 / 1 / 1` | `1` answer (`254` chunks); no answer during pause |
+| 2. 1.2 s pause (`n=2`) | 2 | `2,950` / `2,764` / **`5,714 ms`** | `2 / 1 / 1` | `1` answer (`243` chunks); no answer during pause |
+| 3. `"Mm-hmm"` mid-stream (`n=2`) | 1 | `—` / `—` / **`6,415 ms`** | `3 / 1 / 2` | `1` answer (`191` chunks, `outdated: false`); **zero filler bubble (`q1` only)**, zero duplicate/cancel |
+| 3. `"Mm-hmm"` mid-stream (`n=2`) | 2 | `—` / `—` / **`9,264 ms`** | `2 / 1 / 1` | `1` answer (`261` chunks, `outdated: false`); **zero filler bubble (`q1` only)**, zero duplicate/cancel |
+| 4. Correction mid-stream (`n=2`) | 1 | Corr: `2,098` / `2,467` / **`4,565 ms`** | `2 / 2 / 0` | Q1 (`1` chunk, `codex-cli` slow start) finished 29 ms before Corr EoT (`outdated: false`); Q2 (`63` chunks), zero stale chunks |
+| 4. Correction mid-stream (`n=2`) | 2 | Corr: `2,092` / `4,892` / **`6,984 ms`** | `3 / 2 / 1` | Q1 (`254` chunks) cancelled (`doneMs: null`), kept visible while Q2 generated, folded at `14,530 ms` (`21 ms` before Q2 overlay `firstTextAt` `14,551 ms`); Q2 (`73` chunks, `updated: true`), zero stale chunks |
+| 5. Follow-up after completed (`n=2`) | 1 | FU: `1,312` / `1,741` / **`3,053 ms`** | `2 / 2 / 0` | `2` answers (`260` + `71` chunks); **Base kept visible (`outdated: false`)** |
+| 5. Follow-up after completed (`n=2`) | 2 | FU: `1,446` / `1,696` / **`3,142 ms`** | `2 / 2 / 0` | `2` answers (`286` + `60` chunks); **Base kept visible (`outdated: false`)** |
+
+5. **Final validation after all edits:**
+   - `npm run test:live-brain`: **`132/132`** pass, `0` fail.
+   - `npm run build:electron`: passed (exit 0).
+   - `npm run typecheck:electron`, `typecheck:premium`, `typecheck:ts7`: all clean (exit 0).
+   - `npm run test:lib`: **`3,246`** pass, `15` skipped, `0` fail.
+   - `npm run test:components`: **`1,002`** pass, `2` skipped, `0` fail.
+   - **Tested physically on Windows:** `dev:agent` Windows Electron app (`deepgram-flux` + `codex-cli`).
+   - **Reviewed but not executed on macOS. Requires physical macOS verification.**
+
+Independent final review checked the saved Emma filler trace and Windows S2–S5 rerun summaries. Added a generation guard and regression assertion so a late first-text notification from a cancelled replacement cannot fold the earlier answer. The Electron build, all 132 Live Brain tests, and the 30-test orchestrator rerun passed.

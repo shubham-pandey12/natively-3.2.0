@@ -49,24 +49,56 @@ async function rig() {
     return { brain, clock, calls, completions, orchestrator, decision };
 }
 
-test('an answer decision writes once; a second decision folds and cancels the streaming draft', async () => {
-    const h = await rig();
-    h.decision('answer', { question });
-    assert.deepEqual(h.calls, [['write', { question, replacesAutomaticAnswer: false }]]);
-    h.decision('answer', { question: 'Use MongoDB for the catalog.' });
-    assert.deepEqual(h.calls.slice(1), [
-        ['outdated', 1, true],
+test('an answer decision writes once; a second decision cancels the streaming draft and folds after replacement first text', async () => {
+    const brain = new FakeLiveBrain();
+    const clock = new FakeClock();
+    const calls = [];
+    const completions = [];
+    const firstTextCallbacks = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        answerWriter: {
+            write(req, opts) {
+                calls.push(['write', req]);
+                firstTextCallbacks.push(opts?.onFirstText);
+                const completion = Promise.withResolvers();
+                completions.push(completion);
+                return { generationId: completions.length, done: completion.promise };
+            },
+            cancel: reason => calls.push(['cancel', reason]),
+        },
+        overlay: {
+            showAsk: payload => calls.push(['ask', payload]),
+            setOutdated: (...args) => calls.push(['outdated', ...args]),
+            setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
+            showText: payload => calls.push(['text', payload]),
+        },
+    });
+    brain.onEvent(event => orchestrator.handleEvent(event));
+    await brain.start({
+        sessionId: 'test', instructions: '', recentTurns: [], signal: new AbortController().signal,
+        notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 },
+    });
+    const decision = (action, data = {}) => brain.emit({ type: 'decision', decisionId: `d${calls.length + 1}`, action, at: clock.now(), ...data });
+
+    decision('answer', { question });
+    assert.deepEqual(calls, [['write', { question, replacesAutomaticAnswer: false }]]);
+    decision('answer', { question: 'Use MongoDB for the catalog.' });
+    // Old answer stays visible (not outdated) until replacement emits first text.
+    assert.deepEqual(calls.slice(1), [
         ['cancel', 'answer_corrected'],
         ['write', { question: 'Use MongoDB for the catalog.', replacesAutomaticAnswer: true }],
     ]);
-    h.completions[0].resolve('cancelled');
+    firstTextCallbacks[1]?.(clock.now());
+    assert.deepEqual(calls.at(-1), ['outdated', 1, true]);
+    completions[0].resolve('cancelled');
     await flush();
-    h.brain.emit({ type: 'interviewer_speech_started', at: h.clock.now() });
-    assert.deepEqual(h.calls.at(-1), ['speaking', 2, true]);
+    brain.emit({ type: 'interviewer_speech_started', at: clock.now() });
+    assert.deepEqual(calls.at(-1), ['speaking', 2, true]);
 });
 
-for (const [elapsed, replaces] of [[10_000, true], [25_000, false]]) {
-    test(`a completed answer ${elapsed / 1000}s ago is ${replaces ? 'eligible' : 'too old'} for replacement`, async () => {
+for (const elapsed of [1_000, 10_000, 25_000]) {
+    test(`Phase 3: a completed writer answer ${elapsed / 1000}s ago stays visible on an ordinary follow-up`, async () => {
         const h = await rig();
         h.decision('answer', { question });
         h.completions[0].resolve('completed');
@@ -74,17 +106,14 @@ for (const [elapsed, replaces] of [[10_000, true], [25_000, false]]) {
         h.clock.advance(elapsed);
         h.decision('answer', { question: 'Add a replica.' });
         assert.deepEqual(h.calls.slice(1), [
-            ...(replaces ? [['outdated', 1, true]] : []),
-            ['write', { question: 'Add a replica.', replacesAutomaticAnswer: replaces }],
+            ['write', { question: 'Add a replica.', replacesAutomaticAnswer: false }],
         ]);
     });
 }
 
-test('ask folds the prior answer and writes the asked question with an assumption after ten seconds', async () => {
+test('ask folds an in-flight streaming answer and writes the asked question with an assumption after ten seconds', async () => {
     const h = await rig();
     h.decision('answer', { question });
-    h.completions[0].resolve('completed');
-    await flush();
     h.decision('ask', { question, clarification });
     assert.deepEqual(h.calls.slice(1), [['outdated', 1, true], ['ask', { askId: 'd2', clarification }]]);
     h.clock.advance(9999);
@@ -516,4 +545,120 @@ test('Phase 2: ResponseOrchestrator skips empty/filler eager turns, allows Yes o
     // Meeting end / reset cancels any active draft cleanly.
     orchestrator.reset();
     assert.ok(calls.some(([k, reason]) => k === 'cancelDraft' && reason === 'auto_disabled_or_meeting_ended'));
+});
+
+test('Phase 3: Flux/Gemini filler variants and initial M partial are suppressed, while filler-like real questions pass', () => {
+    const { isFillerOnly } = require(`${dist}ResponseOrchestrator.js`);
+    for (const filler of ['MM.', 'mm', 'M.M.', 'M.M', 'Mhmm.', 'M', 'M.', 'Mmm...', 'Mm, okay.']) {
+        assert.equal(isFillerOnly(filler), true, `expected filler: ${filler}`);
+    }
+    for (const real of ['MySQL?', 'MongoDB or Postgres?', 'M.I.T.?', 'Make it stateless.', 'Memory limit?', 'Okay, how does caching work?', 'Yes, what about offline?']) {
+        assert.equal(isFillerOnly(real), false, `expected real question: ${real}`);
+    }
+});
+
+test('Phase 3: initial M partial growing into a real question shows normally, while M -> MM. stays hidden', async () => {
+    const h = await rig();
+    const shownQuestions = [];
+    const clock = new FakeClock();
+    const brain = new FakeLiveBrain();
+    const completions = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        answerWriter: {
+            write(req) {
+                const completion = Promise.withResolvers();
+                completions.push(completion);
+                return { generationId: completions.length, done: completion.promise };
+            },
+            cancel: () => {},
+        },
+        overlay: {
+            showAsk: () => {},
+            setOutdated: () => {},
+            setInterviewerSpeaking: () => {},
+            showQuestion: q => shownQuestions.push(q),
+            showText: () => {},
+        },
+    });
+    brain.onEvent(e => orchestrator.handleEvent(e));
+    await brain.start({
+        sessionId: 'test', instructions: '', recentTurns: [], signal: new AbortController().signal,
+        notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 },
+    });
+
+    // 1. "M" -> "MM." stays completely hidden
+    brain.emit({ type: 'interviewer_transcript', text: 'M', final: false, at: 10 });
+    brain.emit({ type: 'interviewer_transcript', text: 'MM.', final: true, at: 20 });
+    brain.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'MM.', at: 21 });
+    assert.equal(shownQuestions.length, 0);
+    assert.equal(completions.length, 0);
+
+    // 2. "M" -> "Make it stateless." shows once it grows past filler
+    brain.emit({ type: 'interviewer_transcript', text: 'M', final: false, at: 30 });
+    assert.equal(shownQuestions.length, 0);
+    brain.emit({ type: 'interviewer_transcript', text: 'Make it stateless.', final: true, at: 40 });
+    assert.equal(shownQuestions.length, 1);
+    assert.equal(shownQuestions[0].text, 'Make it stateless.');
+    brain.emit({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'Make it stateless.', at: 41 });
+    assert.equal(completions.length, 1);
+});
+
+test('Phase 3: replacement failure before showing text restores outdated flag; repeated corrections preserve original until text arrives', async () => {
+    const brain = new FakeLiveBrain();
+    const clock = new FakeClock();
+    const calls = [];
+    const completions = [];
+    const firstTextCallbacks = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        answerWriter: {
+            write(req, opts) {
+                calls.push(['write', req]);
+                firstTextCallbacks.push(opts?.onFirstText);
+                const completion = Promise.withResolvers();
+                completions.push(completion);
+                return { generationId: completions.length, done: completion.promise };
+            },
+            cancel: reason => calls.push(['cancel', reason]),
+        },
+        overlay: {
+            showAsk: payload => calls.push(['ask', payload]),
+            setOutdated: (...args) => calls.push(['outdated', ...args]),
+            setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
+            showText: payload => calls.push(['text', payload]),
+        },
+    });
+    brain.onEvent(e => orchestrator.handleEvent(e));
+    await brain.start({
+        sessionId: 'test', instructions: '', recentTurns: [], signal: new AbortController().signal,
+        notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 },
+    });
+
+    // Answer 1 starts and is superseded by Correction 1, then Correction 2 before text arrives.
+    brain.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Use Redis?', at: 10 });
+    brain.emit({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'Actually no cache.', at: 20 });
+    brain.emit({ type: 'decision', decisionId: 'd3', action: 'answer', question: 'Actually use SQLite.', at: 30 });
+    completions[0].resolve('cancelled');
+    completions[1].resolve('cancelled');
+    await flush();
+
+    // Generation 3 fails BEFORE showing any text -> Generation 1 was never marked outdated!
+    assert.equal(typeof firstTextCallbacks[1], 'function');
+    firstTextCallbacks[1](31); // Late text notification from the cancelled replacement.
+    completions[2].resolve('failed');
+    await flush();
+    assert.deepEqual(calls.filter(([k]) => k === 'outdated'), []);
+
+    // Once a replacement DOES show text, outdated is set on the superseded answer.
+    brain.emit({ type: 'decision', decisionId: 'd4', action: 'answer', question: 'Q1', at: 40 });
+    brain.emit({ type: 'decision', decisionId: 'd5', action: 'answer', question: 'Q2', at: 50 });
+    completions[3].resolve('cancelled');
+    assert.deepEqual(calls.filter(([k]) => k === 'outdated'), []);
+    firstTextCallbacks[4]?.(55);
+    completions[4].resolve('failed');
+    await flush();
+    assert.deepEqual(calls.filter(([k]) => k === 'outdated'), [
+        ['outdated', 4, true],
+    ]);
 });

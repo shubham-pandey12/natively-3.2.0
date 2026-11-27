@@ -323,3 +323,31 @@ test('Phase 2 Flux turnKey scoping: duplicate EagerEndOfTurn dedupes, TurnResume
     const reconnectDecision = events.filter(e => e.type === 'decision').at(-1);
     assert.notEqual(reconnectDecision.turnKey, preReconnectTurnKey);
 });
+
+test('Phase 3: Flux holds single short opening partials (Emma -> MM -> Mhmm.) until multi-word or final', async (t) => {
+    const { brain, events, connections } = await createRig(t);
+    await brain.start(makeContext());
+    const conn = connections[0];
+
+    // Exact reproduced S3 sequence: "Emma" -> "MM" -> "MM." -> "Mhmm." -> EndOfTurn "Mhmm."
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 0, transcript: '' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'Emma' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'MM' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'MM.' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'Mhmm.' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 0, transcript: 'Mhmm.' });
+
+    await until(() => events.filter(e => e.type === 'decision').length === 1);
+    assert.equal(events.filter(e => e.type === 'interviewer_transcript' && !e.final).length, 0);
+    assert.equal(events.filter(e => e.type === 'interviewer_transcript' && e.final).at(-1).text, 'Mhmm.');
+
+    // Genuine question starting with "Emma": held at "Emma", then streams once multi-word.
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'StartOfTurn', turn_index: 1, transcript: '' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'Emma' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'Update', turn_index: 1, transcript: 'Emma, how do you scale?' });
+    sendJson(conn.socket, { type: 'TurnInfo', event: 'EndOfTurn', turn_index: 1, transcript: 'Emma, how do you scale?' });
+
+    await until(() => events.filter(e => e.type === 'decision').length === 2);
+    const turn1Partials = events.filter(e => e.type === 'interviewer_transcript' && !e.final);
+    assert.deepEqual(turn1Partials.map(e => e.text), ['Emma, how do you scale?']);
+});

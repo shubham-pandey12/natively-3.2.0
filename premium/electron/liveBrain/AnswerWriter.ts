@@ -73,18 +73,20 @@ export class AnswerWriter implements AnswerWriterPort {
 
     write(
         request: Parameters<AnswerWriterPort['write']>[0],
-        optionsOrFirstText?: ((at: number) => void) | { suppressQuestionRow?: boolean },
+        optionsOrFirstText?: ((at: number) => void) | { suppressQuestionRow?: boolean; onFirstText?: (at: number) => void },
     ): ReturnType<AnswerWriterPort['write']> {
         this.cancel('answer_corrected');
         const controller = new AbortController();
         this.active = controller;
-        const onFirstText = typeof optionsOrFirstText === 'function' ? optionsOrFirstText : undefined;
+        const callerOnFirstText = typeof optionsOrFirstText === 'function'
+            ? optionsOrFirstText
+            : optionsOrFirstText?.onFirstText;
         const suppressQuestionRow = typeof optionsOrFirstText === 'object' ? optionsOrFirstText?.suppressQuestionRow : undefined;
         const { turnKey, ...answerFields } = request;
         const baseRequest: LiveBrainAnswerRequest = {
             ...answerFields,
             signal: controller.signal,
-            ...(onFirstText ? { onFirstText } : {}),
+            ...(callerOnFirstText ? { onFirstText: callerOnFirstText } : {}),
             ...(suppressQuestionRow ? { suppressQuestionRow } : {}),
         };
 
@@ -98,7 +100,7 @@ export class AnswerWriter implements AnswerWriterPort {
                     ...baseRequest,
                     onFirstText: at => {
                         writerSawFirstText = true;
-                        onFirstText?.(at);
+                        callerOnFirstText?.(at);
                     },
                 };
                 const adopted = draft.adopt(adoptRequest);
