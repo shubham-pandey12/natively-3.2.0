@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import { streamingStttWsOptions } from '../../../../electron/audio/dnsHelpers';
 import { wsDataToString } from '../../../../electron/audio/realtimeTransport';
-import { DEFAULT_GEMINI_LIVE_MODEL } from '../../../../src/types/liveBrainSettings';
+import { DEFAULT_GEMINI_LIVE_MODEL, getSupportedLiveBrainReasoningEfforts, type LiveBrainExplicitReasoningEffort } from '../../../../src/types/liveBrainSettings';
 import { CLARIFICATION_ASSUMPTION } from '../instructions';
 import type { ResponseClock } from '../ResponseOrchestrator';
 import { toPcm16kMono } from '../interviewerAudio';
@@ -36,6 +36,7 @@ const LATE_TRANSCRIPT_WINDOW_MS = 1_500;
 export interface GeminiLiveOptions {
     apiKey: string;
     model?: string;
+    reasoningEffort?: LiveBrainExplicitReasoningEffort;
     endpoint?: string;
     setupTimeoutMs?: number;
     backoffMs?: readonly number[];
@@ -220,11 +221,18 @@ export class GeminiLiveBrain implements LiveBrain {
             socket.on('open', () => {
                 if (this.socket !== socket || !this.context) return;
                 const model = this.options.model?.trim() || DEFAULT_GEMINI_LIVE_MODEL;
+                const supported = getSupportedLiveBrainReasoningEfforts({ provider: 'gemini-live', model });
+                const thinkingLevel = this.options.reasoningEffort && supported.includes(this.options.reasoningEffort)
+                    ? this.options.reasoningEffort
+                    : undefined;
                 this.resuming = Boolean(this.resumeHandle);
                 this.send({
                     setup: {
                         model: model.startsWith('models/') ? model : `models/${model}`,
-                        generationConfig: { responseModalities: ['AUDIO'] },
+                        generationConfig: {
+                            responseModalities: ['AUDIO'],
+                            ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
+                        },
                         realtimeInputConfig: { automaticActivityDetection: GEMINI_AUTOMATIC_ACTIVITY_DETECTION },
                         systemInstruction: { parts: [{ text: this.context.instructions }] },
                         inputAudioTranscription: {},

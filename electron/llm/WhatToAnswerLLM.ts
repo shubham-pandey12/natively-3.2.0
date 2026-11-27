@@ -1229,7 +1229,11 @@ The user triggered this action with a coding problem on screen and NO new questi
             // composed user prompt — that spliced two governance layers into one
             // turn (V3's system prompt + Context OS's user pack, V3's user
             // prompt discarded). Only set when _v3p actually rides this stream.
-            const _wtaRoute = _v3p ? { ...wtaRouteOptions, v3Owned: true } : wtaRouteOptions;
+            const _wtaRoute = {
+                ...wtaRouteOptions,
+                ...(_v3p ? { v3Owned: true } : {}),
+                ...(requestSnapshot?.reasoningEffort ? { reasoningEffort: requestSnapshot.reasoningEffort } : {}),
+            };
             require('./promptDebug').notePromptComposition({
                 surface: 'what_to_answer',
                 promptSource: _v3p ? 'v3' : (_v2TurnUser ? 'v2_turn' : (v2BasePrompt ? 'v2_base_v1_packet' : 'legacy_v1_packet')),

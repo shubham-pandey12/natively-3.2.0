@@ -1,3 +1,6 @@
+import type { LiveBrainExplicitReasoningEffort, LiveBrainReasoningEffort } from './liveBrainReasoning';
+export * from './liveBrainReasoning';
+
 export type LiveBrainKeyProvider = 'gemini-live' | 'openai-realtime' | 'elevenlabs-realtime' | 'deepgram-voice-agent' | 'deepgram-flux';
 export type LiveBrainProvider = LiveBrainKeyProvider | 'amazon-sonic' | 'pipeline';
 export type LiveBrainPromptVariant = 'full' | 'trimmed';
@@ -20,6 +23,7 @@ export interface FluxAiRouteStatus {
     provider: string;
     providerLabel: string;
     model: string;
+    modelId?: string;
     configured: boolean;
     reason?: string;
 }
@@ -62,6 +66,8 @@ export interface LiveBrainConfig {
     keySource: 'dedicated' | 'env' | 'ai-providers' | null;
     model: string;
     promptVariant: LiveBrainPromptVariant | null;
+    reasoningEffort?: LiveBrainReasoningEffort;
+    supportedReasoningEfforts?: readonly LiveBrainExplicitReasoningEffort[];
     deepgram?: DeepgramSettingsConfig;
     fluxAiRoute?: FluxAiRouteStatus;
     sonicRegion?: string;
@@ -72,6 +78,7 @@ export interface LiveBrainConfig {
 export type LiveBrainOptions =
     | { provider: LiveBrainKeyProvider; model: string }
     | { provider: LiveBrainKeyProvider; useAiProvidersKey: boolean }
+    | { provider: Exclude<LiveBrainProvider, 'pipeline'>; reasoningEffort: LiveBrainReasoningEffort }
     | { provider: 'amazon-sonic'; region: string; model: string }
     | {
         provider: 'deepgram-voice-agent';

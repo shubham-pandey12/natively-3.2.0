@@ -343,6 +343,8 @@ Tasks:
 
 7. **Live Brain integration of shared response cleanup (approved 2026-11-27).** ← **next** (before Phase 6, user decision 2026-11-27). Not started. Cleanup is a shared project covering Auto Answer, text replies, and Live Brain; see [../response-cleanup/PLAN.md](../response-cleanup/PLAN.md). Live Brain is one integration: it calls the shared component in spoken mode on streamed answer text, never alters `Ask:` or `No action.` before the sentinel parser and filler rules see them, and keeps D3 (Natively answer style). Live Brain replies are part of the replay set, and their first-text and first-cleaned-sentence latency is measured per provider route. No user-visible change without a separate user decision.
 
+8. **Manual Reasoning effort setting (approved 2026-11-28).** Add a manual `Reasoning effort` setting in Settings → Audio → Live Brain Provider, below the model picker in each applicable provider card (`ModelSelect` / `Managed by provider` when unsupported). Default to `Provider default` (preserving current request behavior). Persist per provider; fall back to `Provider default` if a model switch invalidates the saved value. Wire through `SettingsManager`, `live-brain:get-config` / `live-brain:set-options`, `GeminiLiveBrain` (`generationConfig.thinkingConfig`), `OpenAIRealtimeBrain` / `RealtimeBrain` (`session.reasoning.effort`), and `DeepgramFluxBrain` + `AnswerWriter` / `IntelligenceEngine` / `LLMHelper` (private drafts + confirmed turns, with draft invalidation when effort changes). Automatic routing by question difficulty is out of scope.
+
 ---
 
 ## Test corpus (Phase 0 creates; all phases use)

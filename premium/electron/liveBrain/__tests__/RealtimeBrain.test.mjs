@@ -38,7 +38,7 @@ async function until(read) {
     assert.fail('Expected a Realtime event');
 }
 
-async function rig(t, id, { reply, backoffMs = [] } = {}) {
+async function rig(t, id, { reply, backoffMs = [], model, reasoningEffort } = {}) {
     const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
     await once(server, 'listening');
     const { header, credential } = providers[id];
@@ -57,7 +57,7 @@ async function rig(t, id, { reply, backoffMs = [] } = {}) {
         });
     });
     const endpoint = `ws://127.0.0.1:${server.address().port}`;
-    const brain = createLiveBrain(id, { apiKey, endpoint, backoffMs });
+    const brain = createLiveBrain(id, { apiKey, endpoint, backoffMs, ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) });
     const events = [];
     brain.onEvent(event => events.push(event));
     t.after(async () => {
@@ -336,4 +336,18 @@ test('response.done cancelled with no visible delta does not emit response_silen
     done(socket, 'follow-up', 'completed');
     await until(() => events.some(e => e.type === 'response_done' && e.status === 'completed'));
     assert.equal(events.some(e => e.type === 'response_silent'), false);
+});
+
+test('OpenAIRealtimeBrain omits reasoning by default and wires session.reasoning.effort when set', async t => {
+    const defaultRig = await rig(t, 'openai-realtime');
+    await defaultRig.brain.start(testContext());
+    assert.equal(defaultRig.connections[0].messages[0].session.reasoning, undefined);
+
+    const highRig = await rig(t, 'openai-realtime', { model: 'gpt-realtime-2.1', reasoningEffort: 'high' });
+    await highRig.brain.start(testContext());
+    assert.deepEqual(highRig.connections[0].messages[0].session.reasoning, { effort: 'high' });
+
+    const elevenRig = await rig(t, 'elevenlabs-realtime', { reasoningEffort: 'high' });
+    await elevenRig.brain.start(testContext());
+    assert.equal(elevenRig.connections[0].messages[0].session.reasoning, undefined);
 });

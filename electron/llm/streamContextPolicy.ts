@@ -19,6 +19,7 @@
 // No LLM, no I/O.
 
 import type { AnswerType, ContextLayer } from './AnswerPlanner';
+import type { LiveBrainExplicitReasoningEffort } from '../../src/types/liveBrainReasoning';
 
 /**
  * Optional routing info threaded from a caller that already computed an
@@ -75,6 +76,11 @@ export interface StreamRouteOptions {
    * copying screen content into routing metadata.
    */
   hasScreenText?: boolean;
+  /**
+   * Manual Live Brain Reasoning effort override for Deepgram Flux + My AI Provider.
+   * Absent or undefined → keep each provider adapter's default reasoning behavior.
+   */
+  reasoningEffort?: LiveBrainExplicitReasoningEffort;
   /**
    * Context Intelligence V3 (2026-07-31): this stream's prompts were composed
    * END-TO-END by the V3 decision layer — one frozen TurnDecision, scope/

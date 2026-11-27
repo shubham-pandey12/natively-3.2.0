@@ -15,7 +15,11 @@ import {
     DEFAULT_ELEVENLABS_REALTIME_MODEL,
     DEFAULT_GEMINI_LIVE_MODEL,
     DEFAULT_OPENAI_REALTIME_MODEL,
+    getSupportedLiveBrainReasoningEfforts,
+    isValidLiveBrainReasoningEffort,
+    resolveEffectiveLiveBrainReasoningEffort,
 } from '../../src/types/liveBrainSettings';
+export { getSupportedLiveBrainReasoningEfforts, resolveEffectiveLiveBrainReasoningEffort };
 import type {
     DeepgramByoOption,
     DeepgramManagedProvider,
@@ -23,6 +27,7 @@ import type {
     FluxAiRouteStatus,
     FluxAiRouteTestStatus,
     LiveBrainConfig,
+    LiveBrainExplicitReasoningEffort,
     LiveBrainKeyProvider,
     LiveBrainModel,
     LiveBrainModelsResult,
@@ -501,7 +506,7 @@ export function inspectFluxAiRoute(
             break;
     }
 
-    return { provider, providerLabel, model: displayModel, configured, ...(reason ? { reason } : {}) };
+    return { provider, providerLabel, model: displayModel, modelId: model, configured, ...(reason ? { reason } : {}) };
 }
 
 /**
@@ -590,7 +595,7 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
         return { keyIsWellFormed: Boolean(sonicRegion), config: {
             provider, promptVariant, sonicRegion, hasKey: false, hasDedicatedKey: false,
             maskedSuffix: null, useAiProvidersKey: false, usingAiProvidersKey: false, keySource: null,
-            model,
+            model, reasoningEffort: 'default', supportedReasoningEfforts: [],
         } };
     }
     if (!isKeyProvider(provider)) {
@@ -599,6 +604,7 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
             config: {
                 provider, promptVariant, hasKey: false, hasDedicatedKey: false,
                 maskedSuffix: null, useAiProvidersKey: false, usingAiProvidersKey: false, keySource: null, model: '',
+                reasoningEffort: 'default', supportedReasoningEfforts: [],
             },
         };
     }
@@ -619,6 +625,22 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
     const keyIsWellFormed = key !== undefined && isWellFormed(provider, key);
     const deepgramInfo = provider === 'deepgram-voice-agent' ? inspectDeepgramSettings(settings, credentials) : undefined;
     const fluxAiRoute = provider === 'deepgram-flux' ? inspectFluxAiRoute(llmHelper, credentials) : undefined;
+    const effectiveModel = deepgramInfo
+        ? (deepgramInfo.ui.thinkMode === 'byo' ? deepgramInfo.runtime.byoModel ?? '' : deepgramInfo.ui.managedModel)
+        : provider === 'deepgram-flux'
+            ? DEFAULT_DEEPGRAM_FLUX_MODEL
+            : model;
+    const effortModel = provider === 'gemini-live' && !effectiveModel.trim()
+        ? DEFAULT_GEMINI_LIVE_MODEL
+        : effectiveModel;
+    const supportedReasoningEfforts = getSupportedLiveBrainReasoningEfforts({
+        provider,
+        model: effortModel,
+        fluxAiProvider: fluxAiRoute?.provider,
+        fluxAiModel: fluxAiRoute?.modelId ?? fluxAiRoute?.model,
+    });
+    const savedEffort = settings.get('liveBrainReasoningEffort')?.[provider];
+    const reasoningEffort = resolveEffectiveLiveBrainReasoningEffort(savedEffort, supportedReasoningEfforts);
     return {
         keyIsWellFormed,
         usableKey: keyIsWellFormed ? key : undefined,
@@ -632,12 +654,10 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
             useAiProvidersKey,
             usingAiProvidersKey,
             keySource: dedicated ? 'dedicated' : fromEnv ? 'env' : usingAiProvidersKey ? 'ai-providers' : null,
-            model: deepgramInfo
-                ? (deepgramInfo.ui.thinkMode === 'byo' ? deepgramInfo.runtime.byoModel ?? '' : deepgramInfo.ui.managedModel)
-                : provider === 'deepgram-flux'
-                    ? DEFAULT_DEEPGRAM_FLUX_MODEL
-                    : model,
+            model: effectiveModel,
             promptVariant,
+            reasoningEffort,
+            supportedReasoningEfforts,
             ...(deepgramInfo ? { deepgram: deepgramInfo.ui } : {}),
             ...(fluxAiRoute ? { fluxAiRoute } : {}),
         },
@@ -645,13 +665,31 @@ function inspectConfig(settings: SettingsManager, credentials: CredentialsReader
 }
 
 /** Main-process only. IPC exposes inspectConfig().config, never usableKey or byoApiKey. */
-export function resolveLiveBrainRuntime(forProvider?: Exclude<LiveBrainProvider, 'pipeline'>): Pick<LiveBrainConfig, 'provider' | 'model' | 'promptVariant'> & { apiKey?: string; deepgramThink?: DeepgramThinkConfig; sonicRegion?: string } {
-    const { config, usableKey, deepgramThink } = inspectConfig(SettingsManager.getInstance(), CredentialsManager.getInstance(), devEnvKey, forProvider);
+export function resolveLiveBrainRuntime(
+    forProvider?: Exclude<LiveBrainProvider, 'pipeline'>,
+    llmHelper?: FluxLlmHelper,
+): Pick<LiveBrainConfig, 'provider' | 'model' | 'promptVariant'> & {
+    apiKey?: string;
+    reasoningEffort?: LiveBrainExplicitReasoningEffort;
+    deepgramThink?: DeepgramThinkConfig;
+    sonicRegion?: string;
+} {
+    const { config, usableKey, deepgramThink } = inspectConfig(SettingsManager.getInstance(), CredentialsManager.getInstance(), devEnvKey, forProvider, llmHelper);
     if (config.provider !== 'pipeline' && config.provider !== 'amazon-sonic' && !isKeyProvider(config.provider)) {
         throw new Error(`Unsupported live brain: ${String(config.provider)}`);
     }
-    return { provider: config.provider, model: config.model, promptVariant: config.promptVariant, apiKey: usableKey,
-        ...(config.sonicRegion ? { sonicRegion: config.sonicRegion } : {}), ...(deepgramThink ? { deepgramThink } : {}) };
+    const reasoningEffort = config.reasoningEffort && config.reasoningEffort !== 'default'
+        ? config.reasoningEffort
+        : undefined;
+    return {
+        provider: config.provider,
+        model: config.model,
+        promptVariant: config.promptVariant,
+        apiKey: usableKey,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        ...(config.sonicRegion ? { sonicRegion: config.sonicRegion } : {}),
+        ...(deepgramThink ? { deepgramThink } : {}),
+    };
 }
 
 export function registerLiveBrainSettingsIpc(
@@ -662,6 +700,7 @@ export function registerLiveBrainSettingsIpc(
     safeHandle: (channel: string, listener: (event: unknown, payload?: unknown) => unknown) => void,
     broadcastChanged: () => void,
     loadPremium = loadLiveBrainPremium,
+    onReasoningEffortChanged?: () => void,
 ): void {
     const settings = () => SettingsManager.getInstance();
     const credentials = () => CredentialsManager.getInstance();
@@ -914,6 +953,33 @@ export function registerLiveBrainSettingsIpc(
                             handled = true;
                         }
                     }
+                    if ('reasoningEffort' in options) {
+                        if (!isValidLiveBrainReasoningEffort(options.reasoningEffort)) {
+                            return { success: false, error: 'Invalid reasoning effort.' };
+                        }
+                        const targetModel = typeof change.liveBrainGeminiModel === 'string'
+                            ? change.liveBrainGeminiModel
+                            : typeof change.liveBrainOpenaiModel === 'string'
+                                ? change.liveBrainOpenaiModel
+                                : inspectConfig(st, cm, devEnvKey, options.provider, llmHelper()).config.model;
+                        const fluxRoute = options.provider === 'deepgram-flux'
+                            ? inspectFluxAiRoute(llmHelper(), cm)
+                            : undefined;
+                        const supported = getSupportedLiveBrainReasoningEfforts({
+                            provider: options.provider,
+                            model: targetModel,
+                            fluxAiProvider: fluxRoute?.provider,
+                            fluxAiModel: fluxRoute?.modelId ?? fluxRoute?.model,
+                        });
+                        if (options.reasoningEffort !== 'default' && !supported.includes(options.reasoningEffort)) {
+                            return { success: false, error: 'Select a supported reasoning effort for this model.' };
+                        }
+                        const nextEfforts = { ...(st.get('liveBrainReasoningEffort') ?? {}) };
+                        if (options.reasoningEffort === 'default') delete nextEfforts[options.provider];
+                        else nextEfforts[options.provider] = options.reasoningEffort;
+                        change.liveBrainReasoningEffort = nextEfforts;
+                        handled = true;
+                    }
                 } else {
                     return { success: false, error: 'Invalid Live Brain options.' };
                 }
@@ -923,7 +989,10 @@ export function registerLiveBrainSettingsIpc(
             if (endpointToSave && !cm.setLiveBrainDeepgramEndpoint(endpointToSave.url, endpointToSave.authHeader)) {
                 return { success: false, error: 'Could not save the Deepgram Think endpoint.' };
             }
-            return Object.keys(change).length ? saved(st.setValues(change), settingsUnavailable, credentialChange) : { success: true };
+            if (!Object.keys(change).length) return { success: true };
+            const persisted = st.setValues(change);
+            if (persisted && 'liveBrainReasoningEffort' in change) onReasoningEffortChanged?.();
+            return saved(persisted, settingsUnavailable, credentialChange);
         } catch {
             return { success: false, error: 'internal_error', message: 'Could not save Live Brain settings.' };
         }

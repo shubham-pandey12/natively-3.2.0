@@ -10905,7 +10905,8 @@ export class AppState {
       return 'accepted';
     };
     this.liveBrainRouting.start(onFailure => {
-      const { provider, model, apiKey, promptVariant, deepgramThink, sonicRegion } = resolveLiveBrainRuntime();
+      const llmHelper = this.processingHelper?.getLLMHelper?.();
+      const { provider, model, apiKey, promptVariant, reasoningEffort, deepgramThink, sonicRegion } = resolveLiveBrainRuntime(undefined, llmHelper);
       const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
       const modes = ModesManager.getInstance();
       modes.setLiveGroundingChangeListener(() => this.liveBrainRouting.activeSession?.refreshContext?.());
@@ -10934,8 +10935,8 @@ export class AppState {
         };
       };
       return loadLiveBrainPremium()?.createMeeting({
-        provider, apiKey, model, deepgramThink, sonicRegion, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
-        resolveProvider: resolveLiveBrainRuntime,
+        provider, apiKey, model, reasoningEffort, deepgramThink, sonicRegion, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
+        resolveProvider: (p) => resolveLiveBrainRuntime(p, this.processingHelper?.getLLMHelper?.()),
         resolveContext, readGroundingState,
         engine: this.intelligenceManager,
         emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),

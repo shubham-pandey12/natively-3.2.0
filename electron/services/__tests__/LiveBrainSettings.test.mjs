@@ -558,6 +558,68 @@ test('Deepgram Voice Agent settings reuse STT key, configure managed & BYO Think
         assert.equal(errRes.success, false);
         assert.equal(errRes.error, 'internal_error');
         assert.equal(JSON.stringify(errRes).includes('secret-raw-failure'), false);
+
+        // Reasoning effort: defaults to 'default', persists per provider, rejects unsupported values,
+        // resets to 'default' on incompatible model switch, and notifies draft cancellation.
+        let effortChangeCount = 0;
+        const effortHandlers = new Map();
+        const mockLlmHelper = {
+            getCurrentProvider: () => 'openai',
+            getCurrentModelId: () => 'gpt-5.4',
+            getCurrentModelDisplayName: () => 'GPT-5.4',
+            getDirectAssistSelection: () => ({ provider: 'openai', model: 'gpt-5.4' }),
+        };
+        require(`${compiled}liveBrainSettings.js`).registerLiveBrainSettingsIpc({
+            getLiveBrainEnabled: () => false,
+            setLiveBrainEnabled: () => true,
+            processingHelper: { getLLMHelper: () => mockLlmHelper },
+        }, (channel, listener) => effortHandlers.set(channel, listener), () => {}, () => null, () => {
+            effortChangeCount++;
+        });
+        const invokeEffort = (name, payload) => effortHandlers.get(`live-brain:${name}`)(null, payload);
+
+        settings.set('liveBrainProvider', 'gemini-live');
+        settings.set('liveBrainGeminiModel', 'gemini-3.1-flash-live-preview');
+        const geminiInitial = await invokeEffort('get-config');
+        assert.equal(geminiInitial.reasoningEffort, 'default');
+        assert.deepEqual(geminiInitial.supportedReasoningEfforts, ['minimal', 'low', 'medium', 'high']);
+
+        assert.equal(invokeEffort('set-options', { provider: 'gemini-live', reasoningEffort: 'high' }).success, true);
+        assert.equal(effortChangeCount, 1);
+        assert.equal((await invokeEffort('get-config')).reasoningEffort, 'high');
+        assert.equal(require(`${compiled}liveBrainSettings.js`).resolveLiveBrainRuntime('gemini-live').reasoningEffort, 'high');
+
+        // Reject unsupported effort for Gemini 3.1 Flash Live Preview
+        assert.equal(invokeEffort('set-options', { provider: 'gemini-live', reasoningEffort: 'xhigh' }).success, false);
+        assert.equal(invokeEffort('set-options', { provider: 'gemini-live', reasoningEffort: 'bogus' }).success, false);
+
+        // Switching to gemini-3.8-live (no thinking control) falls back to 'default'
+        assert.equal(invokeEffort('set-options', { provider: 'gemini-live', model: 'gemini-3.8-live' }).success, true);
+        const gemini38 = await invokeEffort('get-config');
+        assert.equal(gemini38.reasoningEffort, 'default');
+        assert.deepEqual(gemini38.supportedReasoningEfforts, []);
+        assert.equal(require(`${compiled}liveBrainSettings.js`).resolveLiveBrainRuntime('gemini-live').reasoningEffort, undefined);
+
+        // Switching to OpenAI Realtime persists independently
+        settings.set('liveBrainProvider', 'openai-realtime');
+        const openaiInitial = await invokeEffort('get-config');
+        assert.equal(openaiInitial.reasoningEffort, 'default');
+        assert.deepEqual(openaiInitial.supportedReasoningEfforts, ['minimal', 'low', 'medium', 'high', 'xhigh']);
+        assert.equal(invokeEffort('set-options', { provider: 'openai-realtime', reasoningEffort: 'medium' }).success, true);
+        assert.equal((await invokeEffort('get-config')).reasoningEffort, 'medium');
+
+        // ElevenLabs Realtime has no reasoning control
+        settings.set('liveBrainProvider', 'elevenlabs-realtime');
+        assert.deepEqual((await invokeEffort('get-config')).supportedReasoningEfforts, []);
+        assert.equal(invokeEffort('set-options', { provider: 'elevenlabs-realtime', reasoningEffort: 'high' }).success, false);
+
+        // Deepgram Flux reads active AI Provider model capabilities
+        settings.set('liveBrainProvider', 'deepgram-flux');
+        const fluxConfig = await invokeEffort('get-config');
+        assert.deepEqual(fluxConfig.supportedReasoningEfforts, ['none', 'low', 'medium', 'high', 'xhigh']);
+        assert.equal(invokeEffort('set-options', { provider: 'deepgram-flux', reasoningEffort: 'low' }).success, true);
+        assert.equal((await invokeEffort('get-config')).reasoningEffort, 'low');
+        assert.equal(require(`${compiled}liveBrainSettings.js`).resolveLiveBrainRuntime('deepgram-flux', mockLlmHelper).reasoningEffort, 'low');
     } finally {
         Module._load = load;
         globalThis.__nativelySettingsManagerV1__ = originalSettings;

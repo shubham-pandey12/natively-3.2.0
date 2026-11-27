@@ -71,6 +71,7 @@ export interface AppSettings {
     liveBrainDeepgramByoCustomHeader?: string;
     liveBrainDeepgramByoModels?: Record<string, string>;
     liveBrainPromptVariant?: 'full' | 'trimmed';
+    liveBrainReasoningEffort?: Partial<Record<Exclude<import('../../src/types/liveBrainSettings').LiveBrainProvider, 'pipeline'>, import('../../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort>>;
     liveBrainReuseGeminiKey?: boolean;
     liveBrainReuseOpenaiKey?: boolean;
     liveBrainReuseElevenlabsKey?: boolean;

@@ -1508,7 +1508,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
      */
-    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
+    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }): Promise<AutomaticAnswerResult> {
         // An absent confidence is not a low one: the planner substitutes the
         // intent classifier's score. Only an EXPLICIT sub-threshold value skips.
         // Not for an AUTOMATIC trigger: its confidence is the judge's
@@ -1564,7 +1564,7 @@ export class IntelligenceEngine extends EventEmitter {
         return true;
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }): Promise<AutomaticAnswerResult> {
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }): Promise<AutomaticAnswerResult> {
         if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         if (trigger.automatic && this.isManualAnswerActive()) return { status: 'skipped', reason: 'busy' };
         // Gemini already decided to answer. Keep manual/turn ownership guards,
@@ -1728,6 +1728,7 @@ export class IntelligenceEngine extends EventEmitter {
             const generationBefore = this.currentGenerationId;
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
                 { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain,
+                    ...(liveBrain?.reasoningEffort ? { reasoningEffort: liveBrain.reasoningEffort } : {}),
                     ...(liveBrain?.onComplete ? { promptInstruction: 'If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.' } : {}),
                     ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {}) } : {}) });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
@@ -2116,20 +2117,31 @@ export class IntelligenceEngine extends EventEmitter {
         }, options.speechStoppedAt);
     }
 
+    private getLiveBrainFluxReasoningEffort(): string {
+        try {
+            const { resolveLiveBrainRuntime } = require('./services/liveBrainSettings') as typeof import('./services/liveBrainSettings');
+            return resolveLiveBrainRuntime('deepgram-flux', this.llmHelper as any).reasoningEffort ?? 'default';
+        } catch {
+            return 'default';
+        }
+    }
+
     getLiveBrainAiRouteKey(): string {
+        const effort = this.getLiveBrainFluxReasoningEffort();
         try {
             const sel = (this.llmHelper as any)?.getDirectAssistSelection?.();
             if (sel?.provider && sel?.model) {
                 const fingerprint = this.llmHelper.getLiveBrainCustomRouteFingerprint?.();
-                return fingerprint ? `${sel.provider}:${sel.model}:${fingerprint}` : `${sel.provider}:${sel.model}`;
+                const base = fingerprint ? `${sel.provider}:${sel.model}:${fingerprint}` : `${sel.provider}:${sel.model}`;
+                return `${base}:effort=${effort}`;
             }
         } catch { /* fall through */ }
         try {
             const provider = this.llmHelper?.getCurrentProvider?.() ?? 'unknown';
             const model = (this.llmHelper as any)?.getCurrentModelId?.() ?? this.llmHelper?.getCurrentModel?.() ?? 'unknown';
-            return `${provider}:${model}`;
+            return `${provider}:${model}:effort=${effort}`;
         } catch {
-            return 'unknown:unknown';
+            return `unknown:unknown:effort=${effort}`;
         }
     }
 
@@ -2171,6 +2183,7 @@ export class IntelligenceEngine extends EventEmitter {
             skipCooldown: true,
             promptInstruction: 'If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.',
             ...(request.liveBrainNotebook ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
+            ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
             privateDraft: control,
             turnOut,
             outcomeOut,
@@ -2265,6 +2278,7 @@ export class IntelligenceEngine extends EventEmitter {
                     onComplete: request.onComplete,
                     signal: request.signal,
                     suppressQuestionRow: request.suppressQuestionRow,
+                    ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
                 });
             } finally {
                 request.signal.removeEventListener('abort', cancel);
@@ -2762,7 +2776,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; reasoningEffort?: LiveBrainAnswerRequest['reasoningEffort']; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2838,7 +2852,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; privateDraft?: InternalPrivateLiveBrainDraft; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }; privateDraft?: InternalPrivateLiveBrainDraft; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -5668,6 +5682,9 @@ export class IntelligenceEngine extends EventEmitter {
                 ...(wtaContextOsGeneration ? { contextOsGeneration: wtaContextOsGeneration } : {}),
                 ...(wtaV3Prompt ? { v3Prompt: wtaV3Prompt } : {}),
                 ...(wtaDiagramTurn && (wtaDiagramTurn.signals || wtaDiagramTurn.turnBlock) ? { diagramTurn: wtaDiagramTurn } : {}),
+                ...((options?.reasoningEffort ?? options?.liveBrain?.reasoningEffort)
+                    ? { reasoningEffort: options?.reasoningEffort ?? options?.liveBrain?.reasoningEffort }
+                    : {}),
             });
 
             // T4 (2026-08-28): did V3 compose this turn's prompt? Every

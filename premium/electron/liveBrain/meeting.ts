@@ -103,6 +103,11 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         finishTiming(outcomeStatus);
         supervisor.setExternalWriting(false);
     };
+    const fluxReasoningEffort = () => (
+        options.resolveProvider
+            ? options.resolveProvider('deepgram-flux')?.reasoningEffort
+            : preferred === 'deepgram-flux' ? options.reasoningEffort : undefined
+    );
     const trackWriterRun = <T extends { generationId: number; done: Promise<AutoAnswerDispatchResult> }>(
         request: LiveBrainAnswerRequest,
         launch: (trackedRequest: LiveBrainAnswerRequest) => T | null,
@@ -110,6 +115,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         const liveBrainNotebook = request.liveBrainNotebook !== undefined
             ? (request.liveBrainNotebook || undefined)
             : (supervisor?.notebookContext || undefined);
+        const reasoningEffort = request.reasoningEffort ?? fluxReasoningEffort();
         const stopAt = request.reuseGenerationId !== undefined ? lastWriterStopAt : speechStoppedAt;
         lastWriterStopAt = stopAt;
         speechStoppedAt = undefined;
@@ -132,6 +138,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         const res = launch({
             ...request,
             ...(liveBrainNotebook ? { liveBrainNotebook } : {}),
+            ...(reasoningEffort ? { reasoningEffort } : {}),
             ...(stopAt !== undefined ? { speechStoppedAt: stopAt } : {}),
             onFirstText: (at) => {
                 if (!started || writerRun !== run || request.signal.aborted) return;
@@ -176,9 +183,11 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                         const liveBrainNotebook = request.liveBrainNotebook !== undefined
                             ? (request.liveBrainNotebook || undefined)
                             : (supervisor?.notebookContext || undefined);
+                        const reasoningEffort = request.reasoningEffort ?? fluxReasoningEffort();
                         const inner = options.engine.startLiveBrainDraft!({
                             ...request,
                             ...(liveBrainNotebook !== undefined ? { liveBrainNotebook } : {}),
+                            ...(reasoningEffort ? { reasoningEffort } : {}),
                         });
                         if (!inner) return null;
                         return {
@@ -260,7 +269,13 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             const deepgramThink = id === 'deepgram-voice-agent'
                 ? (config.deepgramThink ?? options.deepgramThink)
                 : undefined;
-            return { brain: createLiveBrain(id, { apiKey: config.apiKey, model, ...(deepgramThink ? { deepgramThink } : {}) }), model };
+            const reasoningEffort = config.reasoningEffort;
+            return { brain: createLiveBrain(id, {
+                apiKey: config.apiKey,
+                model,
+                ...(reasoningEffort ? { reasoningEffort } : {}),
+                ...(deepgramThink ? { deepgramThink } : {}),
+            }), model };
         },
         onSwitch: data => {
             diagnostic('brain-switch', data);

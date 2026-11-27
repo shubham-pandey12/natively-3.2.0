@@ -42,7 +42,7 @@ async function rig(t, options = {}) {
         });
     });
     const endpoint = `ws://127.0.0.1:${server.address().port}`;
-    const brain = new GeminiLiveBrain({ apiKey: 'fake-gemini-key-for-tests', model: 'test-model', endpoint, backoffMs: options.backoffMs ?? [10, 20], rolloverClock: options.rolloverClock });
+    const brain = new GeminiLiveBrain({ apiKey: 'fake-gemini-key-for-tests', model: options.model ?? 'test-model', ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}), endpoint, backoffMs: options.backoffMs ?? [10, 20], rolloverClock: options.rolloverClock });
     const events = [];
     brain.onEvent(event => events.push(event));
     t.after(async () => {
@@ -512,4 +512,20 @@ test('1008 during resumption emits fatal protocol with session_resumption_failed
     assert.deepEqual(rNoHandle.events.find(e => e.type === 'error'), {
         type: 'error', code: 'protocol', fatal: true,
     });
+});
+
+test('GeminiLiveBrain setup omits thinkingConfig by default and wires supported thinkingLevel when set', async t => {
+    const defaultRig = await rig(t);
+    await defaultRig.brain.start(ctx());
+    assert.equal(defaultRig.connections[0].requests[0].setup.generationConfig.thinkingConfig, undefined);
+
+    const mediumRig = await rig(t, { model: 'gemini-3.1-flash-live-preview', reasoningEffort: 'medium' });
+    await mediumRig.brain.start(ctx());
+    assert.deepEqual(mediumRig.connections[0].requests[0].setup.generationConfig.thinkingConfig, {
+        thinkingLevel: 'medium',
+    });
+
+    const unsupportedRig = await rig(t, { model: 'gemini-3.8-live', reasoningEffort: 'medium' });
+    await unsupportedRig.brain.start(ctx());
+    assert.equal(unsupportedRig.connections[0].requests[0].setup.generationConfig.thinkingConfig, undefined);
 });

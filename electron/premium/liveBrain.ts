@@ -2,9 +2,11 @@ import type { WhatToAnswerQuestionEvent } from '../../src/types/whatToAnswerQues
 import type {
     DeepgramManagedProvider,
     DeepgramThinkMode,
+    LiveBrainExplicitReasoningEffort,
     LiveBrainKeyProvider,
     LiveBrainPromptVariant,
     LiveBrainProvider,
+    LiveBrainReasoningEffort,
     LiveBrainSettingsResult,
 } from '../../src/types/liveBrainSettings';
 import type { AutoAnswerDispatchResult } from './autoAnswer';
@@ -31,6 +33,7 @@ export interface LiveBrainAnswerRequest {
     speechStoppedAt?: number;
     suppressQuestionRow?: boolean;
     reuseGenerationId?: number;
+    reasoningEffort?: LiveBrainExplicitReasoningEffort;
 }
 
 export interface LiveBrainDraftRequest {
@@ -39,6 +42,7 @@ export interface LiveBrainDraftRequest {
     question: string;
     liveBrainNotebook?: string;
     contextKey?: string;
+    reasoningEffort?: LiveBrainExplicitReasoningEffort;
 }
 
 export interface LiveBrainAdoptedDraft {
@@ -93,8 +97,9 @@ export interface LiveBrainMeetingOptions extends LiveBrainContextSnapshot {
     sessionId: string;
     apiKey?: string;
     provider?: LiveBrainProvider;
-    resolveProvider?(provider: Exclude<LiveBrainProvider, 'pipeline'>): { apiKey?: string; model: string; deepgramThink?: DeepgramThinkConfig; sonicRegion?: string };
+    resolveProvider?(provider: Exclude<LiveBrainProvider, 'pipeline'>): { apiKey?: string; model: string; reasoningEffort?: LiveBrainExplicitReasoningEffort; deepgramThink?: DeepgramThinkConfig; sonicRegion?: string };
     model?: string;
+    reasoningEffort?: LiveBrainExplicitReasoningEffort;
     sonicRegion?: string;
     deepgramThink?: DeepgramThinkConfig;
     promptVariant?: LiveBrainPromptVariant;

@@ -1,12 +1,14 @@
 import WebSocket from 'ws';
 import { openAiHandshakeVerdict, realtimeReconnectDelay, realtimeSocketOptions, resampleRealtimePcm16, SEND_THRESHOLD_SAMPLES, WS_SAMPLE_RATE, wsDataToString } from '../../../../electron/audio/realtimeTransport';
 import { safeDetachAndClose } from '../../../../electron/audio/wsSafeTeardown';
+import { getSupportedLiveBrainReasoningEfforts, type LiveBrainExplicitReasoningEffort } from '../../../../src/types/liveBrainSettings';
 import { CLARIFICATION_ASSUMPTION } from '../instructions';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainEvent, LiveBrainStartContext } from '../types';
 
 export interface RealtimeBrainOptions {
     apiKey: string;
     model?: string;
+    reasoningEffort?: LiveBrainExplicitReasoningEffort;
     endpoint?: string;
     setupTimeoutMs?: number;
     backoffMs?: readonly number[];
@@ -205,6 +207,12 @@ export class RealtimeBrain implements LiveBrain {
 
     private updateSession(): void {
         const provider = this.provider;
+        const supported = provider.id === 'openai-realtime'
+            ? getSupportedLiveBrainReasoningEfforts({ provider: 'openai-realtime', model: this.model })
+            : [];
+        const reasoningEffort = this.options.reasoningEffort && supported.includes(this.options.reasoningEffort)
+            ? this.options.reasoningEffort
+            : undefined;
         this.send({
             type: 'session.update',
             session: {
@@ -213,6 +221,7 @@ export class RealtimeBrain implements LiveBrain {
                 ...(provider.updateOnOpen ? { model: this.model } : {}),
                 instructions: this.context?.instructions,
                 output_modalities: [provider.output],
+                ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
                 audio: {
                     input: {
                         format: { type: 'audio/pcm', rate: WS_SAMPLE_RATE },

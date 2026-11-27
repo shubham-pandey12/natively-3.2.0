@@ -2754,6 +2754,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChan
     const t = useT();
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = React.useRef<HTMLDivElement>(null);
+    const triggerRef = React.useRef<HTMLButtonElement>(null);
     const fit = minLabel !== undefined;
     const measureRef = useRef<HTMLSpanElement>(null);
     const [fitWidth, setFitWidth] = useState<number | null>(null);
@@ -2809,6 +2810,18 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChan
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return;
+            e.stopPropagation();
+            setIsOpen(false);
+            triggerRef.current?.focus();
+        };
+        document.addEventListener('keydown', onKey, true);
+        return () => document.removeEventListener('keydown', onKey, true);
+    }, [isOpen]);
+
     const selectedOption = options.find(o => o.id === value);
     const resolvedPlaceholder = placeholder ?? t('Select model');
     const fullLabel = selectedOption ? selectedOption.name : resolvedPlaceholder;
@@ -2817,6 +2830,7 @@ export const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChan
     return (
         <div className={containerClassName} ref={containerRef}>
             <button
+                ref={triggerRef}
                 onClick={() => setIsOpen(!isOpen)}
                 aria-expanded={isOpen}
                 aria-haspopup="listbox"

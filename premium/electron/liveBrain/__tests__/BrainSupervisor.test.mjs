@@ -188,7 +188,7 @@ for (const code of ['auth', 'quota']) {
         gemini.emit({ type: 'response_delta', responseId: 'gemini:1', text: 'Start with' });
         gemini.emit({ type: 'error', code, fatal: true });
         assert.equal(h.supervisor.current.id, 'pipeline');
-        assert.deepEqual(h.attempted, ['gemini-live', 'openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent', 'deepgram-flux', 'pipeline']);
+        assert.deepEqual(h.attempted, ['gemini-live', 'elevenlabs-realtime', 'deepgram-flux', 'deepgram-voice-agent', 'openai-realtime', 'amazon-sonic', 'pipeline']);
         assert.match(h.supervisor.pipelineContext, /must be email only/);
         assert.match(h.supervisor.pipelineContext, /durable queue/);
         gemini.emit({ type: 'response_delta', responseId: 'gemini:1', text: 'stale' });
@@ -241,7 +241,7 @@ test('the selected realtime provider comes first, followed by Gemini, remaining 
         brain.emit({ type: 'error', code: 'quota', fatal: true });
     }
     assert.equal(h.supervisor.current.id, 'pipeline');
-    assert.deepEqual(h.attempted, ['elevenlabs-realtime', 'gemini-live', 'openai-realtime', 'deepgram-voice-agent', 'deepgram-flux', 'pipeline']);
+    assert.deepEqual(h.attempted, ['elevenlabs-realtime', 'gemini-live', 'deepgram-flux', 'deepgram-voice-agent', 'openai-realtime', 'amazon-sonic', 'pipeline']);
     h.supervisor.stop();
 });
 

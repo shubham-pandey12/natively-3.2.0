@@ -400,6 +400,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       if (win.isDestroyed() || win.webContents.isDestroyed()) return;
       try { win.webContents.send('credentials-changed'); } catch { /* window closing */ }
     });
+  }, undefined, () => {
+    try { appState.getIntelligenceManager()?.cancelLiveBrainDrafts?.('reasoning_effort_changed'); } catch { /* noop */ }
   });
 
   // System-design diagram artifacts: repair, export, the feature switch and

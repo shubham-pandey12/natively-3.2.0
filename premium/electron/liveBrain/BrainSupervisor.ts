@@ -102,7 +102,7 @@ export class BrainSupervisor<Timer> {
     start(): void {
         if (!this.stopped) return;
         const preferred = this.options.preferred;
-        if (preferred !== 'pipeline' && preferred !== 'amazon-sonic' && !REALTIME.some(id => id === preferred)) {
+        if (preferred !== 'pipeline' && !FALLBACK_ORDER.includes(preferred)) {
             throw new Error(`Unsupported live brain: ${String(preferred)}`);
         }
         this.stopped = false;

@@ -52,6 +52,8 @@ import {
     DEFAULT_ELEVENLABS_REALTIME_MODEL,
     DEFAULT_GEMINI_LIVE_MODEL,
     DEFAULT_OPENAI_REALTIME_MODEL,
+    isValidLiveBrainReasoningEffort,
+    LIVE_BRAIN_REASONING_LABELS,
 } from '../types/liveBrainSettings';
 import {
     clampOverlayOpacity,
@@ -813,6 +815,43 @@ const LiveBrainProviderSettings = () => {
     const listedModels = isDeepgramByo
         ? config?.deepgram?.byoRecommendedModels ?? []
         : models.some(m => m.id === currentModel) ? models : [{ id: currentModel, label: currentModel }, ...models];
+    const supportedReasoningEfforts = config?.supportedReasoningEfforts ?? [];
+    const effectiveReasoningEffort = config?.reasoningEffort ?? 'default';
+    const reasoningEffortOptions = [
+        { id: 'default', name: t(LIVE_BRAIN_REASONING_LABELS.default) },
+        ...supportedReasoningEfforts.map(level => ({ id: level, name: t(LIVE_BRAIN_REASONING_LABELS[level]) })),
+    ];
+    const renderReasoningEffortRow = (targetProvider: LiveBrainKeyProvider | 'amazon-sonic') => {
+        const isFlux = targetProvider === 'deepgram-flux';
+        const hasControl = targetProvider !== 'amazon-sonic' && supportedReasoningEfforts.length > 0;
+        return (
+            <div className="space-y-1">
+                <div className="aip-provider-row">
+                    <label className="aip-meta shrink-0">{t('Reasoning effort')}</label>
+                    {hasControl ? (
+                        <ModelSelect
+                            value={effectiveReasoningEffort}
+                            onChange={(val) => {
+                                if (isValidLiveBrainReasoningEffort(val)) {
+                                    void setOption({ provider: targetProvider, reasoningEffort: val });
+                                }
+                            }}
+                            options={reasoningEffortOptions}
+                            containerClassName="relative flex-1 min-w-0"
+                            className="!w-full"
+                        />
+                    ) : (
+                        <span className="aip-meta ml-auto">{t('Managed by provider')}</span>
+                    )}
+                </div>
+                {hasControl && meetingActive && liveBrainEnabled && (
+                    <p className="aip-meta">
+                        {isFlux ? t('Applies to the next answer') : t('Applies from the next session')}
+                    </p>
+                )}
+            </div>
+        );
+    };
 
     if (config?.available === false) return null;
 
@@ -921,6 +960,8 @@ const LiveBrainProviderSettings = () => {
                                         })}
                                     />
                                 </div>
+
+                                {renderReasoningEffortRow('amazon-sonic')}
 
                                 {testDetail && testStatus === 'success' && <p className="aip-meta settings-swap-in" role="status">{testDetail}</p>}
                                 {note && <p className="aip-meta aip-danger-fg aip-provider-note settings-swap-in" role="alert">{note}</p>}
@@ -1068,6 +1109,8 @@ const LiveBrainProviderSettings = () => {
                                     )}
                                 </div>
 
+                                {keyProvider !== 'deepgram-flux' && renderReasoningEffortRow(keyProvider)}
+
                                 {keyProvider === 'deepgram-voice-agent' && config.deepgram && (() => {
                                     const dg = config.deepgram;
                                     const thinkSelectValue = dg.thinkMode === 'byo'
@@ -1206,6 +1249,7 @@ const LiveBrainProviderSettings = () => {
                                         <p className="aip-meta">
                                             {t('Deepgram Flux transcribes the interviewer. Answers stream directly from Natively using your active AI Providers selection (including Codex CLI, Antigravity, and Ollama).')}
                                         </p>
+                                        {renderReasoningEffortRow('deepgram-flux')}
                                     </div>
                                 )}
 

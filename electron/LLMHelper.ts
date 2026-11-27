@@ -30,6 +30,7 @@ import { VisionProbe, VISION_PROBE_QUESTION, VISION_PROBE_SYSTEM } from "./llm/v
 import { parseOpenRouterVision } from "./llm/providerVisionData"
 import { trimUserContentToFit, userContentRoomChars } from "./llm/localContextTrim"
 import { getModelCapabilities, ollamaRequestContext, selectPromptTier, estimateTokens, truncateTranscriptToFit, getOpenAiMaxOutput, getOpenAiReasoningEffort, claudeAcceptsSamplingParams, claudeThinkingParam, type OpenAiReasoningEffort, type PromptTier, type ModelCapabilities } from "./llm/modelCapabilities"
+import { getSupportedAiProviderReasoningEfforts, type LiveBrainExplicitReasoningEffort } from "../src/types/liveBrainReasoning"
 import { GeminiPromptCache } from "./llm/GeminiPromptCache"
 import { filterOllamaGenerationModels } from "./llm/ollamaGenerationModels"
 import {
@@ -589,7 +590,30 @@ const MINIMAL_THINKING_MODELS = new Set<string>([
   'gemini-3.6-flash',
 ]);
 
-export function buildThinkingConfig(model: string | undefined, budget: number): { thinkingLevel: ThinkingLevel } | { thinkingBudget: number } {
+export function buildThinkingConfig(
+  model: string | undefined,
+  budget: number,
+  reasoningEffort?: LiveBrainExplicitReasoningEffort,
+): { thinkingLevel: ThinkingLevel } | { thinkingBudget: number } {
+  if (reasoningEffort && typeof model === 'string') {
+    const supported = getSupportedAiProviderReasoningEfforts('gemini', model);
+    if (supported.includes(reasoningEffort)) {
+      const normalized = model.replace(/^models\//, '').trim().toLowerCase();
+      if (normalized.startsWith('gemini-2.5-')) {
+        const budgetMap: Record<string, number> = { none: 0, low: 1024, medium: 4096, high: 8192 };
+        if (reasoningEffort in budgetMap) return { thinkingBudget: budgetMap[reasoningEffort] };
+      } else {
+        const levelMap: Partial<Record<LiveBrainExplicitReasoningEffort, ThinkingLevel>> = {
+          minimal: ThinkingLevel.MINIMAL,
+          low: ThinkingLevel.LOW,
+          medium: ThinkingLevel.MEDIUM,
+          high: ThinkingLevel.HIGH,
+        };
+        const level = levelMap[reasoningEffort];
+        if (level) return { thinkingLevel: level };
+      }
+    }
+  }
   if (typeof model === 'string' && PRO_MODEL_RE.test(model)) return { thinkingLevel: ThinkingLevel.LOW };
   if (budget <= 0) {
     // Unknown/unlisted model → LOW, the universally accepted floor. Falling
@@ -610,7 +634,13 @@ export function buildThinkingConfig(model: string | undefined, budget: number): 
 // to keep TTFT low — the same "kill the hidden default reasoning" lever as Gemini's
 // thinkingLevel:minimal — or null for non-reasoning models, in which case the param
 // is omitted (e.g. gpt-4*/gpt-3.5, or when the client proxies a non-OpenAI model).
-function openaiReasoningParam(model: string): { reasoning_effort: OpenAiReasoningEffort } | {} {
+function openaiReasoningParam(
+  model: string,
+  reasoningEffort?: LiveBrainExplicitReasoningEffort,
+): { reasoning_effort: OpenAiReasoningEffort } | {} {
+  if (reasoningEffort && getSupportedAiProviderReasoningEfforts('openai', model).includes(reasoningEffort)) {
+    return { reasoning_effort: reasoningEffort as OpenAiReasoningEffort };
+  }
   const effort = getOpenAiReasoningEffort(model);
   return effort ? { reasoning_effort: effort } : {};
 }
@@ -2267,7 +2297,10 @@ export class LLMHelper {
    * wire: settings outlive code, and a stale level must not turn every
    * question into a 400.
    */
-  private ninerouterThinkingParam(): { reasoning_effort?: ReasoningEffortValue } {
+  private ninerouterThinkingParam(reasoningEffort?: LiveBrainExplicitReasoningEffort): { reasoning_effort?: ReasoningEffortValue } {
+    if (reasoningEffort && getSupportedAiProviderReasoningEfforts('ninerouter').includes(reasoningEffort)) {
+      return { reasoning_effort: reasoningEffort as ReasoningEffortValue };
+    }
     const level = (this.ninerouterThinking || '').trim();
     // DEFAULT IS NO THINKING. 9Router's own default reasons hard, and on a
     // free/cheap-tier aggregator that is the difference between a ~1s answer and
@@ -6965,7 +6998,11 @@ let isMultimodal = !!(imagePaths?.length);
     // value is dropped first so a re-entrant call can't carry a stale param down
     // the ladder. See groqReasoningParams for the live probe that measured this.
     const withReasoning = (r: any) => {
-      const { reasoning_effort: _drop, ...rest } = r || {};
+      const { reasoning_effort: explicitEffort, ...rest } = r || {};
+      if (typeof explicitEffort === 'string'
+          && getSupportedAiProviderReasoningEfforts('groq', r?.model).includes(explicitEffort as LiveBrainExplicitReasoningEffort)) {
+        return { ...rest, reasoning_effort: explicitEffort };
+      }
       return { ...rest, ...groqReasoningParams(r?.model) };
     };
     try {
@@ -11649,6 +11686,10 @@ let isMultimodal = !!(imagePaths?.length);
     // with every other candidate (autoFastPick), so this runs only as the
     // FALLBACK after a fast pick failed — never ahead of a ranking that chose
     // otherwise, and never for the user's own endpoint (activeIsSelfHosted).
+    const codexTuning = routeOptions?.reasoningEffort
+      && getSupportedAiProviderReasoningEfforts('codex-cli', this.getSelectedCodexCliModel()).includes(routeOptions.reasoningEffort)
+      ? { modelReasoningEffort: routeOptions.reasoningEffort as CodexCliConfig['modelReasoningEffort'] }
+      : undefined;
     const fastModeApplies = fastPickFailed && this.groqFastTextMode && !isMultimodal && (
       this.isCodexAvailable() ||
       this.isGroqModel(this.currentModelId) ||
@@ -11658,7 +11699,7 @@ let isMultimodal = !!(imagePaths?.length);
       if (this.isCodexAvailable()) {
         console.log(`[LLMHelper] ⚡️ Fast Mode fallback (Streaming): routing to Codex CLI...`);
         try {
-          yield* this.trackCommit(this.streamWithCodexCli(userContent, finalSystemPrompt, true, undefined, abortSignal), commit);
+          yield* this.trackCommit(this.streamWithCodexCli(userContent, finalSystemPrompt, true, undefined, abortSignal, undefined, codexTuning), commit);
           return;
         } catch (e: any) {
           if (commit.emitted) {
@@ -11738,7 +11779,7 @@ let isMultimodal = !!(imagePaths?.length);
     }
 
     if (this.isCodexCliModel(this.currentModelId) && this.isCodexAvailable()) {
-      yield* this.streamWithCodexCli(userContent, finalSystemPrompt, false, imagePaths, abortSignal);
+      yield* this.streamWithCodexCli(userContent, finalSystemPrompt, false, imagePaths, abortSignal, undefined, codexTuning);
       return;
     }
     if (this.getCodexSelectionAuthError()) {
@@ -11828,8 +11869,8 @@ let isMultimodal = !!(imagePaths?.length);
       yield* this.streamSelectedProviderWithFailover({
         id: 'openai', name: 'OpenAI',
         open: (sig) => ((isMultimodal && imagePaths)
-          ? this.streamWithOpenaiMultimodal(userContent, imagePaths, finalOpenAiSystem, undefined, sig)
-          : this.streamWithOpenai(userContent, finalOpenAiSystem, undefined, sig)),
+          ? this.streamWithOpenaiMultimodal(userContent, imagePaths, finalOpenAiSystem, undefined, sig, routeOptions?.reasoningEffort)
+          : this.streamWithOpenai(userContent, finalOpenAiSystem, undefined, sig, routeOptions?.reasoningEffort)),
         userContent, finalSystemPrompt: finalOpenAiSystem, thinkingBudget, abortSignal,
         hasImages: Boolean(isMultimodal && imagePaths?.length),
       });
@@ -11984,7 +12025,7 @@ let isMultimodal = !!(imagePaths?.length);
       yield* this.streamSelectedProviderWithFailover({
         id: 'ninerouter',
         name: `9Router (${this.ninerouterWireModel(this.currentModelId)})`,
-        open: (sig) => this.streamWithNinerouter(userContent, ninerouterSystem, ninerouterSendsImages ? imagePaths : undefined, sig),
+        open: (sig) => this.streamWithNinerouter(userContent, ninerouterSystem, ninerouterSendsImages ? imagePaths : undefined, sig, undefined, routeOptions?.reasoningEffort),
         userContent, finalSystemPrompt: ninerouterSystem, thinkingBudget, abortSignal,
         hasImages: ninerouterSendsImages,
       });
@@ -12014,7 +12055,7 @@ let isMultimodal = !!(imagePaths?.length);
         const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
         const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
         // CACHE: pass system separately so Groq prefix-cache hits across turns.
-        yield* this.trackCommit(this.streamWithGroq(userContent, this.currentModelId, finalGroqSystem, abortSignal), commit);
+        yield* this.trackCommit(this.streamWithGroq(userContent, this.currentModelId, finalGroqSystem, abortSignal, false, routeOptions?.reasoningEffort), commit);
         return;
       } catch (e: any) {
         // 413 / 429 / 5xx on Groq → fall through to Natively / Gemini cascade
@@ -12264,7 +12305,7 @@ let isMultimodal = !!(imagePaths?.length);
       // should not take the live answer down when another provider is configured.
       let geminiYielded = false;
       try {
-        for await (const chunk of this.streamGeminiTextCascade(userContent, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget)) {
+        for await (const chunk of this.streamGeminiTextCascade(userContent, imagePaths, finalSystemPrompt, abortSignal, thinkingBudget, routeOptions?.reasoningEffort)) {
           geminiYielded = true;
           // Mirror into the generator-wide commit state so the last-resort
           // providers below observe the same fact this block already tracks.
@@ -12841,7 +12882,7 @@ let isMultimodal = !!(imagePaths?.length);
    * `userMessage`) so Groq's prefix cache hits across turns. See generateWithGroq
    * for the full rationale. The single-arg form is retained for legacy callers.
    */
-  private async * streamWithGroq(userMessage: string, modelId: string = GROQ_MODEL, systemPrompt?: string, abortSignal?: AbortSignal, strictModel = false): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGroq(userMessage: string, modelId: string = GROQ_MODEL, systemPrompt?: string, abortSignal?: AbortSignal, strictModel = false, reasoningEffort?: LiveBrainExplicitReasoningEffort): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.groqClient) throw new Error("Groq client not initialized");
     this.assertOutboundScopes('groq', userMessage);
@@ -12863,6 +12904,7 @@ let isMultimodal = !!(imagePaths?.length);
       temperature: INTERACTIVE_TEMPERATURE,
       seed: interactiveSeedFor('groq', [modelId, systemPrompt, userMessage]), // Groq honors seed for near-deterministic output
       max_tokens: 8192,
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     };
     require('./llm/providerPayloadCapture').captureProviderPayload({
       provider: 'groq', classification: 'sdk_request_object_before_serialization', payload: request,
@@ -12945,7 +12987,7 @@ let isMultimodal = !!(imagePaths?.length);
    * the cache hits naturally. Do NOT inline per-request data into the system
    * string above the static body, or the cache prefix will be invalidated.
    */
-  private async * streamWithOpenai(userMessage: string, systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOpenai(userMessage: string, systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal, reasoningEffort?: LiveBrainExplicitReasoningEffort): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
     this.assertOutboundScopes('openai', userMessage);
@@ -13148,7 +13190,7 @@ let isMultimodal = !!(imagePaths?.length);
     }
   }
 
-  private async * streamWithNinerouter(userMessage: string, systemPrompt?: string, imagePaths?: string[], abortSignal?: AbortSignal, modelId?: string): AsyncGenerator<string, void, unknown> {
+  private async * streamWithNinerouter(userMessage: string, systemPrompt?: string, imagePaths?: string[], abortSignal?: AbortSignal, modelId?: string, reasoningEffort?: LiveBrainExplicitReasoningEffort): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.ninerouterClient) throw new Error("9Router client not initialized");
     this.assertOutboundScopes('ninerouter', userMessage, imagePaths);
@@ -13172,7 +13214,7 @@ let isMultimodal = !!(imagePaths?.length);
       messages,
       stream: true as const,
       max_tokens: maxTokens,
-      ...this.ninerouterThinkingParam(),
+      ...this.ninerouterThinkingParam(reasoningEffort),
     };
     require('./llm/providerPayloadCapture').captureProviderPayload({
       provider: 'ninerouter', classification: 'sdk_request_object_before_serialization', payload: request,
@@ -13265,7 +13307,7 @@ let isMultimodal = !!(imagePaths?.length);
   /**
    * Stream multimodal (image + text) response from OpenAI with system/user separation
    */
-  private async * streamWithOpenaiMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal): AsyncGenerator<string, void, unknown> {
+  private async * streamWithOpenaiMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string, modelId?: string, abortSignal?: AbortSignal, reasoningEffort?: LiveBrainExplicitReasoningEffort): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.openaiClient) throw new Error("OpenAI client not initialized");
     this.assertOutboundScopes('openai', userMessage, imagePaths);
@@ -13395,7 +13437,7 @@ let isMultimodal = !!(imagePaths?.length);
    *    haven't migrated. Static content leads that string so implicit caching
    *    still applies.
    */
-  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): AsyncGenerator<string, void, unknown> {
+  private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[], systemInstruction?: string, abortSignal?: AbortSignal, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET, reasoningEffort?: LiveBrainExplicitReasoningEffort): AsyncGenerator<string, void, unknown> {
     if (this.isLocalOnlyMode) throw new Error("Cloud providers disabled in local-only mode");
     if (!this.client) throw new Error("Gemini client not initialized");
     this.assertOutboundScopes('gemini', fullMessage, imagePaths);
@@ -13448,7 +13490,7 @@ let isMultimodal = !!(imagePaths?.length);
       // (off, fast) for budget≤0, 'low' for Pro (which can't disable), or an
       // explicit numeric budget when a caller passes a positive one. Threaded
       // budget comes from the caller; model picks the level/floor.
-      thinkingConfig: buildThinkingConfig(model, thinkingBudget),
+      thinkingConfig: buildThinkingConfig(model, thinkingBudget, reasoningEffort),
       // Propagate the caller's AbortSignal into the SDK so cancelling a stream
       // (supersession or gemini-chat-stream-stop) aborts the client-side HTTP
       // request and rejects the in-flight iterator immediately — instead of us
@@ -13563,18 +13605,18 @@ let isMultimodal = !!(imagePaths?.length);
    * streamWithGeminiModel) applies the correct per-model level (flash-lite/flash
    * → minimal at budget≤0, pro → forced 'low').
    */
-  private async * streamGeminiTextCascade(fullMessage: string, imagePaths: string[] | undefined, systemInstruction: string | undefined, abortSignal: AbortSignal | undefined, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET): AsyncGenerator<string, void, unknown> {
+  private async * streamGeminiTextCascade(fullMessage: string, imagePaths: string[] | undefined, systemInstruction: string | undefined, abortSignal: AbortSignal | undefined, thinkingBudget: number = INTERACTIVE_THINKING_BUDGET, reasoningEffort?: LiveBrainExplicitReasoningEffort): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
     // Full ladder, cheapest → most capable. priority encodes the ladder order.
     // Each rung carries its OWN first-token budget (GEMINI_TEXT_TTFT_MS).
     const ladder: TextStreamProvider[] = [
       { id: 'gemini_flash_lite', name: 'Gemini Flash-Lite', isLocal: false, priority: 0, ttftTimeoutMs: GEMINI_TEXT_TTFT_MS.flashLite,
-        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_FLASH_LITE_MODEL, imagePaths, systemInstruction, sig, thinkingBudget) },
+        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_FLASH_LITE_MODEL, imagePaths, systemInstruction, sig, thinkingBudget, reasoningEffort) },
       { id: 'gemini_flash', name: 'Gemini Flash', isLocal: false, priority: 1, ttftTimeoutMs: GEMINI_TEXT_TTFT_MS.flash,
-        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_FLASH_MODEL, imagePaths, systemInstruction, sig, thinkingBudget) },
+        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_FLASH_MODEL, imagePaths, systemInstruction, sig, thinkingBudget, reasoningEffort) },
       { id: 'gemini_pro', name: 'Gemini Pro', isLocal: false, priority: 2, ttftTimeoutMs: GEMINI_TEXT_TTFT_MS.pro,
-        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_PRO_MODEL, imagePaths, systemInstruction, sig, thinkingBudget) },
+        open: (sig) => this.streamWithGeminiModel(fullMessage, GEMINI_PRO_MODEL, imagePaths, systemInstruction, sig, thinkingBudget, reasoningEffort) },
     ];
 
     // Honor the selected Gemini model as the starting rung; fall forward only.

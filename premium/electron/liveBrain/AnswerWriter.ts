@@ -36,7 +36,7 @@ export class AnswerWriter implements AnswerWriterPort {
         this.onDraftEvent = options.onDraftEvent;
     }
 
-    prepareDraft(request: { turnKey: string; question: string; liveBrainNotebook?: string; contextKey?: string }): boolean {
+    prepareDraft(request: { turnKey: string; question: string; liveBrainNotebook?: string; contextKey?: string; reasoningEffort?: import('../../../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }): boolean {
         if (!this.engine.startLiveBrainDraft) return false;
         const question = request.question.trim();
         if (!question) return false;
@@ -57,6 +57,7 @@ export class AnswerWriter implements AnswerWriterPort {
             question,
             ...(request.liveBrainNotebook !== undefined ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
             ...(request.contextKey !== undefined ? { contextKey: request.contextKey } : {}),
+            ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
         });
         if (!created) return false;
         this.draft = created;

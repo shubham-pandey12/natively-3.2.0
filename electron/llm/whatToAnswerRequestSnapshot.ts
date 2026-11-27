@@ -108,6 +108,8 @@ export interface WhatToAnswerRequestSnapshot {
    *  block is suppressed. Opaque (`unknown`) to avoid a cross-module type cycle;
    *  WhatToAnswerLLM narrows it at the use site. Absent → legacy assembly. */
   readonly contextOsGeneration?: unknown;
+  /** Manual Live Brain Reasoning effort override for Deepgram Flux + My AI Provider. */
+  readonly reasoningEffort?: import('../../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort;
 }
 
 /** Minimal interface for the bits of ModesManager the snapshot reads. Keeps this
