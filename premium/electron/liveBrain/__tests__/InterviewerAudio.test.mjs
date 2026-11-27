@@ -25,6 +25,18 @@ test('48 kHz is downsampled to a third of the frames', () => {
     assert.ok(Math.abs(out.length / 2 - 1_600) <= 2, `got ${out.length / 2} frames`);
 });
 
+test('24 kHz and 44.1 kHz produce the expected 16 kHz output length', () => {
+    assert.equal(toPcm16kMono(pcm(new Array(2_400).fill(1_000)), 24_000, 1).length, 3_200);
+    assert.equal(toPcm16kMono(pcm(new Array(4_410).fill(1_000)), 44_100, 1).length, 3_200);
+});
+
+test('empty audio and incomplete samples or stereo frames are handled safely', () => {
+    assert.deepEqual(toPcm16kMono(Buffer.alloc(0), 24_000, 1), Buffer.alloc(0));
+    const odd = Buffer.concat([pcm([100, 300]), Buffer.from([0xff])]);
+    assert.deepEqual(toPcm16kMono(odd, 16_000, 1), pcm([100, 300]));
+    assert.deepEqual(toPcm16kMono(pcm([100, 300, 500]), 16_000, 2), pcm([200]));
+});
+
 test('full-scale audio is clamped instead of throwing', () => {
     const loud = pcm(Array.from({ length: 4_800 }, (_, i) => (i % 2 ? 32_767 : -32_768)));
     assert.doesNotThrow(() => toPcm16kMono(loud, 48_000, 1));

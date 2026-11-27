@@ -84,7 +84,38 @@ test('spoken sentinels survive split chunks, punctuation and case', () => {
     assert.deepEqual(parser.finish(), []);
     assert.deepEqual(createResponseParser().push('No actionable error.'), [kind('answer'), text('No actionable error.')]);
     const bounded = createResponseParser();
-    assert.deepEqual(bounded.push('*'.repeat(17)), [kind('answer'), text('*'.repeat(17))]);
+    assert.deepEqual(bounded.push('*'.repeat(81)), [kind('answer'), text('*'.repeat(81))]);
+});
+
+test('spoken wait requires the whole response and preserves answers starting with No action', () => {
+    for (const chunks of [['No action.'], ['No ac', 'tion.'], ['“No action…', '”  ']]) {
+        const parser = createResponseParser();
+        assert.deepEqual(chunks.flatMap(chunk => parser.push(chunk)), []);
+        assert.deepEqual(parser.finish(), [kind('wait')]);
+    }
+    const parser = createResponseParser();
+    assert.deepEqual(parser.push('No action'), []);
+    assert.deepEqual(parser.push(' is required on the primary.'),
+        [kind('answer'), text('No action is required on the primary.')]);
+});
+
+test('spoken Ask survives split indentation, Markdown markers, and multilingual text', () => {
+    for (const chunks of [
+        [' '.repeat(20) + 'Ask: Why?'],
+        [' '.repeat(20), 'As', 'k: Why?'],
+        ['### Ask: Why?'],
+        ['##', '# ', 'Ask: Why?'],
+        ['- Ask: Why?'],
+        ['*', ' Ask: Why?'],
+        ['1', '. ', 'Ask: Why?'],
+        [' '.repeat(64), 'Ask: Why?'],
+    ]) {
+        const parser = createResponseParser();
+        assert.deepEqual([...chunks.flatMap(chunk => parser.push(chunk)), ...parser.finish()],
+            [kind('ask'), text('Why?')]);
+    }
+    const parser = createResponseParser();
+    assert.deepEqual(parser.push('Ask: ¿Qué base de datos?'), [kind('ask'), text('¿Qué base de datos?')]);
 });
 
 test('the decide_turn declaration wraps the provider-neutral JSON schema for Gemini', () => {
@@ -149,7 +180,7 @@ test('answer variants retain the imported voice while trimmed omits scenario rul
         assert.ok(output.includes(SPOKEN_ANSWER_CONTRACT.trim()));
         assert.ok(output.includes('Start with the answer, not a windup.'));
         assert.equal(output.split('<human_spoken_answer_contract>').length, 2);
-        for (const value of [NO_ACTION_SENTINEL, ASK_SENTINEL, 'stated assumption', 'newest interviewer instruction', context.profileContext, context.modeName, context.notebookText]) {
+        for (const value of [ASK_SENTINEL, 'stated assumption', 'newest interviewer instruction', context.profileContext, context.modeName, context.notebookText]) {
             assert.ok(output.includes(value), value);
         }
     }

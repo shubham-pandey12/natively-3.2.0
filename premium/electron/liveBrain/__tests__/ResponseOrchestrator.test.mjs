@@ -430,10 +430,21 @@ test('D15: a short "Yes" that answers an Ask is still answered', () => {
     assert.equal(h.texts.at(-1).text, 'Then I would use a read-through cache.');
 });
 
-test('D15: every realtime provider gets the mandatory filler rule', () => {
+test('D15: every answer-generating realtime provider gets one filler directive', () => {
     const { buildProviderInstructions, FILLER_TURN_RULE } = require(`${dist}instructions.js`);
-    for (const id of ['gemini-live', 'openai-realtime', 'elevenlabs-realtime']) {
-        assert.ok(buildProviderInstructions({}, 'full', id).includes(FILLER_TURN_RULE), id);
+    const providers = [
+        ['gemini-live'], ['openai-realtime'], ['elevenlabs-realtime'], ['amazon-sonic'],
+        ['deepgram-voice-agent', 'managed'], ['deepgram-voice-agent', 'byo'],
+    ];
+    for (const variant of ['full', 'trimmed']) {
+        for (const [id, thinkMode] of providers) {
+            const prompt = buildProviderInstructions({}, variant, id, thinkMode);
+            assert.ok(prompt.includes(FILLER_TURN_RULE), id);
+            assert.equal(prompt.match(/MANDATORY FILLER RULE/g)?.length, 1, id);
+            assert.equal(prompt.match(/No action\./g)?.length, 1, id);
+            assert.ok(!prompt.includes('[[NO_ACTION]]'), id);
+            assert.ok(prompt.includes('that reply is NOT filler — answer the original question using it.'), id);
+        }
     }
     assert.match(FILLER_TURN_RULE, /never repeat, continue, or rephrase your previous answer/);
 });

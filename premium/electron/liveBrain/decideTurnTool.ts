@@ -2,6 +2,7 @@ import type { LiveBrainEvent } from './types';
 
 type DecisionKind = NonNullable<Extract<LiveBrainEvent, { type: 'decision' }>['kind']>;
 
+/** @deprecated D12 superseded D10/D11; spike/tests only, not used at runtime. */
 export type Decision =
     | { action: 'answer'; question: string; kind?: DecisionKind }
     | { action: 'ask'; clarification: string; question?: string; kind?: DecisionKind }
@@ -12,6 +13,7 @@ const CLARIFICATION_MAX_LENGTH = 300;
 const ACTIONS = ['answer', 'ask', 'wait'] as const;
 const KINDS = ['new', 'follow_up', 'correction'] as const;
 
+/** @deprecated D12 superseded D10/D11; spike/tests only, not used at runtime. */
 export const DECIDE_TURN_TOOL = {
     name: 'decide_turn',
     description: 'Decide what the candidate needs after an interviewer turn.',
@@ -35,6 +37,7 @@ export const DECIDE_TURN_TOOL = {
     },
 } as const;
 
+/** @deprecated D12 superseded D10/D11; spike/tests only, not used at runtime. */
 export function toGeminiDecideTurnTool() {
     const { name, description, parameters } = DECIDE_TURN_TOOL;
     return { functionDeclarations: [{ name, description, parametersJsonSchema: parameters }] };
@@ -47,6 +50,7 @@ function limitedText(value: unknown, maxLength: number): string {
     return text.replace(/[\uD800-\uDBFF]$/, '').trimEnd();
 }
 
+/** @deprecated D12 superseded D10/D11; spike/tests only, not used at runtime. */
 export function parseDecideTurnArgs(raw: unknown): Decision | null {
     let value: unknown = raw;
     if (typeof raw === 'string') {

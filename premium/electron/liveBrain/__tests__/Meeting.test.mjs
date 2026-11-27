@@ -11,6 +11,8 @@ const { clearPromptDebugState, getPromptDebugState } = require(`${dist}electron/
 const { createMeeting } = require(`${dist}premium/electron/liveBrain/meeting.js`);
 const { AnswerWriter } = require(`${dist}premium/electron/liveBrain/AnswerWriter.js`);
 const { FakeLiveBrain } = require(`${dist}premium/electron/liveBrain/__tests__/FakeLiveBrain.js`);
+const { buildFluxTurnContext, isCorrectionTurn, isUnrelatedNewTopicForClarification } =
+    require(`${dist}premium/electron/liveBrain/fluxTurnContext.js`);
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function rig() {
@@ -264,7 +266,7 @@ test('Prompt Debugger captures spoken instructions and timestamps the first disp
     done('timed');
     const { notes, answerTimings } = getPromptDebugState();
     const note = notes.find(note => note.promptSource === 'answer');
-    assert.match(note.system, /say exactly "No action\."/);
+    assert.match(note.system, /output exactly No action\. and nothing else/);
     assert.match(note.system, /Candidate built a queue/);
     assert.match(note.system, /Mock interview/);
     assert.deepEqual(answerTimings, [{
@@ -796,6 +798,20 @@ test('Phase 3: Flux filler mid-stream, correction before first token, stale drop
     q3Gate.resolve();
     await flush();
     assert.equal(h.answers.length, 0);
+});
+
+test('Flux distinguishes standalone questions with constraints from corrections', () => {
+    const question = 'Explain how a mutex works without busy waiting';
+    const context = { question, replacesAutomaticAnswer: false, lastConfirmedTurn: { question: 'Design a payments API' } };
+    assert.equal(isCorrectionTurn(question), false);
+    assert.equal(buildFluxTurnContext(context), '');
+    assert.equal(isCorrectionTurn('Actually, use MongoDB instead'), true);
+    assert.equal(isCorrectionTurn('Do it without Redis'), true);
+    assert.equal(isUnrelatedNewTopicForClarification(question), true);
+    assert.equal(buildFluxTurnContext({
+        ...context,
+        pendingClarification: { originalQuestion: 'Design a payments API', clarification: 'Which payment methods?' },
+    }), '');
 });
 
 test('Phase 4: AI-boundary context for follow-ups, corrections, clarification replies, unrelated topics, and stale draft rejection', async t => {

@@ -1,7 +1,10 @@
 const FOLLOW_UP_OPENERS = /^(?:what if|how about|what about|and\b|but\b|so\b|or\b|why did you choose|how come|can it|does it|will it|would it|could it|what happens if|in that case|otherwise|instead)\b/i;
 const ANAPHORIC_REFERENT = /\b(?:it|its|that|this|they|them|their|those|these|there|such|the same)\b/i;
 const SELF_CONTAINED_NEW_TOPIC = /^(?:design|build|architect|explain|compare|what is the difference between|how does|tell me about|walk me through)\b/i;
-const CORRECTION_MARKER = /\b(?:actually|instead|correction|never mind|scratch that|not allowed|no longer|without|rather than|forget|change that)\b/i;
+const WH_QUESTION = /^(?:what|how|why|when|where|who|which|can you|could you|do you)\b/i;
+const STRONG_CORRECTION = /\b(?:actually|correction|never mind|scratch that|forget|change that)\b/i;
+const WEAK_CORRECTION = /\b(?:without|instead|rather than|not allowed|no longer)\b/i;
+const PRIOR_TURN_REFERENCE = /\b(?:the previous|that design)\b/i;
 
 const MAX_PREVIOUS_ANSWER_CHARS = 900;
 
@@ -31,7 +34,10 @@ function truncate(text: string, maxChars: number): string {
 }
 
 export function isCorrectionTurn(question: string): boolean {
-    return CORRECTION_MARKER.test(question.trim());
+    const clean = question.trim();
+    if (STRONG_CORRECTION.test(clean.split(/\s+/, 5).join(' '))) return true;
+    return WEAK_CORRECTION.test(clean)
+        && (!startsNewTopic(clean) || ANAPHORIC_REFERENT.test(clean) || PRIOR_TURN_REFERENCE.test(clean));
 }
 
 export function isFollowUpTurn(question: string): boolean {
@@ -45,8 +51,11 @@ export function isUnrelatedNewTopicForClarification(question: string): boolean {
     const clean = question.trim();
     if (!clean) return false;
     if (isFollowUpTurn(clean) || isCorrectionTurn(clean)) return false;
-    return SELF_CONTAINED_NEW_TOPIC.test(clean)
-        || /^(?:what|how|why|when|where|who|which|can you|could you|do you)\b/i.test(clean);
+    return startsNewTopic(clean);
+}
+
+function startsNewTopic(question: string): boolean {
+    return SELF_CONTAINED_NEW_TOPIC.test(question) || WH_QUESTION.test(question);
 }
 
 /**

@@ -8,7 +8,7 @@ import { WebSocketServer } from 'ws';
 const require = createRequire(import.meta.url);
 const load = name => require(`../../../../dist-electron/premium/electron/liveBrain/${name}.js`);
 const { DeepgramVoiceAgentBrain, resolveByoEndpoint } = load('brains/DeepgramVoiceAgentBrain');
-const { buildDeepgramInstructions, buildProviderInstructions, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS } = load('instructions');
+const { buildDeepgramInstructions, buildProviderInstructions, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS, FILLER_TURN_RULE } = load('instructions');
 const { createLiveBrain } = load('index');
 const { testConnection } = load('meeting');
 const {
@@ -246,8 +246,27 @@ test('compact instructions stay <= 25,000 chars for managed mode and omit heavy 
     const origWarn = console.warn;
     console.warn = (msg) => { warnings.push(String(msg ?? '')); };
     try {
-        const bounded = buildDeepgramInstructions({ profileContext: 'X'.repeat(10_000) });
+        const notebookText = 'The interviewer requires a single database.';
+        const profileContext = 'Profile starts here.\n' + 'X'.repeat(10_000);
+        const bounded = buildDeepgramInstructions({ notebookText, profileContext });
         assert.ok(bounded.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+        assert.ok(bounded.includes(FILLER_TURN_RULE));
+        assert.ok(bounded.includes('Ask for clarification only when missing information materially changes the answer. Ask one short question. Never repeat a clarification or ask for information already supplied.'));
+        assert.ok(bounded.includes(notebookText));
+        assert.ok(bounded.indexOf('Profile starts here.') > bounded.indexOf(notebookText));
+        assert.ok(!bounded.includes('XXXX'));
+        assert.ok(bounded.endsWith('[context truncated]'));
+
+        const reference = content => '<reference_file format="json">\n'
+            + JSON.stringify({ content }) + '\n</reference_file>';
+        const firstReference = reference('A short reference.');
+        const oversizedReference = reference('Y'.repeat(10_000));
+        const withReferences = buildDeepgramInstructions({ modeContext: firstReference + '\n\n' + oversizedReference });
+        assert.ok(withReferences.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+        assert.ok(withReferences.includes(firstReference));
+        assert.equal(withReferences.match(/<reference_file\b/g)?.length, 1);
+        assert.equal(withReferences.match(/<\/reference_file>/g)?.length, 1);
+        assert.ok(withReferences.endsWith('[context truncated]'));
         assert.ok(warnings.some(w => w.includes('25000')));
     } finally {
         console.warn = origWarn;

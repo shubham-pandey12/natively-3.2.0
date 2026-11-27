@@ -7,7 +7,7 @@ import {
     UNIVERSAL_WHAT_TO_ANSWER_PROMPT,
 } from '../../../electron/llm/prompts';
 import type { DeepgramThinkMode } from '../../../src/types/liveBrainSettings';
-import { ASK_SENTINEL, NO_ACTION_SENTINEL } from './responseParser';
+import { ASK_SENTINEL } from './responseParser';
 import type { LiveBrainId } from './types';
 
 interface LiveContext {
@@ -38,13 +38,14 @@ const CORRECTION_RULE = 'The newest interviewer instruction overrides earlier re
 export const CLARIFICATION_ASSUMPTION = 'The interviewer did not clarify; state a reasonable assumption first, then answer the original interviewer question.';
 
 // Keep the language exercised in the ElevenLabs Mini sentinel check.
-const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: If the entire interviewer turn is an acknowledgment or filler (for example, mm-hmm, okay, right), output exactly No action. and stop. Never greet, acknowledge, offer help, or answer filler. If a design question has multiple materially different scopes and no scope was supplied, begin with the exact prefix Ask: followed by a single short question, then stop and wait. Do not answer or assume a scope in that turn.';
+const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: Never greet, acknowledge, or offer help. If a design question has multiple materially different scopes and no scope was supplied, begin with the exact prefix Ask: followed by a single short question, then stop and wait. Do not answer or assume a scope in that turn.';
 
 // Live check 2026-11-26: a "Mm-hmm." during Gemini's open audio turn counted as
 // an interruption, and Gemini then repeated its previous answer.
-export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), output exactly No action. and nothing else. This also applies right after you were interrupted: never repeat, continue, or rephrase your previous answer because of a filler turn. Answer again only when the interviewer asks a new question or changes a requirement.';
+export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), is small talk, or is an unfinished question, output exactly No action. and nothing else. After an interruption, never repeat, continue, or rephrase your previous answer because of a filler turn. If you previously asked a clarification (Ask:) and the interviewer replies briefly (e.g. \'yes\', \'the second one\', \'Postgres\'), that reply is NOT filler — answer the original question using it.';
 
 export const DEEPGRAM_MAX_MANAGED_PROMPT_CHARS = 25_000;
+const CONTEXT_TRUNCATED = '\n\n[context truncated]';
 
 export function buildDeepgramInstructions(ctx: AnswerContext): string {
     const base = [CORE_IDENTITY, EXECUTION_CONTRACT, HUMAN_SPOKEN_ANSWER_CONTRACT]
@@ -52,25 +53,43 @@ export function buildDeepgramInstructions(ctx: AnswerContext): string {
         .filter(Boolean)
         .join('\n\n');
     const protocol = `Speak only what the candidate should say next, without reading formatting aloud.
-For filler, small talk, or an unfinished interviewer question, say nothing or say exactly "No action."
 For a clarification, start with "Ask:" and say only the clarification question.
 Otherwise, speak the answer directly without a sentinel.
 ${CLARIFICATION_RULE} If the interviewer moves on without clarifying, answer with a stated assumption.
 ${CORRECTION_RULE}
 If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.`;
     const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${protocol}\n\n${FILLER_TURN_RULE}`;
-    const modeContext = ctx.modeContext?.trim();
-    const modePrompt = ctx.modePrompt?.trim();
-    const extra = [modePrompt, contextBlocks(ctx, ctx.profileContext).trim(), modeContext]
-        .filter(Boolean).map(block => `\n\n${block}`).join('');
-    const full = `${core}${extra}`;
-    if (full.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) return full;
-    console.warn(`[LiveBrain] Deepgram managed prompt length (${full.length}) exceeds ${DEEPGRAM_MAX_MANAGED_PROMPT_CHARS} chars; trimming runtime context.`);
-    const budget = Math.max(0, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - core.length);
-    if (core.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) {
-        return `${core}${extra.slice(0, budget)}`;
+    if (core.length > DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) {
+        throw new Error('Deepgram managed prompt rules exceed the character limit.');
     }
-    return core.slice(0, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+    const blocks = [
+        ctx.modePrompt?.trim(),
+        contextBlocks({ modeName: ctx.modeName }).trim(),
+        contextBlocks({ notebookText: ctx.notebookText }).trim(),
+        contextBlocks({}, ctx.profileContext).trim(),
+        // ModesManager emits custom instructions and each reference as a complete tagged JSON block.
+        ...(ctx.modeContext?.trim().split(/\n\n(?=<(?:reference_file|active_mode_custom_instructions)\b)/u) ?? []),
+    ].filter((block): block is string => Boolean(block));
+    const fullLength = core.length + blocks.reduce((length, block) => length + 2 + block.length, 0);
+    if (fullLength <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) return [core, ...blocks].join('\n\n');
+    console.warn(`[LiveBrain] Deepgram managed prompt length (${fullLength}) exceeds ${DEEPGRAM_MAX_MANAGED_PROMPT_CHARS} chars; trimming runtime context.`);
+
+    if (core.length + CONTEXT_TRUNCATED.length > DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) return core;
+
+    let prompt = core;
+    for (const block of blocks) {
+        const remaining = DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - prompt.length - CONTEXT_TRUNCATED.length - 2;
+        if (block.length <= remaining) {
+            prompt += `\n\n${block}`;
+            continue;
+        }
+        if (!/<(?:reference_file|active_mode_custom_instructions)\b/u.test(block) && remaining > 0) {
+            const newline = block.lastIndexOf('\n', remaining);
+            if (newline > 0) prompt += `\n\n${block.slice(0, newline).trimEnd()}`;
+        }
+        break;
+    }
+    return prompt + CONTEXT_TRUNCATED;
 }
 
 export function buildProviderInstructions(
@@ -104,6 +123,7 @@ function contextBlocks(ctx: LiveContext, profile?: string): string {
     }, '');
 }
 
+/** @deprecated D12 superseded D10/D11; spike/tests only, not used at runtime. */
 export function buildDeciderInstructions(ctx: DeciderContext): string {
     return `${LIVE_PREAMBLE}
 At every end of an interviewer turn, call decide_turn exactly once. Never speak an answer or a clarification.
@@ -127,11 +147,9 @@ export function buildAnswerInstructions(ctx: AnswerContext, variant: 'full' | 't
 
     const format = output === 'spoken'
         ? `Speak only what the candidate should say next, without reading formatting aloud.
-For filler, small talk, or an unfinished interviewer question, say nothing or say exactly "No action."
 For a clarification, start with "Ask:" and say only the clarification question.
 Otherwise, speak the answer directly without a sentinel.`
         : `Write what the candidate should say next. Output text only.
-For small talk, filler, or an unfinished interviewer turn, output only ${NO_ACTION_SENTINEL}.
 For a clarification, start with ${ASK_SENTINEL} and write only the clarification question.
 Otherwise, write the answer directly without a sentinel.`;
     const protocol = `${format}
