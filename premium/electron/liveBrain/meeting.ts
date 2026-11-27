@@ -210,6 +210,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             setAutomaticAnswerOutdated: (generationId, outdated) => options.engine.setAutomaticAnswerOutdated(generationId, outdated),
         }),
         requestClarificationAnswer: () => supervisor.current?.requestClarificationAnswer?.(),
+        recordSttQuestion: (text, at) => supervisor.recordInterviewerTurn(text, at),
     });
     const finishTiming = (status: 'completed' | 'cancelled' | 'failed') => {
         if (!timing) return;
@@ -289,7 +290,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             if (debug && event.type === 'response_silent') speechStoppedAt = undefined;
             // Pipeline emits observations for memory and diagnostics. Its native
             // answer events already carry the generation IDs used by Phase 1.
-            const displayedText = id !== 'pipeline' ? orchestrator.handleEvent(event) : undefined;
+            const disposition = id !== 'pipeline' ? orchestrator.handleEvent(event) : undefined;
             if (id === 'pipeline' && event.type === 'response_started') orchestrator.replaceWithExternalAnswer();
             else if (id === 'pipeline' && event.type === 'response_delta') {
                 presented = true;
@@ -299,7 +300,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 if (!backup && event.status === 'completed') showStatus(presented ? 'Answer ready' : 'Listening');
                 if (event.responseId === timing?.responseId) finishTiming(event.status);
             }
-            if (isIntelligenceFlagEnabled('sharedResponseCleanup')) return displayedText;
+            return disposition;
         },
     });
 

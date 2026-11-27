@@ -10,6 +10,9 @@ import {
 import type { LiveBrainEvent } from './types';
 
 export type AnswerCompletion = 'completed' | 'cancelled' | 'failed';
+export type OrchestratorDisposition =
+    | { kind: 'answer' | 'ask'; text: string }
+    | { kind: 'suppressed' | 'interviewer_already_recorded' };
 
 export interface AnswerWriterPort {
     write(
@@ -82,6 +85,7 @@ interface QuestionBubble {
     /** Still being spoken: more transcript may arrive. */
     open: boolean;
     source: 'provider' | 'stt';
+    sttRecorded?: boolean;
     generationId?: number;
     /** Sent to the overlay at least once. */
     shown?: boolean;
@@ -104,7 +108,7 @@ const STT_QUESTION_MAX_AGE_MS = 8_000;
 // D15: an interviewer turn made only of these words is filler. An answer to it
 // is not shown (the model sometimes repeats its previous answer after a filler
 // interrupted its audio turn). Includes Flux/Gemini "MM." / "mm" / "M.M." / "M" variants.
-const FILLER_WORD = String.raw`(?:m+-?h+m+|m+\.m+|m+|h+m+|u+h+-?h+u+h+|uh+|um+|okay|ok|right|yeah|yep|yes|sure|got it|i see|alright|all right|cool|nice|good|great|thank you|thanks)`;
+const FILLER_WORD = String.raw`(?:m+-?h+m+|m+\.m+|m+|h+m+|u+h+[\s-]?h+u+h+|uh+|um+|okay|ok|right|yeah|yep|yes|sure|got it|i see|alright|all right|cool|nice|good|great|thank you|thanks)`;
 const FILLER_ONLY = new RegExp(String.raw`^${FILLER_WORD}(?:[\s,.!?-]+${FILLER_WORD})*[\s,.!?-]*$`, 'i');
 
 export function isFillerOnly(text: string): boolean {
@@ -138,12 +142,13 @@ export class ResponseOrchestrator<Timer> {
         cleanupText?: (text: string) => string;
         overlay: LiveBrainOverlayPort;
         clock: ResponseClock<Timer>;
+        recordSttQuestion?(text: string, at: number): void;
     }) { }
 
-    handleEvent(event: LiveBrainEvent): string | undefined {
+    handleEvent(event: LiveBrainEvent): OrchestratorDisposition | undefined {
         switch (event.type) {
             case 'interviewer_transcript':
-                this.noteProviderTranscript(event.text, event.final);
+                if (this.noteProviderTranscript(event.text, event.final)) return { kind: 'interviewer_already_recorded' };
                 break;
             case 'interviewer_speech_started':
                 if (this.answerTurn) this.answerTurn.superseded = true;
@@ -196,14 +201,14 @@ export class ResponseOrchestrator<Timer> {
             }
             case 'response_done': {
                 const response = this.response;
-                if (response?.id !== event.responseId) return;
+                if (response?.id !== event.responseId) return { kind: 'suppressed' };
                 // Gemini reports the barge-in cancel before the speech start.
                 if (event.status === 'cancelled') this.noteCutOff();
                 if (event.status === 'completed') {
                     this.readTextEvents(response, response.parser.finish());
                     if (!response.kind && this.current) this.setSpeaking(this.current, false);
                 }
-                return this.closeTextResponse(event.status === 'completed');
+                return this.closeTextResponse(event.status === 'completed', event.status === 'cancelled');
             }
         }
     }
@@ -215,7 +220,7 @@ export class ResponseOrchestrator<Timer> {
         if (!clean || this.question?.open) return;
         const turn = this.answerTurn;
         if (turn && !turn.bubble && !turn.superseded) {
-            turn.bubble = this.createBubble(clean, 'stt', false, turn.generationId);
+            turn.bubble = this.createSttBubble(clean, at, turn.generationId);
             return;
         }
         this.sttPending = { text: clean, at };
@@ -593,7 +598,7 @@ export class ResponseOrchestrator<Timer> {
         this.showText(response, false);
     }
 
-    private noteProviderTranscript(text: string, final: boolean): void {
+    private noteProviderTranscript(text: string, final: boolean): boolean | undefined {
         const clean = text.replace(/\s+/g, ' ').trim();
         if (!clean) return;
         const open = this.question?.open ? this.question : undefined;
@@ -615,7 +620,7 @@ export class ResponseOrchestrator<Timer> {
             } else {
                 turn.bubble = this.createBubble(clean, 'provider', false, turn.generationId);
             }
-            return;
+            return turn.bubble.sttRecorded;
         }
         this.sttPending = undefined;
         this.createBubble(clean, 'provider', true, undefined, !final);
@@ -636,13 +641,22 @@ export class ResponseOrchestrator<Timer> {
         return bubble;
     }
 
+    private createSttBubble(text: string, at: number, generationId?: number): QuestionBubble {
+        const bubble = this.createBubble(text, 'stt', false, generationId);
+        if (bubble.shown && this.ports.recordSttQuestion) {
+            bubble.sttRecorded = true;
+            this.ports.recordSttQuestion(text, at);
+        }
+        return bubble;
+    }
+
     private startAnswerTurn(responseId: string): void {
         let bubble = this.question?.open ? this.question : undefined;
         if (bubble) this.closeQuestion();
         else {
             const pending = this.sttPending;
             if (pending && this.ports.clock.now() - pending.at <= STT_QUESTION_MAX_AGE_MS) {
-                bubble = this.createBubble(pending.text, 'stt', false);
+                bubble = this.createSttBubble(pending.text, pending.at);
             }
         }
         this.sttPending = undefined;
@@ -672,15 +686,16 @@ export class ResponseOrchestrator<Timer> {
         });
     }
 
-    private closeTextResponse(completed = false): string | undefined {
+    private closeTextResponse(completed = false, cancelled = false): OrchestratorDisposition {
         const response = this.response;
         this.response = undefined;
         if (response?.kind === 'ask' && response.text.trim()) {
             const clarification = response.text.trim();
             if (completed) this.showAsk(response.id, clarification, undefined, false);
             else this.ports.overlay.showAsk({ askId: response.id, clarification, askStreaming: false });
+            if (completed || cancelled) return { kind: 'ask', text: clarification };
         }
-        if (response?.generationId === undefined) return;
+        if (response?.generationId === undefined) return { kind: 'suppressed' };
         if (completed && response.kind === 'answer' && !response.suppressed && this.ports.cleanupText && response.text.trim()) {
             try {
                 const cleaned = this.ports.cleanupText(response.text);
@@ -691,7 +706,9 @@ export class ResponseOrchestrator<Timer> {
             this.current.completedAt = this.ports.clock.now();
         }
         this.showText(response, true);
-        return completed && response.kind === 'answer' && !response.suppressed ? response.text : undefined;
+        return (completed || cancelled) && response.kind === 'answer' && !response.suppressed
+            ? { kind: 'answer', text: response.text }
+            : { kind: 'suppressed' };
     }
 
     private showText(response: TextResponse, done: boolean): void {

@@ -1,6 +1,6 @@
 import { InterviewNotebook, renderRecentTurns } from './InterviewNotebook';
 import { createResponseParser } from './responseParser';
-import type { ResponseClock } from './ResponseOrchestrator';
+import type { OrchestratorDisposition, ResponseClock } from './ResponseOrchestrator';
 import type { ConversationTurn, LiveBrain, LiveBrainEvent, LiveBrainId, LiveBrainStartContext } from './types';
 
 const REALTIME = ['gemini-live', 'openai-realtime', 'elevenlabs-realtime', 'deepgram-voice-agent', 'deepgram-flux'] as const;
@@ -56,7 +56,7 @@ export class BrainSupervisor<Timer> {
         notebook: InterviewNotebook;
         clock: ResponseClock<Timer>;
         create(id: LiveBrainId): { brain: LiveBrain; model: string } | undefined;
-        onEvent(event: LiveBrainEvent, id: LiveBrainId, model: string): string | void;
+        onEvent(event: LiveBrainEvent, id: LiveBrainId, model: string): OrchestratorDisposition | void;
         onSwitch?(data: { from?: LiveBrainId; to: LiveBrainId; reason: string; elapsedMs: number }): void;
         onRollover?(data: { brain: LiveBrainId; reason: string; elapsedMs: number }): void;
     }) { }
@@ -78,6 +78,10 @@ export class BrainSupervisor<Timer> {
         if (!this.stopped && text.trim()) {
             this.options.notebook.record({ role: 'assistant', text: text.trim(), at: this.options.clock.now() }, isClarification);
         }
+    }
+
+    recordInterviewerTurn(text: string, at: number): void {
+        if (!this.stopped) this.options.notebook.record({ role: 'interviewer', text, at });
     }
 
     start(): void {
@@ -232,9 +236,6 @@ export class BrainSupervisor<Timer> {
             this.speaking = false;
             if (event.action === 'answer') this.clearAudio();
         }
-        if (event.type === 'interviewer_transcript' && event.final) {
-            this.options.notebook.record({ role: 'interviewer', text: event.text, at: event.at });
-        }
         if (event.type === 'response_started') {
             this.clearResponseTimeout();
             this.missed = 0;
@@ -245,13 +246,10 @@ export class BrainSupervisor<Timer> {
         if (event.type === 'response_delta' && this.response?.id === event.responseId) {
             this.response.text += event.text.slice(0, MAX_RESPONSE_CHARS - this.response.text.length);
         }
-        let completedText: string | undefined;
+        let rawResponse: string | undefined;
         if (event.type === 'response_done' && this.response?.id === event.responseId) {
-            // Audio-mode providers keep "speaking" long after the text is on
-            // screen, so the interviewer's next words usually cancel the turn.
-            // Text already shown was seen by the candidate: keep it in the notebook.
-            if (event.status === 'completed') completedText = event.finalText ?? this.response.text;
-            else if (event.status === 'cancelled' && this.response.text.trim()) this.recordAnswer(this.response.text);
+            if (event.status === 'completed') rawResponse = event.finalText ?? this.response.text;
+            else if (event.status === 'cancelled') rawResponse = this.response.text;
             this.response = undefined;
         }
         if (event.type === 'response_silent') {
@@ -259,12 +257,15 @@ export class BrainSupervisor<Timer> {
             this.missed = 0;
             this.speaking = false;
         }
-        const displayedText = this.options.onEvent(event, lease.brain.id, lease.model);
-        if (completedText !== undefined) {
-            if (typeof displayedText === 'string') {
-                this.options.notebook.record({ role: 'assistant', text: displayedText, at: this.options.clock.now() });
-            } else {
-                this.recordAnswer(completedText);
+        const disposition = this.options.onEvent(event, lease.brain.id, lease.model);
+        if (event.type === 'interviewer_transcript' && event.final && disposition?.kind !== 'interviewer_already_recorded') {
+            this.recordInterviewerTurn(event.text, event.at);
+        }
+        if (rawResponse !== undefined) {
+            if (disposition?.kind === 'answer' || disposition?.kind === 'ask') {
+                this.recordAssistantTurn(disposition.text, disposition.kind === 'ask');
+            } else if (!disposition) {
+                this.recordAnswer(rawResponse);
             }
         }
         if (event.type === 'response_done' || event.type === 'response_silent') this.promote();

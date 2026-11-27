@@ -8,12 +8,13 @@ const dist = '../../../../dist-electron/';
 const load = name => require(`${dist}premium/electron/liveBrain/${name}.js`);
 const { BrainSupervisor } = load('BrainSupervisor');
 const { InterviewNotebook } = load('InterviewNotebook');
+const { ResponseOrchestrator } = load('ResponseOrchestrator');
 const { PipelineBrain } = load('brains/PipelineBrain');
 const { FakeLiveBrain } = load('__tests__/FakeLiveBrain');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const MIN = 60_000;
 
-function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemini-live'], presentedAnswer) {
+function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemini-live'], disposition, useOrchestrator = false) {
     const clock = new FakeClock();
     const notebook = new InterviewNotebook({ now: () => clock.now() });
     const realtime = [];
@@ -21,6 +22,11 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemi
     const seen = [];
     const switches = [];
     const rollovers = [];
+    const orchestrator = useOrchestrator ? new ResponseOrchestrator({
+        clock,
+        recordSttQuestion: (text, at) => supervisor.recordInterviewerTurn(text, at),
+        overlay: { showText() {}, showQuestion() {}, showAsk() {}, setOutdated() {}, setInterviewerSpeaking() {} },
+    }) : undefined;
     const supervisor = new BrainSupervisor({
         sessionId: 'meeting', preferred, instructions: id => `Answer instructions for ${id}`, notebook, clock,
         create(id) {
@@ -42,16 +48,17 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemi
         },
         onEvent: (event, id) => {
             seen.push([id, event]);
-            if (event.type === 'response_done') return presentedAnswer;
+            if (id !== 'pipeline' && orchestrator) return orchestrator.handleEvent(event);
+            if (event.type === 'response_done') return disposition;
         },
         onSwitch: data => switches.push(data),
         onRollover: data => rollovers.push(data),
     });
-    return { clock, notebook, supervisor, realtime, attempted, seen, switches, rollovers };
+    return { clock, notebook, supervisor, realtime, attempted, seen, switches, rollovers, orchestrator };
 }
 
 test('completed ready-to-display text is stored in the notebook', async () => {
-    const h = rig('gemini-live', 0, ['gemini-live'], 'I found useful takeaways.');
+    const h = rig('gemini-live', 0, ['gemini-live'], { kind: 'answer', text: 'I found useful takeaways.' });
     h.supervisor.start();
     await flush();
     const brain = h.realtime[0];
@@ -59,6 +66,53 @@ test('completed ready-to-display text is stored in the notebook', async () => {
     brain.emit({ type: 'response_delta', responseId: 'r1', text: 'I found actionable insights.' });
     brain.emit({ type: 'response_done', responseId: 'r1', status: 'completed' });
     assert.equal(h.notebook.recentTurns().at(-1).text, 'I found useful takeaways.');
+});
+
+test('handled suppressed answers and cancelled filler stay out of the notebook while Ask is recorded', async () => {
+    const h = rig('gemini-live', 0, ['gemini-live'], undefined, true);
+    h.supervisor.start();
+    await flush();
+    const brain = h.realtime[0];
+    const respond = (responseId, text, status) => {
+        brain.emit({ type: 'interviewer_transcript', final: true, text: 'Mm-hmm.', at: h.clock.now() });
+        brain.emit({ type: 'response_started', responseId, at: h.clock.now() });
+        brain.emit({ type: 'response_delta', responseId, text });
+        brain.emit({ type: 'response_done', responseId, status });
+    };
+    respond('hidden', 'Hidden answer.', 'completed');
+    respond('interrupted', 'Hidden partial.', 'cancelled');
+    assert.deepEqual(h.notebook.recentTurns().filter(turn => turn.role === 'assistant'), []);
+    respond('ask', 'Ask: Which region?', 'completed');
+    assert.deepEqual(h.notebook.snapshot().clarifications, [{ asked: 'Which region?', answer: null }]);
+    assert.deepEqual(h.notebook.recentTurns().filter(turn => turn.role === 'assistant').map(turn => turn.text),
+        ['Which region?']);
+    h.orchestrator.reset();
+    h.supervisor.stop();
+});
+
+test('STT fallback is recorded when used and a late provider final for that bubble is not added', async () => {
+    for (const sttBeforeAnswer of [true, false]) {
+        const h = rig('gemini-live', 0, ['gemini-live'], undefined, true);
+        h.supervisor.start();
+        await flush();
+        const brain = h.realtime[0];
+        const at = h.clock.now();
+        const useStt = () => h.orchestrator.noteSttTranscript('How should it scale?', at);
+        if (sttBeforeAnswer) {
+            useStt();
+            assert.deepEqual(h.notebook.recentTurns(), []);
+        }
+        brain.emit({ type: 'response_started', responseId: 'stt', at });
+        if (!sttBeforeAnswer) useStt();
+        assert.deepEqual(h.notebook.recentTurns(), [{ role: 'interviewer', text: 'How should it scale?', at }]);
+        brain.emit({ type: 'response_delta', responseId: 'stt', text: 'Add replicas.' });
+        brain.emit({ type: 'response_done', responseId: 'stt', status: 'completed' });
+        brain.emit({ type: 'interviewer_transcript', final: true, text: 'How should we scale it?', at: at + 1 });
+        assert.deepEqual(h.notebook.recentTurns().filter(turn => turn.role === 'interviewer'),
+            [{ role: 'interviewer', text: 'How should it scale?', at }]);
+        h.orchestrator.reset();
+        h.supervisor.stop();
+    }
 });
 
 test('Amazon Sonic reconnects with notebook context and rolls over before the eight-minute limit', async () => {
