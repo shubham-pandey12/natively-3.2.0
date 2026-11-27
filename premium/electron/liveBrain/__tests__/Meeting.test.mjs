@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const require = createRequire(import.meta.url);
 const dist = '../../../../dist-electron/';
@@ -408,6 +409,7 @@ function fluxEngineRig(t, options = {}) {
             const call = {
                 id: streamCalls.length + 1,
                 question: plan?.question || transcript,
+                transcript,
                 signal,
                 route: { ...route },
             };
@@ -796,10 +798,152 @@ test('Phase 3: Flux filler mid-stream, correction before first token, stale drop
     assert.equal(h.answers.length, 0);
 });
 
+test('Phase 4: AI-boundary context for follow-ups, corrections, clarification replies, unrelated topics, and stale draft rejection', async t => {
+    const h = fluxEngineRig(t);
+    const interruptedGate = Promise.withResolvers();
+
+    h.queuedStreams.push(
+        // 0: Base answer for follow-up test
+        async function* () {
+            yield 'Use CRDTs with WebSocket delta sync across devices.';
+        },
+        // 1: Early-draft follow-up ("What if it needs to work offline?")
+        async function* () {
+            yield 'Queue edits locally in IndexedDB and merge CRDT state on reconnect.';
+        },
+        // 2: Unrelated new topic ("What is the difference between horizontal and vertical scaling?")
+        async function* () {
+            yield 'Horizontal scaling adds more machines; vertical scaling upgrades one machine.';
+        },
+        // 3: Original product lookup answer (will be interrupted mid-stream after painting >160 chars)
+        async function* () {
+            yield 'Use a Redis cache-aside read path with a 60-second TTL, write-through invalidation on catalog updates, and a fallback to the primary database on cache miss so p99 stays low.';
+            await interruptedGate.promise;
+            yield ' Unfinished tail that must stay out of history.';
+        },
+        // 4: Early-draft correction ("Actually, caching is not allowed.")
+        async function* () {
+            yield 'Without caching, partition the catalog by product ID with read replicas.';
+        },
+        // 5: Clarification question ("Can the cache serve from disk?") -> Ask:
+        async function* () {
+            yield 'Ask: Is disk latency acceptable?';
+        },
+        // 6: Early-draft clarification reply ("Yes.")
+        async function* () {
+            yield 'Yes, serve warm reads from NVMe SSDs with an in-memory index.';
+        },
+        // 7: Confirmed-turn follow-up after meeting restart (no prior meeting context)
+        async function* () {
+            yield 'Start fresh without stale context.';
+        },
+    );
+
+    // 1. Base Q&A followed by early-draft follow-up ("What if it needs to work offline?")
+    h.flux.emit({ type: 'interviewer_transcript', text: 'How would you design a collaborative note-taking app that syncs across devices?', final: true, at: 10 });
+    h.flux.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'How would you design a collaborative note-taking app that syncs across devices?', turnKey: 'flux-p4:c1:t0', at: 11 });
+    await untilCondition(() => h.answers.length === 1);
+
+    h.flux.emit({ type: 'eager_end_of_turn', turnKey: 'flux-p4:c1:t1', question: 'What if it needs to work offline?', at: 20 });
+    await untilCondition(() => h.streamCalls.length === 2);
+    assert.match(h.streamCalls[1].transcript, /<turn_context kind="follow_up">/);
+    assert.match(h.streamCalls[1].transcript, /collaborative note-taking app/);
+    assert.match(h.streamCalls[1].transcript, /CRDTs with WebSocket delta sync/);
+
+    h.flux.emit({ type: 'interviewer_transcript', text: 'What if it needs to work offline?', final: true, at: 25 });
+    h.flux.emit({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'What if it needs to work offline?', turnKey: 'flux-p4:c1:t1', at: 26 });
+    await untilCondition(() => h.answers.length === 2);
+    assert.equal(h.streamCalls.length, 2, 'follow-up draft with matching context must be adopted');
+
+    // 2. Unrelated new topic must NOT inherit old follow-up / note-taking topic context.
+    h.flux.emit({ type: 'interviewer_transcript', text: 'What is the difference between horizontal and vertical scaling?', final: true, at: 30 });
+    h.flux.emit({ type: 'decision', decisionId: 'd3', action: 'answer', question: 'What is the difference between horizontal and vertical scaling?', turnKey: 'flux-p4:c1:t2', at: 31 });
+    await untilCondition(() => h.answers.length === 3);
+    assert.doesNotMatch(h.streamCalls[2].transcript, /<turn_context/);
+    assert.doesNotMatch(h.streamCalls[2].transcript, /collaborative note-taking app/);
+
+    // 3. Interrupted answer followed by early-draft correction: unfinished draft stays out of history,
+    //    and correction carries original confirmed goal.
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Design a low-latency product lookup service. You can use a cache.', final: true, at: 40 });
+    h.flux.emit({ type: 'decision', decisionId: 'd4', action: 'answer', question: 'Design a low-latency product lookup service. You can use a cache.', turnKey: 'flux-p4:c1:t3', at: 41 });
+    await untilCondition(() => h.streamCalls.length === 4);
+    await untilCondition(() => h.tokens.some(tok => tok.genId === h.streamCalls[3].generationId || tok.chunk.includes('Redis')));
+
+    h.flux.emit({ type: 'interviewer_speech_started', at: 45 });
+    h.flux.emit({ type: 'eager_end_of_turn', turnKey: 'flux-p4:c1:t4', question: 'Actually, caching is not allowed.', at: 46 });
+    await untilCondition(() => h.streamCalls.length === 5);
+    assert.match(h.streamCalls[4].transcript, /<turn_context kind="correction">/);
+    assert.match(h.streamCalls[4].transcript, /low-latency product lookup service/);
+    assert.match(h.streamCalls[4].transcript, /Actually, caching is not allowed\./);
+
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Actually, caching is not allowed.', final: true, at: 50 });
+    h.flux.emit({ type: 'decision', decisionId: 'd5', action: 'answer', question: 'Actually, caching is not allowed.', turnKey: 'flux-p4:c1:t4', at: 51 });
+    interruptedGate.resolve();
+    await untilCondition(() => h.answers.length === 4);
+    assert.equal(h.sessionAssistantWrites.some(w => w.includes('Unfinished tail')), false);
+
+    // 4. Pending clarification + early-draft "Yes." ties original question, Ask, and reply together,
+    //    and consumes pending clarification once.
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Can the cache serve from disk?', final: true, at: 60 });
+    h.flux.emit({ type: 'decision', decisionId: 'd6', action: 'answer', question: 'Can the cache serve from disk?', turnKey: 'flux-p4:c1:t5', at: 61 });
+    await untilCondition(() => h.answers.length === 5);
+
+    h.flux.emit({ type: 'eager_end_of_turn', turnKey: 'flux-p4:c1:t6', question: 'Yes.', at: 70 });
+    await untilCondition(() => h.streamCalls.length === 7);
+    assert.match(h.streamCalls[6].transcript, /<turn_context kind="clarification_reply">/);
+    assert.match(h.streamCalls[6].transcript, /Can the cache serve from disk\?/);
+    assert.match(h.streamCalls[6].transcript, /Is disk latency acceptable\?/);
+    assert.match(h.streamCalls[6].transcript, /Interviewer reply: Yes\./);
+
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Yes.', final: true, at: 75 });
+    h.flux.emit({ type: 'decision', decisionId: 'd7', action: 'answer', question: 'Yes.', turnKey: 'flux-p4:c1:t6', at: 76 });
+    await untilCondition(() => h.answers.length === 6);
+
+    // Second standalone "Yes." after clarification was consumed must be suppressed as filler.
+    h.flux.emit({ type: 'interviewer_transcript', text: 'Yes.', final: true, at: 80 });
+    h.flux.emit({ type: 'decision', decisionId: 'd8', action: 'answer', question: 'Yes.', turnKey: 'flux-p4:c1:t7', at: 81 });
+    await flush();
+    assert.equal(h.streamCalls.length, 7);
+
+    // 5. Meeting stop resets context so a new meeting does not inherit stale turns.
+    h.routing.stop();
+    const h2 = fluxEngineRig(t);
+    h2.queuedStreams.push(async function* () { yield 'Fresh meeting answer.'; });
+    h2.flux.emit({ type: 'interviewer_transcript', text: 'What if it needs to work offline?', final: true, at: 100 });
+    h2.flux.emit({ type: 'decision', decisionId: 'd9', action: 'answer', question: 'What if it needs to work offline?', turnKey: 'flux-p4b:c1:t0', at: 101 });
+    await untilCondition(() => h2.answers.length === 1);
+    assert.doesNotMatch(h2.streamCalls[0].transcript, /<turn_context/);
+    assert.doesNotMatch(h2.streamCalls[0].transcript, /Can the cache serve from disk/);
+});
+
 async function untilCondition(pred, timeoutMs = 2_000) {
     const start = Date.now();
     while (!pred()) {
         if (Date.now() - start > timeoutMs) assert.fail('Timed out waiting for Phase 2 test condition');
-        await new Promise(resolve => setTimeout(resolve, 10));
+        await delay(10);
     }
 }
+
+test('Flux clarification timeout answers through the writer and reconnect cancels it', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const h = fluxEngineRig(t);
+    h.queuedStreams.push(
+        async function* () { yield 'Ask: Is disk latency acceptable?'; },
+        async function* () { yield 'Assuming it is acceptable, use NVMe.'; },
+        async function* () { yield 'Ask: How many users?'; },
+    );
+
+    h.flux.emit({ type: 'decision', decisionId: 'ask-disk', action: 'answer', question: 'Can the cache serve from disk?', at: 10 });
+    await untilCondition(() => h.answers.length === 1);
+    t.mock.timers.tick(10_000);
+    await untilCondition(() => h.answers.length === 2);
+    assert.match(h.streamCalls[1].transcript, /Can the cache serve from disk/);
+    assert.match(h.streamCalls[1].transcript, /state a reasonable assumption/);
+
+    h.flux.emit({ type: 'decision', decisionId: 'ask-users', action: 'answer', question: 'Design the chat service.', at: 20 });
+    await untilCondition(() => h.answers.length === 3);
+    h.flux.emit({ type: 'status', status: 'connecting' });
+    t.mock.timers.tick(10_000);
+    await flush();
+    assert.equal(h.streamCalls.length, 3);
+});

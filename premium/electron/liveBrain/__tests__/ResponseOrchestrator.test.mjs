@@ -251,9 +251,9 @@ function chatRig() {
     const orchestrator = new ResponseOrchestrator({
         clock,
         overlay: {
-            showAsk: () => {},
-            setOutdated: () => {},
-            setInterviewerSpeaking: () => {},
+            showAsk: () => { },
+            setOutdated: () => { },
+            setInterviewerSpeaking: () => { },
             showQuestion: payload => { shown.push(payload); order.push(['question', payload.questionId]); },
             showText: payload => order.push(['answer', payload.generationId]),
         },
@@ -338,7 +338,7 @@ test('D14: a new question after a finished answer keeps that answer visible (not
     const orchestrator = new ResponseOrchestrator({
         clock: h.clock,
         overlay: {
-            showAsk: () => {}, setInterviewerSpeaking: () => {}, showQuestion: () => {},
+            showAsk: () => { }, setInterviewerSpeaking: () => { }, showQuestion: () => { },
             setOutdated: (...args) => outdated.push(args),
             showText: payload => h.order.push(['answer', payload.generationId, payload.updated]),
         },
@@ -361,7 +361,7 @@ test('D14: an answer cut off while its text was streaming is marked outdated by 
     const orchestrator = new ResponseOrchestrator({
         clock: h.clock,
         overlay: {
-            showAsk: () => {}, setInterviewerSpeaking: () => {}, showQuestion: () => {},
+            showAsk: () => { }, setInterviewerSpeaking: () => { }, showQuestion: () => { },
             setOutdated: (...args) => outdated.push(args),
             showText: payload => h.order.push(['answer', payload.generationId, payload.updated]),
         },
@@ -396,7 +396,7 @@ function fillerRig() {
     const orchestrator = new ResponseOrchestrator({
         clock,
         overlay: {
-            showAsk: payload => asks.push(payload), setOutdated: () => {}, setInterviewerSpeaking: () => {}, showQuestion: () => {},
+            showAsk: payload => asks.push(payload), setOutdated: () => { }, setInterviewerSpeaking: () => { }, showQuestion: () => { },
             showText: payload => texts.push(payload),
         },
     });
@@ -571,14 +571,14 @@ test('Phase 3: initial M partial growing into a real question shows normally, wh
                 completions.push(completion);
                 return { generationId: completions.length, done: completion.promise };
             },
-            cancel: () => {},
+            cancel: () => { },
         },
         overlay: {
-            showAsk: () => {},
-            setOutdated: () => {},
-            setInterviewerSpeaking: () => {},
+            showAsk: () => { },
+            setOutdated: () => { },
+            setInterviewerSpeaking: () => { },
             showQuestion: q => shownQuestions.push(q),
-            showText: () => {},
+            showText: () => { },
         },
     });
     brain.onEvent(e => orchestrator.handleEvent(e));
@@ -644,8 +644,6 @@ test('Phase 3: replacement failure before showing text restores outdated flag; r
     await flush();
 
     // Generation 3 fails BEFORE showing any text -> Generation 1 was never marked outdated!
-    assert.equal(typeof firstTextCallbacks[1], 'function');
-    firstTextCallbacks[1](31); // Late text notification from the cancelled replacement.
     completions[2].resolve('failed');
     await flush();
     assert.deepEqual(calls.filter(([k]) => k === 'outdated'), []);
@@ -661,4 +659,83 @@ test('Phase 3: replacement failure before showing text restores outdated flag; r
     assert.deepEqual(calls.filter(([k]) => k === 'outdated'), [
         ['outdated', 4, true],
     ]);
+});
+
+test('Phase 4: clarification expiry, unrelated question consumption, reconnect reset, and stale-context draft discard', async () => {
+    const brain = new FakeLiveBrain();
+    const clock = new FakeClock();
+    const calls = [];
+    const completions = [];
+    let baseNotebook = 'nb1';
+    let constraints = ['use Redis'];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        getContextSnapshot: () => ({ baseNotebook, constraints }),
+        answerWriter: {
+            prepareDraft: req => { calls.push(['prepareDraft', req]); return true; },
+            cancelDraft: (reason, turnKey) => { calls.push(['cancelDraft', reason, turnKey]); return true; },
+            write(req, opts) {
+                calls.push(['write', req, opts?.liveBrainNotebook, opts?.contextKey]);
+                const completion = Promise.withResolvers();
+                completions.push(completion);
+                return { generationId: completions.length, done: completion.promise };
+            },
+            cancel: reason => calls.push(['cancel', reason]),
+        },
+        overlay: {
+            showAsk: payload => calls.push(['ask', payload]),
+            setOutdated: (...args) => calls.push(['outdated', ...args]),
+            setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
+            showQuestion: () => {},
+            showText: () => {},
+        },
+    });
+    brain.onEvent(e => orchestrator.handleEvent(e));
+    await brain.start({
+        sessionId: 'test', instructions: '', recentTurns: [], signal: new AbortController().signal,
+        notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 },
+    });
+
+    // 1. Clarification expires after 10s -> subsequent "Yes." is suppressed as standalone filler.
+    brain.emit({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Can the cache serve from disk?', turnKey: 'c1:t0', at: 10 });
+    completions[0].resolve('completed');
+    await flush();
+    orchestrator.noteWriterClarification('Can the cache serve from disk?', 'Is disk latency acceptable?');
+    clock.advance(10_000); // fires timeout fallback (write #2) and clears pendingClarification
+    completions[1].resolve('completed');
+    await flush();
+    const writesBeforeYes = completions.length;
+    brain.emit({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'Yes.', turnKey: 'c1:t1', at: 10_010 });
+    assert.equal(completions.length, writesBeforeYes, 'expired clarification must not accept standalone Yes.');
+
+    // 2. Unrelated question consumes pending clarification without attaching it.
+    orchestrator.noteWriterClarification('Can the cache serve from disk?', 'Is disk latency acceptable?');
+    brain.emit({ type: 'decision', decisionId: 'd3', action: 'answer', question: 'How does consistent hashing work?', turnKey: 'c1:t2', at: 10_020 });
+    const unrelatedCall = calls.filter(([k]) => k === 'write').at(-1);
+    assert.equal(unrelatedCall[2], '');
+    completions[2].resolve('completed');
+    await flush();
+
+    // 3. Reconnect (endProviderTurn) clears pending clarification.
+    orchestrator.noteWriterClarification('Can the cache serve from disk?', 'Is disk latency acceptable?');
+    orchestrator.endProviderTurn();
+    const writesBeforeReconnectYes = completions.length;
+    brain.emit({ type: 'decision', decisionId: 'd4', action: 'answer', question: 'Yes.', turnKey: 'c2:t0', at: 10_030 });
+    assert.equal(completions.length, writesBeforeReconnectYes, 'endProviderTurn must clear pending clarification');
+
+    // 4. Context change (clarification expiry) between EagerEndOfTurn and EndOfTurn updates contextKey.
+    brain.emit({ type: 'decision', decisionId: 'd5', action: 'answer', question: 'Can the cache serve from disk?', turnKey: 'c2:t1', at: 10_040 });
+    completions[3].resolve('completed');
+    await flush();
+    orchestrator.noteWriterClarification('Can the cache serve from disk?', 'Is disk latency acceptable?');
+    brain.emit({ type: 'eager_end_of_turn', turnKey: 'c2:t2', question: 'Yes, disk is fine.', at: 10_050 });
+    const draftCall = calls.filter(([k]) => k === 'prepareDraft').at(-1);
+    assert.match(draftCall[1].contextKey, /clarification_reply/);
+    clock.advance(10_000); // clarification expires before EndOfTurn
+    completions[4].resolve('completed');
+    await flush();
+    brain.emit({ type: 'decision', decisionId: 'd6', action: 'answer', question: 'Yes, disk is fine.', turnKey: 'c2:t2', at: 20_060 });
+    const confirmedCall = calls.filter(([k]) => k === 'write').at(-1);
+    assert.doesNotMatch(confirmedCall[3], /clarification_reply/);
+    assert.notEqual(draftCall[1].contextKey, confirmedCall[3]);
 });

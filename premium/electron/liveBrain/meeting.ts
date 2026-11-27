@@ -90,7 +90,9 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         request: LiveBrainAnswerRequest,
         launch: (trackedRequest: LiveBrainAnswerRequest) => T | null,
     ): T | null => {
-        const liveBrainNotebook = supervisor?.notebookContext || undefined;
+        const liveBrainNotebook = request.liveBrainNotebook !== undefined
+            ? (request.liveBrainNotebook || undefined)
+            : (supervisor?.notebookContext || undefined);
         const stopAt = request.reuseGenerationId !== undefined ? lastWriterStopAt : speechStoppedAt;
         lastWriterStopAt = stopAt;
         speechStoppedAt = undefined;
@@ -125,7 +127,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 presented = true;
                 const clarification = /^Ask:\s*(\S[\s\S]*)$/i.exec(text.trim());
                 supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
-                if (clarification) orchestrator.noteWriterClarification(request.question);
+                if (clarification) orchestrator.noteWriterClarification(request.question, clarification[1]);
+                else orchestrator.noteWriterAnswer(text);
                 request.onComplete?.(text);
             },
         });
@@ -149,10 +152,12 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             ...(options.engine.startLiveBrainDraft
                 ? {
                     startLiveBrainDraft: (request) => {
-                        const liveBrainNotebook = supervisor?.notebookContext || undefined;
+                        const liveBrainNotebook = request.liveBrainNotebook !== undefined
+                            ? (request.liveBrainNotebook || undefined)
+                            : (supervisor?.notebookContext || undefined);
                         const inner = options.engine.startLiveBrainDraft!({
                             ...request,
-                            ...(liveBrainNotebook ? { liveBrainNotebook } : {}),
+                            ...(liveBrainNotebook !== undefined ? { liveBrainNotebook } : {}),
                         });
                         if (!inner) return null;
                         return {
@@ -161,6 +166,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                             turnKey: inner.turnKey,
                             question: inner.question,
                             routeKey: inner.routeKey,
+                            ...(inner.contextKey !== undefined ? { contextKey: inner.contextKey } : {}),
                             canAdopt: () => inner.canAdopt(),
                             cancel: (reason: string) => inner.cancel(reason),
                             adopt: (request) => trackWriterRun(request, tracked => inner.adopt(tracked)),
@@ -179,6 +185,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
     const orchestrator = new ResponseOrchestrator({
         clock,
         ...(answerWriter ? { answerWriter } : {}),
+        getContextSnapshot: () => ({
+            baseNotebook: supervisor?.notebookContext ?? '',
+            constraints: notebook.snapshot().constraints,
+        }),
         overlay: createLiveBrainOverlayPort({
             emitQuestion: event => {
                 if (event.responseText?.text.trim() || event.clarification?.trim()) {
@@ -189,10 +199,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             },
             setAutomaticAnswerOutdated: (generationId, outdated) => options.engine.setAutomaticAnswerOutdated(generationId, outdated),
         }),
-        requestClarificationAnswer: () => {
-            if (supervisor.current?.id === 'deepgram-flux') return false;
-            supervisor.current?.requestClarificationAnswer?.();
-        },
+        requestClarificationAnswer: () => supervisor.current?.requestClarificationAnswer?.(),
     });
     const finishTiming = (status: 'completed' | 'cancelled' | 'failed') => {
         if (!timing) return;

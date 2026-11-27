@@ -22,6 +22,7 @@
 | Baseline 1 — Flux vs GPT Realtime & Gemini Live | ✅ Done | Measured Windows Electron app (`dev:agent` WASAPI loopback) on 6 synthetic interview scenarios across `deepgram-flux` (`codex-cli` and `openai/gpt-4o-mini`) and `gemini-live` (`gemini-3.1-flash-live-preview`). OpenAI Realtime (`gpt-realtime-2.1`) setup was rejected on the available account and no Realtime model appeared in its model list. Documented the filler duplicate, completed-answer fold, and the clarification scenario that could not be reached. Physical macOS verification remains open. |
 | Baseline 2 — Flux Private Draft | ✅ Done | Verified on Windows Electron (`dev:agent` WASAPI loopback, `deepgram-flux` / `flux-general-multi` + `codex-cli`, Technical Interview, `full` prompt) vs fresh `5c092319` baseline worktree. S1 first overlay text dropped from `6,024` / `6,628 ms` to `2,471` / `2,863 ms` (smoke `2,322 ms`); S2 pause held with 2–3 `turn_resumed` draft discards and 1 final answer (`4,863` / `4,054 ms` vs `6,290` / `4,499 ms`); S4 cancelled Q1 cleanly with no stale chunks (`6,329` / `7,966 ms` vs `6,554` / `3,517 ms`, cause of the timing difference unverified). All 126 Live Brain tests, build, and typechecks pass. Physical macOS verification remains open. |
 | Baseline 3 — Flux Interruptions & Corrections | ✅ Done | Reproduced S3 filler bubble (`"Emma"` → `"MM"` → `"MM."` → `"Mhmm."`), added Flux short-opening-partial hold (`DeepgramFluxBrain.ts`) + deferred `setOutdated` until replacement first text (`ResponseOrchestrator.ts`), and reran S2–S5 (`n=2`, `deepgram-flux` + `codex-cli`). S3 produced `0/2` filler bubbles and `0` duplicate answers; S4 kept Q1 visible until replacement first text (`-21 ms` before overlay batch); S5 kept base answers visible (`outdated: false` in `2/2`); S2 held the 1.2 s pause (`5,909` / `5,714 ms`, `2/1/1` drafts). All `132/132` Live Brain tests, builds, typechecks, `test:lib`, and `test:components` pass. Physical macOS verification remains open. |
+| Baseline 4 — Flux Follow-up & Clarification Context | ✅ Done | Added `fluxTurnContext.ts`, wired `ResponseOrchestrator` + `AnswerWriter` + `meeting.ts` + `IntelligenceEngine.ts` (`contextKey` staleness check on private drafts), grounded follow-ups/corrections/pending clarification replies (`<turn_context>`), and omitted prior topics on unrelated new questions. Verified at the AI route boundary (`134/134` in `test:live-brain`) and on Windows Electron (`deepgram-flux` + `codex-cli`, S4 & S5 `n=2` each). Builds, typechecks, `test:lib`, and `test:components` pass. Physical macOS verification remains open. |
 
 ## Verified provider facts (fill in Phase 0, with source URLs)
 
@@ -929,3 +930,64 @@ node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b88
    - **Reviewed but not executed on macOS. Requires physical macOS verification.**
 
 Independent final review checked the saved Emma filler trace and Windows S2–S5 rerun summaries. Added a generation guard and regression assertion so a late first-text notification from a cancelled replacement cannot fold the earlier answer. The Electron build, all 132 Live Brain tests, and the 30-test orchestrator rerun passed.
+
+## Baseline Phase 4 — Improve Flux Follow-up and Clarification Context (Windows, 2026-11-27)
+
+Started from commit `5f51aa21` on `feat/live-brain`. Scope: `deepgram-flux` + My AI Provider (`fluxTurnContext.ts`, `ResponseOrchestrator.ts`, `AnswerWriter.ts`, `meeting.ts`, `electron/premium/liveBrain.ts`, `electron/IntelligenceEngine.ts`).
+
+### Changes made
+
+1. **Focused Flux turn-context builder (`premium/electron/liveBrain/fluxTurnContext.ts`):**
+   - **Follow-ups (`<turn_context kind="follow_up">`):** pairs follow-up questions (pronouns/deictic referents or elliptical openers such as `"What if it needs to work offline?"`) with `lastConfirmedTurn.question` and `lastConfirmedTurn.answer` (truncated to 900 chars).
+   - **Corrections (`<turn_context kind="correction">`):** carries forward `lastConfirmedTurn.question` and active `InterviewNotebook` constraints alongside the new correction (`"Actually, caching is not allowed."`). Unfinished/interrupted drafts are never recorded into `lastConfirmedTurn.answer` or `InterviewNotebook`.
+   - **Pending clarification replies (`<turn_context kind="clarification_reply">`):** ties `{ originalQuestion, clarification, reply }` together when a pending `Ask:` exists; consumed once on confirmation and cleared on 10 s expiry, unrelated new questions, `response_silent`, `endProviderTurn` (reconnect/fallback), and `reset()` (meeting end).
+   - **Unrelated new topics:** returns `''`, and `meeting.ts` (`trackWriterRun` / `startLiveBrainDraft`) preserves `''` instead of falling back to `supervisor.notebookContext`, avoiding stale topic leakage onto unrelated questions.
+2. **Draft context staleness (`AnswerWriter.ts`, `electron/premium/liveBrain.ts`, `electron/IntelligenceEngine.ts`):**
+   - Added `contextKey` to `LiveBrainDraftRequest`, `LiveBrainPrivateDraft`, `AnswerWriter.prepareDraft`, and `AnswerWriter.write`. If semantic turn context (`lastConfirmedTurn`, `pendingClarification`) changes between `EagerEndOfTurn` and `EndOfTurn`, the draft is discarded (`context_changed`) and the confirmed-turn path runs.
+
+### AI-boundary & lifecycle tests (`134/134` passing in `npm run test:live-brain`)
+
+- `Meeting.test.mjs` (`Phase 4: AI-boundary context for follow-ups, corrections, clarification replies, unrelated topics, and stale draft rejection`):
+  - Inspected `streamCalls[i].transcript` passed to `whatToAnswerLLM.generateStream(...)` inside `IntelligenceEngine`:
+    - Early-draft follow-up (`"What if it needs to work offline?"`) received `<turn_context kind="follow_up">`, `"collaborative note-taking app"`, and `"CRDTs with WebSocket delta sync"`, and adopted the draft.
+    - Unrelated new topic (`"What is the difference between horizontal and vertical scaling?"`) received neither `<turn_context` nor `"collaborative note-taking app"`.
+    - Interrupted product-lookup answer + early-draft correction (`"Actually, caching is not allowed."`) kept the unfinished tail out of `sessionAssistantWrites` and passed `<turn_context kind="correction">` with `"low-latency product lookup service"`.
+    - Pending `Ask: Is disk latency acceptable?` + early-draft `"Yes."` passed `<turn_context kind="clarification_reply">` with `"Can the cache serve from disk?"`, `"Is disk latency acceptable?"`, and `"Interviewer reply: Yes."`, then consumed the clarification so a second `"Yes."` was suppressed as filler.
+    - Meeting stop (`routing.stop()`) reset context so a new meeting's `"What if it needs to work offline?"` had zero `<turn_context` or prior-meeting leakage.
+- `ResponseOrchestrator.test.mjs` (`Phase 4: clarification expiry, unrelated question consumption, reconnect reset, and stale-context draft discard`):
+  - Verified 10 s clarification expiry suppresses subsequent `"Yes."`, unrelated questions consume pending clarification with empty context, `endProviderTurn()` clears pending clarification, and clarification expiry between `EagerEndOfTurn` and `EndOfTurn` updates `contextKey`.
+
+### Windows Electron replay — 2026-11-27
+
+Replayed S4 (correction) and S5 (follow-up) (`n=2` reps each, fresh meetings) on `dev:agent` (`NATIVELY_E2E=1`, `NATIVELY_PROMPT_DEBUG=1`) with `deepgram-flux` (`flux-general-multi`) + `codex-cli` (`codex-cli`), Technical Interview mode, `promptVariant: full`:
+
+~~~powershell
+$env:NATIVELY_E2E='1'; $env:NATIVELY_PROMPT_DEBUG='1'; npm run dev:agent
+node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\replay_phase3.mjs" --provider deepgram-flux --ai-provider codex-cli --ai-model codex-cli --reps 2 --only 4,5 --out "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b886e\scratch\results_phase4_deepgram-flux_codex-cli.json"
+~~~
+
+| Scenario | Rep | EoT / EoT→1st / Speech→1st | Drafts (s/r/d) | Grounding & overlay state |
+|---|---:|---|---|---|---|
+| 4. Correction mid-stream (`n=2`) | 1 | Corr: `2,345` / `3,872` / **`6,217 ms`** | `2 / 2 / 0` | Q1 (`252` chunks) cancelled (`doneMs: null`, `outdated: true`); Q2 (`73` chunks, `updated: true`) preserved product-lookup read path without caching |
+| 4. Correction mid-stream (`n=2`) | 2 | Corr: `2,143` / `3,029` / **`5,172 ms`** | `3 / 2 / 1` | Q1 (`260` chunks) cancelled (`doneMs: null`, `outdated: true`); Q2 (`68` chunks, `updated: true`) preserved partitioned indexed DB product-lookup read path without cache |
+| 5. Follow-up after completed (`n=2`) | 1 | FU: `1,679` / `934` / **`2,613 ms`** | `2 / 2 / 0` | Base (`260` chunks) kept visible (`outdated: false`); FU (`55` chunks) grounded in local note copy + operation queue + Sync Service CRDT merge |
+| 5. Follow-up after completed (`n=2`) | 2 | FU: `1,672` / `1,330` / **`3,002 ms`** | `2 / 2 / 0` | Base (`322` chunks) kept visible (`outdated: false`); FU (`63` chunks) grounded in local note copy + CRDT operation queue + Sync Service |
+
+- **Clarification `"Yes."` note:** Verified deterministically at the AI route boundary in `Meeting.test.mjs` (`"Can the cache serve from disk?"` → `Ask: Is disk latency acceptable?` → `"Yes."`), as live `codex-cli` runs answer `"Design an e-commerce app."` directly with stated assumptions rather than emitting `Ask:`.
+
+### Validation
+
+- **`npm run test:live-brain`:** `134/134` pass, `0` fail.
+- **`npm run build:electron`:** passed (exit 0).
+- **`npm run typecheck:electron`, `typecheck:premium`, `typecheck:ts7`:** all clean (exit 0).
+- **`npm run test:lib`:** `3,246` pass, `15` skipped, `0` fail.
+- **`npm run test:components`:** `1,002` pass, `2` skipped, `0` fail.
+- **Tested physically on Windows:** `dev:agent` Windows Electron app (`deepgram-flux` + `codex-cli`).
+- **Reviewed but not executed on macOS. Requires physical macOS verification.**
+
+### Baseline Phase 4 review
+
+- Fixed the Flux writer clarification timeout to send the original question, clarification, and stated-assumption instruction through AnswerWriter. Reconnect and silent turns cancel the pending timer. Speech suppresses the timed fallback while the pending reply is still eligible until expiry.
+- Unrelated questions can supersede an active stream without being treated as corrections. Successive corrections retain the confirmed question and correction text, and the draft key includes relevant notebook constraints apart from sentences already represented by the current transcript.
+- Independently verified the saved Windows Electron traces for both corrections and both completed-answer follow-ups. From clip end to first visible text, follow-ups took 2,613 and 3,002 ms and replacements took 6,217 and 5,172 ms. These traces predate the review fixes. The short-reply and timeout paths are covered through automated meeting and AI-route tests.
+- Independent validation on Windows: Electron build, all 135 Live Brain tests, Electron and premium type checks, and diff whitespace check. Physical macOS and a live provider clarification replay remain open.

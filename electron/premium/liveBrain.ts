@@ -38,6 +38,7 @@ export interface LiveBrainDraftRequest {
     turnKey: string;
     question: string;
     liveBrainNotebook?: string;
+    contextKey?: string;
 }
 
 export interface LiveBrainAdoptedDraft {
@@ -52,6 +53,7 @@ export interface LiveBrainPrivateDraft {
     readonly turnKey: string;
     readonly question: string;
     readonly routeKey: string;
+    readonly contextKey?: string;
     canAdopt(): boolean;
     adopt(request: LiveBrainAnswerRequest): LiveBrainAdoptedDraft | null;
     cancel(reason: string): void;

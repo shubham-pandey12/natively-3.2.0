@@ -36,7 +36,7 @@ export class AnswerWriter implements AnswerWriterPort {
         this.onDraftEvent = options.onDraftEvent;
     }
 
-    prepareDraft(request: { turnKey: string; question: string }): boolean {
+    prepareDraft(request: { turnKey: string; question: string; liveBrainNotebook?: string; contextKey?: string }): boolean {
         if (!this.engine.startLiveBrainDraft) return false;
         const question = request.question.trim();
         if (!question) return false;
@@ -45,6 +45,7 @@ export class AnswerWriter implements AnswerWriterPort {
             && this.draft.sessionId === this.sessionId
             && this.draft.turnKey === request.turnKey
             && this.draft.question.trim() === question
+            && (request.contextKey === undefined || (this.draft.contextKey ?? '') === request.contextKey)
             && (currentRoute === undefined || this.draft.routeKey === currentRoute)
             && this.draft.canAdopt()) {
             return false;
@@ -54,6 +55,8 @@ export class AnswerWriter implements AnswerWriterPort {
             sessionId: this.sessionId,
             turnKey: request.turnKey,
             question,
+            ...(request.liveBrainNotebook !== undefined ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
+            ...(request.contextKey !== undefined ? { contextKey: request.contextKey } : {}),
         });
         if (!created) return false;
         this.draft = created;
@@ -73,7 +76,7 @@ export class AnswerWriter implements AnswerWriterPort {
 
     write(
         request: Parameters<AnswerWriterPort['write']>[0],
-        optionsOrFirstText?: ((at: number) => void) | { suppressQuestionRow?: boolean; onFirstText?: (at: number) => void },
+        optionsOrFirstText?: ((at: number) => void) | { suppressQuestionRow?: boolean; onFirstText?: (at: number) => void; liveBrainNotebook?: string; contextKey?: string },
     ): ReturnType<AnswerWriterPort['write']> {
         this.cancel('answer_corrected');
         const controller = new AbortController();
@@ -82,17 +85,20 @@ export class AnswerWriter implements AnswerWriterPort {
             ? optionsOrFirstText
             : optionsOrFirstText?.onFirstText;
         const suppressQuestionRow = typeof optionsOrFirstText === 'object' ? optionsOrFirstText?.suppressQuestionRow : undefined;
+        const liveBrainNotebook = typeof optionsOrFirstText === 'object' ? optionsOrFirstText?.liveBrainNotebook : undefined;
+        const contextKey = typeof optionsOrFirstText === 'object' ? optionsOrFirstText?.contextKey : undefined;
         const { turnKey, ...answerFields } = request;
         const baseRequest: LiveBrainAnswerRequest = {
             ...answerFields,
             signal: controller.signal,
             ...(callerOnFirstText ? { onFirstText: callerOnFirstText } : {}),
             ...(suppressQuestionRow ? { suppressQuestionRow } : {}),
+            ...(liveBrainNotebook !== undefined ? { liveBrainNotebook } : {}),
         };
 
         const draft = this.draft;
         if (draft) {
-            const mismatchReason = this.draftMismatchReason(draft, request.question, turnKey);
+            const mismatchReason = this.draftMismatchReason(draft, request.question, turnKey, contextKey);
             if (!mismatchReason) {
                 this.draft = undefined;
                 let writerSawFirstText = false;
@@ -144,10 +150,16 @@ export class AnswerWriter implements AnswerWriterPort {
         this.active = undefined;
     }
 
-    private draftMismatchReason(draft: LiveBrainPrivateDraft, question: string, turnKey?: string): string | null {
+    private draftMismatchReason(
+        draft: LiveBrainPrivateDraft,
+        question: string,
+        turnKey?: string,
+        contextKey?: string,
+    ): string | null {
         if (!turnKey || draft.turnKey !== turnKey) return 'turn_mismatch';
         if (draft.sessionId !== this.sessionId) return 'session_mismatch';
         if (draft.question.trim() !== question.trim()) return 'transcript_changed';
+        if (contextKey !== undefined && (draft.contextKey ?? '') !== contextKey) return 'context_changed';
         const currentRoute = this.engine.getLiveBrainAiRouteKey?.();
         if (currentRoute !== undefined && draft.routeKey !== currentRoute) return 'route_changed';
         if (!draft.canAdopt()) return 'draft_unusable';

@@ -2188,6 +2188,7 @@ export class IntelligenceEngine extends EventEmitter {
             turnKey: request.turnKey,
             question,
             routeKey,
+            ...(request.contextKey !== undefined ? { contextKey: request.contextKey } : {}),
             canAdopt: () => !control.adopted
                 && !abortController.signal.aborted
                 && (control.phase === 'buffering' || control.phase === 'completed_private')
