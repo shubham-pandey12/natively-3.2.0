@@ -62,6 +62,7 @@ export interface LiveBrain {
     requestClarificationAnswer?(): void;
     requestSessionRollover?(inMs: number): boolean;
     addHistoryContext?(history: string): void;
+    hasPendingHistoryContext?(): boolean;
     /** Ask the provider to cancel the in-flight response. Safe to repeat. */
     cancelResponse(reason: string): void;
     stop(): Promise<void>;

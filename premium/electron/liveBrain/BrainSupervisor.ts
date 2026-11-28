@@ -41,6 +41,7 @@ interface Lease {
     pendingFluxTranscript?: { text: string; at: number };
     unsubscribe?: () => void;
     historyRevision: number;
+    externalHistoryRevision: number;
     pendingExternalHistory: Map<number, { turn: MeetingTurn; revision: number }>;
 }
 
@@ -126,7 +127,7 @@ export class BrainSupervisor<Timer> {
     }
 
     hasPendingExternalHistory(): boolean {
-        return Boolean(this.active?.pendingExternalHistory.size);
+        return Boolean(this.active?.pendingExternalHistory.size || this.active?.brain.hasPendingHistoryContext?.());
     }
 
     getPendingHistoryRevision(): number {
@@ -267,7 +268,7 @@ export class BrainSupervisor<Timer> {
         if (provider.brain.id !== id) throw new Error(`Live brain factory returned ${provider.brain.id} for ${id}`);
         return {
             ...provider, reason, since: this.options.clock.now(), ready: false, controller: new AbortController(),
-            historyRevision: 0, pendingExternalHistory: new Map(),
+            historyRevision: 0, externalHistoryRevision: 0, pendingExternalHistory: new Map(),
         };
     }
 
@@ -315,7 +316,9 @@ export class BrainSupervisor<Timer> {
             };
         };
         const initial = refreshContext();
-        lease.historyRevision = notebook.projectHistory()?.revision ?? 0;
+        const initialProjection = notebook.projectHistory();
+        lease.historyRevision = initialProjection?.revision ?? 0;
+        lease.externalHistoryRevision = initialProjection?.externalRevision ?? lease.historyRevision;
         if (lease === this.standby) lease.seeded = notebook.recentTurns();
         else this.quoteAfter = this.options.clock.now();
         const ctx: LiveBrainStartContext = {
@@ -498,7 +501,7 @@ export class BrainSupervisor<Timer> {
         const projectedHistory = this.options.notebook.projectHistory(undefined, replacement.seededHistory);
         const historyText = projectedHistory?.text ?? renderRecentTurns(history);
         if (replacement.brain.id === 'amazon-sonic' && projectedHistory
-            && projectedHistory.revision > replacement.historyRevision) {
+            && projectedHistory.externalRevision > replacement.externalHistoryRevision) {
             this.standby = undefined;
             if (this.deadline !== undefined) this.options.clock.clearTimeout(this.deadline);
             this.deadline = undefined;
@@ -534,7 +537,10 @@ export class BrainSupervisor<Timer> {
             replacement.brain.addHistoryContext(historyText);
             this.candidates = [];
         }
-        if (projectedHistory) replacement.historyRevision = projectedHistory.revision;
+        if (projectedHistory) {
+            replacement.historyRevision = projectedHistory.revision;
+            replacement.externalHistoryRevision = projectedHistory.externalRevision;
+        }
         if (replacement.brain.id === 'amazon-sonic') replacement.pendingExternalHistory.clear();
         replacement.seeded = undefined;
         replacement.seededHistory = undefined;

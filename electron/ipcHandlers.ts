@@ -2588,8 +2588,14 @@ export function initializeIpcHandlers(appState: AppState): void {
       let questionOnRecordAsSpeech = false;
       const historyStartedAt = Date.now();
       const historyManager = appState.getIntelligenceManager?.();
+      try {
+        questionOnRecordAsSpeech = options?.liveQuestion === true
+          && spokenLineAlreadyInTranscript(historyManager?.getCurrentMeetingTranscript?.(SPOKEN_DEDUPE_TAIL_LINES), message, historyStartedAt);
+      } catch { /* not on record */ }
       const historyTurn = typeof message === 'string' && message.trim()
-        ? historyManager?.beginMeetingTurn?.(message, 'user', historyStartedAt)
+        ? (questionOnRecordAsSpeech
+            ? (historyManager?.findMeetingQuestion?.(message) ?? historyManager?.noteMeetingSpeech?.(message, 'interviewer', historyStartedAt, 'stt'))
+            : historyManager?.beginMeetingTurn?.(message, 'user', historyStartedAt))
         : undefined;
       if (historyTurn && imagePaths?.length) historyManager?.enrichMeetingTurn?.(historyTurn, { hasVisualInput: true });
       const answerHistory = { question: message, meetingTurn: historyTurn };
@@ -7805,9 +7811,14 @@ export function initializeIpcHandlers(appState: AppState): void {
                 && !blockedFromSessionTracker
                 && !sessionWriteDecision.blockedFromSessionTracker
                 && !contextChangedSinceAsk()) {
-              intelligenceManager.addAssistantMessage(fullResponse, forThisTurn(sessionWriteDecision), 'manual_chat', undefined, answerHistory);
+              const recordedAnswer = finalText ?? fullResponse;
+              if (historyTurn) {
+                const resolvedQ = typeof message === 'string' && message.trim() ? message.trim() : undefined;
+                if (resolvedQ) historyManager?.enrichMeetingTurn?.(historyTurn, { resolvedQuestion: resolvedQ });
+              }
+              intelligenceManager.addAssistantMessage(recordedAnswer, forThisTurn(sessionWriteDecision), 'manual_chat', undefined, answerHistory);
               // Log Usage for streaming chat
-              intelligenceManager.logUsage('chat', message, fullResponse, imagePaths);
+              intelligenceManager.logUsage('chat', message, recordedAnswer, imagePaths);
               // CONTEXT OS memory safety (Phase 9, 2026-07-10): persist the
               // answer's factual CLAIMS separately from the conversational
               // message, default validation_status='unverified'. Only VERIFIED
@@ -9395,8 +9406,11 @@ export function initializeIpcHandlers(appState: AppState): void {
               void require('./services/screen/screenTranscription')
                 .transcribeScreenForMemory(request.imagePaths, request.currentRequest, { backupDescribe: 'manual_use_screen' })
                 .then((screenText: string) => {
-                  if (screenText && directHistoryTurn && !directCaptureText) {
-                    historyManager.enrichMeetingTurn(directHistoryTurn, { capture: { text: screenText, origin: 'capture' } });
+                  if (screenText && directHistoryTurn) {
+                    const merged = directCaptureText ? `${directCaptureText}\n\n${screenText}` : screenText;
+                    historyManager.enrichMeetingTurn(directHistoryTurn, {
+                      capture: { text: merged, origin: directCaptureText ? 'extension_untrusted' : 'capture' },
+                    });
                   }
                 }).catch(() => {});
             }

@@ -121,7 +121,7 @@ export class InterviewNotebook {
     }) {}
 
     projectHistory(question?: string, seeded?: ReadonlyMap<number, string>, trackSeed = false): {
-        text: string; revision: number; fingerprints?: ReadonlyMap<number, string>;
+        text: string; revision: number; externalRevision: number; fingerprints?: ReadonlyMap<number, string>;
         messages: { role: 'USER' | 'ASSISTANT'; text: string }[];
     } | undefined {
         const snapshot = this.options.readMeetingHistory?.();
@@ -132,6 +132,7 @@ export class InterviewNotebook {
         return {
             text: formatProviderMeetingHistory(turns, { question, rollingSummary: renderNotebook(this.state) }),
             revision: snapshot.revision,
+            externalRevision: snapshot.externalRevision ?? snapshot.revision,
             messages: formatProviderMeetingHistoryMessages(turns, { rollingSummary: renderNotebook(this.state) }),
             fingerprints,
         };

@@ -788,7 +788,16 @@ export function createMeeting(
                         // A final-only backend supplied no timestamp that identifies which capture it transcribed.
                         unclaimedCaptureStops.length = 0;
                     }
-                    if (notePendingTurn(text, at, false) && (realtimeDisconnected || status === 'Backup busy')) dispatchBackup();
+                    if (notePendingTurn(text, at, false)) {
+                        if (realtimeDisconnected || status === 'Backup busy') dispatchBackup();
+                        else if (supervisor.hasPendingExternalHistory()) {
+                            diagnostic('history-sync-fallback', {
+                                ledgerRevision: supervisor.getPendingHistoryRevision(),
+                                route: supervisor.current?.id ?? 'none', outcome: 'writer_before_followup',
+                            });
+                            dispatchBackup('writer');
+                        }
+                    }
                 }
             }
             return false;

@@ -613,3 +613,17 @@ for (const writerAvailable of [true, false]) {
         assert.ok(statuses.indexOf('Backup brain') > statuses.indexOf('Backup answering'));
     });
 }
+
+test('MEDIUM-3: GeminiLiveBrain reports hasPendingHistoryContext while buffering during an active provider turn', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket, requests } = connections[0];
+    send(socket, output('Thinking'));
+    await until(() => events.some(event => event.type === 'response_started'));
+    brain.addHistoryContext('Interviewer: Find top k.\nAI suggestion: Use a min-heap.');
+    assert.equal(brain.hasPendingHistoryContext(), true);
+    assert.equal(requests.some(req => req.clientContent?.turnComplete === false), false);
+    send(socket, { serverContent: { turnComplete: true } });
+    await until(() => !brain.hasPendingHistoryContext());
+    assert.equal(requests.some(req => req.clientContent?.turnComplete === false), true);
+});

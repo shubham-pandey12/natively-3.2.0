@@ -118,10 +118,10 @@ test('meeting session forwards a screenshot answer from SessionTracker before th
     brain.addHistoryContext = text => { contextUpdates.push(text); protocolOrder.push('history'); };
     const session = createMeeting({
         sessionId: 'shared-history-integration',
-        engine: { setAutomaticAnswerOutdated() {} },
+        engine: { setAutomaticAnswerOutdated() { } },
         readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
         subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
-        emitQuestion() {},
+        emitQuestion() { },
         onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
     }, brain);
     t.after(() => session.stop());
@@ -151,10 +151,10 @@ test('Sonic external answers start a fresh session with the current ledger befor
     const brains = [];
     const session = createMeeting({
         sessionId: 'sonic-history-reseed', provider: 'amazon-sonic',
-        engine: { setAutomaticAnswerOutdated() {} },
+        engine: { setAutomaticAnswerOutdated() { } },
         readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
         subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
-        emitQuestion() {}, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+        emitQuestion() { }, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
     }, id => {
         const brain = new FakeLiveBrain(id);
         brains.push(brain);
@@ -184,25 +184,25 @@ test('unflushed realtime history uses the writer once and ignores a late realtim
     const ledger = new SessionTracker();
     const realtime = new FakeLiveBrain('gemini-live');
     const originalStart = realtime.start.bind(realtime);
-    realtime.start = async context => { await originalStart(context); await new Promise(() => {}); };
+    realtime.start = async context => { await originalStart(context); await new Promise(() => { }); };
     const writerRequests = [];
     const session = createMeeting({
         sessionId: 'pending-history-fallback', provider: 'gemini-live',
         engine: {
-            setAutomaticAnswerOutdated() {}, canAutoAnswer: () => true,
+            setAutomaticAnswerOutdated() { }, canAutoAnswer: () => true,
             runLiveBrainAnswer(request) {
                 writerRequests.push(request);
                 request.onFirstText(Date.now());
                 request.onComplete('A heap keeps the best k candidates.', {});
-                ledger.recordMeetingAnswer(request.meetingTurn, 'A heap keeps the best k candidates.', { surface: 'meeting_auto_answer' });
+                ledger.recordMeetingAnswer(request.meetingTurn, 'A heap keeps the best k candidates.', { surface: 'live_brain' });
                 return { generationId: 700, done: Promise.resolve({ status: 'completed' }) };
             },
         },
-        readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurnsView(), revision: ledger.getMeetingHistoryRevision(), externalRevision: ledger.getExternalHistoryRevision() }),
         subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
         identifyInterviewTurn: (question, at) => ledger.noteMeetingSpeech(question, 'interviewer', at, 'realtime'),
         recordInterviewAnswer: (turn, answer, status, replaces) => ledger.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces }),
-        emitQuestion() {}, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+        emitQuestion() { }, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
     }, realtime);
     t.after(() => session.stop());
     session.start();
@@ -237,26 +237,26 @@ test('Sonic uses the writer while its history-seeded replacement is still connec
         sessionId: 'sonic-pending-history-fallback', provider: 'amazon-sonic',
         resolveProvider: () => ({ sonicRegion: 'us-east-1' }),
         engine: {
-            setAutomaticAnswerOutdated() {}, canAutoAnswer: () => true,
+            setAutomaticAnswerOutdated() { }, canAutoAnswer: () => true,
             runLiveBrainAnswer(request) {
                 writerRequests.push(request);
                 request.onFirstText(Date.now());
                 request.onComplete('A min-heap keeps the best k candidates.', {});
-                ledger.recordMeetingAnswer(request.meetingTurn, 'A min-heap keeps the best k candidates.', { surface: 'meeting_auto_answer' });
+                ledger.recordMeetingAnswer(request.meetingTurn, 'A min-heap keeps the best k candidates.', { surface: 'live_brain' });
                 return { generationId: 701, done: Promise.resolve({ status: 'completed' }) };
             },
         },
-        readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurnsView(), revision: ledger.getMeetingHistoryRevision(), externalRevision: ledger.getExternalHistoryRevision() }),
         subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
         identifyInterviewTurn: (question, at) => ledger.noteMeetingSpeech(question, 'interviewer', at, 'realtime'),
         recordInterviewAnswer: (turn, answer, status, replaces) => ledger.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces }),
-        emitQuestion() {}, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+        emitQuestion() { }, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
     }, id => {
         if (id !== 'amazon-sonic') return undefined;
         const brain = new FakeLiveBrain(id);
         if (brains.length) {
             const original = brain.start.bind(brain);
-            brain.start = async context => { await original(context); await new Promise(() => {}); };
+            brain.start = async context => { await original(context); await new Promise(() => { }); };
         }
         brains.push(brain);
         return brain;
@@ -284,6 +284,152 @@ test('Sonic uses the writer while its history-seeded replacement is still connec
     assert.equal(ledger.getMeetingTurns().filter(turn => turn.question === 'Why did you use a heap?' && turn.answer?.status === 'completed').length, 1);
 });
 
+test('HIGH-2: real Live Brain writer records surface live_brain once and does not fire external listeners', async t => {
+    const ledger = new SessionTracker();
+    const externalEvents = [];
+    ledger.subscribeExternalMeetingAnswers((turn, rev) => externalEvents.push({ turn, rev }));
+    const engine = Object.create(IntelligenceEngine.prototype);
+    engine.session = ledger;
+    engine.emit = () => true;
+    engine.setMode = () => { };
+    engine.whatToAnswerLLM = {
+        async *generateStream() { yield 'Use a bounded min-heap of size k.'; },
+    };
+    engine.runWhatShouldISayInner = async (_q, _c, _imgs, opts) => {
+        const answerSurface = opts?.liveBrain ? 'live_brain' : 'what_to_answer';
+        ledger.addAssistantMessage('Use a bounded min-heap of size k.', undefined, answerSurface, undefined, { meetingTurn: opts?.meetingTurn });
+        opts?.liveBrain?.onFirstText?.(Date.now());
+        opts?.liveBrain?.onComplete?.('Use a bounded min-heap of size k.', {});
+        return 'Use a bounded min-heap of size k.';
+    };
+    const turn = ledger.noteMeetingSpeech('Why a min-heap?', 'interviewer', 1_000, 'realtime');
+    await engine.runWhatShouldISay('Why a min-heap?', 0.9, undefined, {
+        meetingTurn: turn,
+        liveBrain: { generationId: 1 },
+    });
+    const [recorded] = ledger.getMeetingTurns();
+    assert.equal(recorded.answer?.surface, 'live_brain');
+    assert.equal(recorded.answer?.text, 'Use a bounded min-heap of size k.');
+    assert.equal(externalEvents.length, 0);
+});
+
+test('HIGH-3: Sonic standby promotes after interviewer speaks and writer answers without a second reseed', async t => {
+    const ledger = new SessionTracker();
+    const brains = [];
+    let releaseStandby;
+    const session = createMeeting({
+        sessionId: 'sonic-no-loop', provider: 'amazon-sonic',
+        resolveProvider: () => ({ sonicRegion: 'us-east-1' }),
+        engine: {
+            setAutomaticAnswerOutdated() { }, canAutoAnswer: () => true,
+            runLiveBrainAnswer(request) {
+                request.onFirstText(Date.now());
+                request.onComplete('A min-heap keeps the best k candidates.', {});
+                return { generationId: 702, done: Promise.resolve({ status: 'completed' }) };
+            },
+        },
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurnsView(), revision: ledger.getMeetingHistoryRevision(), externalRevision: ledger.getExternalHistoryRevision() }),
+        subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
+        identifyInterviewTurn: (question, at) => ledger.noteMeetingSpeech(question, 'interviewer', at, 'realtime'),
+        recordInterviewAnswer: (turn, answer, status, replaces) => ledger.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces }),
+        emitQuestion() { }, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+    }, id => {
+        if (id !== 'amazon-sonic') return undefined;
+        const brain = new FakeLiveBrain(id);
+        if (brains.length === 1) {
+            const original = brain.start.bind(brain);
+            brain.start = async context => {
+                await original(context);
+                await new Promise(resolve => { releaseStandby = resolve; });
+            };
+        }
+        brains.push(brain);
+        return brain;
+    });
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+    const screenshot = ledger.beginMeetingTurn('Solve screen problem.', 'request', Date.now(), 'captured');
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap.', { surface: 'screenshot' });
+    await flush();
+    assert.equal(brains.length, 2);
+    brains[0].emit({ type: 'interviewer_transcript', text: 'Why did you use a heap?', final: true, at: Date.now() });
+    await flush();
+    releaseStandby();
+    await flush();
+    assert.equal(brains.length, 2, 'standby must be promoted without triggering a second Sonic reseed');
+    assert.equal(brains[0].stopCalls, 1);
+});
+
+test('MEDIUM-1: observePipelineTranscript runs writer catch-up once when external history is pending', async t => {
+    const ledger = new SessionTracker();
+    const realtime = new FakeLiveBrain('gemini-live');
+    const originalStart = realtime.start.bind(realtime);
+    realtime.start = async context => { await originalStart(context); await new Promise(() => { }); };
+    const writerRequests = [];
+    const session = createMeeting({
+        sessionId: 'stt-pending-history-fallback', provider: 'gemini-live',
+        engine: {
+            setAutomaticAnswerOutdated() { }, canAutoAnswer: () => true,
+            runLiveBrainAnswer(request) {
+                writerRequests.push(request);
+                request.onFirstText(Date.now());
+                request.onComplete('Use a min-heap for O(n log k).', {});
+                return { generationId: 703, done: Promise.resolve({ status: 'completed' }) };
+            },
+        },
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurnsView(), revision: ledger.getMeetingHistoryRevision(), externalRevision: ledger.getExternalHistoryRevision() }),
+        subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
+        identifyInterviewTurn: (question, at) => ledger.noteMeetingSpeech(question, 'interviewer', at, 'stt'),
+        recordInterviewAnswer: (turn, answer, status, replaces) => ledger.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces }),
+        emitQuestion() { }, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+    }, realtime);
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+    const screenshot = ledger.beginMeetingTurn('Find top k.', 'request', Date.now(), 'captured');
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap.', { surface: 'screenshot' });
+    session.observePipelineTranscript('Why did you use a heap?', true, Date.now());
+    await flush();
+    assert.equal(writerRequests.length, 1);
+    assert.match(writerRequests[0].liveBrainNotebook, /Use a min-heap\./);
+});
+
+test('MEDIUM-3: buffered Gemini history during active turn still triggers writer catch-up on immediate follow-up', async t => {
+    const ledger = new SessionTracker();
+    const realtime = new FakeLiveBrain('gemini-live');
+    let pendingBuffered = false;
+    realtime.addHistoryContext = () => { pendingBuffered = true; };
+    realtime.hasPendingHistoryContext = () => pendingBuffered;
+    const writerRequests = [];
+    const session = createMeeting({
+        sessionId: 'gemini-buffered-catchup', provider: 'gemini-live',
+        engine: {
+            setAutomaticAnswerOutdated() { }, canAutoAnswer: () => true,
+            runLiveBrainAnswer(request) {
+                writerRequests.push(request);
+                request.onFirstText(Date.now());
+                request.onComplete('The min-heap bounds memory to k.', {});
+                return { generationId: 704, done: Promise.resolve({ status: 'completed' }) };
+            },
+        },
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurnsView(), revision: ledger.getMeetingHistoryRevision(), externalRevision: ledger.getExternalHistoryRevision() }),
+        subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
+        identifyInterviewTurn: (question, at) => ledger.noteMeetingSpeech(question, 'interviewer', at, 'realtime'),
+        recordInterviewAnswer: (turn, answer, status, replaces) => ledger.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces }),
+        emitQuestion() { }, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+    }, realtime);
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+    const screenshot = ledger.beginMeetingTurn('Find top k.', 'request', Date.now(), 'captured');
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap.', { surface: 'screenshot' });
+    realtime.emit({ type: 'interviewer_transcript', text: 'Why did you use a heap?', final: true, at: Date.now() });
+    await flush();
+    assert.equal(writerRequests.length, 1);
+    assert.match(writerRequests[0].liveBrainNotebook, /Use a min-heap\./);
+});
+
 function useSkillsFixture(t) {
     const skills = Object.create(SkillsManager.prototype);
     skills.skillsDir = mkdtempSync(join(tmpdir(), 'live-brain-skills-'));
@@ -298,8 +444,8 @@ test('toggling a standing skill refreshes the active realtime session with the n
     const session = createMeeting({
         sessionId: 'skills-refresh',
         resolveContext: () => ({ standingSkills: skills.getAlwaysOnPromptBlock() }),
-        engine: { setAutomaticAnswerOutdated() {} },
-        emitQuestion() {},
+        engine: { setAutomaticAnswerOutdated() { } },
+        emitQuestion() { },
         onFailure: () => assert.fail('Unexpected fallback'),
     }, id => {
         const brain = new FakeLiveBrain(id);
@@ -481,7 +627,7 @@ test('routing keeps the legacy switch off-path, suppresses it for Gemini and re-
     assert.equal(canDispatch(true, false), false);
     routing.stop();
     assert.equal(canDispatch(false), false);
-    routing.start(() => undefined, () => {}); // Explicit pipeline or no usable Gemini key.
+    routing.start(() => undefined, () => { }); // Explicit pipeline or no usable Gemini key.
     assert.equal(canDispatch(false), true);
     routing.stop();
 });
@@ -491,7 +637,7 @@ test('supervised fallback forwards the notebook through the existing Auto Answer
     const overlay = [];
     const engine = Object.create(IntelligenceEngine.prototype);
     engine.runLiveBrainAnswer = undefined;
-    engine.setAutomaticAnswerOutdated = () => {};
+    engine.setAutomaticAnswerOutdated = () => { };
     engine.handleSuggestionTrigger = async trigger => {
         assert.equal(trigger.automatic, true);
         assert.equal(trigger.replacesAutomaticAnswer, true);
@@ -501,7 +647,7 @@ test('supervised fallback forwards the notebook through the existing Auto Answer
     const routing = new LiveBrainRouting();
     routing.start(onFailure => createMeeting({
         sessionId: 'supervised-fixture', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: () => acceptedBackup(), cancel() {} }, emitQuestion: event => overlay.push(event),
+        pipeline: { activate: () => acceptedBackup(), cancel() { } }, emitQuestion: event => overlay.push(event),
     }, brain), () => assert.fail('The supervisor owns fallback'));
     assert.equal(routing.pipelineOverride(true), false);
     brain.emit({ type: 'interviewer_transcript', text: 'Notifications must use email only.', final: true, at: Date.now() });
@@ -616,10 +762,10 @@ test('D17: Deepgram Flux streams answers through IntelligenceEngine, cancels on 
     const routing = new LiveBrainRouting();
     routing.start(onFailure => createMeeting({
         sessionId: 'flux-meeting', apiKey: 'fake', provider: 'deepgram-flux', engine,
-        pipeline: { activate: () => 'failed', cancel() {} },
+        pipeline: { activate: () => 'failed', cancel() { } },
         emitQuestion: ev => overlay.push(ev),
         onFailure,
-    }, flux), () => {});
+    }, flux), () => { });
 
     assert.equal(routing.pipelineOverride(true), false);
     flux.emit({ type: 'interviewer_transcript', text: 'How do you scale reads?', final: false, at: 10 });
@@ -685,7 +831,7 @@ function fluxEngineRig(t, options = {}) {
     const session = new SessionTracker();
     let route = options.initialRoute ?? { provider: 'openai', model: 'gpt-4o-mini' };
     const engine = new IntelligenceEngine({
-        setNegotiationCoachingHandler() {},
+        setNegotiationCoachingHandler() { },
         getDirectAssistSelection: () => ({ ...route }),
         getCurrentProvider: () => route.provider,
         getCurrentModelId: () => route.model,
@@ -752,16 +898,19 @@ function fluxEngineRig(t, options = {}) {
         apiKey: 'fake',
         provider: 'deepgram-flux',
         readGroundingState: options.readGroundingState,
+        identifyInterviewTurn: (question, at) => session.noteMeetingSpeech(question, 'interviewer', at, 'realtime'),
+        recordInterviewAnswer: (turn, text, status, replaces) =>
+            session.recordMeetingAnswer(turn, text, { status, replaces, surface: 'live_brain' }),
         engine: {
             setAutomaticAnswerOutdated: (genId, outdated) => engine.setAutomaticAnswerOutdated(genId, outdated),
             runLiveBrainAnswer: req => engine.runLiveBrainAnswer(req, session.getFormattedContext(120)),
             startLiveBrainDraft: req => engine.startLiveBrainDraft(req, session.getFormattedContext(120)),
             getLiveBrainAiRouteKey: () => engine.getLiveBrainAiRouteKey(),
         },
-        pipeline: { activate: () => 'failed', cancel() {} },
+        pipeline: { activate: () => 'failed', cancel() { } },
         emitQuestion: ev => overlay.push(ev),
         onFailure,
-    }, flux), () => {});
+    }, flux), () => { });
     t.after(() => {
         routing.stop();
         engine.reset();
@@ -793,6 +942,7 @@ test('Phase 2: confirmation before first token promotes in-flight draft into one
     assert.equal(h.questions.length, 0);
     assert.equal(h.sessionAssistantWrites.length, 0);
     assert.equal(h.usageWrites.length, 0);
+    assert.deepEqual(h.session.getMeetingTurns(), []);
 
     // EndOfTurn confirms BEFORE the first token arrives.
     h.flux.emit({ type: 'interviewer_transcript', text: 'What is horizontal vs vertical scaling?', final: true, at: 20 });
@@ -808,6 +958,10 @@ test('Phase 2: confirmation before first token promotes in-flight draft into one
     assert.equal(h.sessionAssistantWrites.length, 1);
     assert.equal(h.usageWrites.length, 1);
     assert.match(h.sessionAssistantWrites[0], /Horizontal scaling adds machines/);
+    const [ledgerTurn] = h.session.getMeetingTurns();
+    assert.equal(h.session.getMeetingTurns().length, 1);
+    assert.match(ledgerTurn.question, /horizontal vs vertical scaling/);
+    assert.match(ledgerTurn.answer.text, /Horizontal scaling adds machines/);
     // Verify notebook recorded the confirmed answer (surfaced in pipelineContext upon fallback).
     h.flux.emit({ type: 'error', code: 'auth', fatal: true });
     assert.match(h.routing.activeSession.pipelineContext(), /Horizontal scaling adds machines/);
@@ -1284,7 +1438,7 @@ test('U5e-1: unanswered STT final before fatal realtime failure hands off once t
     const { PipelineBrain } = require('../../../../dist-electron/premium/electron/liveBrain/brains/PipelineBrain.js');
     const engine = Object.create(IntelligenceEngine.prototype);
     engine.runLiveBrainAnswer = undefined;
-    engine.setAutomaticAnswerOutdated = () => {};
+    engine.setAutomaticAnswerOutdated = () => { };
 
     // 1. Fresh pending STT final handed off to pipeline.activate and deduped within 5 s.
     const { brain: b1 } = rig();
@@ -1292,8 +1446,8 @@ test('U5e-1: unanswered STT final before fatal realtime failure hands off once t
     const routing1 = new LiveBrainRouting();
     routing1.start(onFailure => createMeeting({
         sessionId: 'u5e1-fresh', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => { activated1.push(pending); return acceptedBackup(); }, cancel() {} },
-        emitQuestion: () => {},
+        pipeline: { activate: pending => { activated1.push(pending); return acceptedBackup(); }, cancel() { } },
+        emitQuestion: () => { },
     }, b1), () => assert.fail('Supervisor owns fallback'));
 
     routing1.activeSession.observePipelineTranscript('What is a mutex?', true, 100_000);
@@ -1312,8 +1466,8 @@ test('U5e-1: unanswered STT final before fatal realtime failure hands off once t
     const routing2 = new LiveBrainRouting();
     routing2.start(onFailure => createMeeting({
         sessionId: 'u5e1-stale', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => { activated2.push(pending); return acceptedBackup(); }, cancel() {} },
-        emitQuestion: () => {},
+        pipeline: { activate: pending => { activated2.push(pending); return acceptedBackup(); }, cancel() { } },
+        emitQuestion: () => { },
     }, b2), () => assert.fail('Supervisor owns fallback'));
     routing2.activeSession.observePipelineTranscript('What is a mutex?', true, 102_000);
     t.mock.timers.tick(20_001);
@@ -1323,7 +1477,7 @@ test('U5e-1: unanswered STT final before fatal realtime failure hands off once t
 
     // 3. PipelineBrain stop() inside response_started emits no delta after response_done;
     //    failed before any token emits response_silent once.
-    const p1 = new PipelineBrain(() => {});
+    const p1 = new PipelineBrain(() => { });
     const events1 = [];
     p1.onEvent(e => {
         events1.push(e);
@@ -1333,7 +1487,7 @@ test('U5e-1: unanswered STT final before fatal realtime failure hands off once t
     p1.observe({ type: 'token', generationId: 1, text: 'Hello' });
     assert.deepEqual(events1.map(e => e.type), ['status', 'response_started', 'response_done']);
 
-    const p2 = new PipelineBrain(() => {});
+    const p2 = new PipelineBrain(() => { });
     const events2 = [];
     p2.onEvent(e => events2.push(e));
     await p2.start({ sessionId: 'p2', instructions: '', notebook: { topics: [], currentTopic: null, requirements: [], constraints: [], clarifications: [], decisions: [], answered: [], summary: '', updatedAt: 0 }, recentTurns: [], signal: new AbortController().signal });
@@ -1345,7 +1499,7 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     t.mock.timers.enable({ apis: ['Date'], now: 200_000 });
     const engine = Object.create(IntelligenceEngine.prototype);
     engine.runLiveBrainAnswer = undefined;
-    engine.setAutomaticAnswerOutdated = () => {};
+    engine.setAutomaticAnswerOutdated = () => { };
 
     // 1. interviewer_speech_started -> final -> response_started -> late STT backup final -> fatal failure: NO pipeline answer.
     const { brain: b1 } = rig();
@@ -1353,8 +1507,8 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     const routing1 = new LiveBrainRouting();
     routing1.start(onFailure => createMeeting({
         sessionId: 'u5e1-bug-a', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => { activated1.push(pending); return acceptedBackup(); }, cancel() {} },
-        emitQuestion: () => {},
+        pipeline: { activate: pending => { activated1.push(pending); return acceptedBackup(); }, cancel() { } },
+        emitQuestion: () => { },
     }, b1), () => assert.fail('Supervisor owns fallback'));
 
     b1.emit({ type: 'interviewer_speech_started', at: 200_000 });
@@ -1372,8 +1526,8 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     const routing2 = new LiveBrainRouting();
     routing2.start(onFailure => createMeeting({
         sessionId: 'u5e1-bug-b', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => { activated2.push(pending); return acceptedBackup(); }, cancel() {} },
-        emitQuestion: () => {},
+        pipeline: { activate: pending => { activated2.push(pending); return acceptedBackup(); }, cancel() { } },
+        emitQuestion: () => { },
     }, b2), () => assert.fail('Supervisor owns fallback'));
 
     b2.emit({ type: 'interviewer_speech_started', at: 200_000 });
@@ -1389,8 +1543,8 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     const routing3 = new LiveBrainRouting();
     routing3.start(onFailure => createMeeting({
         sessionId: 'u5e1-stt-first', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => { activated3.push(pending); return acceptedBackup(); }, cancel() {} },
-        emitQuestion: () => {},
+        pipeline: { activate: pending => { activated3.push(pending); return acceptedBackup(); }, cancel() { } },
+        emitQuestion: () => { },
     }, b3), () => assert.fail('Supervisor owns fallback'));
 
     routing3.activeSession.observePipelineTranscript('What is a mutex?', true, 200_000);
@@ -1418,8 +1572,8 @@ test('realtime profile gating and context refresh at lease boundaries', async t 
         resolveContext: () => ({
             profileContext: resolveLiveBrainProfileContext(readGroundingState(), () => 'Resume Name', () => profile),
         }),
-        engine: { setAutomaticAnswerOutdated() {} },
-        emitQuestion() {},
+        engine: { setAutomaticAnswerOutdated() { } },
+        emitQuestion() { },
         onFailure: assert.fail,
     }, id => {
         const brain = new FakeLiveBrain(id);
@@ -1511,7 +1665,7 @@ test('an incomplete writer answer does not enter the fallback notebook', async t
         sessionId: 'partial',
         provider: 'deepgram-flux',
         engine: {
-            setAutomaticAnswerOutdated() {},
+            setAutomaticAnswerOutdated() { },
             runLiveBrainAnswer(request) {
                 const done = Promise.resolve().then(() => {
                     request.onComplete('An incomplete detail', { stopReason: 'stall_timeout', storageVeto: true });
@@ -1520,8 +1674,8 @@ test('an incomplete writer answer does not enter the fallback notebook', async t
                 return { generationId: 1, done };
             },
         },
-        pipeline: { activate: () => 'failed', cancel() {} },
-        emitQuestion() {},
+        pipeline: { activate: () => 'failed', cancel() { } },
+        emitQuestion() { },
         onFailure: assert.fail,
     }, brain);
     t.after(() => meeting.stop());
@@ -1582,7 +1736,7 @@ test('realtime prompt variants carry the live background rule within the managed
 test('custom providers sharing an ID and model have different route keys when the endpoint changes', () => {
     const { LLMHelper } = require(`${dist}electron/LLMHelper.js`);
     const llm = Object.create(LLMHelper.prototype);
-    llm.setNegotiationCoachingHandler = () => {};
+    llm.setNegotiationCoachingHandler = () => { };
     const { SessionTracker } = require(`${dist}electron/SessionTracker.js`);
     const engine = new IntelligenceEngine(llm, new SessionTracker());
     const provider = (host, key) => ({
@@ -1600,7 +1754,7 @@ for (const afterHeaders of [false, true]) {
     test(`cURL-compatible transport aborts ${afterHeaders ? 'after' : 'before'} headers`, async t => {
         const { LLMHelper } = require(`${dist}electron/LLMHelper.js`);
         const helper = Object.create(LLMHelper.prototype);
-        helper.assertOutboundScopes = () => {};
+        helper.assertOutboundScopes = () => { };
         const pending = Promise.withResolvers();
         const controller = new AbortController();
         t.mock.method(globalThis, 'fetch', (_url, { signal }) => {
@@ -1629,13 +1783,13 @@ test('U8-1: fail after response_started before delta triggers pipeline once; bus
             sessionId: `u8-1-${status}`,
             apiKey: 'fake',
             provider: 'gemini-live',
-            engine: { setAutomaticAnswerOutdated() {} },
+            engine: { setAutomaticAnswerOutdated() { } },
             pipeline: {
                 activate: pending => { activated.push(pending); return status === 'accepted' ? acceptedBackup() : status; },
-                cancel() {},
+                cancel() { },
             },
-            emitQuestion() {},
-            onFailure() {},
+            emitQuestion() { },
+            onFailure() { },
         }, brain);
         session.start();
         await flush();
@@ -1683,10 +1837,10 @@ test('U8-4: refreshContext resets open bubble and pending clarification timer, a
         apiKey: 'fake',
         provider: 'gemini-live',
         readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled, groundingKey }),
-        engine: { setAutomaticAnswerOutdated() {} },
-        pipeline: { activate: () => acceptedBackup(), cancel() {} },
+        engine: { setAutomaticAnswerOutdated() { } },
+        pipeline: { activate: () => acceptedBackup(), cancel() { } },
         emitQuestion: ev => overlay.push(ev),
-        onFailure() {},
+        onFailure() { },
     }, () => new FakeLiveBrain('gemini-live'));
     session.start();
     await flush();
@@ -1702,10 +1856,10 @@ test('U8-4: refreshContext resets open bubble and pending clarification timer, a
         apiKey: 'fake',
         provider: 'gemini-live',
         readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled, groundingKey }),
-        engine: { setAutomaticAnswerOutdated() {} },
-        pipeline: { activate: () => acceptedBackup(), cancel() {} },
+        engine: { setAutomaticAnswerOutdated() { } },
+        pipeline: { activate: () => acceptedBackup(), cancel() { } },
         emitQuestion: ev => events.push(ev),
-        onFailure() {},
+        onFailure() { },
     }, () => (++count === 1 ? active : second));
     s2.start();
     await flush();
@@ -1730,7 +1884,7 @@ test('U8-5: pipeline unavailable invokes onFailure and sets Backup brain unavail
         sessionId: 'u8-5',
         apiKey: 'fake',
         provider: 'gemini-live',
-        engine: { setAutomaticAnswerOutdated() {} },
+        engine: { setAutomaticAnswerOutdated() { } },
         emitQuestion: ev => events.push(ev),
         onFailure: code => failures.push(code),
     }, brain);
@@ -1771,10 +1925,10 @@ test('Bug 1: discarding standby does not cancel active Flux writer or close acti
         apiKey: 'fake',
         provider: 'gemini-live',
         readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled: true, groundingKey }),
-        engine: { setAutomaticAnswerOutdated() {} },
-        pipeline: { activate: () => acceptedBackup(), cancel() {} },
+        engine: { setAutomaticAnswerOutdated() { } },
+        pipeline: { activate: () => acceptedBackup(), cancel() { } },
         emitQuestion: ev => overlayEvents.push(ev),
-        onFailure() {},
+        onFailure() { },
     }, id => {
         const brain = new FakeLiveBrain(id);
         if (brains.length >= 1) {
@@ -1823,11 +1977,11 @@ test('Bug 1: active Flux lease released with forced_rollover cancels active writ
         clock,
         create(id) {
             const b = new FakeLiveBrain(id);
-            b.addHistoryContext = () => {};
+            b.addHistoryContext = () => { };
             brains.push(b);
             return { brain: b, model: 'flux' };
         },
-        onEvent: () => {},
+        onEvent: () => { },
         onLeaseDetached: (lease, reason, role) => detached.push([lease.brain.id, reason, role]),
     });
     sup.start();
@@ -1881,8 +2035,8 @@ function rescueFixture({ replacement, runLiveBrainAnswer, activate = () => accep
     const calls = [];
     const session = createMeeting({
         sessionId: 'turn-rescue', apiKey: 'fake',
-        engine: { setAutomaticAnswerOutdated() {}, runLiveBrainAnswer, canAutoAnswer },
-        pipeline: { activate: turn => { calls.push(turn); return activate(turn); }, cancel() {} },
+        engine: { setAutomaticAnswerOutdated() { }, runLiveBrainAnswer, canAutoAnswer },
+        pipeline: { activate: turn => { calls.push(turn); return activate(turn); }, cancel() { } },
         onFailure: code => assert.fail(code),
         emitQuestion: event => events.push(event),
     }, id => id === primary.id ? primary : id === replacement?.id ? replacement : undefined);
@@ -1903,10 +2057,12 @@ for (const code of ['auth', 'quota']) {
     test('Fatal ' + code + ' rescues via the writer before the session selects its next provider', async t => {
         const next = new FakeLiveBrain('elevenlabs-realtime');
         const writes = [];
-        const h = rescueFixture({ replacement: next, runLiveBrainAnswer(request) {
-            writes.push({ request, nextStarted: next.starts.length });
-            return { generationId: 1, done: Promise.resolve({ status: 'completed' }) };
-        } });
+        const h = rescueFixture({
+            replacement: next, runLiveBrainAnswer(request) {
+                writes.push({ request, nextStarted: next.starts.length });
+                return { generationId: 1, done: Promise.resolve({ status: 'completed' }) };
+            }
+        });
         t.after(() => h.session.stop());
         await flush();
         pendingFinal(h.primary, 'What was the first thing you checked?');
@@ -1927,7 +2083,7 @@ test('Without Auto Answer, a fatal error rescues via the writer and reports the 
     const writes = [];
     const session = createMeeting({
         sessionId: 'turn-rescue-no-pipeline', apiKey: 'fake',
-        engine: { setAutomaticAnswerOutdated() {}, runLiveBrainAnswer: request => { writes.push(request); return { generationId: 1, done: done.promise }; } },
+        engine: { setAutomaticAnswerOutdated() { }, runLiveBrainAnswer: request => { writes.push(request); return { generationId: 1, done: done.promise }; } },
         onFailure: code => failures.push(code),
         emitQuestion: event => events.push(event),
     }, id => id === primary.id ? primary : undefined);
@@ -2060,4 +2216,25 @@ test('A drop seals visible realtime output as interrupted and never duplicates t
     assert.deepEqual(h.calls, []);
     const lastText = h.events.filter(event => event.responseText).at(-1).responseText;
     assert.deepEqual(lastText, { text: 'I checked the request logs and tenant identifiers.', done: true, interrupted: true });
+});
+
+test('Flux meeting stays active and triggers no backup dispatch on external capture speech stops', async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000 });
+    const flux = new FakeLiveBrain('deepgram-flux');
+    const calls = [];
+    const session = createMeeting({
+        sessionId: 'flux-capture-stop', provider: 'deepgram-flux', apiKey: 'fake',
+        engine: { setAutomaticAnswerOutdated() { }, runLiveBrainAnswer: async () => ({ text: '', discarded: false }) },
+        pipeline: { activate: turn => { calls.push(turn); return acceptedBackup(); }, cancel() { } },
+        onFailure: code => assert.fail(code),
+    }, id => id === 'deepgram-flux' ? flux : undefined);
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+    session.noteSpeechStop(1_000);
+    t.mock.timers.tick(7_000);
+    session.noteSpeechStop(8_000);
+    t.mock.timers.tick(7_000);
+    assert.equal(session.isUsingPipeline(), false);
+    assert.deepEqual(calls, []);
 });

@@ -412,7 +412,7 @@ test('a screenshot that could not be transcribed is still recorded as having exi
   assert.match(engine, /const fallbackText = screenContext \? \(compose\(screenContext as never\) \|\| ''\) : '';/);
   // (2026-10-29: a page captured for the turn is recorded with its screen, so
   // the text attached replaces the placeholder as recorded, page included.)
-  assert.match(engine, /if \(screenText\) attachScreenToAnsweredTurn\(sessionId, answer, withPage\(screenText\)!, \{ turn, placeholder: recorded \}\);/);
+  assert.match(engine, /if \(screenText\) \{[\s\S]{0,200}attachScreenToAnsweredTurn\(sessionId, answer, withPage\(screenText\)!, \{ turn, placeholder: recorded \}\);/);
   assert.match(engine, /else if \(placeholder === SCREEN_BEING_READ\) attachScreenToAnsweredTurn\(sessionId, answer, withPage\(SCREEN_NOT_TRANSCRIBED\)!, \{ turn, placeholder: recorded \}\);/);
   assert.match(engine, /this\.recordLiveTurn\(answer, options\?\.screenContext,\s*heard \|\| \(sawScreen \? undefined : IntelligenceEngine\.UNPROMPTED_TURN_QUESTION\),\s*imagePaths\?\.length \?\? 0, imagePaths,/);
   // The recorded text is a DEDICATED transcription, not the answering call's

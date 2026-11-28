@@ -217,4 +217,24 @@ describe('SessionTracker surface isolation (Phase 9)', () => {
     assert.doesNotMatch(body, /addAssistantMessage\([^)]*'what_to_answer'(?:,|\))/,
       'runManualAnswer must NOT be tagged what_to_answer — that mislabels a manual-chat answer as a WTA suggestion');
   });
+
+  test('MEDIUM-2: runFollowUp, runRecap, runClarify, and runLiveHelper read shared history and never attach to an unrelated interviewer turn', () => {
+    for (const [fnName, nextFn] of [
+      ['async runFollowUp(', 'private buildRecapFollowUpContract('],
+      ['async runRecap(', 'async runClarify('],
+      ['async runClarify(', 'async runLiveHelper('],
+      ['async runLiveHelper(', 'async runCustomButton('],
+    ]) {
+      const start = intelligenceEngineSrc.indexOf(fnName);
+      const end = intelligenceEngineSrc.indexOf(nextFn, start);
+      assert.ok(start >= 0 && end > start, `expected ${fnName} bounded by ${nextFn}`);
+      const body = intelligenceEngineSrc.slice(start, end);
+      assert.match(body, /formatProviderMeetingHistory\(/, `${fnName} must read shared history`);
+      if (fnName === 'async runFollowUp(') {
+        assert.match(body, /addAssistantMessage\([^)]*\{ meetingTurn \}\)/, 'runFollowUp must record its own meetingTurn');
+      } else {
+        assert.match(body, /addAssistantMessage\([^)]*\{ skipMeetingLedger: true \}\)/, `${fnName} must pass skipMeetingLedger: true`);
+      }
+    }
+  });
 });

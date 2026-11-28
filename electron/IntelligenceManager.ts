@@ -166,8 +166,16 @@ export class IntelligenceManager extends EventEmitter {
         return this.session.beginMeetingTurn(...args);
     }
 
+    findMeetingQuestion(...args: Parameters<SessionTracker['findMeetingQuestion']>) {
+        return this.session.findMeetingQuestion(...args);
+    }
+
     readMeetingHistory() {
-        return { turns: this.session.getMeetingTurns(), revision: this.session.getMeetingHistoryRevision() };
+        return {
+            turns: this.session.getMeetingTurnsView(),
+            revision: this.session.getMeetingHistoryRevision(),
+            externalRevision: this.session.getExternalHistoryRevision(),
+        };
     }
 
     subscribeExternalMeetingAnswers(listener: Parameters<SessionTracker['subscribeExternalMeetingAnswers']>[0]): () => void {
@@ -175,7 +183,7 @@ export class IntelligenceManager extends EventEmitter {
     }
 
     formatMeetingHistory(question?: string, turn?: MeetingTurnIdentity, maxChars?: number): string {
-        return formatProviderMeetingHistory(this.session.getMeetingTurns(), { question, currentTurn: turn, maxChars });
+        return formatProviderMeetingHistory(this.session.getMeetingTurnsView(), { question, currentTurn: turn, maxChars });
     }
     getMeetingHistoryEpoch(): number {
         return this.session.getMeetingHistoryEpoch();

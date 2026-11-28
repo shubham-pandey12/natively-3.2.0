@@ -624,3 +624,17 @@ for (const [label, opener] of [['AgentStartedSpeaking', 'speaking'], ['the safet
         assert.deepEqual(events.filter(event => event.type === 'response_done').map(event => event.status), ['cancelled', 'completed', 'completed']);
     });
 }
+
+test('LOW-1: UpdatePrompt reserves a minimum history budget and never slices closing tags mid-tag', async t => {
+    const { brain, connections } = await createRig(t, { brainOptions: { deepgramThink: { thinkMode: 'managed', managedProvider: 'open_ai', managedModel: 'gpt-4o-mini' } } });
+    await brain.start(makeContext({ instructions: 'S'.repeat(24_950) }));
+    const messages = connections[0].jsonMessages;
+    const before = messages.length;
+    const block = '<interview_conversation>\nEarlier conversation.\n\nInterviewer: Find top k.\nAI suggestion: Use a min-heap.\n</interview_conversation>';
+    brain.addHistoryContext(block);
+    const update = await until(() => messages.slice(before).find(m => m.type === 'UpdatePrompt'));
+    assert.ok(update, 'UpdatePrompt must be sent even when instructions are near 25k');
+    assert.match(update.prompt, /Use a min-heap\./);
+    assert.match(update.prompt, /<\/interview_conversation>$/);
+    assert.ok(update.prompt.length <= 25_000);
+});

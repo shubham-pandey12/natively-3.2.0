@@ -189,6 +189,10 @@ export class GeminiLiveBrain implements LiveBrain {
         else this.bufferedHistoryContext.push(text);
     }
 
+    hasPendingHistoryContext(): boolean {
+        return this.bufferedHistoryContext.length > 0;
+    }
+
     cancelResponse(_reason: string): void {
         if (!this.providerTurnActive) return;
         // Gemini owns speech barge-in. A local manual answer suppresses the

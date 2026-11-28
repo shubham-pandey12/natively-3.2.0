@@ -24,11 +24,11 @@ const slice = (from, to) => {
 };
 
 const wrapper = slice('async runWhatShouldISay(', 'private async runWhatShouldISayInner(');
-const inner = slice('private async runWhatShouldISayInner(', "this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer'")
-  + "this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer');";
+const inner = slice('private async runWhatShouldISayInner(', "this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, answerSurface")
+  + "this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, answerSurface);";
 
 test('the wrapper does not record a turn the session declined to store', () => {
-  assert.match(wrapper, /const declined = turnOut\.writeDecision\?\.policy === 'do_not_store';/);
+  assert.match(wrapper, /const declined = turnOut\.writeDecision\?\.policy === 'do_not_store'/);
   const recordAt = wrapper.indexOf('this.recordLiveTurn(');
   assert.ok(recordAt > 0);
   const gate = wrapper.lastIndexOf('if (', recordAt);
@@ -36,12 +36,12 @@ test('the wrapper does not record a turn the session declined to store', () => {
 });
 
 test('every decision-bearing session write in the inner run reports its decision to the wrapper', () => {
-  const writes = [...inner.matchAll(/this\.session\.addAssistantMessage\((\w+), (\w+WriteDecision), 'what_to_answer'\);/g)];
+  const writes = [...inner.matchAll(/this\.session\.addAssistantMessage\((\w+), (\w+WriteDecision), (?:'what_to_answer'|answerSurface)(?:,[^;]+)?\);/g)];
   // stub fallback, transport error, tag leak, final answer
   assert.ok(writes.length >= 4, `expected the four decision-bearing writes, saw ${writes.length}`);
   for (const w of writes) {
-    const before = inner.slice(Math.max(0, w.index - 200), w.index);
-    assert.match(before, new RegExp(`options\\.turnOut\\.writeDecision = ${w[2]};\\s*$`),
+    const before = inner.slice(Math.max(0, w.index - 260), w.index);
+    assert.match(before, new RegExp(`options\\.turnOut\\.writeDecision = ${w[2]};`),
       `${w[2]} must be handed to turnOut right before it is written`);
   }
 });

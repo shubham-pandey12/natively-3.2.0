@@ -255,10 +255,24 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         if (!this.ready || !history.trim() || !this.context) return;
         const instructions = this.context.instructions;
         const byo = this.options.deepgramThink?.thinkMode === 'byo';
-        const available = byo ? 16_000 : Math.max(0, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - instructions.length - 80);
+        const minManagedHistory = 2_000;
+        const available = byo ? 16_000 : Math.max(minManagedHistory, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - instructions.length - 80);
         const historyBudget = Math.min(16_000, available);
-        const accumulated = `${this.historyContext}\n\n${history}`.trim();
-        this.historyContext = historyBudget ? accumulated.slice(-historyBudget) : '';
+        const blocks = [...(this.historyContext ? this.historyContext.split('\n\n') : []), history.trim()].filter(Boolean);
+        while (blocks.length > 1 && blocks.join('\n\n').length > historyBudget) {
+            blocks.shift();
+        }
+        let trimmed = blocks.join('\n\n');
+        if (trimmed.length > historyBudget) {
+            const footer = '\n</interview_conversation>';
+            if (trimmed.includes('<interview_conversation>') && trimmed.endsWith(footer) && historyBudget > footer.length + 40) {
+                const bodyLimit = historyBudget - footer.length - 1;
+                trimmed = `${trimmed.slice(0, bodyLimit)}…${footer}`;
+            } else {
+                trimmed = trimmed.slice(0, historyBudget);
+            }
+        }
+        this.historyContext = trimmed;
         const extra = this.historyContext ? `\n\nEarlier in this interview:\n${this.historyContext}` : '';
         const prompt = byo
             ? instructions + extra

@@ -191,9 +191,12 @@ export class SessionTracker {
     private nextMeetingTurnId = 0;
     private meetingHistoryEpoch = 0;
     private meetingHistoryRevision = 0;
+    private externalMeetingHistoryRevision = 0;
     private readonly externalMeetingAnswerListeners = new Set<(turn: MeetingTurn, revision: number) => void>();
 
     getMeetingHistoryRevision(): number { return this.meetingHistoryRevision; }
+
+    getExternalHistoryRevision(): number { return this.externalMeetingHistoryRevision; }
 
     getMeetingHistoryEpoch(): number {
         return this.meetingHistoryEpoch;
@@ -209,6 +212,7 @@ export class SessionTracker {
         this.meetingSpeechSources.clear();
         this.meetingHistoryEpoch++;
         this.meetingHistoryRevision++;
+        this.externalMeetingHistoryRevision++;
     }
 
     beginMeetingTurn(question: string, role: MeetingTurn['role'] = 'request', timestamp = Date.now(), inputKind?: MeetingTurn['inputKind']): MeetingTurnIdentity {
@@ -231,6 +235,11 @@ export class SessionTracker {
 
     getMeetingTurns(): MeetingTurn[] {
         return structuredClone([...this.meetingTurns.values()]);
+    }
+
+    /** Internal readonly view of the ledger without deep-cloning every turn. */
+    getMeetingTurnsView(): readonly MeetingTurn[] {
+        return [...this.meetingTurns.values()];
     }
 
     findMeetingQuestion(question: string): MeetingTurnIdentity | undefined {
@@ -268,6 +277,10 @@ export class SessionTracker {
         if (details.capture?.text.trim()) {
             turn.capture = { ...details.capture, text: details.capture.text.trim().slice(0, limit) };
         }
+        if (turn.answer?.status === 'completed' && turn.answer.surface !== 'live_brain'
+            && (details.resolvedQuestion?.trim() || details.capture?.text.trim())) {
+            this.externalMeetingHistoryRevision++;
+        }
         return true;
     }
 
@@ -298,6 +311,7 @@ export class SessionTracker {
         turn.answer = { text: cleanText.slice(0, SessionTracker.MAX_MEETING_TURN_FIELD_CHARS), status, surface: options.surface };
         if (status === 'completed' && options.replaces) this.linkReplacement(turn, options.replaces);
         if (status === 'completed' && options.surface !== 'live_brain') {
+            this.externalMeetingHistoryRevision++;
             const snapshot = structuredClone(turn);
             for (const listener of this.externalMeetingAnswerListeners) listener(snapshot, this.meetingHistoryRevision);
         }

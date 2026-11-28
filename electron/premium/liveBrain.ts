@@ -135,7 +135,7 @@ export interface LiveBrainMeetingOptions extends LiveBrainContextSnapshot {
         cancel(reason: 'manual_answer' | 'auto_disabled_or_meeting_ended'): void;
     };
     summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
-    readMeetingHistory?(): { turns: MeetingTurn[]; revision: number };
+    readMeetingHistory?(): { turns: readonly MeetingTurn[]; revision: number; externalRevision?: number };
     subscribeExternalMeetingAnswers?(listener: (turn: MeetingTurn, revision: number) => void): () => void;
     identifyInterviewTurn?(question: string, at: number): MeetingTurnIdentity | undefined;
     recordInterviewAnswer?(turn: MeetingTurnIdentity, answer: string, status: 'completed' | 'interrupted', replaces?: MeetingTurnIdentity): void;
