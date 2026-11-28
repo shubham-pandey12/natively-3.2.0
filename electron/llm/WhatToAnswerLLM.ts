@@ -110,7 +110,8 @@ type ModesManagerType = {
 // to withhold the code. A screenshot of a coding problem is the single most
 // literal "the user wants the answer code" moment in the product.
 export const SCREEN_DIRECT_VISION_INSTRUCTION = `<screen_direct_vision_instruction>
-The attached image is the current screen. Treat visible code, problem statements, constraints, compiler or test errors, and selected UI state as primary context. Use the transcript only to infer what the user or interviewer is asking.
+The attached image is the current screen. Treat visible code, problem statements, constraints, compiler or test errors, and selected UI state as primary context. Use the transcript only to infer what the user or interviewer is asking about the screen.
+When the request only points at the screen ("this", "the screenshot", "What should I say about this?"), the screen IS the subject: answer about what it shows. Never re-answer an earlier interviewer question the screen is not about, and never repeat a previous answer.
 
 If the screen shows a CODING, ALGORITHM, SQL, or DEBUGGING task:
 - Answer it. Write the working code — a screenshot of a problem is a request to solve it, never a request to describe it.

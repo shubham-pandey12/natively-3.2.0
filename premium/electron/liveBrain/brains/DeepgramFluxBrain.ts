@@ -8,6 +8,7 @@ import {
     SocketBackpressureTracker,
 } from '../../../../electron/audio/realtimeTransport';
 import { safeDetachAndClose } from '../../../../electron/audio/wsSafeTeardown';
+import { getSttContextTerms } from '../../../../electron/audio/sttContextTerms';
 import { DEFAULT_DEEPGRAM_FLUX_MODEL } from '../../../../src/types/liveBrainSettings';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainEvent, LiveBrainStartContext } from '../types';
 
@@ -17,13 +18,18 @@ export const DEEPGRAM_FLUX_FRAME_SAMPLES = 1_280; // 80 ms at 16 kHz mono (docum
 export const DEEPGRAM_FLUX_FRAME_BYTES = DEEPGRAM_FLUX_FRAME_SAMPLES * 2; // 2,560 bytes
 const SILENCE_FILL_AFTER_MS = 300;
 const BYTES_PER_MS = DEEPGRAM_FLUX_SAMPLE_RATE * 2 / 1_000;
-// A falling voice mid-question can exceed the default Flux confidence.
-const DEFAULT_EOT_THRESHOLD = 0.95;
+// A falling voice mid-question can exceed the default Flux confidence, so this
+// stays above Flux's 0.7 default. 0.95 + 1,500 ms added up to two seconds of
+// silence before an answer could start; with barge-in now stopping an answer
+// when the interviewer keeps talking, an early end costs much less.
+const DEFAULT_EOT_THRESHOLD = 0.9;
 // Tuned on the Windows Phase 1 synthetic clips: 0.50 fires EagerEndOfTurn
 // ~0.7-1.6s ahead of EndOfTurn (and catches resumed S2 turns at ~0.503 where
 // 0.60 missed them), while 0.95 + 1,500 ms still guards confirmed EndOfTurn.
 export const DEFAULT_EAGER_EOT_THRESHOLD = 0.5;
-const DEFAULT_EOT_TIMEOUT_MS = 1_500;
+const DEFAULT_EOT_TIMEOUT_MS = 1_200;
+// Deepgram keyterm prompting: the user's name and dictionary words (sttContextTerms.ts).
+const MAX_FLUX_KEYTERMS = 50;
 const SILENCE_FILL_INTERVAL_MS = 80;
 const MAX_RETRIES = 3;
 
@@ -36,6 +42,8 @@ export interface DeepgramFluxOptions {
     eotThreshold?: number;
     eagerEotThreshold?: number;
     eotTimeoutMs?: number;
+    /** Words to bias recognition toward; defaults to the meeting's STT context terms. */
+    keyterms?: readonly string[];
 }
 
 interface FluxWireMessage {
@@ -154,6 +162,11 @@ export class DeepgramFluxBrain implements LiveBrain {
         }
         if (!url.searchParams.has('eot_timeout_ms')) {
             url.searchParams.set('eot_timeout_ms', String(this.options.eotTimeoutMs ?? DEFAULT_EOT_TIMEOUT_MS));
+        }
+        if (!url.searchParams.has('keyterm')) {
+            for (const term of (this.options.keyterms ?? getSttContextTerms()).slice(0, MAX_FLUX_KEYTERMS)) {
+                url.searchParams.append('keyterm', term);
+            }
         }
         return url;
     }

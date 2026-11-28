@@ -6,8 +6,6 @@ const STRONG_CORRECTION = /\b(?:actually|correction|never mind|scratch that|forg
 const WEAK_CORRECTION = /\b(?:without|instead|rather than|not allowed|no longer)\b/i;
 const PRIOR_TURN_REFERENCE = /\b(?:the previous|that design)\b/i;
 
-const MAX_PREVIOUS_ANSWER_CHARS = 900;
-
 export interface FluxConfirmedTurn {
     question: string;
     answer?: string;
@@ -21,6 +19,9 @@ export interface FluxPendingClarification {
 export interface FluxTurnContextInput {
     question: string;
     replacesAutomaticAnswer: boolean;
+    /** Earlier answered turns, oldest first. */
+    recentTurns?: readonly FluxConfirmedTurn[];
+    /** @deprecated use recentTurns */
     lastConfirmedTurn?: FluxConfirmedTurn;
     pendingClarification?: FluxPendingClarification;
     constraints?: readonly string[];
@@ -58,13 +59,21 @@ function startsNewTopic(question: string): boolean {
     return SELF_CONTAINED_NEW_TOPIC.test(question) || WH_QUESTION.test(question);
 }
 
+/** How many earlier answered turns the provider sees (oldest dropped first). */
+export const MAX_RECENT_TURNS = 4;
+const MAX_HISTORY_ANSWER_CHARS = 600;
+
 /**
- * Builds focused turn context for Deepgram Flux + My AI Provider at the AI route
- * boundary:
- *  - Pending clarification reply: original question + clarification + reply.
- *  - Correction: earlier confirmed question + active constraints + correction.
- *  - Follow-up: relevant previous question + previous answer + follow-up.
- *  - Unrelated new topic: returns '' so prior topics do not leak into new questions.
+ * Builds turn context for Deepgram Flux + My AI Provider at the AI route
+ * boundary, so the provider can behave like a realtime brain that heard the
+ * whole conversation:
+ *  - Pending clarification reply: original question + clarification + reply
+ *    (this is app state, not a guess, so it stays explicit).
+ *  - Otherwise, when there is history: the last few questions and answers, and
+ *    the model itself decides whether the current turn is a follow-up, a
+ *    correction, a new topic or filler. Regex labels guessed wrong (an
+ *    interrupting follow-up labelled a correction made the model merge two
+ *    questions into one answer), so the decision moved to the model.
  */
 export function buildFluxTurnContext(input: FluxTurnContextInput): string {
     const question = input.question.trim();
@@ -82,32 +91,28 @@ export function buildFluxTurnContext(input: FluxTurnContextInput): string {
         return base ? `${block}\n\n${base}` : block;
     }
 
-    if ((isCorrectionTurn(question) || (input.replacesAutomaticAnswer && isFollowUpTurn(question))) && input.lastConfirmedTurn) {
-        const constraints = (input.constraints ?? []).filter(Boolean);
-        const lines = [
-            '<turn_context kind="correction">',
-            `Original confirmed question: ${input.lastConfirmedTurn.question}`,
-            ...(constraints.length ? [`Active constraints (newest overrides conflicting earlier rules): ${constraints.join(' | ')}`] : []),
-            `Interviewer correction: ${question}`,
-            'Preserve the original goal and all unchanged constraints; apply this correction.',
-            '</turn_context>',
-        ];
-        const block = lines.join('\n');
-        return base ? `${block}\n\n${base}` : block;
-    }
+    const turns = (input.recentTurns ?? (input.lastConfirmedTurn ? [input.lastConfirmedTurn] : []))
+        .filter(turn => turn.question.trim())
+        .slice(-MAX_RECENT_TURNS);
+    if (!turns.length) return '';
 
-    if (isFollowUpTurn(question) && input.lastConfirmedTurn) {
-        const lines = [
-            '<turn_context kind="follow_up">',
-            `Relevant previous question: ${input.lastConfirmedTurn.question}`,
-            ...(input.lastConfirmedTurn.answer ? [`Relevant previous answer: ${truncate(input.lastConfirmedTurn.answer, MAX_PREVIOUS_ANSWER_CHARS)}`] : []),
-            `Current follow-up: ${question}`,
-            'Ground any pronouns or implicit references in the relevant previous turn above.',
-            '</turn_context>',
-        ];
-        const block = lines.join('\n');
-        return base ? `${block}\n\n${base}` : block;
-    }
-
-    return '';
+    const constraints = (input.constraints ?? []).filter(Boolean);
+    const lines = [
+        '<turn_context kind="conversation">',
+        'Recent interview turns, oldest first:',
+        ...turns.flatMap((turn, index) => [
+            `Q${index + 1}: ${truncate(turn.question, MAX_HISTORY_ANSWER_CHARS)}`,
+            `A${index + 1}: ${turn.answer?.trim() ? truncate(turn.answer, MAX_HISTORY_ANSWER_CHARS) : '(no answer was given; it may have been interrupted)'}`,
+        ]),
+        ...(constraints.length ? [`Active constraints (newest overrides conflicting earlier rules): ${constraints.join(' | ')}`] : []),
+        `Current interviewer turn: ${question}`,
+        'Decide yourself how the current turn relates to the turns above:',
+        '- Follow-up: answer only the current turn; resolve pronouns and implicit references ("it", "that project") from the turns above.',
+        '- Correction or changed requirement: re-answer the earlier question with the change applied, keeping every unchanged constraint.',
+        '- New topic: answer it on its own and ignore the turns above.',
+        'Never repeat or re-answer an earlier question unless the current turn asks for it, and do not reuse earlier wording.',
+        '</turn_context>',
+    ];
+    const block = lines.join('\n');
+    return base ? `${block}\n\n${base}` : block;
 }

@@ -1130,3 +1130,17 @@ node "C:\Users\dell\.gemini\antigravity\brain\73d0cf55-9cfb-4f3e-9d1b-ae367f1b88
 Restored Live Brain cancellation and answer storage behavior, fixed supervisor startup using the documented fallback list, and updated fallback test expectations. Flux now reads the current provider default after a reset and invalidates drafts after a successful settings write. OpenAI Realtime exposes only the documented effort values.
 
 Windows validation passed with 215 Live Brain and settings tests, 203 Auto Answer tests, the Electron build, and Electron, premium, and renderer typechecks. Provider requests were covered by mocked tests. Live provider acceptance and physical macOS verification remain open.
+
+### Deepgram Flux + My AI Provider realtime parity (2026-11-28)
+
+User-approved change to D15 and D17: the model, not regex, now decides how a Flux turn relates to the conversation and whether it needs an answer.
+
+- **Barge-in:** a streaming writer answer stops on the first Flux partial with two or more non-filler words (was: only at the next EndOfTurn, then three words). A lone word while an answer streams cannot cancel it.
+- **Model-decided No action:** Live Brain writer requests tell the provider to output `[[NO_ACTION]]` for filler, small talk, or an unfinished thought. A Live Brain run swallows it silently: no manual-press fallback line, no history entry, and the previous answer stays on screen. Only clear filler is still dropped before the model.
+- **History instead of labels:** `fluxTurnContext.ts` sends the last four turns (`kind="conversation"`), including turns that were interrupted, and the model classifies follow-up, correction, or new topic. Clarification replies keep their explicit block. Merged answers came from regex labelling an interrupting follow-up as a correction.
+- **Outdated rows:** an answer replaced before its first word is no longer marked outdated (no empty "Outdated answer" row).
+- **Latency:** Flux `eot_threshold` 0.95 → 0.9 and `eot_timeout_ms` 1500 → 1200.
+- **Keyterms:** Flux now sends the meeting STT context terms (name + user dictionary), up to 50, as `keyterm`.
+- **Screenshot Ctrl+Enter:** the shared vision instruction told the model to take the question from the transcript, so "What should I say about this?" re-answered the last spoken question. When a request only points at the screen, the screen is now the subject.
+
+Windows validation: Electron build, premium typecheck, 224/224 Live Brain and settings tests, 12/12 prompt-assembly tests. Not run against live providers. Open risks: Flux acceptance of `keyterm` and the lower end-of-turn threshold need a live Windows run; a filler draft that returns `[[NO_ACTION]]` is discarded and the confirmed turn asks the provider again. Reviewed but not executed on macOS. Requires physical macOS verification. Requires physical Windows verification.

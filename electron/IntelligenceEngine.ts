@@ -288,6 +288,12 @@ interface SpokenAnswerClaim {
 }
 
 /** Two timestamps further apart than this are different turns, whatever their words. */
+// Live Brain writer turns (Deepgram Flux + My AI Provider). Like a realtime
+// brain, the model decides when a turn needs no answer: filler, small talk or an
+// unfinished thought gets the [[NO_ACTION]] sentinel, which a Live Brain run
+// swallows silently (no fallback line, no history entry).
+const LIVE_BRAIN_WRITER_INSTRUCTION = 'If the latest interviewer turn is only an acknowledgment or filler (mm-hmm, okay, right, nice, take your time), small talk, or an unfinished thought, output exactly [[NO_ACTION]] and nothing else. Never repeat or continue your previous answer because of such a turn. If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.';
+const LIVE_BRAIN_NO_ACTION_REASON = 'live_brain_no_action';
 const SPOKEN_TURN_MATCH_WINDOW_MS = 15_000;
 /** Longest a manual press waits on the automatic answer it joined before answering itself. */
 const SPOKEN_JOIN_MAX_WAIT_MS = 60_000;
@@ -1729,7 +1735,7 @@ export class IntelligenceEngine extends EventEmitter {
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
                 { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain,
                     ...(liveBrain?.reasoningEffort ? { reasoningEffort: liveBrain.reasoningEffort } : {}),
-                    ...(liveBrain?.onComplete ? { promptInstruction: 'If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.' } : {}),
+                    ...(liveBrain?.onComplete ? { promptInstruction: LIVE_BRAIN_WRITER_INSTRUCTION } : {}),
                     ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {}) } : {}) });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
             await run;
@@ -2181,7 +2187,7 @@ export class IntelligenceEngine extends EventEmitter {
 
         const run = this.runWhatShouldISayInner(question, 0.85, undefined, {
             skipCooldown: true,
-            promptInstruction: 'If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.',
+            promptInstruction: LIVE_BRAIN_WRITER_INSTRUCTION,
             ...(request.liveBrainNotebook ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
             ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
             privateDraft: control,
@@ -2193,7 +2199,8 @@ export class IntelligenceEngine extends EventEmitter {
             if (!control.adopted) {
                 return { status: control.phase === 'cancelled' ? 'cancelled' : 'failed' };
             }
-            const declined = turnOut.writeDecision?.policy === 'do_not_store';
+            const declined = turnOut.writeDecision?.policy === 'do_not_store'
+                || outcomeOut.value?.reason === LIVE_BRAIN_NO_ACTION_REASON;
             if (outcomeOut.value?.status === 'cancelled') return { status: 'cancelled' };
             if (answer && !declined) {
                 this.recordLiveTurn(answer, undefined, question, 0, undefined, 'meeting', { startedUnder });
@@ -2830,7 +2837,8 @@ export class IntelligenceEngine extends EventEmitter {
         // as "what YOU said", with no completeness flag, so a cut-off partial
         // recorded here passed for a finished answer (#743). Same gate as the
         // Auto Answer reveal path.
-        const declined = turnOut.writeDecision?.policy === 'do_not_store';
+        const declined = turnOut.writeDecision?.policy === 'do_not_store'
+            || outcomeOut.value?.reason === LIVE_BRAIN_NO_ACTION_REASON;
         if (declined && !options?.speculative && answered) {
             console.warn(`[IntelligenceEngine] What to answer turn not recorded in the conversation ring (${turnOut.writeDecision?.reason ?? 'do_not_store'})`);
         }
@@ -7823,6 +7831,18 @@ export class IntelligenceEngine extends EventEmitter {
                             isSpeculative,
                         }));
                     } catch (e) { console.warn('[TRACE:LONGCTX] nonanswer_sentinel_discard logging failed', e); }
+                }
+                if (options?.liveBrain && !isSpeculative) {
+                    // Live Brain writer (Deepgram Flux + My AI Provider): the model
+                    // chose No action for filler or an unfinished turn, as a
+                    // realtime brain would. Nothing is shown or recorded and the
+                    // previous answer stays on screen. Not the manual-press
+                    // fallback below: that is for an explicit press.
+                    if (openedStreamRow) this.emit('suggested_answer_discard', 'no_answer', generationId);
+                    setOutcome('success', LIVE_BRAIN_NO_ACTION_REASON, false);
+                    console.log('[IntelligenceEngine] Live Brain turn needs no answer (model chose No action)');
+                    this.setMode('idle');
+                    return null;
                 }
                 if (!isSpeculative) {
                     // ALWAYS ANSWER (2026-09-07): a manual press regenerates once

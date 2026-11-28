@@ -83,6 +83,8 @@ test('an answer decision writes once; a second decision cancels the streaming dr
 
     decision('answer', { question });
     assert.deepEqual(calls, [['write', { question, replacesAutomaticAnswer: false }]]);
+    // The first answer has shown text, so its replacement folds it.
+    firstTextCallbacks[0]?.(clock.now());
     decision('answer', { question: 'Use MongoDB for the catalog.' });
     // Old answer stays visible (not outdated) until replacement emits first text.
     assert.deepEqual(calls.slice(1), [
@@ -668,8 +670,9 @@ test('Phase 3: replacement failure before showing text restores outdated flag; r
     assert.deepEqual(calls.filter(([k]) => k === 'outdated'), []);
 
     // Once a replacement DOES show text, outdated is set on the superseded answer.
-    brain.emit({ type: 'decision', decisionId: 'd4', action: 'answer', question: 'Q1', at: 40 });
-    brain.emit({ type: 'decision', decisionId: 'd5', action: 'answer', question: 'Q2', at: 50 });
+    brain.emit({ type: 'decision', decisionId: 'd4', action: 'answer', question: 'How do you shard it?', at: 40 });
+    firstTextCallbacks[3]?.(45);
+    brain.emit({ type: 'decision', decisionId: 'd5', action: 'answer', question: 'How do you replicate it?', at: 50 });
     completions[3].resolve('cancelled');
     assert.deepEqual(calls.filter(([k]) => k === 'outdated'), []);
     firstTextCallbacks[4]?.(55);
@@ -731,7 +734,7 @@ test('Phase 4: clarification expiry, unrelated question consumption, reconnect r
     orchestrator.noteWriterClarification('Can the cache serve from disk?', 'Is disk latency acceptable?');
     brain.emit({ type: 'decision', decisionId: 'd3', action: 'answer', question: 'How does consistent hashing work?', turnKey: 'c1:t2', at: 10_020 });
     const unrelatedCall = calls.filter(([k]) => k === 'write').at(-1);
-    assert.equal(unrelatedCall[2], '');
+    assert.doesNotMatch(unrelatedCall[2], /clarification_reply|Is disk latency acceptable/);
     completions[2].resolve('completed');
     await flush();
 
@@ -880,4 +883,128 @@ test('U7-4: Flux completed answer followed by a correction 10 s later marks prev
     h.brain.emit({ type: 'interviewer_transcript', text: 'Actually, without Redis.', final: true, at: h.clock.now() });
     h.decision('answer', { question: 'Actually, without Redis.' });
     assert.ok(h.calls.some(([k, req]) => k === 'write' && req.question === 'Actually, without Redis.' && req.replacesAutomaticAnswer === true));
+});
+
+function interruptRig() {
+    const clock = new FakeClock();
+    const calls = [];
+    const runs = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        answerWriter: {
+            write(request, options) {
+                calls.push(['write', request]);
+                const completion = Promise.withResolvers();
+                runs.push({ request, options, completion });
+                return { generationId: runs.length, done: completion.promise };
+            },
+            cancel: reason => {
+                calls.push(['cancel', reason]);
+                runs.at(-1)?.completion.resolve('cancelled');
+            },
+        },
+        overlay: {
+            showAsk: () => {}, showText: () => {}, showQuestion: () => {},
+            setInterviewerSpeaking: () => {},
+            setOutdated: (...args) => calls.push(['outdated', ...args]),
+        },
+    });
+    const send = event => orchestrator.handleEvent({ at: clock.now(), ...event });
+    return { calls, runs, send };
+}
+
+test('Flux barge-in: a real interviewer partial stops the streaming answer; filler does not', async () => {
+    const h = interruptRig();
+    h.send({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Tell me about a project you built.', turnKey: 'c1:t0' });
+    h.runs[0].options.onFirstText(1);
+    h.send({ type: 'interviewer_speech_started' });
+    h.send({ type: 'interviewer_transcript', text: 'Take your time.', final: false });
+    h.send({ type: 'interviewer_transcript', text: 'Mm-hmm', final: false });
+    assert.equal(h.calls.filter(([k]) => k === 'cancel').length, 0);
+    h.send({ type: 'interviewer_transcript', text: 'Okay, what was the hardest', final: false });
+    assert.deepEqual(h.calls.filter(([k]) => k === 'cancel'), [['cancel', 'interviewer_interrupted']]);
+    await flush();
+    // The confirmed turn folds the interrupted answer (it showed text) and answers only the new question.
+    h.send({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'Okay, what was the hardest decision in that project?', turnKey: 'c1:t1' });
+    assert.equal(h.runs.length, 2);
+    assert.equal(h.runs[1].request.replacesAutomaticAnswer, true);
+    h.runs[1].options.onFirstText(2);
+    assert.deepEqual(h.calls.filter(([k]) => k === 'outdated'), [['outdated', 1, true]]);
+});
+
+test('Flux: an answer replaced before its first word is not marked outdated', async () => {
+    const h = interruptRig();
+    h.send({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'What is a project that handled user traffic?', turnKey: 'c1:t0' });
+    h.send({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'What was the hardest decision in that project?', turnKey: 'c1:t1' });
+    h.runs[1].options.onFirstText(2);
+    await flush();
+    assert.equal(h.calls.filter(([k]) => k === 'outdated').length, 0);
+});
+
+test('Flux: single-word fragments and polite asides are filler', () => {
+    const { isFillerOnly, isNonQuestionTurn } = require(`${dist}ResponseOrchestrator.js`);
+    for (const filler of ['K.', 'Take your time.', 'Okay. Go ahead.', 'Sure, no problem.', 'That makes sense.']) {
+        assert.equal(isFillerOnly(filler), true, filler);
+    }
+    for (const fragment of ['I', 'So.', 'K.', 'Take your time.']) {
+        assert.equal(isNonQuestionTurn(fragment), true, fragment);
+    }
+    // A one-word clarification reply stays meaningful to the notebook.
+    assert.equal(isFillerOnly('Tokyo.'), false);
+    for (const real of ['Redis?', 'Why?', 'Take your time and explain caching.', 'I want to ask about caching.']) {
+        assert.equal(isNonQuestionTurn(real), false, real);
+    }
+});
+
+test('Flux barge-in: two real words stop the answer, a lone word does not', async () => {
+    const h = interruptRig();
+    h.send({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Tell me about a project you built.', turnKey: 'c1:t0' });
+    h.runs[0].options.onFirstText(1);
+    h.send({ type: 'interviewer_transcript', text: 'Nice', final: false });
+    assert.equal(h.calls.filter(([k]) => k === 'cancel').length, 0);
+    // A lone word confirmed while the answer streams is dropped, so it cannot cancel it.
+    h.send({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'Nice.', turnKey: 'c1:t1' });
+    assert.equal(h.runs.length, 1);
+    h.send({ type: 'interviewer_transcript', text: 'How did', final: false });
+    assert.deepEqual(h.calls.filter(([k]) => k === 'cancel'), [['cancel', 'interviewer_interrupted']]);
+});
+
+test('Flux: a lone word with no answer streaming goes to the model, which decides (No action or answer)', () => {
+    const h = interruptRig();
+    h.send({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Kubernetes', turnKey: 'c1:t0' });
+    assert.equal(h.runs.length, 1);
+    // Clear filler never reaches the model.
+    h.send({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'Okay, got it.', turnKey: 'c1:t1' });
+    assert.equal(h.runs.length, 1);
+});
+
+test('Flux history: the provider sees the last answered turns, oldest dropped first', async () => {
+    const runs = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock: new FakeClock(),
+        getContextSnapshot: () => ({ baseNotebook: '', constraints: [] }),
+        answerWriter: {
+            write(request, options) {
+                const completion = Promise.withResolvers();
+                runs.push({ request, options, completion });
+                return { generationId: runs.length, done: completion.promise };
+            },
+            cancel: () => {},
+        },
+        overlay: { showAsk() {}, showText() {}, showQuestion() {}, setInterviewerSpeaking() {}, setOutdated() {} },
+    });
+    for (let i = 1; i <= 6; i++) {
+        orchestrator.handleEvent({ type: 'decision', decisionId: `d${i}`, action: 'answer', question: `Question number ${i}?`, turnKey: `c1:t${i}`, at: i * 100 });
+        if (i < 6) {
+            orchestrator.noteWriterAnswer(`Answer number ${i}.`);
+            runs.at(-1).completion.resolve('completed');
+            await flush();
+        }
+    }
+    const context = runs.at(-1).options.liveBrainNotebook;
+    assert.match(context, /<turn_context kind="conversation">/);
+    assert.doesNotMatch(context, /Question number 1\?/);
+    assert.match(context, /Q1: Question number 2\?\nA1: Answer number 2\./);
+    assert.match(context, /Q4: Question number 5\?\nA4: Answer number 5\./);
+    assert.match(context, /Current interviewer turn: Question number 6\?/);
 });

@@ -2,9 +2,9 @@ import { createResponseParser, type ResponseKind, type ResponseParserEvent } fro
 import {
     buildFluxTurnContext,
     isCorrectionTurn,
-    isFollowUpTurn,
     isUnrelatedNewTopicForClarification,
     type FluxConfirmedTurn,
+    MAX_RECENT_TURNS,
     type FluxPendingClarification,
 } from './fluxTurnContext';
 import type { LiveBrainEvent } from './types';
@@ -63,6 +63,10 @@ interface CurrentAnswer {
     cutOff?: boolean;
     /** Superseded answer to fold when the replacement first shows text. */
     pendingOutdatedGenerationId?: number;
+    /** Writer answer: its first text reached the overlay. */
+    textShown?: boolean;
+    /** Writer answer: stopped because the interviewer started a real new turn. */
+    interrupted?: boolean;
 }
 
 interface TextResponse {
@@ -109,12 +113,27 @@ const STT_QUESTION_MAX_AGE_MS = 8_000;
 // D15: an interviewer turn made only of these words is filler. An answer to it
 // is not shown (the model sometimes repeats its previous answer after a filler
 // interrupted its audio turn). Includes Flux/Gemini "MM." / "mm" / "M.M." / "M" variants.
-const FILLER_WORD = String.raw`(?:m+-?h+m+|m+\.m+|m+|h+m+|u+h+[\s-]?h+u+h+|uh+|um+|okay|ok|right|yeah|yep|yes|sure|got it|i see|alright|all right|cool|nice|good|great|thank you|thanks)`;
+const FILLER_WORD = String.raw`(?:m+-?h+m+|m+\.m+|m+|h+m+|u+h+[\s-]?h+u+h+|uh+|um+|okay|ok|k|right|yeah|yep|yes|sure|got it|i see|alright|all right|cool|nice|good|great|thank you|thanks|take your time|go ahead|no worries|no problem|of course|that makes sense|makes sense|fair enough)`;
 const FILLER_ONLY = new RegExp(String.raw`^${FILLER_WORD}(?:[\s,.!?-]+${FILLER_WORD})*[\s,.!?-]*$`, 'i');
+// A lone word with no question mark ("I", "So.") is a speech fragment, not a
+// question. "Redis?" and multi-word turns still pass.
+const SINGLE_WORD_FRAGMENT = /^[\p{L}\p{N}'’-]+[\s.,!…-]*$/u;
+// Like a realtime brain, a streaming writer answer stops as soon as the
+// interviewer says something that is not filler. Two words, not one: a lone
+// "Nice." or "Hmm?" would otherwise kill the answer with nothing to replace it.
+const INTERRUPT_MIN_WORDS = 2;
 
 export function isFillerOnly(text: string): boolean {
     const clean = text.trim();
     return /^a\.?$/i.test(clean) || FILLER_ONLY.test(clean);
+}
+
+/** A turn that never gets an automatic answer unless an Ask is waiting:
+ *  filler, or a lone word with no question mark ("I", "So."). Kept out of
+ *  isFillerOnly, which the notebook also uses for clarification replies ("Tokyo."). */
+export function isNonQuestionTurn(text: string): boolean {
+    const clean = text.trim();
+    return isFillerOnly(clean) || SINGLE_WORD_FRAGMENT.test(clean);
 }
 const CLARIFICATION_MS = 10_000;
 const PROVISIONAL_MS = 1_500;
@@ -136,7 +155,10 @@ export class ResponseOrchestrator<Timer> {
     private readonly questionNamespace: string;
     /** An Ask is waiting for the interviewer: a short "yes" may answer it. */
     private askPending = false;
-    private lastConfirmedTurn?: FluxConfirmedTurn;
+    /** Answered (or abandoned) turns, oldest first, capped at MAX_RECENT_TURNS. */
+    private recentTurns: FluxConfirmedTurn[] = [];
+    /** The turn being answered now; joins recentTurns once answered or replaced. */
+    private openTurn?: FluxConfirmedTurn;
     private pendingClarification?: FluxPendingClarification;
     private writerClarificationHeardSpeech = false;
     private manualCancelPending = false;
@@ -158,6 +180,7 @@ export class ResponseOrchestrator<Timer> {
     handleEvent(event: LiveBrainEvent): OrchestratorDisposition | undefined {
         switch (event.type) {
             case 'interviewer_transcript':
+                if (!event.final) this.interruptActiveWriter(event.text);
                 if (this.noteProviderTranscript(event.text, event.final)) return { kind: 'interviewer_already_recorded' };
                 break;
             case 'interviewer_speech_started':
@@ -171,7 +194,7 @@ export class ResponseOrchestrator<Timer> {
                 if (!this.ports.answerWriter) return;
                 const question = event.question?.trim();
                 if (!question) return;
-                if (!this.askPending && isFillerOnly(question)) return;
+                if (!this.askPending && isNonQuestionTurn(question)) return;
                 const replacesAutomaticAnswer = this.current?.source === 'writer' && this.current.completedAt === undefined;
                 const turnCtx = this.buildContextForTurn(question, replacesAutomaticAnswer, event.turnKey, true);
                 this.ports.answerWriter.prepareDraft?.({
@@ -261,7 +284,8 @@ export class ResponseOrchestrator<Timer> {
         this.answerTurn = undefined;
         this.sttPending = undefined;
         this.askPending = false;
-        this.lastConfirmedTurn = undefined;
+        this.recentTurns = [];
+        this.openTurn = undefined;
         this.pendingClarification = undefined;
         this.writerClarificationHeardSpeech = false;
         this.pendingDraftContext = undefined;
@@ -318,7 +342,10 @@ export class ResponseOrchestrator<Timer> {
                 }
                 // D15/D17: filler-only speech does not cancel or replace an active answer,
                 // unless an Ask clarification is waiting for a short reply ("Yes.").
-                if (!this.askPending && isFillerOnly(question)) {
+                // Clear filler is dropped here; anything else goes to the model, which
+                // replies No action when the turn needs no answer. A lone word while an
+                // answer is still streaming is also dropped, so "Nice." cannot cancel it.
+                if (!this.askPending && (isFillerOnly(question) || (isNonQuestionTurn(question) && this.hasStreamingWriter()))) {
                     this.ports.answerWriter?.cancelDraft?.('filler_turn', event.turnKey);
                     if (this.current) this.setSpeaking(this.current, false);
                     this.closeQuestion();
@@ -336,21 +363,24 @@ export class ResponseOrchestrator<Timer> {
                     : completedWriterCorrection
                         ? (this.setSpeaking(previous, false), this.current = undefined, true)
                         : this.supersedeForNewTurn(true);
+                // An answer cut off before its first word has nothing to keep:
+                // marking it outdated only left an empty "Outdated answer" row.
                 const pendingOutdatedGenerationId = replacesAutomaticAnswer
-                    ? (previous?.pendingOutdatedGenerationId ?? previous?.generationId)
+                    ? (previous?.pendingOutdatedGenerationId
+                        ?? (previous && (previous.source !== 'writer' || previous.textShown) ? previous.generationId : undefined))
                     : undefined;
                 const turnCtx = this.buildContextForTurn(question, replacesAutomaticAnswer, event.turnKey, false);
-                const priorTurn = this.lastConfirmedTurn;
-                const correctionLike = isCorrectionTurn(question) || (replacesAutomaticAnswer && isFollowUpTurn(question));
                 const clarification = this.pendingClarification;
                 const answeringClarification = clarification && !isUnrelatedNewTopicForClarification(question);
                 this.pendingClarification = undefined;
                 this.askPending = false;
-                this.lastConfirmedTurn = answeringClarification
+                // An Ask's original question folds into its reply; any other
+                // still-open turn (interrupted, or answered with No action)
+                // stays in history so a follow-up can refer to it.
+                if (this.openTurn && !answeringClarification) this.archiveTurn(this.openTurn);
+                this.openTurn = answeringClarification
                     ? { question: `${clarification.originalQuestion}\nClarification: ${clarification.clarification} ${question}` }
-                    : correctionLike && priorTurn
-                        ? { question: `${priorTurn.question}\n${question}`.slice(-2_000) }
-                        : { question };
+                    : { question };
                 this.closeTextResponse();
                 this.write(
                     question,
@@ -439,9 +469,21 @@ export class ResponseOrchestrator<Timer> {
     }
 
     noteWriterAnswer(answer: string): void {
-        if (this.lastConfirmedTurn && answer.trim()) {
-            this.lastConfirmedTurn.answer = answer.trim();
-        }
+        const turn = this.openTurn;
+        if (!turn || !answer.trim()) return;
+        turn.answer = answer.trim();
+        this.openTurn = undefined;
+        this.archiveTurn(turn);
+    }
+
+    private archiveTurn(turn: FluxConfirmedTurn): void {
+        this.recentTurns.push(turn);
+        if (this.recentTurns.length > MAX_RECENT_TURNS) this.recentTurns.splice(0, this.recentTurns.length - MAX_RECENT_TURNS);
+    }
+
+    /** History the next turn sees: archived turns plus a still-open one. */
+    private historyTurns(): FluxConfirmedTurn[] {
+        return this.openTurn ? [...this.recentTurns, this.openTurn] : [...this.recentTurns];
     }
 
     /**
@@ -464,11 +506,12 @@ export class ResponseOrchestrator<Timer> {
         const { baseNotebook, constraints, groundingKey } = this.ports.getContextSnapshot();
         // The current transcript is already keyed separately. Its final event can
         // add these same sentences to the notebook just before confirmation.
+        const history = this.historyTurns();
         const currentSentences = new Set(question.split(/(?<=[.!?])\s+/u).map(sentence => sentence.slice(0, 170)));
         const conversationalKey = buildFluxTurnContext({
             question,
             replacesAutomaticAnswer,
-            lastConfirmedTurn: this.lastConfirmedTurn,
+            recentTurns: history,
             pendingClarification: this.pendingClarification,
             constraints: constraints.filter(constraint => !currentSentences.has(constraint)),
         });
@@ -477,7 +520,7 @@ export class ResponseOrchestrator<Timer> {
             const liveBrainNotebook = buildFluxTurnContext({
                 question,
                 replacesAutomaticAnswer,
-                lastConfirmedTurn: this.lastConfirmedTurn,
+                recentTurns: history,
                 pendingClarification: this.pendingClarification,
                 constraints,
                 baseNotebook,
@@ -496,7 +539,7 @@ export class ResponseOrchestrator<Timer> {
         const liveBrainNotebook = buildFluxTurnContext({
             question,
             replacesAutomaticAnswer,
-            lastConfirmedTurn: this.lastConfirmedTurn,
+            recentTurns: history,
             pendingClarification: this.pendingClarification,
             constraints,
             baseNotebook,
@@ -559,6 +602,29 @@ export class ResponseOrchestrator<Timer> {
         return clear ? this.replaceCurrent() : this.markCurrentOutdated();
     }
 
+    /**
+     * D17 barge-in: the interviewer started a real new turn while a writer
+     * answer is still streaming. Stop it now instead of letting it run until
+     * the new turn is confirmed, which showed two answers at once. Filler and
+     * very short partials ("Mm", "Take your time") never stop an answer, and
+     * neither does a reply while an Ask is waiting.
+     */
+    private hasStreamingWriter(): boolean {
+        const current = this.current;
+        return current?.source === 'writer' && current.completedAt === undefined && !current.interrupted;
+    }
+
+    private interruptActiveWriter(text: string): void {
+        const current = this.current;
+        if (current?.source !== 'writer' || current.completedAt !== undefined || current.interrupted) return;
+        if (this.askPending || !this.ports.answerWriter) return;
+        const clean = text.replace(/\s+/g, ' ').trim();
+        if (!clean || isFillerOnly(clean) || clean.split(' ').length < INTERRUPT_MIN_WORDS) return;
+        current.interrupted = true;
+        this.setSpeaking(current, false);
+        this.ports.answerWriter.cancel('interviewer_interrupted');
+    }
+
     private cancelActiveWriterForCorrection(): boolean {
         const previous = this.current;
         if (!previous) return false;
@@ -605,20 +671,17 @@ export class ResponseOrchestrator<Timer> {
             ...(bubble ? { suppressQuestionRow: true } : {}),
             ...(liveBrainNotebook !== undefined ? { liveBrainNotebook } : {}),
             ...(contextKey !== undefined ? { contextKey } : {}),
-            ...(pendingOutdatedGenerationId !== undefined ? {
-                onFirstText: () => {
-                    if (answer.generationId !== 0 && this.current !== answer) return;
-                    const toFold = answer.pendingOutdatedGenerationId;
-                    answer.pendingOutdatedGenerationId = undefined;
-                    if (toFold !== undefined) {
-                        this.ports.overlay.setOutdated(toFold, true);
-                    }
-                },
-            } : {}),
+            onFirstText: () => {
+                if (answer.generationId !== 0 && this.current !== answer) return;
+                answer.textShown = true;
+                const toFold = answer.pendingOutdatedGenerationId;
+                answer.pendingOutdatedGenerationId = undefined;
+                if (toFold !== undefined) {
+                    this.ports.overlay.setOutdated(toFold, true);
+                }
+            },
         };
-        const { generationId, done } = Object.keys(writeOptions).length > 0
-            ? writer.write(request, writeOptions)
-            : writer.write(request);
+        const { generationId, done } = writer.write(request, writeOptions);
         answer.generationId = generationId;
         if (bubble) {
             bubble.generationId = generationId;
@@ -633,6 +696,9 @@ export class ResponseOrchestrator<Timer> {
                 answer.completedAt = this.ports.clock.now();
                 return;
             }
+            // An interrupted answer stays current until the interrupting turn
+            // is confirmed, so that turn can fold (or drop) it.
+            if (answer.interrupted) return;
             this.current = undefined;
         };
         void done.then(settle, () => settle('failed'));

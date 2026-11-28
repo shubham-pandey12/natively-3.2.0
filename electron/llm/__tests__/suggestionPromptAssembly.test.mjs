@@ -372,3 +372,9 @@ test('WhatToAnswerLLM delegates attached images to streamChat (vision fallback o
   assert.deepEqual(calls[0][1], ['/tmp/screen.png'], 'image paths forwarded to streamChat');
   assert.deepEqual(chunks, ['vision-answer']);
 });
+
+test('a screenshot press that only points at the screen makes the screen the subject, not the last spoken question', () => {
+    const { SCREEN_DIRECT_VISION_INSTRUCTION } = require('../../../dist-electron/electron/llm/WhatToAnswerLLM.js');
+    assert.match(SCREEN_DIRECT_VISION_INSTRUCTION, /the screen IS the subject/);
+    assert.match(SCREEN_DIRECT_VISION_INSTRUCTION, /Never re-answer an earlier interviewer question the screen is not about/);
+});

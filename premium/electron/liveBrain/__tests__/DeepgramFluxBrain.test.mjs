@@ -103,9 +103,9 @@ test('Flux handshake connects to /v2/listen with linear16 16kHz, streams 80ms bi
     assert.match(conn.url, /model=flux-general-multi/);
     assert.match(conn.url, /encoding=linear16/);
     assert.match(conn.url, /sample_rate=16000/);
-    assert.match(conn.url, /eot_threshold=0\.95/);
+    assert.match(conn.url, /[?&]eot_threshold=0\.9(&|$)/);
     assert.match(conn.url, /eager_eot_threshold=0\.5/);
-    assert.match(conn.url, /eot_timeout_ms=1500/);
+    assert.match(conn.url, /eot_timeout_ms=1200/);
     assert.ok(events.some(e => e.type === 'status' && e.status === 'ready'));
 
     // Push 100 ms of 48 kHz mono -> 1,600 samples at 16 kHz = 3,200 bytes -> 1 x 2,560B (80 ms) frame buffered + remainder flushed on stop.
@@ -124,6 +124,21 @@ test('Flux handshake connects to /v2/listen with linear16 16kHz, streams 80ms bi
     assert.equal(conn.jsonMessages.some(m => m.type === 'KeepAlive'), false, '/v2/listen must never receive KeepAlive');
     assert.equal(events.at(-1).type, 'status');
     assert.equal(events.at(-1).status, 'closed');
+});
+
+test('Flux sends the meeting keyterms (capped at 50) so names and stack words are recognized', async (t) => {
+    const terms = ['Kubernetes', 'PostgreSQL', ...Array.from({ length: 60 }, (_, i) => `Term${i}`)];
+    const { brain, connections } = await createRig(t, { brainOptions: { keyterms: terms } });
+    await brain.start(makeContext());
+    const sent = new URL(connections[0].url, 'ws://x').searchParams.getAll('keyterm');
+    assert.equal(sent.length, 50);
+    assert.deepEqual(sent.slice(0, 2), ['Kubernetes', 'PostgreSQL']);
+});
+
+test('Flux sends no keyterm parameter when there are no terms', async (t) => {
+    const { brain, connections } = await createRig(t, { brainOptions: { keyterms: [] } });
+    await brain.start(makeContext());
+    assert.equal(new URL(connections[0].url, 'ws://x').searchParams.has('keyterm'), false);
 });
 
 test('resumed Flux turns yield one answer after confirmed EndOfTurn', async (t) => {

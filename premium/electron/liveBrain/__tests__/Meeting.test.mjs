@@ -326,6 +326,9 @@ test('D17: Deepgram Flux streams answers through IntelligenceEngine, cancels on 
     assert.ok(overlay.some(e => e.liveBrainQuestion?.text === 'How do you scale reads?' && e.liveBrainQuestion.generationId === runs[0].options.liveBrain.generationId));
 
     // Correction cancels generation 1 and feeds generation 2; outdated folds on replacement first text.
+    // Generation 1 has shown text (an answer cut off before any text is dropped, not folded).
+    runs[0].options.outcomeOut.value = { status: 'success' };
+    runs[0].options.liveBrain.onFirstText?.(25);
     flux.emit({ type: 'interviewer_transcript', text: 'Actually, assume write-heavy.', final: true, at: 30 });
     flux.emit({ type: 'decision', decisionId: 'f2', action: 'answer', question: 'Actually, assume write-heavy.', at: 31 });
     assert.deepEqual(cancellations, ['answer_corrected']);
@@ -805,14 +808,16 @@ test('Flux distinguishes standalone questions with constraints from corrections'
     const question = 'Explain how a mutex works without busy waiting';
     const context = { question, replacesAutomaticAnswer: false, lastConfirmedTurn: { question: 'Design a payments API' } };
     assert.equal(isCorrectionTurn(question), false);
-    assert.equal(buildFluxTurnContext(context), '');
+    // The model now decides how a turn relates to history; the provider sees it.
+    assert.match(buildFluxTurnContext(context), /<turn_context kind="conversation">[\s\S]*Q1: Design a payments API[\s\S]*Current interviewer turn: Explain how a mutex/);
+    assert.equal(buildFluxTurnContext({ question, replacesAutomaticAnswer: false }), '');
     assert.equal(isCorrectionTurn('Actually, use MongoDB instead'), true);
     assert.equal(isCorrectionTurn('Do it without Redis'), true);
     assert.equal(isUnrelatedNewTopicForClarification(question), true);
     assert.equal(buildFluxTurnContext({
         ...context,
         pendingClarification: { originalQuestion: 'Design a payments API', clarification: 'Which payment methods?' },
-    }), '');
+    }).includes('clarification_reply'), false);
 });
 
 test('Phase 4: AI-boundary context for follow-ups, corrections, clarification replies, unrelated topics, and stale draft rejection', async t => {
@@ -863,7 +868,7 @@ test('Phase 4: AI-boundary context for follow-ups, corrections, clarification re
 
     h.flux.emit({ type: 'eager_end_of_turn', turnKey: 'flux-p4:c1:t1', question: 'What if it needs to work offline?', at: 20 });
     await untilCondition(() => h.streamCalls.length === 2);
-    assert.match(h.streamCalls[1].transcript, /<turn_context kind="follow_up">/);
+    assert.match(h.streamCalls[1].transcript, /<turn_context kind="conversation">/);
     assert.match(h.streamCalls[1].transcript, /collaborative note-taking app/);
     assert.match(h.streamCalls[1].transcript, /CRDTs with WebSocket delta sync/);
 
@@ -876,8 +881,9 @@ test('Phase 4: AI-boundary context for follow-ups, corrections, clarification re
     h.flux.emit({ type: 'interviewer_transcript', text: 'What is the difference between horizontal and vertical scaling?', final: true, at: 30 });
     h.flux.emit({ type: 'decision', decisionId: 'd3', action: 'answer', question: 'What is the difference between horizontal and vertical scaling?', turnKey: 'flux-p4:c1:t2', at: 31 });
     await untilCondition(() => h.answers.length === 3);
-    assert.doesNotMatch(h.streamCalls[2].transcript, /<turn_context/);
-    assert.doesNotMatch(h.streamCalls[2].transcript, /collaborative note-taking app/);
+    // History is shown; the model is told to ignore it for a new topic.
+    assert.match(h.streamCalls[2].transcript, /Current interviewer turn: What is the difference between horizontal and vertical scaling\?/);
+    assert.match(h.streamCalls[2].transcript, /New topic: answer it on its own and ignore the turns above/);
 
     // 3. Interrupted answer followed by early-draft correction: unfinished draft stays out of history,
     //    and correction carries original confirmed goal.
@@ -889,7 +895,8 @@ test('Phase 4: AI-boundary context for follow-ups, corrections, clarification re
     h.flux.emit({ type: 'interviewer_speech_started', at: 45 });
     h.flux.emit({ type: 'eager_end_of_turn', turnKey: 'flux-p4:c1:t4', question: 'Actually, caching is not allowed.', at: 46 });
     await untilCondition(() => h.streamCalls.length === 5);
-    assert.match(h.streamCalls[4].transcript, /<turn_context kind="correction">/);
+    assert.match(h.streamCalls[4].transcript, /<turn_context kind="conversation">/);
+    assert.match(h.streamCalls[4].transcript, /Correction or changed requirement: re-answer the earlier question/);
     assert.match(h.streamCalls[4].transcript, /low-latency product lookup service/);
     assert.match(h.streamCalls[4].transcript, /Actually, caching is not allowed\./);
 
@@ -1521,4 +1528,17 @@ test('Bug 1: active Flux lease released with forced_rollover cancels active writ
     await flush();
     assert.deepEqual(detached, [['deepgram-flux', 'forced_rollover', 'active']]);
     sup.stop();
+});
+
+test('Flux: an interrupting follow-up is a follow-up, not a correction of the unanswered question', () => {
+    const context = buildFluxTurnContext({
+        question: 'What was the hardest technical decision in that project?',
+        replacesAutomaticAnswer: true,
+        lastConfirmedTurn: { question: 'What is a project you built that handled user traffic?' },
+    });
+    // The model classifies the turn; the context never labels it a correction.
+    assert.match(context, /<turn_context kind="conversation">/);
+    assert.doesNotMatch(context, /kind="correction"/);
+    assert.match(context, /A1: \(no answer was given; it may have been interrupted\)/);
+    assert.match(context, /Never repeat or re-answer an earlier question/);
 });

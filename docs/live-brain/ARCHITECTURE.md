@@ -39,6 +39,8 @@ It listens to the interviewer continuously, understands like a strong conversati
 
 **D18 (2026-11-27).** Amazon Nova Sonic is an optional Live Brain provider (`amazon-sonic`), independent of the Bedrock AI Provider. Use the AWS SDK credential chain and a separately selected Region and model. Send existing interviewer PCM over Bedrock bidirectional streaming, display interviewer and assistant text, and discard returned audio in keeping with D6. Reuse the notebook, interruption handling, rollover, reconnect, and fallback. Nova Sonic v1 reached end of life, so offer active Sonic models documented for the selected Region.
 
+
+**D19 (2026-11-28, user decision: Flux + My AI Provider behaves like a realtime brain).** Amends D15 and D17 for `deepgram-flux` only. (1) Barge-in: a streaming writer answer is cancelled on the first Flux `Update` with two or more non-filler words, not at the next `EndOfTurn`. (2) The writer request carries a filler rule; a `[[NO_ACTION]]` reply is swallowed silently by the Live Brain run (no fallback line, no history entry, previous answer stays). Only clear filler is dropped locally. (3) Turn context is the last four turns (`kind="conversation"`) and the model decides follow-up, correction or new topic; regex `follow_up`/`correction` labels are retired, the explicit `clarification_reply` block stays. (4) Defaults: `eot_threshold` 0.9, `eot_timeout_ms` 1200, meeting STT context terms sent as `keyterm` (max 50).
 ### Non-goals
 
 - Text-to-speech, audio playback, voice output of any kind.
