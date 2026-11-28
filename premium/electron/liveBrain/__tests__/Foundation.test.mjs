@@ -64,7 +64,10 @@ test('D20 realtime providers use the short candidate prompt and keep their turn 
         assert.equal(prompt.includes('MANDATORY TURN OUTPUT: Never greet, acknowledge, or offer help.'), id === 'elevenlabs-realtime', id);
     }
     assert.equal(buildProviderInstructions({}, 'full', 'deepgram-flux'), '');
-    assert.notEqual(buildProviderInstructions({}, 'full', 'pipeline'), buildProviderInstructions({}, 'trimmed', 'pipeline'));
+    const pipelineFull = buildProviderInstructions({ profileContext: 'Built an order queue' }, 'full', 'pipeline');
+    assert.notEqual(pipelineFull, buildProviderInstructions({ profileContext: 'Built an order queue' }, 'trimmed', 'pipeline'));
+    assert.match(pipelineFull, /Build a believable answer from your real skills, tech stack and experience/);
+    assert.doesNotMatch(pipelineFull, /Only claim experience supported by the candidate's résumé or profile/);
 });
 
 test('standing skills follow the other realtime context and empty skills are omitted', () => {

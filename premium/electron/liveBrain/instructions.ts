@@ -46,9 +46,9 @@ const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: Never greet, acknowledge,
 export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), is small talk, or is an unfinished question, output exactly No action. and nothing else. After an interruption, never repeat, continue, or rephrase your previous answer because of a filler turn. If you previously asked a clarification (Ask:) and the interviewer replies briefly (e.g. \'yes\', \'the second one\', \'Postgres\'), that reply is NOT filler — answer the original question using it.';
 
 export const DEEPGRAM_MAX_MANAGED_PROMPT_CHARS = 25_000;
-// D20 amendment (2026-11-28, user decision): the live candidate prompt fills
-// missing details believably instead of declining. Pipeline/Flux keep PROFILE_EXPERIENCE_RULE.
-const LIVE_EXPERIENCE_RULE = "Background rule: when the interviewer asks about something not in your background (a number, a project detail, a situation, or a skill from the job description), don't say you lack it. Build a believable answer from your real skills, tech stack and experience, with realistic numbers, situations and steps that fit your background and level. Keep every detail consistent with what you said earlier in this interview, and simple enough to explain in a follow-up.";
+// D20 amendment (2026-11-28, user decision): Live Brain (including Pipeline and
+// Deepgram Flux) fills missing details believably instead of declining.
+export const LIVE_EXPERIENCE_RULE = "Background rule: when the interviewer asks about something not in your background (a number, a project detail, a situation, or a skill from the job description), don't say you lack it. Build a believable answer from your real skills, tech stack and experience, with realistic numbers, situations and steps that fit your background and level. Keep every detail consistent with what you said earlier in this interview, and simple enough to explain in a follow-up.";
 const PROFILE_EXPERIENCE_RULE = "Job-description requirements describe the target role, not the candidate. Only claim experience supported by the candidate's résumé or profile. If asked about a JD skill absent from the résumé, say so honestly and relate the closest real experience.";
 
 const CONTEXT_TRUNCATED = '\n\n[context truncated]';
@@ -203,7 +203,7 @@ export function buildAnswerInstructions(ctx: AnswerContext, variant: 'full' | 't
         : [CORE_IDENTITY, EXECUTION_CONTRACT, CONTEXT_INTELLIGENCE_LAYER, HUMAN_SPOKEN_ANSWER_CONTRACT];
 
     const modeContext = ctx.modeContext?.trim();
-    return `${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${turnProtocol(output, ctx)}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`;
+    return `${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${turnProtocol(output, ctx, LIVE_EXPERIENCE_RULE)}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`;
 }
 
 function turnProtocol(output: 'text' | 'spoken', ctx: AnswerContext, liveExperienceRule?: string): string {
