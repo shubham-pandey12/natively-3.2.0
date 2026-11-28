@@ -81,6 +81,7 @@ export interface LiveBrainContextSnapshot {
     modeTemplate?: string;
     modePrompt?: string;
     modeContext?: string;
+    standingSkills?: string;
 }
 
 export function resolveLiveBrainProfileContext(
@@ -104,6 +105,7 @@ export interface LiveBrainMeetingOptions extends LiveBrainContextSnapshot {
     deepgramThink?: DeepgramThinkConfig;
     promptVariant?: LiveBrainPromptVariant;
     resolveContext?(): LiveBrainContextSnapshot;
+    isHumanizeSkillEnabled?(): boolean;
     readGroundingState?(): LiveBrainGroundingState;
     engine: {
         setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void;
@@ -126,7 +128,7 @@ export interface LiveBrainMeetingSession {
     acceptAudio(channel: 'system' | 'mic', pcm: Buffer, sampleRate: number, channels?: number): void;
     addCandidateText(text: string, at: number): void;
     noteSpeechStop(at: number): void;
-    refreshContext?(): void;
+    refreshContext?(change?: 'skills'): void;
     isPipeline?(): boolean;
     pipelineContext?(): string;
     observePipelineTranscript?(text: string, final: boolean, at: number): boolean | void;

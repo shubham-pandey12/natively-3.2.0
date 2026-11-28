@@ -7,7 +7,7 @@ const dist = '../../../../dist-electron/';
 const load = (name) => require(`${dist}premium/electron/liveBrain/${name}.js`);
 const { createResponseParser, NO_ACTION_SENTINEL, ASK_SENTINEL } = load('responseParser');
 const { DECIDE_TURN_TOOL, toGeminiDecideTurnTool, parseDecideTurnArgs } = load('decideTurnTool');
-const { buildDeciderInstructions, buildAnswerInstructions, buildDeepgramInstructions } = load('instructions');
+const { buildDeciderInstructions, buildAnswerInstructions, buildDeepgramInstructions, buildProviderInstructions, FILLER_TURN_RULE } = load('instructions');
 const { createLiveBrain } = load('index');
 const { FakeLiveBrain } = load('__tests__/FakeLiveBrain');
 const {
@@ -20,6 +20,57 @@ const {
 
 const kind = (value) => ({ type: 'kind', kind: value });
 const text = (value) => ({ type: 'text', text: value });
+
+test('D20 realtime providers use the short candidate prompt and keep their turn protocol', () => {
+    const providers = [
+        ['gemini-live'], ['openai-realtime'], ['elevenlabs-realtime'], ['amazon-sonic'],
+        ['deepgram-voice-agent', 'managed'], ['deepgram-voice-agent', 'byo'],
+    ];
+    const role = "You are the candidate in a live job interview. You hear the interviewer. Text lines beginning 'Candidate said:' are things you already said. Say exactly what you would say out loud next, as yourself, in first person.";
+    const closing = 'Remember: you are talking, not writing. Simple Indian English, short and real. Sound like yourself.';
+    for (const [id, thinkMode] of providers) {
+        const profileContext = 'Built an order queue';
+        const inputs = { modeTemplate: 'technical-interview', modePrompt: 'Old mode suffix', profileContext };
+        const prompt = buildProviderInstructions(inputs, 'full', id, thinkMode);
+        assert.ok(prompt.startsWith(role), id);
+        assert.ok(prompt.endsWith(closing), id);
+        assert.match(prompt, /Examples of tone, do not reuse their facts/);
+        assert.match(prompt, /simple Indian English/);
+        assert.match(prompt, /Never announce your thinking/);
+        assert.match(prompt, /Build a believable answer from your real skills, tech stack and experience/);
+        assert.match(prompt, /Keep every detail consistent with what you said earlier/);
+        assert.doesNotMatch(prompt, /don't make one up|Say honestly what you haven't done/);
+        assert.doesNotMatch(prompt, /Brief thinking out loud is fine/);
+        assert.match(prompt, /Ask for clarification only when missing information materially changes the answer/);
+        assert.match(prompt, /If the interviewer moves on without clarifying, answer with a stated assumption/);
+        assert.match(prompt, /The newest interviewer instruction overrides earlier requirements/);
+        assert.doesNotMatch(prompt, /Only claim experience supported by the candidate's résumé or profile/);
+        assert.ok(prompt.includes(FILLER_TURN_RULE), id);
+        for (const oldPrompt of [UNIVERSAL_WHAT_TO_ANSWER_PROMPT, MODE_TECHNICAL_INTERVIEW_PROMPT, HUMAN_SPOKEN_ANSWER_CONTRACT, inputs.modePrompt]) {
+            assert.ok(!prompt.includes(oldPrompt.trim()), id);
+        }
+        assert.equal(prompt, buildProviderInstructions(inputs, 'trimmed', id, thinkMode), id);
+        assert.ok(prompt.indexOf('Candidate profile context:') + closing.length <= 4_500, id);
+        assert.equal(prompt.includes(`For a clarification, start with ${ASK_SENTINEL}`), id === 'openai-realtime', id);
+        assert.equal(prompt.includes('For a clarification, start with "Ask:"'), id !== 'openai-realtime', id);
+        assert.equal(prompt.includes('MANDATORY TURN OUTPUT: Never greet, acknowledge, or offer help.'), id === 'elevenlabs-realtime', id);
+    }
+    assert.equal(buildProviderInstructions({}, 'full', 'deepgram-flux'), '');
+    assert.notEqual(buildProviderInstructions({}, 'full', 'pipeline'), buildProviderInstructions({}, 'trimmed', 'pipeline'));
+});
+
+test('standing skills follow the other realtime context and empty skills are omitted', () => {
+    const ctx = {
+        modeName: 'Mock interview', profileContext: 'Built an order queue',
+        notebookText: 'Needs retries', modeContext: 'Use examples from operations.',
+        standingSkills: 'Use everyday Spanish.',
+    };
+    const prompt = buildProviderInstructions(ctx, 'full', 'gemini-live');
+    const ordered = [ctx.modeName, ctx.profileContext, ctx.notebookText, ctx.modeContext, 'Standing skills:', ctx.standingSkills, 'Remember:'];
+    assert.deepEqual(ordered.map(block => prompt.indexOf(block)), ordered.map(block => prompt.indexOf(block)).sort((a, b) => a - b));
+    assert.ok(ordered.every(block => prompt.includes(block)));
+    assert.ok(!buildProviderInstructions({ ...ctx, standingSkills: '   ' }, 'full', 'gemini-live').includes('Standing skills:'));
+});
 
 test('wait commits as soon as its split sentinel completes and emits no text', () => {
     const parser = createResponseParser();

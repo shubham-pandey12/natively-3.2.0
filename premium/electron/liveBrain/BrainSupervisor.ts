@@ -65,7 +65,7 @@ export class BrainSupervisor<Timer> {
     constructor(private readonly options: {
         sessionId: string;
         preferred: LiveBrainId;
-        instructions(id: LiveBrainId): string;
+        instructions(id: LiveBrainId, notebookText?: string): string;
         groundingKey?(): string | undefined;
         notebook: InterviewNotebook;
         clock: ResponseClock<Timer>;
@@ -218,13 +218,13 @@ export class BrainSupervisor<Timer> {
         lease.groundingKey = this.options.groundingKey?.();
         const refreshContext = () => {
             const recentTurns = notebook.recentTurns();
-            const instructions = this.options.instructions(lease.brain.id);
+            const id = lease.brain.id;
+            // Deepgram already gets verbatim turns separately in agent.context.messages.
+            const notebookText = [notebook.renderNotebook(), id !== 'deepgram-voice-agent' && renderRecentTurns(recentTurns)]
+                .filter(Boolean).join('\n\n');
             return {
                 notebook: notebook.snapshot(), recentTurns,
-                // Deepgram seeds its history separately in agent.context.messages.
-                instructions: lease.brain.id === 'deepgram-voice-agent'
-                    ? instructions
-                    : [instructions, notebook.renderNotebook(), renderRecentTurns(recentTurns)].filter(Boolean).join('\n\n'),
+                instructions: this.options.instructions(id, notebookText),
             };
         };
         const initial = refreshContext();

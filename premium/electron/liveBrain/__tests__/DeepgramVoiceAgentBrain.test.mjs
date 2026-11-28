@@ -281,8 +281,34 @@ test('compact instructions stay <= 25,000 chars for managed mode and omit heavy 
         console.warn = origWarn;
     }
 
-    assert.ok(buildProviderInstructions({}, 'full', 'deepgram-voice-agent', 'managed').length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
-    assert.ok(buildProviderInstructions({}, 'full', 'deepgram-voice-agent', 'byo').length > DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+});
+
+test('D20 managed mode caps the live candidate prompt and BYO keeps all context', t => {
+    const warning = t.mock.method(console, 'warn', () => {});
+    const reference = content => `<reference_file format="json">\n${JSON.stringify({ content })}\n</reference_file>`;
+    const smallReference = reference('Small reference.');
+    const bigReference = reference('x'.repeat(30_000));
+    const ctx = {
+        modeName: 'My interview', profileContext: 'Built a queue', notebookText: 'Needs retries',
+        modeContext: [smallReference, bigReference].join('\n\n'), standingSkills: 'Speak plainly.',
+    };
+    const managed = buildProviderInstructions(ctx, 'full', 'deepgram-voice-agent', 'managed');
+    const byo = buildProviderInstructions(ctx, 'full', 'deepgram-voice-agent', 'byo');
+    assert.ok(managed.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+    assert.ok(managed.includes(smallReference));
+    assert.equal(managed.match(/<reference_file\b/g)?.length, 1);
+    assert.match(managed, /\[context truncated\]\n\nRemember:/);
+    assert.ok(byo.includes(bigReference));
+    assert.ok(byo.includes('Speak plainly.'));
+    assert.equal(warning.mock.callCount(), 1);
+
+    const oversizedSkills = buildProviderInstructions({
+        ...ctx, modeContext: smallReference, standingSkills: 'x'.repeat(30_000),
+    }, 'full', 'deepgram-voice-agent', 'managed');
+    assert.ok(oversizedSkills.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
+    assert.ok(oversizedSkills.includes(smallReference));
+    assert.ok(!oversizedSkills.includes('<standing_skills>'));
+    assert.match(oversizedSkills, /\[context truncated\]\n\nRemember:/);
 });
 
 test('401 auth error emits fatal auth error without retries', async t => {

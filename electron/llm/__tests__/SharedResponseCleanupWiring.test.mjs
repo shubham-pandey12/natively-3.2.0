@@ -177,7 +177,7 @@ describe('Live Brain ResponseOrchestrator — final-text cleanup integration', (
     assert.equal(cleanupCalls, 0);
   });
 
-  test('interrupted/cancelled stream does not run cleanup or mutate replacement reply', () => {
+  test('interrupted stream cleans its tail and late completion cannot mutate the replacement reply', () => {
     let cleanupCalls = 0;
     const h = createHarness((text) => {
       cleanupCalls++;
@@ -185,20 +185,21 @@ describe('Live Brain ResponseOrchestrator — final-text cleanup integration', (
     });
 
     h.orchestrator.handleEvent({ type: 'response_started', responseId: 'r1', at: 1000 });
-    h.orchestrator.handleEvent({ type: 'response_delta', responseId: 'r1', text: 'The service is robust ' });
+    h.orchestrator.handleEvent({ type: 'response_delta', responseId: 'r1', text: 'The service is robust and scalable ' });
     h.advance(100);
     h.orchestrator.handleEvent({ type: 'interviewer_speech_started', at: 1100 });
     h.orchestrator.handleEvent({ type: 'response_done', responseId: 'r1', status: 'cancelled' });
 
-    assert.equal(cleanupCalls, 0, 'cancelled response must not run completion cleanup');
+    assert.equal(cleanupCalls, 1);
+    assert.equal(h.shownTexts.at(-1).text, 'The service is reliable and scalable ');
 
     h.orchestrator.handleEvent({ type: 'response_started', responseId: 'r2', at: 1200 });
     h.orchestrator.handleEvent({ type: 'response_delta', responseId: 'r2', text: 'The pipeline turns raw data into actionable intelligence.' });
     h.orchestrator.handleEvent({ type: 'response_done', responseId: 'r1', status: 'completed' });
-    assert.equal(cleanupCalls, 0, 'late completion must not clean the replacement stream');
+    assert.equal(cleanupCalls, 1, 'late completion must not clean the replacement stream');
     h.orchestrator.handleEvent({ type: 'response_done', responseId: 'r2', status: 'completed' });
 
-    assert.equal(cleanupCalls, 1);
+    assert.equal(cleanupCalls, 2);
     const r2Finals = h.shownTexts.filter((t) => t.responseId === 'r2' && t.done);
     assert.equal(r2Finals.length, 1);
     assert.equal(r2Finals[0].text, 'The pipeline turns raw data into useful information.');

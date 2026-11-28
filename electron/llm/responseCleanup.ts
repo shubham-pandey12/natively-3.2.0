@@ -18,6 +18,7 @@ export interface ResponseCleanupInput {
   mode: ResponseCleanupMode;
   answerType?: AnswerType;
   speaker?: HumanizeSpokenAnswerOptions['speaker'];
+  preserveNumericRanges?: boolean;
 }
 
 export interface ResponseCleanupResult {
@@ -33,7 +34,7 @@ const CONTROL_MESSAGE_RE = /^(?:(?:\*\*|__)?ask\s*:|\[\[ask\]\]|\[\[no_action\]\
  * code/formulas/numeric ranges, and structured answer types.
  */
 export function cleanupResponse(input: ResponseCleanupInput): ResponseCleanupResult {
-  const { text, mode, answerType, speaker } = input;
+  const { text, mode, answerType, speaker, preserveNumericRanges } = input;
   if (!text || typeof text !== 'string') {
     return { text, changed: false };
   }
@@ -49,6 +50,7 @@ export function cleanupResponse(input: ResponseCleanupInput): ResponseCleanupRes
     mode,
     ...(answerType !== undefined ? { answerType } : {}),
     ...(speaker !== undefined ? { speaker } : {}),
+    ...(preserveNumericRanges ? { preserveNumericRanges } : {}),
   });
   return { text: out, changed: out !== text };
 }

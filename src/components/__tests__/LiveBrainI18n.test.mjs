@@ -60,6 +60,7 @@ const REQUIRED_LIVE_BRAIN_KEYS = [
     'Configured · Test reply succeeded',
     'Configured · Test reply failed',
     'Instruction variant',
+    'Realtime providers use the live candidate prompt.',
     'Choose a variant',
     'Full',
     'Trimmed',

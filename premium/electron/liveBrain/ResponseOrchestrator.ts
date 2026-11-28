@@ -74,6 +74,7 @@ interface TextResponse {
     parser: ReturnType<typeof createResponseParser>;
     kind?: ResponseKind;
     text: string;
+    cleanup?: { offset: number; prefix: string };
     generationId?: number;
     updated: boolean;
     lastTextAt?: number;
@@ -170,6 +171,7 @@ export class ResponseOrchestrator<Timer> {
         requestClarificationAnswer?: () => void;
         getContextSnapshot?: () => { baseNotebook: string; constraints: readonly string[]; groundingKey?: string };
         cleanupText?: (text: string) => string;
+        shouldCleanupText?: () => boolean;
         overlay: LiveBrainOverlayPort;
         clock: ResponseClock<Timer>;
         recordSttQuestion?(text: string, at: number): void;
@@ -226,7 +228,11 @@ export class ResponseOrchestrator<Timer> {
                 this.seenResponseIds.add(event.responseId);
                 this.closeTextResponse();
                 this.startAnswerTurn(event.responseId);
-                this.response = { id: event.responseId, parser: createResponseParser(), text: '', updated: false };
+                this.response = {
+                    id: event.responseId, parser: createResponseParser(), text: '', updated: false,
+                    ...(this.ports.cleanupText && (this.ports.shouldCleanupText?.() ?? true)
+                        ? { cleanup: { offset: 0, prefix: '' } } : {}),
+                };
                 break;
             case 'response_delta': {
                 const response = this.response;
@@ -878,6 +884,11 @@ export class ResponseOrchestrator<Timer> {
                 this.readTextEvents(response, [...response.parser.push(finalText), ...response.parser.finish()]);
             }
             if (response.kind === 'answer') {
+                const cleanup = response.cleanup;
+                if (cleanup && !finalText.startsWith(response.text.slice(0, cleanup.offset))) {
+                    // Sonic can supply an authoritative revision of its speculative transcript.
+                    response.cleanup = { offset: 0, prefix: '' };
+                }
                 response.text = finalText;
             }
         }
@@ -891,32 +902,72 @@ export class ResponseOrchestrator<Timer> {
             return { kind: 'suppressed' };
         }
         if (response?.generationId === undefined) return { kind: 'suppressed' };
-        if (completed && response.kind === 'answer' && !response.suppressed && this.ports.cleanupText && response.text.trim()) {
-            try {
-                const cleaned = this.ports.cleanupText(response.text);
-                if (cleaned.trim()) response.text = cleaned;
-            } catch { /* cleanup never blocks live delivery */ }
-        }
         if (this.current?.generationId === response.generationId) {
             this.current.completedAt = this.ports.clock.now();
         }
-        this.showText(response, true);
+        const text = this.showText(response, true);
         if (cancelled) return { kind: 'suppressed' };
         return completed && response.kind === 'answer' && !response.suppressed
-            ? { kind: 'answer', text: response.text }
+            ? { kind: 'answer', text }
             : { kind: 'suppressed' };
     }
 
-    private showText(response: TextResponse, done: boolean): void {
-        if (response.generationId === undefined) return;
+    private showText(response: TextResponse, done: boolean): string {
+        const cleanup = response.cleanup;
+        const text = cleanup && this.ports.cleanupText
+            ? cleanStreamingText(response.text, cleanup, this.ports.cleanupText, done)
+            : response.text;
+        if (response.generationId === undefined) return text;
         this.ports.overlay.showText({
             responseId: response.id,
             generationId: response.generationId,
-            text: response.text,
+            text,
             done,
             updated: response.updated,
         });
+        return text;
     }
+}
+
+const sentences = new Intl.Segmenter('en', { granularity: 'sentence' });
+// Keep sentence boundaries out of fenced/inline code, math, and URLs. An open
+// fence or math block stays opaque even if the response ends mid-block.
+const STREAM_PROTECTED = /```[\s\S]*?```|^[ \t]*~{3,}[^\n]*\n[\s\S]*?^[ \t]*~{3,}[ \t]*(?=\r?$)|\$\$[\s\S]*?\$\$|`[^`\n]+`|\$(?=[^$\n]*[\\^_{}])[^$\n]+\$|https?:\/\/[^\s<>]+|^(?: {4}|\t)[^\n]*|(?<open>```[\s\S]*|^[ \t]*~{3,}[\s\S]*|\$\$[\s\S]*|`[^`\n]*$)/gm;
+
+function cleanStreamingText(
+    text: string,
+    state: NonNullable<TextResponse['cleanup']>,
+    cleanup: (text: string) => string,
+    done: boolean,
+): string {
+    const tail = text.slice(state.offset);
+    let safeEnd = tail.length;
+    const masked = tail.replace(STREAM_PROTECTED, (...args) => {
+        const [span, open, index] = args as [string, string | undefined, number];
+        if (open) safeEnd = index;
+        return 'X'.repeat(span.length);
+    });
+    let consumed = 0;
+    const append = (end: number) => {
+        const part = tail.slice(consumed, end);
+        const body = part.trim();
+        let cleaned = body;
+        if (body && !/^(?: {4}|\t)\S/m.test(part)) {
+            try { cleaned = cleanup(body).trim() || body; } catch { /* keep the delivered text */ }
+        }
+        state.prefix += body
+            ? part.slice(0, part.length - part.trimStart().length) + cleaned + part.slice(part.trimEnd().length)
+            : part;
+        consumed = end;
+    };
+    for (const { segment, index } of sentences.segment(masked)) {
+        const end = index + segment.length;
+        if (end > safeEnd || !/[.!?…。！？]["'”’)}\]]*\s+$/u.test(segment)) break;
+        append(end);
+    }
+    if (done) append(safeEnd);
+    state.offset += consumed;
+    return state.prefix + tail.slice(consumed);
 }
 
 function joinText(a: string, b: string): string {

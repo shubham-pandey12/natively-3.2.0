@@ -28,7 +28,9 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemi
         overlay: { showText() {}, showQuestion() {}, showAsk() {}, setOutdated() {}, setInterviewerSpeaking() {} },
     }) : undefined;
     const supervisor = new BrainSupervisor({
-        sessionId: 'meeting', preferred, instructions: id => `Answer instructions for ${id}`, notebook, clock,
+        sessionId: 'meeting', preferred,
+        instructions: (id, notebookText) => [`Answer instructions for ${id}`, notebookText].filter(Boolean).join('\n\n'),
+        notebook, clock,
         create(id) {
             attempted.push(id);
             if (id === 'pipeline') return { brain: new PipelineBrain(() => {}), model: 'pipeline' };

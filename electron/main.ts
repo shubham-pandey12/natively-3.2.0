@@ -10910,6 +10910,10 @@ export class AppState {
       const { ModesManager } = require('./services/ModesManager') as typeof import('./services/ModesManager');
       const modes = ModesManager.getInstance();
       modes.setLiveGroundingChangeListener(() => this.liveBrainRouting.activeSession?.refreshContext?.());
+      const { SkillsManager } = require('./services/SkillsManager') as typeof import('./services/SkillsManager');
+      try {
+        SkillsManager.getInstance().setLiveSkillsChangeListener(() => this.liveBrainRouting.activeSession?.refreshContext?.('skills'));
+      } catch { /* skills unavailable */ }
       const readGroundingState = () => {
         const mode = modes.getActiveMode();
         const knowledge = this.getKnowledgeOrchestrator();
@@ -10928,16 +10932,25 @@ export class AppState {
           () => this.currentUserName(),
           () => this.getKnowledgeOrchestrator()?.getLiveInterviewProfileContext?.(),
         );
+        let standingSkills: string | undefined;
+        try {
+          standingSkills = SkillsManager.getInstance().getAlwaysOnPromptBlock();
+        } catch { /* skills unavailable */ }
         return {
           profileContext, modeName: mode?.name, modeTemplate: mode?.templateType,
           modePrompt: modes.getActiveModeSystemPromptSuffix(mode?.id),
           modeContext: modes.buildActiveModeContextBlock(),
+          standingSkills,
         };
       };
       return loadLiveBrainPremium()?.createMeeting({
         provider, apiKey, model, reasoningEffort, deepgramThink, sonicRegion, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
         resolveProvider: (p) => resolveLiveBrainRuntime(p, this.processingHelper?.getLLMHelper?.()),
         resolveContext, readGroundingState,
+        isHumanizeSkillEnabled: () => {
+          const skill = SkillsManager.getInstance().getSkill('humanize-ai-text');
+          return skill?.alwaysOn === true && skill.enabled !== false;
+        },
         engine: this.intelligenceManager,
         emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),
         summarize: (prompt, signal) => this.processingHelper.getLLMHelper().summarizeLiveInterview(prompt, signal),

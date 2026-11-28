@@ -41,6 +41,10 @@ It listens to the interviewer continuously, understands like a strong conversati
 
 
 **D19 (2026-11-28, user decision: Flux + My AI Provider behaves like a realtime brain).** Amends D15 and D17 for `deepgram-flux` only. (1) Barge-in: a streaming writer answer is cancelled on the first Flux `Update` with two or more non-filler words, not at the next `EndOfTurn`. (2) The writer request carries a filler rule; a `[[NO_ACTION]]` reply is swallowed silently by the Live Brain run (no fallback line, no history entry, previous answer stays). Only clear filler is dropped locally. (3) Turn context is the last four turns (`kind="conversation"`) and the model decides follow-up, correction or new topic; regex `follow_up`/`correction` labels are retired, the explicit `clarification_reply` block stays. (4) Defaults: `eot_threshold` 0.9, `eot_timeout_ms` 1200, meeting STT context terms sent as `keyterm` (max 50).
+| # | Decision |
+|---|---|
+| D20 | **2026-11-28, user decision.** Gemini Live, OpenAI Realtime, ElevenLabs Realtime, Deepgram Voice Agent (managed and BYO), and Amazon Sonic use a dedicated short live candidate spoken prompt in place of the full or trimmed Natively answer prompt. This narrows D3 for these realtime providers only. Pipeline/AnswerWriter and Deepgram Flux keep D3 and include standing skills. **Amended 2026-11-28 (user decision):** the live candidate prompt targets simple, plain Indian English as spoken by a non-native speaker (common words, no idioms or dramatic words, 2–3 short sentences, no announced thinking), and Live Brain cleanup adds a plain-word pass (`plainSpeech.ts`). **Amended again 2026-11-28 (user decision):** when a detail is missing from the candidate's background, the live candidate prompt fills it in believably from the candidate's real skills, stack and experience, consistent with earlier answers, instead of declining (`LIVE_EXPERIENCE_RULE`). Pipeline/AnswerWriter and Deepgram Flux keep `PROFILE_EXPERIENCE_RULE`. |
+
 ### Non-goals
 
 - Text-to-speech, audio playback, voice output of any kind.
@@ -319,28 +323,13 @@ File: `premium/electron/liveBrain/AnswerWriter.ts` — a thin adapter around `In
 
 ---
 
-## 5. Instructions (response style = current Natively)
+## 5. Instructions
 
-**Under D12, GeminiLiveBrain uses the full single-model instruction set below** (`buildAnswerInstructions`, variant full | trimmed), with one change: the output protocol is the **spoken** sentinel form in §6, because Gemini's text is a transcription of speech. Keep it spoken-answer friendly (the existing `HUMAN_SPOKEN_ANSWER_CONTRACT` already is). The decider instructions are no longer used.
+Under D20, Gemini Live, OpenAI Realtime, ElevenLabs Realtime, Deepgram Voice Agent (managed and BYO), and Amazon Sonic receive one short live candidate prompt per session. It starts with the first-person interview role, followed by spoken style guidance and generic tone examples. It reuses the §6 output protocol, clarification and correction rules, profile experience rule, and mandatory filler rule. OpenAI uses the text sentinel form. The other providers use the spoken form, and ElevenLabs also keeps its mandatory turn-output rule.
 
-**Former (D10, superseded): two instruction sets:**
+The prompt then carries the mode name, profile, interview notebook, mode context, and standing skills, followed by the spoken-style reminder. Managed Deepgram retains its 25,000-character limit and trims context while preserving the rules and closing reminder.
 
-- **Decider instructions** (Gemini Live session, sent once): live-session preamble, `decide_turn` protocol, clarification rule, correction rule, profile summary, notebook on rollover. Short; no answer-style rules (Gemini doesn't write the answer).
-- **Answer instructions** (AnswerWriter): **unchanged existing Natively answer prompts** — nothing new to write; D3 is met by reuse.
-
-The list below describes the full single-model instruction set, still used by OpenAIRealtimeBrain when it writes answers itself:
-
-`instructions.ts` builds one text, sent **once per session** (system instruction), never per answer:
-
-1. **The current Natively answer prompt** used for spoken interview answers today — resolved through the same code path `WhatToAnswerLLM` uses (`UNIVERSAL_WHAT_TO_ANSWER_PROMPT`, which embeds `HUMAN_SPOKEN_ANSWER_CONTRACT` and `SPOKEN_ANSWER_CONTRACT`, plus mode prompt e.g. `MODE_TECHNICAL_INTERVIEW_PROMPT`). **Do not copy-paste prompt text into new files — import/compose it.**
-2. **Live-session preamble** (new, short): you are listening to a live interview; the audio you hear is the interviewer; lines starting `Candidate said:` are the candidate; write what the candidate should say next; text only.
-3. **Output protocol** (new, short — §6).
-4. **Clarification rule** (new, short): ask only if missing information materially changes the answer; one short question at a time, at most three per original question (D4); never ask what was already answered; never repeat a clarification; if the interviewer moves on, answer with a stated assumption.
-5. **Correction rule** (new, one line): the newest interviewer instruction overrides earlier requirements.
-6. **Profile context** (existing): resume/profile, job description, custom context, interview mode — the same sources the current answer path uses.
-7. **Notebook** (on rollover/fallback only): `NotebookSnapshot` rendered as text (§8).
-
-Phase 0 compares the full current prompt vs a trimmed variant (same style rules, scenario-specific rules removed) on the test corpus; the winner is recorded in PROGRESS.md and becomes the default. Both variants are composed from existing prompt constants.
+Deepgram Flux and Pipeline/AnswerWriter retain the current Natively answer prompt under D3, with standing skills included. The full and trimmed prompt builders remain available for their existing non-realtime, spike, and test uses.
 
 ---
 

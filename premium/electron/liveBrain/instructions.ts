@@ -23,6 +23,7 @@ interface AnswerContext extends LiveContext {
     profileContext?: string;
     modePrompt?: string;
     modeContext?: string;
+    standingSkills?: string;
     /**
      * The active mode's TEMPLATE id (e.g. 'technical-interview', see
      * electron/context-intelligence/policies/mode-policy-registry.ts). Not the
@@ -45,6 +46,9 @@ const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: Never greet, acknowledge,
 export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), is small talk, or is an unfinished question, output exactly No action. and nothing else. After an interruption, never repeat, continue, or rephrase your previous answer because of a filler turn. If you previously asked a clarification (Ask:) and the interviewer replies briefly (e.g. \'yes\', \'the second one\', \'Postgres\'), that reply is NOT filler — answer the original question using it.';
 
 export const DEEPGRAM_MAX_MANAGED_PROMPT_CHARS = 25_000;
+// D20 amendment (2026-11-28, user decision): the live candidate prompt fills
+// missing details believably instead of declining. Pipeline/Flux keep PROFILE_EXPERIENCE_RULE.
+const LIVE_EXPERIENCE_RULE = "Background rule: when the interviewer asks about something not in your background (a number, a project detail, a situation, or a skill from the job description), don't say you lack it. Build a believable answer from your real skills, tech stack and experience, with realistic numbers, situations and steps that fit your background and level. Keep every detail consistent with what you said earlier in this interview, and simple enough to explain in a follow-up.";
 const PROFILE_EXPERIENCE_RULE = "Job-description requirements describe the target role, not the candidate. Only claim experience supported by the candidate's résumé or profile. If asked about a JD skill absent from the résumé, say so honestly and relate the closest real experience.";
 
 const CONTEXT_TRUNCATED = '\n\n[context truncated]';
@@ -54,44 +58,40 @@ export function buildDeepgramInstructions(ctx: AnswerContext): string {
         .map(block => block.trim())
         .filter(Boolean)
         .join('\n\n');
-    const protocol = `Speak only what the candidate should say next, without reading formatting aloud.
-For a clarification, start with "Ask:" and say only the clarification question.
-Otherwise, speak the answer directly without a sentinel.
-${CLARIFICATION_RULE} If the interviewer moves on without clarifying, answer with a stated assumption.
-${CORRECTION_RULE}
-If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.`;
-    const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${protocol}${ctx.profileContext?.trim() ? `\n\n${PROFILE_EXPERIENCE_RULE}` : ''}\n\n${FILLER_TURN_RULE}`;
-    if (core.length > DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) {
-        throw new Error('Deepgram managed prompt rules exceed the character limit.');
-    }
+    const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${turnProtocol('spoken', ctx)}\n\n${FILLER_TURN_RULE}`;
     const blocks = [
         ctx.modePrompt?.trim(),
         contextBlocks({ modeName: ctx.modeName }).trim(),
         contextBlocks({ notebookText: ctx.notebookText }).trim(),
         contextBlocks({}, ctx.profileContext).trim(),
-        // ModesManager emits custom instructions and each reference as a complete tagged JSON block.
-        ...(ctx.modeContext?.trim().split(/\n\n(?=<(?:reference_file|active_mode_custom_instructions)\b)/u) ?? []),
+        ...modeContextBlocks(ctx.modeContext),
     ].filter((block): block is string => Boolean(block));
-    const fullLength = core.length + blocks.reduce((length, block) => length + 2 + block.length, 0);
-    if (fullLength <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) return [core, ...blocks].join('\n\n');
+    return fitManagedPrompt(core, blocks);
+}
+
+function fitManagedPrompt(core: string, blocks: string[], closing = ''): string {
+    const limit = DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - closing.length;
+    if (core.length > limit) throw new Error('Deepgram managed prompt rules exceed the character limit.');
+    const fullLength = core.length + closing.length + blocks.reduce((length, block) => length + 2 + block.length, 0);
+    if (fullLength <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) return [core, ...blocks].join('\n\n') + closing;
     console.warn(`[LiveBrain] Deepgram managed prompt length (${fullLength}) exceeds ${DEEPGRAM_MAX_MANAGED_PROMPT_CHARS} chars; trimming runtime context.`);
 
-    if (core.length + CONTEXT_TRUNCATED.length > DEEPGRAM_MAX_MANAGED_PROMPT_CHARS) return core;
+    if (core.length + CONTEXT_TRUNCATED.length > limit) return core + closing;
 
     let prompt = core;
     for (const block of blocks) {
-        const remaining = DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - prompt.length - CONTEXT_TRUNCATED.length - 2;
+        const remaining = limit - prompt.length - CONTEXT_TRUNCATED.length - 2;
         if (block.length <= remaining) {
             prompt += `\n\n${block}`;
             continue;
         }
-        if (!/<(?:reference_file|active_mode_custom_instructions)\b/u.test(block) && remaining > 0) {
+        if (!/<(?:reference_file|active_mode_custom_instructions|standing_skills)\b/u.test(block) && remaining > 0) {
             const newline = block.lastIndexOf('\n', remaining);
             if (newline > 0) prompt += `\n\n${block.slice(0, newline).trimEnd()}`;
         }
         break;
     }
-    return prompt + CONTEXT_TRUNCATED;
+    return prompt + CONTEXT_TRUNCATED + closing;
 }
 
 export function buildProviderInstructions(
@@ -100,17 +100,58 @@ export function buildProviderInstructions(
     id: LiveBrainId,
     deepgramThinkMode?: DeepgramThinkMode,
 ): string {
-    if (id === 'deepgram-voice-agent') {
-        if (deepgramThinkMode === 'byo') {
-            return `${buildAnswerInstructions(ctx, 'trimmed', 'spoken')}\n\n${FILLER_TURN_RULE}`;
-        }
-        return buildDeepgramInstructions(ctx);
-    }
-    if (id === 'deepgram-flux') {
-        return '';
-    }
-    const instructions = `${buildAnswerInstructions(ctx, variant, id === 'openai-realtime' ? 'text' : 'spoken')}\n\n${FILLER_TURN_RULE}`;
-    return id === 'elevenlabs-realtime' ? `${instructions}\n\n${ELEVENLABS_TURN_OUTPUT}` : instructions;
+    if (id === 'deepgram-flux') return '';
+    if (id === 'pipeline') return `${buildAnswerInstructions(ctx, variant, 'spoken')}\n\n${FILLER_TURN_RULE}`;
+    return buildLiveCandidateInstructions(ctx, id === 'openai-realtime' ? 'text' : 'spoken', {
+        elevenLabs: id === 'elevenlabs-realtime',
+        managedDeepgram: id === 'deepgram-voice-agent' && deepgramThinkMode !== 'byo',
+    });
+}
+
+const LIVE_CANDIDATE_STYLE = `You are the candidate in a live job interview. You hear the interviewer. Text lines beginning 'Candidate said:' are things you already said. Say exactly what you would say out loud next, as yourself, in first person.
+
+How you speak: simple Indian English, like an Indian software engineer talking normally in an interview. English is not your first language, so use common everyday words. No idioms, no American slang, no fancy or dramatic words.
+It is natural to start with "So", "Actually" or "Basically", or say "what I did was", "in that case", "we were getting". Use these lightly, not in every answer.
+Answer straight away. No greeting, no "great question", never repeat the question.
+Never announce your thinking: no "thinking out loud", "briefly thinking", "let me think".
+Usually 2–3 short sentences, one idea per sentence. For step-by-step debugging or design, at most 4 short sentences.
+Give one concrete example. Use your background first; if a detail is missing, fill it in as the background rule below says. Never say "I don't have that" or "I haven't done that".
+No headings, bullets, or markdown. Stop when the point is made, no summary.
+Don't use: dove into, skyrocketing, dramatically, crucial, absolutely, leverage, ensure, robust, seamless, utilize, spearheaded.
+
+Examples of tone, do not reuse their facts:
+"Tell me about a time you disagreed with a teammate." → "Actually, my teammate wanted to split the service into microservices. I felt for our small team it was too much. So I suggested we first clean up the code into modules, and we went with that."
+"What's a race condition?" → "Basically, the result depends on which thing runs first. Like two people booking the last seat at the same time, and both see it as free."
+"Have you used Kubernetes?" → "Yes, we used it to deploy our services. Mostly I wrote the deployment files and checked the pods when something failed."
+"The page is slow. What do you check?" → "First I check the network tab to see what is taking time. If the API is slow, I check the logs for a slow query. Then I fix that, maybe with caching."
+"Design a URL shortener." → "So I'm assuming mostly reads. I would store short IDs and URLs in a key-value store, with a cache in front."`;
+const LIVE_CANDIDATE_CLOSING = '\n\nRemember: you are talking, not writing. Simple Indian English, short and real. Sound like yourself.';
+
+export function buildLiveCandidateInstructions(
+    ctx: AnswerContext,
+    output: 'text' | 'spoken',
+    options: { elevenLabs?: boolean; managedDeepgram?: boolean } = {},
+): string {
+    const core = [
+        LIVE_CANDIDATE_STYLE, turnProtocol(output, ctx, LIVE_EXPERIENCE_RULE), FILLER_TURN_RULE,
+        options.elevenLabs ? ELEVENLABS_TURN_OUTPUT : '',
+    ].filter(Boolean).join('\n\n');
+    const skills = ctx.standingSkills?.trim();
+    const blocks = [
+        contextBlocks({ modeName: ctx.modeName }).trim(),
+        contextBlocks({}, ctx.profileContext).trim(),
+        contextBlocks({ notebookText: ctx.notebookText }).trim(),
+        ...modeContextBlocks(ctx.modeContext),
+        skills ? `Standing skills:\n<standing_skills>\n${skills}\n</standing_skills>` : '',
+    ].filter(Boolean);
+    return options.managedDeepgram
+        ? fitManagedPrompt(core, blocks, LIVE_CANDIDATE_CLOSING)
+        : [core, ...blocks].join('\n\n') + LIVE_CANDIDATE_CLOSING;
+}
+
+function modeContextBlocks(modeContext?: string): string[] {
+    // ModesManager emits complete tagged blocks for custom instructions and each reference.
+    return modeContext?.trim().split(/\n\n(?=<(?:reference_file|active_mode_custom_instructions)\b)/u).filter(Boolean) ?? [];
 }
 
 function contextBlocks(ctx: LiveContext, profile?: string): string {
@@ -147,6 +188,11 @@ export function buildAnswerInstructions(ctx: AnswerContext, variant: 'full' | 't
             technicalInterview ? '' : ctx.modePrompt ?? '']
         : [CORE_IDENTITY, EXECUTION_CONTRACT, CONTEXT_INTELLIGENCE_LAYER, HUMAN_SPOKEN_ANSWER_CONTRACT];
 
+    const modeContext = ctx.modeContext?.trim();
+    return `${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${turnProtocol(output, ctx)}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`;
+}
+
+function turnProtocol(output: 'text' | 'spoken', ctx: AnswerContext, liveExperienceRule?: string): string {
     const format = output === 'spoken'
         ? `Speak only what the candidate should say next, without reading formatting aloud.
 For a clarification, start with "Ask:" and say only the clarification question.
@@ -154,11 +200,8 @@ Otherwise, speak the answer directly without a sentinel.`
         : `Write what the candidate should say next. Output text only.
 For a clarification, start with ${ASK_SENTINEL} and write only the clarification question.
 Otherwise, write the answer directly without a sentinel.`;
-    const protocol = `${format}
+    return `${format}
 ${CLARIFICATION_RULE} If the interviewer moves on without clarifying, answer with a stated assumption.
 ${CORRECTION_RULE}
-If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.`;
-
-    const modeContext = ctx.modeContext?.trim();
-    return `${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${protocol}${ctx.profileContext?.trim() ? `\n\n${PROFILE_EXPERIENCE_RULE}` : ''}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`;
+If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.${liveExperienceRule ? `\n\n${liveExperienceRule}` : ctx.profileContext?.trim() ? `\n\n${PROFILE_EXPERIENCE_RULE}` : ''}`;
 }

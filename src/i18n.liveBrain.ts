@@ -104,6 +104,7 @@ const rows: Record<string, TranslationRow> = {
     'Enter API key': ['Введите ключ API', '输入 API 密钥', 'API キーを入力', 'Introduce la clave de API'],
     'Save model': ['Сохранить модель', '保存模型', 'モデルを保存', 'Guardar modelo'],
     'Instruction variant': ['Вариант инструкций', '指令版本', '指示の種類', 'Variante de instrucciones'],
+    'Realtime providers use the live candidate prompt.': ['Провайдеры реального времени используют инструкции для устных ответов кандидата.', '实时提供商使用候选人口语提示。', 'リアルタイムプロバイダーは候補者の話し方に合わせたプロンプトを使います。', 'Los proveedores en tiempo real usan las instrucciones para respuestas orales del candidato.'],
     'Choose a variant': ['Выберите вариант', '选择版本', '種類を選択', 'Elige una variante'],
     'Full': ['Полный', '完整', '完全版', 'Completa'],
     'Trimmed': ['Сокращённый', '精简', '短縮版', 'Reducida'],

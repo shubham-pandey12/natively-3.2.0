@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -8,6 +11,8 @@ const dist = '../../../../dist-electron/';
 const { IntelligenceEngine } = require(`${dist}electron/IntelligenceEngine.js`);
 const { LiveBrainRouting, resolveLiveBrainProfileContext } = require(`${dist}electron/premium/liveBrain.js`);
 const { clearPromptDebugState, getPromptDebugState } = require(`${dist}electron/llm/promptDebug.js`);
+const { SkillsManager } = require(`${dist}electron/services/SkillsManager.js`);
+const { isIntelligenceFlagEnabled, __resetIntelligenceFlagsCache } = require(`${dist}electron/intelligence/intelligenceFlags.js`);
 const { createMeeting } = require(`${dist}premium/electron/liveBrain/meeting.js`);
 const { AnswerWriter } = require(`${dist}premium/electron/liveBrain/AnswerWriter.js`);
 const { FakeLiveBrain } = require(`${dist}premium/electron/liveBrain/__tests__/FakeLiveBrain.js`);
@@ -15,7 +20,7 @@ const { buildFluxTurnContext, isCorrectionTurn, isUnrelatedNewTopicForClarificat
     require(`${dist}premium/electron/liveBrain/fluxTurnContext.js`);
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function rig() {
+function rig(isHumanizeSkillEnabled) {
     const brain = new FakeLiveBrain();
     const startBrain = brain.start.bind(brain);
     brain.start = context => {
@@ -28,6 +33,7 @@ function rig() {
     const create = onFailure => createMeeting({
         sessionId: 'fixture', apiKey: 'fake', onFailure,
         modeName: 'Mock interview', profileContext: 'Candidate built a queue',
+        isHumanizeSkillEnabled,
         emitQuestion: question => { if (question.liveBrainStatus === undefined) questions.push(question); },
         engine: {
             runLiveBrainAnswer() { assert.fail('Gemini writes its own answer'); },
@@ -97,6 +103,125 @@ test('incremental Gemini answers replace a cancelled answer and drop late chunks
     done('replacement');
     assert.deepEqual(questions.at(-1).responseText, { text: 'Use MongoDB.', done: true });
     session.stop();
+});
+
+function useSkillsFixture(t) {
+    const skills = Object.create(SkillsManager.prototype);
+    skills.skillsDir = mkdtempSync(join(tmpdir(), 'live-brain-skills-'));
+    t.after(() => rmSync(skills.skillsDir, { recursive: true, force: true }));
+    skills.ensureBuiltinSkills();
+    return skills;
+}
+
+test('toggling a standing skill refreshes the active realtime session with the new prompt', async t => {
+    const skills = useSkillsFixture(t);
+    const brains = [];
+    const session = createMeeting({
+        sessionId: 'skills-refresh',
+        resolveContext: () => ({ standingSkills: skills.getAlwaysOnPromptBlock() }),
+        engine: { setAutomaticAnswerOutdated() {} },
+        emitQuestion() {},
+        onFailure: () => assert.fail('Unexpected fallback'),
+    }, id => {
+        const brain = new FakeLiveBrain(id);
+        brains.push(brain);
+        return brain;
+    });
+    t.after(() => session.stop());
+    const mainSource = readFileSync(new URL('../../../../electron/main.ts', import.meta.url), 'utf8');
+    assert.match(mainSource, /setLiveSkillsChangeListener\(\(\) => this\.liveBrainRouting\.activeSession\?\.refreshContext\?\.\('skills'\)\)/);
+    skills.setLiveSkillsChangeListener(() => session.refreshContext('skills'));
+    session.start();
+    await flush();
+    assert.doesNotMatch(brains[0].starts[0].instructions, /Standing skills:/);
+    assert.equal(skills.setSkillAlwaysOn('humanize-ai-text', true).success, true);
+    await flush();
+    assert.ok(brains[1].starts[0].instructions.includes('Standing skills:\n<standing_skills>\n<active_skill id="humanize-ai-text"'));
+    assert.ok(brains[1].starts[0].instructions.includes('Keep the meaning, facts, level of certainty, and requested format.'));
+    assert.ok(skills.getSkill('humanize-ai-text').instructions.includes('The abstraction trap'));
+    assert.equal(skills.setSkillAlwaysOn('humanize-ai-text', true).success, true);
+    await flush();
+    assert.equal(brains.length, 2);
+    assert.equal(skills.setSkillAlwaysOn('humanize-ai-text', false).success, true);
+    await flush();
+    assert.doesNotMatch(brains[2].starts[0].instructions, /Standing skills:/);
+    // A change that leaves the always-on block untouched must not reconnect.
+    assert.equal(skills.setSkillEnabled('humanize-ai-text', false).success, true);
+    await flush();
+    assert.equal(skills.setSkillEnabled('humanize-ai-text', true).success, true);
+    await flush();
+    assert.equal(brains.length, 3);
+});
+
+test('standing humanize skill cleans streamed sentences and interrupted tails with the flag off', t => {
+    const skills = useSkillsFixture(t);
+    const flag = 'NATIVELY_SHARED_RESPONSE_CLEANUP';
+    const oldFlag = process.env[flag];
+    process.env[flag] = '0';
+    __resetIntelligenceFlagsCache();
+    t.after(() => {
+        if (oldFlag === undefined) delete process.env[flag];
+        else process.env[flag] = oldFlag;
+        __resetIntelligenceFlagsCache();
+    });
+    assert.equal(isIntelligenceFlagEnabled('sharedResponseCleanup'), false);
+    assert.equal(skills.setSkillAlwaysOn('humanize-ai-text', true).success, true);
+
+    const { create, start, delta, done, questions } = rig(() => {
+        const skill = skills.getSkill('humanize-ai-text');
+        return skill?.alwaysOn === true && skill.enabled !== false;
+    });
+    const session = create(() => assert.fail('Unexpected fallback'));
+    t.after(() => session.stop());
+    session.start();
+    const latest = () => questions.at(-1).responseText;
+    start('answer');
+    delta('answer', 'I would leverage');
+    assert.equal(latest().text, 'I would leverage');
+    delta('answer', ' a cache. I can leverage');
+    assert.equal(latest().text, 'I would use a cache. I can leverage');
+    delta('answer', ' retries. I would leverage Redis');
+    assert.equal(latest().text, 'I would use a cache. I can use retries. I would leverage Redis');
+    done('answer', 'cancelled');
+    assert.deepEqual(latest(), { text: 'I would use a cache. I can use retries. I would use Redis', done: true });
+
+    start('ask');
+    delta('ask', 'Ask: Can I leverage Redis?');
+    done('ask');
+    assert.equal(questions.at(-1).clarification, 'Can I leverage Redis?');
+    const beforeWait = questions.filter(event => event.responseText || event.clarification).length;
+    start('wait');
+    delta('wait', 'No act');
+    delta('wait', 'ion.');
+    done('wait');
+    assert.equal(questions.filter(event => event.responseText || event.clarification).length, beforeWait);
+
+    const code = '\n```js\n// leverage. Next line.\nconst delay =  3.14;\n```\n';
+    start('code');
+    delta('code', `I would leverage a queue. ${code.slice(0, -5)}`);
+    assert.ok(latest().text.includes('const delay =  3.14;'));
+    delta('code', `${code.slice(-5)}I would leverage 5—10 workers at 3.`);
+    delta('code', '14 ms. Use $$x =  a;b$$ and `leverage()`.');
+    const math = 'Use $$x =  a;b$$ and `leverage()`.';
+    done('code');
+    assert.deepEqual(latest(), {
+        text: `I would use a queue. ${code}I would use 5—10 workers at 3.14 ms. ${math}`,
+        done: true,
+    });
+
+    start('open-code');
+    const openCode = '\n```js\n// leverage; keep this.';
+    delta('open-code', `I would leverage a queue.${openCode}`);
+    done('open-code', 'cancelled');
+    assert.deepEqual(latest(), { text: `I would use a queue.${openCode}`, done: true });
+
+    skills.setSkillAlwaysOn('humanize-ai-text', false);
+    process.env[flag] = '1';
+    __resetIntelligenceFlagsCache();
+    start('flag-only');
+    delta('flag-only', 'I would leverage a queue. ');
+    assert.equal(latest().text, 'I would use a queue. ');
+    done('flag-only');
 });
 
 test('spoken filler and silent model turns keep the current answer', () => {
@@ -1254,7 +1379,7 @@ test('cancelling an adopted draft during claim validation prevents final deliver
     assert.deepEqual(h.sessionAssistantWrites, []);
 });
 
-test('realtime prompt variants keep the JD and résumé experience rule within the managed limit', () => {
+test('realtime prompt variants carry the live background rule within the managed limit', () => {
     const { buildProviderInstructions, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS } =
         require(`${dist}premium/electron/liveBrain/instructions.js`);
     const context = { profileContext: 'Candidate profile: ' + 'evidence '.repeat(4000) };
@@ -1262,8 +1387,8 @@ test('realtime prompt variants keep the JD and résumé experience rule within t
         ['gemini-live', 'full'], ['gemini-live', 'trimmed'], ['deepgram-voice-agent', 'full'],
     ]) {
         const prompt = buildProviderInstructions(context, variant, provider);
-        assert.match(prompt, /Job-description requirements describe the target role, not the candidate/);
-        assert.match(prompt, /Only claim experience supported by the candidate's résumé or profile/);
+        assert.match(prompt, /Background rule: when the interviewer asks about something not in your background/);
+        assert.doesNotMatch(prompt, /Only claim experience supported by the candidate's résumé or profile/);
         if (provider === 'deepgram-voice-agent') assert.ok(prompt.length <= DEEPGRAM_MAX_MANAGED_PROMPT_CHARS);
     }
 });

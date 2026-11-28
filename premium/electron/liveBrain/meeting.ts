@@ -33,6 +33,7 @@ import { buildProviderInstructions } from './instructions';
 import { toPcm16kMono } from './interviewerAudio';
 import { createLiveBrainOverlayPort } from './overlayPort';
 import { isFillerOnly, ResponseOrchestrator } from './ResponseOrchestrator';
+import { plainLiveSpeech } from './plainSpeech';
 import type { LiveBrain, LiveBrainErrorCode, LiveBrainStartContext } from './types';
 
 const DEFAULT_MODELS: Record<LiveBrain['id'], string> = {
@@ -56,8 +57,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
     const preferred = options.provider ?? 'gemini-live';
     const promptVariant = options.promptVariant ?? 'full';
     let grounding = options.readGroundingState?.();
-    const instructions = (id: LiveBrain['id']) => {
-        const context = options.resolveContext?.() ?? options;
+    const instructions = (id: LiveBrain['id'], notebookText?: string) => {
+        const context = { ...(options.resolveContext?.() ?? options), notebookText };
         if (id === 'deepgram-voice-agent') {
             const dg = options.resolveProvider?.('deepgram-voice-agent')?.deepgramThink ?? options.deepgramThink;
             return buildProviderInstructions(context, promptVariant, id, dg?.thinkMode);
@@ -221,11 +222,15 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             constraints: notebook.snapshot().constraints,
             groundingKey: options.readGroundingState?.().groundingKey,
         }),
-        cleanupText: (text: string) => (
-            isIntelligenceFlagEnabled('sharedResponseCleanup')
-                ? cleanupResponse({ text, mode: 'spoken' }).text
-                : text
-        ),
+        shouldCleanupText: () => {
+            if (isIntelligenceFlagEnabled('sharedResponseCleanup')) return true;
+            try {
+                return options.isHumanizeSkillEnabled?.() === true;
+            } catch { return false; }
+        },
+        cleanupText: (text: string) => plainLiveSpeech(cleanupResponse({
+            text, mode: 'spoken', speaker: 'candidate', preserveNumericRanges: true,
+        }).text),
         overlay: createLiveBrainOverlayPort({
             emitQuestion: event => {
                 if (event.responseText?.text.trim() || event.clarification?.trim()) {
@@ -409,13 +414,16 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             });
             supervisor.start();
         },
-        refreshContext() {
+        refreshContext(change) {
             const previous = grounding;
             grounding = options.readGroundingState?.();
-            if (!previous || !grounding || previous.groundingKey === grounding.groundingKey) return;
+            if (change !== 'skills' && previous?.groundingKey === grounding?.groundingKey) return;
             answerWriter?.cancelDraft('context_changed');
-            if ((previous.profileAllowed && !grounding.profileAllowed)
-                || (previous.knowledgeEnabled && !grounding.knowledgeEnabled)) {
+            if (change === 'skills' || (previous && grounding && (
+                (previous.profileAllowed && !grounding.profileAllowed)
+                || (previous.knowledgeEnabled && !grounding.knowledgeEnabled)
+            ))) {
+                if (supervisor.current?.id === 'deepgram-flux' || supervisor.current?.id === 'pipeline') return;
                 orchestrator.resetTurnState();
                 showStatus('Context changed — reconnecting');
                 supervisor.refreshContext();

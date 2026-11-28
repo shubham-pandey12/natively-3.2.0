@@ -1278,7 +1278,7 @@ const LiveBrainProviderSettings = () => {
 
                     {!keyProvider && provider !== 'amazon-sonic' && note && <p className="text-xs text-text-secondary" role="alert">{note}</p>}
 
-                    <CustomSelect
+                    {config.provider === 'pipeline' || config.provider === 'deepgram-flux' ? <CustomSelect
                         label={t('Instruction variant')}
                         placeholder={t('Choose a variant')}
                         value={config.promptVariant ?? 'full'}
@@ -1289,7 +1289,7 @@ const LiveBrainProviderSettings = () => {
                         onChange={(promptVariant) => {
                             if (promptVariant === 'full' || promptVariant === 'trimmed') void setOption({ promptVariant });
                         }}
-                    />
+                    /> : <p className="text-xs text-text-secondary">{t('Realtime providers use the live candidate prompt.')}</p>}
                 </div>
             )}
         </div>

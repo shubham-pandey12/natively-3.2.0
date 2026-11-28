@@ -244,6 +244,7 @@ export interface HumanizeSpokenAnswerOptions {
    * - `'text'`: preserves semicolons and Markdown list indentation for written replies.
    */
   mode?: 'spoken' | 'text';
+  preserveNumericRanges?: boolean;
 }
 
 function isCandidateVoiceContext(options?: HumanizeSpokenAnswerOptions): boolean {
@@ -355,6 +356,7 @@ export function humanizeSpokenAnswer(
 
   // 5. Punctuation that reads as an AI tell in prose.
   //    em/en dash between digits -> hyphen (keep numeric ranges like 5-10).
+  if (options?.preserveNumericRanges) protect(/\d[ \t]*[—–][ \t]*\d/g);
   text = text.replace(/(\d)\s*[—–]\s*(\d)/g, '$1-$2');
   if (mode === 'spoken') {
     // Convert spoken pauses to commas or sentence breaks.

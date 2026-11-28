@@ -39,6 +39,10 @@ interface SkillsState {
  * taken whole in list order until the next would pass the cap.
  */
 const ALWAYS_ON_MAX_CHARS = 16_000;
+const BUILTIN_HUMANIZE_STANDING_INSTRUCTIONS =
+  'Use plain, specific language that fits the person and the situation. Use concrete details already available, ' +
+  'vary sentence length naturally, and cut stock phrases, redundant summaries, and empty transitions. ' +
+  'Keep the meaning, facts, level of certainty, and requested format. Never invent details to make an answer sound more human.';
 
 const BUILTIN_HUMANIZE_TEXT = `---
 name: humanize-ai-text
@@ -597,8 +601,15 @@ function parseSkillMarkdown(content: string, fallbackId: string, source: SkillSo
   } as SkillDetails;
 }
 
+const BUILTIN_HUMANIZE_BODY = parseSkillMarkdown(BUILTIN_HUMANIZE_TEXT, 'humanize-text', 'builtin').instructions;
+
 export class SkillsManager {
   private static instance: SkillsManager;
+  private liveSkillsChangeListener?: () => void;
+
+  public setLiveSkillsChangeListener(listener: () => void): void {
+    this.liveSkillsChangeListener = listener;
+  }
   private readonly skillsDir: string;
 
   private constructor() {
@@ -802,7 +813,13 @@ ${skill.instructions}
     let total = 0;
     for (const skill of this.loadSkills()) {
       if (!skill.alwaysOn || skill.enabled === false || skill.id === excludeId) continue;
-      const block = this.buildPromptBlock(skill);
+      // The shipped editing guide is larger than the standing budget. Use its
+      // concise form here and keep the full guide for explicit /skill requests.
+      const instructions = skill.id === 'humanize-ai-text'
+        && normalizeSkillContent(skill.instructions) === BUILTIN_HUMANIZE_BODY
+        ? BUILTIN_HUMANIZE_STANDING_INSTRUCTIONS
+        : skill.instructions;
+      const block = this.buildPromptBlock({ ...skill, instructions });
       if (total + block.length > ALWAYS_ON_MAX_CHARS) {
         console.warn(`[SkillsManager] always-on skill "${skill.id}" left out: the always-on skills pass ${ALWAYS_ON_MAX_CHARS} chars`);
         continue;
@@ -862,12 +879,19 @@ ${skill.instructions}
   private writeSkillsState(state: SkillsState): void {
     const statePath = path.join(this.skillsDir, SKILLS_STATE_FILE_NAME);
     const tmpPath = statePath + '.tmp';
+    // Live sessions reconnect on a refresh, so only notify when the always-on
+    // block they receive actually changes.
+    const alwaysOnBefore = this.liveSkillsChangeListener ? this.getAlwaysOnPromptBlock() : '';
     try {
       fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
       fs.renameSync(tmpPath, statePath);
     } catch (error: any) {
       console.warn('[SkillsManager] Failed to write skills state file:', error?.message || error);
       try { fs.rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
+      return;
+    }
+    if (this.liveSkillsChangeListener && this.getAlwaysOnPromptBlock() !== alwaysOnBefore) {
+      this.liveSkillsChangeListener();
     }
   }
 
