@@ -9131,7 +9131,10 @@ export class AppState {
       }
     })
 
-    this.intelligenceManager.on('automatic_answer_settled', () => this.simpleAutoAnswer.onEngineIdle())
+    this.intelligenceManager.on('automatic_answer_settled', () => {
+      this.liveBrainRouting.activeSession?.observePipelineIdle?.();
+      this.simpleAutoAnswer.onEngineIdle();
+    })
 
     // Orphaned-scaffold fix: a what-to-answer stream that already showed a
     // coding scaffold ended with no final answer (superseded/declined/errored).
@@ -10884,7 +10887,7 @@ export class AppState {
   private startMeetingLiveBrain(): void {
     if (this.liveBrainRouting.enabled) return;
     this.cancelAutoAnswer();
-    const activatePipeline = (pending?: { text: string; at: number }): 'accepted' | 'busy' | 'failed' | 'unavailable' => {
+    const warmPipeline = (): boolean => {
       if (!this.isAutoAnswerAvailable()) {
         try {
           const { Notification } = require('electron') as typeof import('electron');
@@ -10892,19 +10895,21 @@ export class AppState {
             title: 'Live Brain', body: 'The existing Auto Answer pipeline is unavailable in this build.', silent: true,
           }).show();
         } catch { /* Notification availability must not affect the meeting. */ }
-        return 'unavailable';
+        return false;
       }
       this.warmAutoAnswerJudge();
-      if (!pending) return 'accepted';
-      const candidate = this.simpleAutoAnswer.createLiveBrainFallbackCandidate(pending.text, pending.at);
-      if (!candidate) return 'failed';
+      return true;
+    };
+    const activatePipeline = (turn: import('./premium/liveBrain').LiveBrainPendingTurn): import('./premium/liveBrain').LiveBrainPipelineActivation => {
+      if (!warmPipeline()) return 'unavailable';
       if (!this.intelligenceManager.canAutoAnswer(true)) return 'busy';
-      const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
-      void this.intelligenceManager.runAutoAnswer(candidate, {
+      const candidate = this.simpleAutoAnswer.createLiveBrainFallbackCandidate(turn.text, turn.at);
+      if (!candidate) return 'failed';
+      const done = this.intelligenceManager.runAutoAnswer(candidate, {
         reuseSpeculative: false,
-        liveBrainNotebook: notebook ?? '',
-      }).catch((error) => console.warn('[Main] Pipeline fallback answer failed:', error));
-      return 'accepted';
+        liveBrainNotebook: turn.context,
+      });
+      return { status: 'accepted', done };
     };
     this.liveBrainRouting.start(onFailure => {
       const llmHelper = this.processingHelper?.getLLMHelper?.();
@@ -10958,16 +10963,16 @@ export class AppState {
         summarize: (prompt, signal) => this.processingHelper.getLLMHelper().summarizeLiveInterview(prompt, signal),
         ...(this.isAutoAnswerAvailable() ? {
           pipeline: {
+            warm: warmPipeline,
             activate: activatePipeline,
-            cancel: () => { this.intelligenceManager.cancelAutomaticAnswer('manual_answer'); },
+            cancel: reason => { this.intelligenceManager.cancelAutomaticAnswer(reason); },
           },
         } : {}),
         onFailure,
       });
     }, code => {
       if (code) console.warn(`[LiveBrain] Gemini session ended (${code}).`);
-      const status = activatePipeline();
-      if (status === 'unavailable') {
+      if (!warmPipeline()) {
         this.intelligenceManager.emitLiveBrainQuestion({ liveBrainStatus: 'Backup brain unavailable' });
       }
     });

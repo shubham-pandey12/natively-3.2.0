@@ -46,6 +46,8 @@ function rig(isHumanizeSkillEnabled) {
     return { brain, questions, outdated, create, start, delta, done };
 }
 
+const acceptedBackup = (done = Promise.resolve({ status: 'completed' })) => ({ status: 'accepted', done });
+
 test('an answer uses the existing automatic What to Answer path and replacement waits for cancellation', async () => {
     const engine = Object.create(IntelligenceEngine.prototype);
     engine.currentGenerationId = engine.nextGenerationId = 0;
@@ -313,6 +315,7 @@ test('supervised fallback forwards the notebook through the existing Auto Answer
     const { brain } = rig();
     const overlay = [];
     const engine = Object.create(IntelligenceEngine.prototype);
+    engine.runLiveBrainAnswer = undefined;
     engine.setAutomaticAnswerOutdated = () => {};
     engine.handleSuggestionTrigger = async trigger => {
         assert.equal(trigger.automatic, true);
@@ -323,12 +326,13 @@ test('supervised fallback forwards the notebook through the existing Auto Answer
     const routing = new LiveBrainRouting();
     routing.start(onFailure => createMeeting({
         sessionId: 'supervised-fixture', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate() {}, cancel() {} }, emitQuestion: event => overlay.push(event),
+        pipeline: { activate: () => acceptedBackup(), cancel() {} }, emitQuestion: event => overlay.push(event),
     }, brain), () => assert.fail('The supervisor owns fallback'));
     assert.equal(routing.pipelineOverride(true), false);
     brain.emit({ type: 'interviewer_transcript', text: 'Notifications must use email only.', final: true, at: Date.now() });
     brain.emit({ type: 'error', fatal: true, code: 'auth' });
     assert.equal(routing.pipelineOverride(true), true);
+    await flush();
     const session = routing.activeSession;
     const followUp = 'What would you use during an outage?';
     session.observePipelineTranscript(followUp, true, Date.now());
@@ -337,7 +341,7 @@ test('supervised fallback forwards the notebook through the existing Auto Answer
     });
     session.observePipelineOutput({ type: 'answer', generationId: 1, text: 'Keep retrying email from the queue.' });
     assert.equal(overlay.some(event => event.responseText), false); // legacy events already paint these rows
-    assert.ok(overlay.some(event => event.liveBrainStatus === 'Backup brain'));
+    assert.ok(overlay.some(event => event.liveBrainStatus === 'Backup answering'));
     routing.stop();
     assert.equal(routing.pipelineOverride(true), undefined);
 });
@@ -437,7 +441,7 @@ test('D17: Deepgram Flux streams answers through IntelligenceEngine, cancels on 
     const routing = new LiveBrainRouting();
     routing.start(onFailure => createMeeting({
         sessionId: 'flux-meeting', apiKey: 'fake', provider: 'deepgram-flux', engine,
-        pipeline: { activate() {}, cancel() {} },
+        pipeline: { activate: () => 'failed', cancel() {} },
         emitQuestion: ev => overlay.push(ev),
         onFailure,
     }, flux), () => {});
@@ -579,7 +583,7 @@ function fluxEngineRig(t, options = {}) {
             startLiveBrainDraft: req => engine.startLiveBrainDraft(req, session.getFormattedContext(120)),
             getLiveBrainAiRouteKey: () => engine.getLiveBrainAiRouteKey(),
         },
-        pipeline: { activate() {}, cancel() {} },
+        pipeline: { activate: () => 'failed', cancel() {} },
         emitQuestion: ev => overlay.push(ev),
         onFailure,
     }, flux), () => {});
@@ -1100,10 +1104,11 @@ test('Flux clarification timeout answers through the writer and reconnect cancel
     assert.equal(h.streamCalls.length, 3);
 });
 
-test('U5e-1: unanswered STT final before fatal realtime failure hands off once to pipeline, dedupes within 5s, and skips >20s', async t => {
+test('U5e-1: unanswered STT final before fatal realtime failure hands off once to pipeline, dedupes within 5s, and preserves an older unanswered turn', async t => {
     t.mock.timers.enable({ apis: ['Date'], now: 100_000 });
     const { PipelineBrain } = require('../../../../dist-electron/premium/electron/liveBrain/brains/PipelineBrain.js');
     const engine = Object.create(IntelligenceEngine.prototype);
+    engine.runLiveBrainAnswer = undefined;
     engine.setAutomaticAnswerOutdated = () => {};
 
     // 1. Fresh pending STT final handed off to pipeline.activate and deduped within 5 s.
@@ -1112,33 +1117,33 @@ test('U5e-1: unanswered STT final before fatal realtime failure hands off once t
     const routing1 = new LiveBrainRouting();
     routing1.start(onFailure => createMeeting({
         sessionId: 'u5e1-fresh', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => activated1.push(pending), cancel() {} },
+        pipeline: { activate: pending => { activated1.push(pending); return acceptedBackup(); }, cancel() {} },
         emitQuestion: () => {},
     }, b1), () => assert.fail('Supervisor owns fallback'));
 
     routing1.activeSession.observePipelineTranscript('What is a mutex?', true, 100_000);
     b1.emit({ type: 'error', code: 'auth', fatal: true });
     assert.equal(routing1.pipelineOverride(true), true);
-    assert.deepEqual(activated1, [{ text: 'What is a mutex?', at: 100_000 }]);
+    assert.deepEqual(activated1, [{ turnId: 1, text: 'What is a mutex?', at: 100_000, context: '' }]);
 
     t.mock.timers.tick(2_000);
     const deduped = routing1.activeSession.observePipelineTranscript('  what is a mutex? ', true, 102_000);
     assert.equal(deduped, true);
     routing1.stop();
 
-    // 2. Question older than 20 s at fallback is not submitted.
+    // 2. A question older than 20 s remains eligible.
     const { brain: b2 } = rig();
     const activated2 = [];
     const routing2 = new LiveBrainRouting();
     routing2.start(onFailure => createMeeting({
         sessionId: 'u5e1-stale', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => activated2.push(pending), cancel() {} },
+        pipeline: { activate: pending => { activated2.push(pending); return acceptedBackup(); }, cancel() {} },
         emitQuestion: () => {},
     }, b2), () => assert.fail('Supervisor owns fallback'));
     routing2.activeSession.observePipelineTranscript('What is a mutex?', true, 102_000);
     t.mock.timers.tick(20_001);
     b2.emit({ type: 'error', code: 'auth', fatal: true });
-    assert.deepEqual(activated2, [undefined]);
+    assert.equal(activated2[0]?.text, 'What is a mutex?');
     routing2.stop();
 
     // 3. PipelineBrain stop() inside response_started emits no delta after response_done;
@@ -1164,6 +1169,7 @@ test('U5e-1: unanswered STT final before fatal realtime failure hands off once t
 test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; filler/silent skipped; STT-before-brain answered once', async t => {
     t.mock.timers.enable({ apis: ['Date'], now: 200_000 });
     const engine = Object.create(IntelligenceEngine.prototype);
+    engine.runLiveBrainAnswer = undefined;
     engine.setAutomaticAnswerOutdated = () => {};
 
     // 1. interviewer_speech_started -> final -> response_started -> late STT backup final -> fatal failure: NO pipeline answer.
@@ -1172,7 +1178,7 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     const routing1 = new LiveBrainRouting();
     routing1.start(onFailure => createMeeting({
         sessionId: 'u5e1-bug-a', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => activated1.push(pending), cancel() {} },
+        pipeline: { activate: pending => { activated1.push(pending); return acceptedBackup(); }, cancel() {} },
         emitQuestion: () => {},
     }, b1), () => assert.fail('Supervisor owns fallback'));
 
@@ -1182,7 +1188,7 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     b1.emit({ type: 'response_delta', responseId: 'r1', text: 'A mutex is a lock.' });
     routing1.activeSession.observePipelineTranscript('What is a mutex?', true, 200_300);
     b1.emit({ type: 'error', code: 'auth', fatal: true });
-    assert.deepEqual(activated1, [undefined]);
+    assert.deepEqual(activated1, []);
     routing1.stop();
 
     // 2. final "Okay." -> response_silent -> fatal failure within 20 s -> NO pipeline answer.
@@ -1191,7 +1197,7 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     const routing2 = new LiveBrainRouting();
     routing2.start(onFailure => createMeeting({
         sessionId: 'u5e1-bug-b', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => activated2.push(pending), cancel() {} },
+        pipeline: { activate: pending => { activated2.push(pending); return acceptedBackup(); }, cancel() {} },
         emitQuestion: () => {},
     }, b2), () => assert.fail('Supervisor owns fallback'));
 
@@ -1199,7 +1205,7 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     b2.emit({ type: 'interviewer_transcript', text: 'Okay.', final: true, at: 200_100 });
     b2.emit({ type: 'response_silent' });
     b2.emit({ type: 'error', code: 'auth', fatal: true });
-    assert.deepEqual(activated2, [undefined]);
+    assert.deepEqual(activated2, []);
     routing2.stop();
 
     // 3. STT backup final arrives before brain final, no response yet, then failure -> exactly one pipeline answer.
@@ -1208,14 +1214,16 @@ test('U5e-1 follow-up: answered turn + late STT backup does not re-answer; fille
     const routing3 = new LiveBrainRouting();
     routing3.start(onFailure => createMeeting({
         sessionId: 'u5e1-stt-first', apiKey: 'fake', engine, onFailure,
-        pipeline: { activate: pending => activated3.push(pending), cancel() {} },
+        pipeline: { activate: pending => { activated3.push(pending); return acceptedBackup(); }, cancel() {} },
         emitQuestion: () => {},
     }, b3), () => assert.fail('Supervisor owns fallback'));
 
     routing3.activeSession.observePipelineTranscript('What is a mutex?', true, 200_000);
     b3.emit({ type: 'interviewer_transcript', text: 'What is a mutex?', final: true, at: 200_100 });
     b3.emit({ type: 'error', code: 'auth', fatal: true });
-    assert.deepEqual(activated3, [{ text: 'What is a mutex?', at: 200_100 }]);
+    assert.equal(activated3.length, 1);
+    assert.equal(activated3[0].text, 'What is a mutex?');
+    assert.equal(activated3[0].at, 200_100);
     routing3.stop();
 });
 
@@ -1337,7 +1345,7 @@ test('an incomplete writer answer does not enter the fallback notebook', async t
                 return { generationId: 1, done };
             },
         },
-        pipeline: { activate() {}, cancel() {} },
+        pipeline: { activate: () => 'failed', cancel() {} },
         emitQuestion() {},
         onFailure: assert.fail,
     }, brain);
@@ -1438,7 +1446,7 @@ for (const afterHeaders of [false, true]) {
     });
 }
 
-test('U8-1: fail after response_started before delta triggers pipeline once; busy fallback allows repeat STT final', async () => {
+test('U8-1: fail after response_started before delta triggers pipeline once; busy fallback deduplicates repeat STT final', async () => {
     for (const status of ['accepted', 'busy']) {
         const brain = new FakeLiveBrain('gemini-live');
         const activated = [];
@@ -1448,7 +1456,7 @@ test('U8-1: fail after response_started before delta triggers pipeline once; bus
             provider: 'gemini-live',
             engine: { setAutomaticAnswerOutdated() {} },
             pipeline: {
-                activate: pending => { activated.push(pending); return status; },
+                activate: pending => { activated.push(pending); return status === 'accepted' ? acceptedBackup() : status; },
                 cancel() {},
             },
             emitQuestion() {},
@@ -1463,7 +1471,7 @@ test('U8-1: fail after response_started before delta triggers pipeline once; bus
         assert.equal(activated.length, 1);
         assert.equal(activated[0]?.text, 'Explain CAP theorem.');
         const deduped = session.observePipelineTranscript('Explain CAP theorem.', true, Date.now());
-        assert.equal(deduped, status === 'accepted');
+        assert.equal(deduped, true);
         session.stop();
     }
 });
@@ -1501,7 +1509,7 @@ test('U8-4: refreshContext resets open bubble and pending clarification timer, a
         provider: 'gemini-live',
         readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled, groundingKey }),
         engine: { setAutomaticAnswerOutdated() {} },
-        pipeline: { activate: () => 'accepted', cancel() {} },
+        pipeline: { activate: () => acceptedBackup(), cancel() {} },
         emitQuestion: ev => overlay.push(ev),
         onFailure() {},
     }, () => new FakeLiveBrain('gemini-live'));
@@ -1520,7 +1528,7 @@ test('U8-4: refreshContext resets open bubble and pending clarification timer, a
         provider: 'gemini-live',
         readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled, groundingKey }),
         engine: { setAutomaticAnswerOutdated() {} },
-        pipeline: { activate: () => 'accepted', cancel() {} },
+        pipeline: { activate: () => acceptedBackup(), cancel() {} },
         emitQuestion: ev => events.push(ev),
         onFailure() {},
     }, () => (++count === 1 ? active : second));
@@ -1589,7 +1597,7 @@ test('Bug 1: discarding standby does not cancel active Flux writer or close acti
         provider: 'gemini-live',
         readGroundingState: () => ({ profileAllowed: true, knowledgeEnabled: true, groundingKey }),
         engine: { setAutomaticAnswerOutdated() {} },
-        pipeline: { activate: () => 'accepted', cancel() {} },
+        pipeline: { activate: () => acceptedBackup(), cancel() {} },
         emitQuestion: ev => overlayEvents.push(ev),
         onFailure() {},
     }, id => {
@@ -1690,4 +1698,191 @@ test('An adopted Flux draft returning the no-action sentinel stays silent', asyn
     assert.equal(h.tokens.length, 0);
     assert.equal(h.answers.length, 0);
     assert.equal(h.sessionAssistantWrites.length, 0);
+});
+
+function rescueFixture({ replacement, runLiveBrainAnswer, activate = () => acceptedBackup(), canAutoAnswer } = {}) {
+    const primary = new FakeLiveBrain('gemini-live');
+    const events = [];
+    const calls = [];
+    const session = createMeeting({
+        sessionId: 'turn-rescue', apiKey: 'fake',
+        engine: { setAutomaticAnswerOutdated() {}, runLiveBrainAnswer, canAutoAnswer },
+        pipeline: { activate: turn => { calls.push(turn); return activate(turn); }, cancel() {} },
+        onFailure: code => assert.fail(code),
+        emitQuestion: event => events.push(event),
+    }, id => id === primary.id ? primary : id === replacement?.id ? replacement : undefined);
+    session.start();
+    return { primary, session, events, calls };
+}
+
+const pendingFinal = (brain, text, itemId) => brain.emit({
+    type: 'interviewer_transcript', text, final: true, at: Date.now(), ...(itemId ? { itemId } : {}),
+});
+const spokenAnswer = (brain, responseId, text, done = true) => {
+    brain.emit({ type: 'response_started', responseId, at: Date.now() });
+    brain.emit({ type: 'response_delta', responseId, text });
+    if (done) brain.emit({ type: 'response_done', responseId, status: 'completed' });
+};
+
+for (const code of ['auth', 'quota']) {
+    test('Fatal ' + code + ' rescues via the writer before the session selects its next provider', async t => {
+        const next = new FakeLiveBrain('elevenlabs-realtime');
+        const writes = [];
+        const h = rescueFixture({ replacement: next, runLiveBrainAnswer(request) {
+            writes.push({ request, nextStarted: next.starts.length });
+            return { generationId: 1, done: Promise.resolve({ status: 'completed' }) };
+        } });
+        t.after(() => h.session.stop());
+        await flush();
+        pendingFinal(h.primary, 'What was the first thing you checked?');
+        h.primary.emit({ type: 'error', code, fatal: true });
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].nextStarted, 0);
+        assert.equal(writes[0].request.question, 'What was the first thing you checked?');
+        assert.deepEqual(h.calls, []);
+        assert.ok(h.events.some(event => event.liveBrainStatus === 'Backup answering'));
+    });
+}
+
+test('Without Auto Answer, a fatal error rescues via the writer and reports the failure after it settles', async t => {
+    const primary = new FakeLiveBrain('gemini-live');
+    const events = [];
+    const failures = [];
+    const done = Promise.withResolvers();
+    const writes = [];
+    const session = createMeeting({
+        sessionId: 'turn-rescue-no-pipeline', apiKey: 'fake',
+        engine: { setAutomaticAnswerOutdated() {}, runLiveBrainAnswer: request => { writes.push(request); return { generationId: 1, done: done.promise }; } },
+        onFailure: code => failures.push(code),
+        emitQuestion: event => events.push(event),
+    }, id => id === primary.id ? primary : undefined);
+    session.start();
+    t.after(() => session.stop());
+    await flush();
+    pendingFinal(primary, 'What was the first thing you checked?');
+    primary.emit({ type: 'error', code: 'quota', fatal: true });
+    assert.equal(writes.length, 1);
+    assert.deepEqual(failures, []);
+    assert.equal(events.filter(event => event.liveBrainStatus).at(-1).liveBrainStatus, 'Backup answering');
+    done.resolve({ status: 'completed' });
+    await flush();
+    assert.deepEqual(failures, ['quota']);
+    assert.equal(events.filter(event => event.liveBrainStatus).at(-1).liveBrainStatus, 'Backup brain unavailable');
+});
+
+for (const sameProvider of [true, false]) {
+    test((sameProvider ? 'Reconnected Gemini' : 'Alternate realtime provider') + ' drops rescued output and answers the following turn', async t => {
+        const done = Promise.withResolvers();
+        const next = sameProvider ? undefined : new FakeLiveBrain('openai-realtime');
+        const h = rescueFixture({ replacement: next, runLiveBrainAnswer: () => ({ generationId: 1, done: done.promise }) });
+        t.after(() => h.session.stop());
+        await flush();
+        const question = 'What was the first thing you checked?';
+        pendingFinal(h.primary, question);
+        if (sameProvider) {
+            h.primary.emit({ type: 'status', status: 'degraded' });
+            h.primary.emit({ type: 'status', status: 'connecting' });
+            h.primary.emit({ type: 'status', status: 'ready' });
+        } else {
+            h.primary.emit({ type: 'error', code: 'quota', fatal: true });
+        }
+        await flush();
+        const active = next ?? h.primary;
+        pendingFinal(active, question);
+        spokenAnswer(active, 'old-replay', 'This is duplicate output.');
+        assert.equal(h.events.filter(event => event.liveBrainStatus).at(-1).liveBrainStatus, 'Backup answering');
+        active.emit({ type: 'interviewer_speech_started', at: Date.now(), itemId: 'next-item' });
+        pendingFinal(active, 'How did you prevent it from recurring?', 'next-item');
+        spokenAnswer(active, 'next-response', 'I added a regression test.');
+        assert.ok(!h.events.some(event => event.responseText));
+        done.resolve({ status: 'completed' });
+        await flush();
+        active.emit({ type: 'response_delta', responseId: 'old-replay', text: 'Late duplicate text' });
+        assert.ok(h.events.some(event => event.responseText?.text === 'I added a regression test.'));
+        assert.ok(!h.events.some(event => /duplicate/i.test(event.responseText?.text ?? '')));
+        assert.deepEqual(h.calls, []);
+    });
+}
+
+for (const pipelineFails of [true, false]) {
+    test('A writer failing before visible text tries the pipeline and reports the final outcome', async t => {
+        const done = Promise.withResolvers();
+        const h = rescueFixture({
+            runLiveBrainAnswer: () => ({ generationId: 1, done: Promise.resolve({ status: 'failed' }) }),
+            activate: () => pipelineFails ? 'unavailable' : acceptedBackup(done.promise),
+        });
+        t.after(() => h.session.stop());
+        await flush();
+        pendingFinal(h.primary, 'What was the first thing you checked?');
+        h.primary.emit({ type: 'error', code: 'quota', fatal: true });
+        await flush();
+        assert.equal(h.calls.length, 1);
+        h.session.observePipelineTranscript('What was the first thing you checked?', true, Date.now());
+        h.session.observePipelineIdle();
+        assert.equal(h.calls.length, 1);
+        if (!pipelineFails) done.resolve({ status: 'completed' });
+        await flush();
+        assert.equal(h.events.filter(event => event.liveBrainStatus).at(-1).liveBrainStatus,
+            pipelineFails ? 'Answer failed' : 'Answer ready');
+    });
+}
+
+for (const route of ['writer', 'pipeline']) {
+    test('Busy ' + route + ' retries the same turn once on idle', async t => {
+        let idle = false;
+        let writes = 0;
+        const h = rescueFixture(route === 'writer' ? {
+            canAutoAnswer: () => idle,
+            runLiveBrainAnswer: () => {
+                writes++;
+                return { generationId: 1, done: Promise.resolve({ status: 'completed' }) };
+            },
+        } : { activate: () => idle ? acceptedBackup() : 'busy' });
+        t.after(() => h.session.stop());
+        await flush();
+        pendingFinal(h.primary, 'What was the first thing you checked?');
+        h.primary.emit({ type: 'status', status: 'degraded' });
+        assert.equal(h.events.filter(event => event.liveBrainStatus).at(-1).liveBrainStatus, 'Backup busy');
+        assert.equal(h.session.observePipelineTranscript('What was the first thing you checked?', true, Date.now()), true);
+        idle = true;
+        h.session.observePipelineIdle();
+        h.session.observePipelineIdle();
+        await flush();
+        assert.equal(h.events.filter(event => event.liveBrainStatus).at(-1).liveBrainStatus, 'Answer ready');
+        if (route === 'pipeline') {
+            assert.equal(h.calls.length, 2);
+            assert.equal(h.calls[0].turnId, h.calls[1].turnId);
+        } else assert.equal(writes, 1);
+    });
+}
+
+test('Rescue uses the newest confirmed question and ignores partial or filler turns', async t => {
+    const h = rescueFixture();
+    t.after(() => h.session.stop());
+    await flush();
+    h.primary.emit({ type: 'interviewer_transcript', text: 'An unfinished question', final: false, at: Date.now() });
+    pendingFinal(h.primary, 'Mhmm.');
+    h.primary.emit({ type: 'status', status: 'degraded' });
+    assert.deepEqual(h.calls, []);
+    h.primary.emit({ type: 'status', status: 'ready' });
+    pendingFinal(h.primary, 'What did you check first?');
+    pendingFinal(h.primary, 'How did you isolate the affected tenant?');
+    h.primary.emit({ type: 'status', status: 'degraded' });
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].text, 'How did you isolate the affected tenant?');
+});
+
+test('A drop seals visible realtime output as interrupted and never duplicates the answer', async t => {
+    const h = rescueFixture();
+    t.after(() => h.session.stop());
+    await flush();
+    pendingFinal(h.primary, 'What did you check first?');
+    spokenAnswer(h.primary, 'visible', 'I checked the request logs and tenant identifiers.', false);
+    h.primary.emit({ type: 'status', status: 'degraded' });
+    h.session.observePipelineTranscript('What did you check first?', true, Date.now());
+    h.primary.emit({ type: 'error', code: 'network', fatal: true });
+    await flush();
+    assert.deepEqual(h.calls, []);
+    const lastText = h.events.filter(event => event.responseText).at(-1).responseText;
+    assert.deepEqual(lastText, { text: 'I checked the request logs and tenant identifiers.', done: true, interrupted: true });
 });

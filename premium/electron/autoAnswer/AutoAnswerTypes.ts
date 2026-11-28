@@ -145,6 +145,7 @@ export type AutoAnswerSkipReason =
     | 'judge_unavailable'
     /** The automatic answer was cancelled before it was shown (interviewer resumed, manual press, transcript revised). */
     | 'dispatch_cancelled'
+    | 'live_brain_disconnected'
     | 'dispatch_timeout'
     /** The automatic answer failed and its one retry did too (or it was not retryable). */
     | 'dispatch_failed'

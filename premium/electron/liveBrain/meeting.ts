@@ -7,6 +7,8 @@ import type {
     LiveBrainAnswerRequest,
     LiveBrainMeetingOptions,
     LiveBrainMeetingSession,
+    LiveBrainPendingTurn,
+    LiveBrainPipelineActivation,
 } from '../../../electron/premium/liveBrain';
 import {
     DEFAULT_AMAZON_SONIC_MODEL,
@@ -32,9 +34,9 @@ import type { LiveBrainStatus } from '../../../src/types/whatToAnswerQuestion';
 import { buildProviderInstructions } from './instructions';
 import { toPcm16kMono } from './interviewerAudio';
 import { createLiveBrainOverlayPort } from './overlayPort';
-import { isFillerOnly, ResponseOrchestrator } from './ResponseOrchestrator';
+import { isFillerOnly, ResponseOrchestrator, type OrchestratorDisposition, type ResponseClock } from './ResponseOrchestrator';
 import { plainLiveSpeech } from './plainSpeech';
-import type { LiveBrain, LiveBrainErrorCode, LiveBrainStartContext } from './types';
+import type { LiveBrain, LiveBrainErrorCode, LiveBrainEvent, LiveBrainStartContext } from './types';
 
 const DEFAULT_MODELS: Record<LiveBrain['id'], string> = {
     'gemini-live': DEFAULT_GEMINI_LIVE_MODEL,
@@ -53,7 +55,17 @@ function startContext(sessionId: string, instructions: string, signal: AbortSign
     };
 }
 
-export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: LiveBrain | ((id: LiveBrain['id']) => LiveBrain | undefined)): LiveBrainMeetingSession {
+const BACKUP_BUSY_RETRY_MS = 3_000;
+const PIPELINE_DEDUPE_MS = 5_000;
+
+type MeetingTimer = ReturnType<typeof setTimeout> | number;
+type BackupRun = { turn: LiveBrainPendingTurn; answer?: string; writer?: AbortController; visible: boolean };
+
+export function createMeeting(
+    options: LiveBrainMeetingOptions,
+    injectedBrain?: LiveBrain | ((id: LiveBrain['id']) => LiveBrain | undefined),
+    clock: ResponseClock<MeetingTimer> = { now: Date.now, setTimeout, clearTimeout },
+): LiveBrainMeetingSession {
     const preferred = options.provider ?? 'gemini-live';
     const promptVariant = options.promptVariant ?? 'full';
     let grounding = options.readGroundingState?.();
@@ -65,7 +77,6 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         }
         return buildProviderInstructions(context, promptVariant, id);
     };
-    const clock = { now: Date.now, setTimeout, clearTimeout };
     const debug = isPromptDebugEnabled();
     let speechStoppedAt: number | undefined;
     let timing: { brainId: LiveBrain['id']; model: string; responseStartedAt: number; responseId: string; speechStoppedAt?: number; firstTextAt?: number } | undefined;
@@ -84,25 +95,196 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         now: clock.now, summarize: options.summarize,
         onUpdate: sizes => diagnostic('notebook', sizes),
     });
-    let supervisor!: BrainSupervisor<Parameters<typeof clearTimeout>[0]>;
+    let supervisor!: BrainSupervisor<MeetingTimer>;
     let writerRun: symbol | undefined;
     let lastWriterStopAt: number | undefined;
-    let pendingQuestion: { text: string; at: number } | undefined;
+    let turnSequence = 0;
+    let unanswered: { turn: LiveBrainPendingTurn; providerFinal: boolean } | undefined;
     let turnAnswered = false;
+    let realtimeDisconnected = false;
+    let realtimeWasReady = false;
+    let visibleRealtimeTurn: LiveBrainPendingTurn | undefined;
+    let responseTurnId: number | undefined;
+    let realtimeItemId: string | undefined;
+    let closedItemId: string | undefined;
+    let closedCaptureStop: number | undefined;
+    let lastCaptureStop: number | undefined;
+    let closedHandoff: LiveBrainPendingTurn | undefined;
+    let backupRun: BackupRun | undefined;
+    const ignoredRealtimeResponses = new Set<string>();
+    const deferredRealtime: { event: LiveBrainEvent; id: LiveBrain['id']; model: string }[] = [];
+    let busyRetry: { turnId: number; route: 'writer' | 'pipeline'; timer: MeetingTimer } | undefined;
     let systemTranscriptCaptureAt: number | undefined;
     const unclaimedCaptureStops: number[] = [];
-    let pipelineDedupe: { normalized: string; expiresAt: number } | undefined;
-    const normalizeQuestion = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase();
-    const notePendingQuestion = (text: string, at: number) => {
-        if (turnAnswered) return;
+    let pipelineDedupe: { normalized: string; expiresAt: number; captureStop: number } | undefined;
+    const normalizeQuestion = (text: string): string => text.replace(/[^\p{L}\p{N}]+/gu, ' ').trim().toLowerCase();
+    const showProviderStatus = (next: LiveBrainStatus) => {
+        if (!backupRun && !busyRetry && status !== 'Answer failed') showStatus(next);
+    };
+    let deferredFailure: LiveBrainErrorCode | undefined;
+    const flushDeferredFailure = () => {
+        if (deferredFailure === undefined || !started || backupRun || busyRetry) return;
+        const code = deferredFailure;
+        deferredFailure = undefined;
+        showStatus('Backup brain unavailable');
+        options.onFailure(code);
+    };
+    const clearBusyRetry = () => {
+        if (busyRetry) clock.clearTimeout(busyRetry.timer);
+        busyRetry = undefined;
+    };
+    const retireTurn = () => {
+        clearBusyRetry();
+        unanswered = undefined;
+        turnAnswered = true;
+    };
+    const duplicateHandoff = (text: string, at: number, itemId?: string) => closedHandoff !== undefined
+        && ((itemId !== undefined && itemId === closedItemId) || at < closedHandoff.at || (normalizeQuestion(text) === normalizeQuestion(closedHandoff.text)
+            && (lastCaptureStop ?? -Infinity) <= (closedCaptureStop ?? closedHandoff.at)));
+    const notePendingTurn = (text: string, at: number, providerFinal: boolean): boolean => {
         const clean = text.replace(/\s+/g, ' ').trim();
-        if (!clean || isFillerOnly(clean)) return;
-        pendingQuestion = { text: clean, at };
+        if (!clean || isFillerOnly(clean) || duplicateHandoff(clean, at)) return false;
+        if (closedHandoff && (providerFinal || realtimeDisconnected || supervisor.current?.id === 'pipeline')) {
+            if (!backupRun && providerFinal) {
+                closedHandoff = undefined;
+                closedItemId = undefined;
+            }
+            turnAnswered = false;
+        }
+        if (turnAnswered || (unanswered && at < unanswered.turn.at)) return false;
+        if (unanswered && normalizeQuestion(clean) === normalizeQuestion(unanswered.turn.text)) {
+            if (providerFinal && !unanswered.providerFinal) {
+                unanswered = { turn: { ...unanswered.turn, text: clean, at }, providerFinal };
+            }
+            return true;
+        }
+        clearBusyRetry();
+        deferredRealtime.length = 0;
+        unanswered = {
+            turn: { turnId: ++turnSequence, text: clean, at, context: supervisor.notebookContext },
+            providerFinal,
+        };
+        if (status === 'Answer failed') showStatus(realtimeDisconnected ? 'Reconnecting' : 'Thinking');
+        return true;
+    };
+    const parkBackup = (turn: LiveBrainPendingTurn, route: 'writer' | 'pipeline') => {
+        busyRetry = {
+            turnId: turn.turnId, route,
+            timer: clock.setTimeout(() => retryBackup(), BACKUP_BUSY_RETRY_MS),
+        };
+        showStatus('Backup busy');
+    };
+    const closeHandoff = (turn: LiveBrainPendingTurn) => {
+        closedHandoff = turn;
+        closedItemId = realtimeItemId;
+        closedCaptureStop = lastCaptureStop;
+        retireTurn();
+        pipelineDedupe = { normalized: normalizeQuestion(turn.text), expiresAt: clock.now() + PIPELINE_DEDUPE_MS, captureStop: lastCaptureStop ?? turn.at };
+    };
+    const dispatchBackup = (route: 'writer' | 'pipeline' = 'writer', retry = false): void => {
+        const pending = unanswered;
+        if (!started || !pending || backupRun || busyRetry) return;
+        const { turn, providerFinal } = pending;
+        const writer = route === 'writer' ? options.engine.runLiveBrainAnswer : undefined;
+        if (!writer && route === 'writer') {
+            dispatchBackup('pipeline');
+            return;
+        }
+        const run: BackupRun = { turn, visible: false };
+        let result: LiveBrainPipelineActivation;
+        try {
+            if (writer) {
+                if (options.engine.canAutoAnswer?.(true) === false) result = 'busy';
+                else {
+                    const controller = new AbortController();
+                    run.writer = controller;
+                    const output = writer.call(options.engine, {
+                        question: turn.text,
+                        replacesAutomaticAnswer: false,
+                        signal: controller.signal,
+                        liveBrainNotebook: turn.context,
+                        speechStoppedAt: lastCaptureStop ?? turn.at,
+                        onFirstText: () => { run.visible = true; },
+                        onComplete: (text, disposition) => {
+                            if (!disposition.storageVeto && !disposition.stopReason) run.answer = text;
+                        },
+                    });
+                    result = output ? { status: 'accepted', done: output.done } : 'unavailable';
+                }
+            } else {
+                result = options.pipeline?.activate(turn) ?? 'unavailable';
+            }
+        } catch {
+            result = 'failed';
+        }
+        if (result === 'busy' && !retry) {
+            parkBackup(turn, route);
+            return;
+        }
+        if (typeof result === 'string') {
+            if (route === 'writer' && result !== 'busy') dispatchBackup('pipeline');
+            else {
+                closeHandoff(turn);
+                showStatus('Answer failed');
+            }
+            return;
+        }
+        closeHandoff(turn);
+        backupRun = run;
+        showStatus('Backup answering');
+        const settle = (outcome: AutoAnswerDispatchResult) => {
+            if (backupRun !== run) return;
+            backupRun = undefined;
+            const succeeded = outcome.status === 'completed' || outcome.status === 'partial';
+            const cancelled = outcome.status === 'cancelled';
+            const busy = outcome.status === 'skipped' && outcome.reason === 'busy';
+            if (!succeeded && !cancelled && !run.visible && !unanswered && (busy || route === 'writer')) {
+                unanswered = pending;
+                if (busy && !retry) parkBackup(turn, route);
+                else if (route === 'writer' && !busy) dispatchBackup('pipeline');
+                else {
+                    retireTurn();
+                    showStatus('Answer failed');
+                }
+                return;
+            }
+            if (succeeded) {
+                if (!providerFinal) supervisor.recordInterviewerTurn(turn.text, turn.at);
+                if (outcome.status === 'completed' && run.answer) {
+                    const ask = /^Ask:\s*(\S[\s\S]*)$/i.exec(run.answer.trim());
+                    supervisor.recordAssistantTurn(ask?.[1] ?? run.answer, Boolean(ask));
+                }
+                showStatus('Answer ready');
+            } else if (!cancelled) showStatus('Answer failed');
+            else showStatus(realtimeDisconnected ? 'Reconnecting' : 'Listening');
+            if (unanswered && (realtimeDisconnected || supervisor.current?.id === 'pipeline')) dispatchBackup();
+            else if (unanswered?.providerFinal) {
+                closedHandoff = undefined;
+                closedItemId = undefined;
+                for (const { event, id, model } of deferredRealtime.splice(0)) {
+                    const disposition = handleProviderEvent(event, id, model);
+                    if (disposition?.kind === 'answer' || disposition?.kind === 'ask') {
+                        supervisor.recordAssistantTurn(disposition.text, disposition.kind === 'ask');
+                    }
+                }
+            }
+        };
+        const settleAndReport = (outcome: AutoAnswerDispatchResult) => {
+            settle(outcome);
+            flushDeferredFailure();
+        };
+        void result.done.then(settleAndReport, () => settleAndReport({ status: 'failed' }));
+    };
+    const retryBackup = () => {
+        const retry = busyRetry;
+        clearBusyRetry();
+        if (retry && unanswered?.turn.turnId === retry.turnId) dispatchBackup(retry.route, true);
+        flushDeferredFailure();
     };
     const settleWriterRun = (run: symbol, outcomeStatus: 'completed' | 'cancelled' | 'failed') => {
         if (writerRun !== run) return;
         writerRun = undefined;
-        if (started) showStatus(outcomeStatus === 'completed' && presented ? 'Answer ready' : 'Listening');
+        if (started) showProviderStatus(outcomeStatus === 'completed' && presented ? 'Answer ready' : 'Listening');
         finishTiming(outcomeStatus);
         supervisor.setExternalWriting(false);
     };
@@ -123,8 +305,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         lastWriterStopAt = stopAt;
         speechStoppedAt = undefined;
         const run = Symbol();
+        const writerTurn = unanswered?.turn;
         writerRun = run;
         presented = false;
+        visibleRealtimeTurn = undefined;
         supervisor.setExternalWriting(true);
         if (debug) {
             finishTiming('cancelled');
@@ -137,7 +321,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 speechStoppedAt: stopAt,
             };
         }
-        showStatus('Thinking');
+        showProviderStatus('Thinking');
         const res = launch({
             ...request,
             ...(liveBrainNotebook ? { liveBrainNotebook } : {}),
@@ -146,8 +330,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             onFirstText: (at) => {
                 if (!started || writerRun !== run || request.signal.aborted) return;
                 presented = true;
-                pendingQuestion = undefined;
-                turnAnswered = true;
+                visibleRealtimeTurn = writerTurn;
+                if (unanswered?.turn.turnId === writerTurn?.turnId) retireTurn();
                 if (timing && timing.firstTextAt === undefined) timing.firstTextAt = at;
                 request.onFirstText?.(at);
             },
@@ -238,7 +422,14 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             emitQuestion: event => {
                 if (event.responseText?.text.trim() || event.clarification?.trim()) {
                     presented = true;
-                    if (timing && timing.firstTextAt === undefined) timing.firstTextAt = Date.now();
+                    const pending = unanswered?.turn;
+                    if (pending && (responseTurnId === undefined || responseTurnId === pending.turnId)) {
+                        visibleRealtimeTurn = pending;
+                        retireTurn();
+                    } else if (!pending) {
+                        retireTurn();
+                    }
+                    if (timing && timing.firstTextAt === undefined) timing.firstTextAt = clock.now();
                 }
                 options.emitQuestion(event);
             },
@@ -262,7 +453,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         create(id) {
             if (id === 'pipeline') {
                 return options.pipeline ? {
-                    brain: new PipelineBrain(options.pipeline.cancel, (generationId, previousGenerationId, previous, next) => {
+                    brain: new PipelineBrain(() => options.pipeline?.cancel('manual_answer'), (generationId, previousGenerationId, previous, next) => {
                         supervisor.mergeInterviewerTurn(previous, next, clock.now());
                         options.emitQuestion({ generationId, liveBrainReplacement: { previousGenerationId, pipelineQuestion: next, writer: true } });
                     }), model: 'pipeline',
@@ -303,29 +494,15 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 orchestrator.endProviderTurn();
             }
             if (data.to === 'pipeline') {
-                const pending = pendingQuestion;
-                pendingQuestion = undefined;
-                turnAnswered = false;
-                const freshPending = pending && clock.now() - pending.at <= 20_000 ? pending : undefined;
-                const armDedupe = () => {
-                    if (freshPending) {
-                        pipelineDedupe = { normalized: normalizeQuestion(freshPending.text), expiresAt: clock.now() + 5_000 };
-                    }
-                };
-                const res = options.pipeline?.activate(freshPending);
-                if (res && typeof (res as Promise<unknown>).then === 'function') {
-                    void (res as Promise<'accepted' | 'busy' | 'failed' | 'unavailable'>).then(
-                        status => { if (status === 'accepted') armDedupe(); },
-                        () => { },
-                    );
-                } else if (res !== 'busy' && res !== 'failed' && res !== 'unavailable') {
-                    armDedupe();
-                }
+                options.pipeline?.warm?.();
+                dispatchBackup();
             }
         },
         onRollover: data => diagnostic('rollover', data),
         onLeaseDetached: (lease, reason, role) => {
             if (role !== 'active') return;
+            deferredRealtime.length = 0;
+            realtimeWasReady = false;
             systemTranscriptCaptureAt = undefined;
             unclaimedCaptureStops.length = 0;
             if (lease.brain.id === 'deepgram-flux' && reason !== 'rollover') {
@@ -339,87 +516,128 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 orchestrator.resetTurnState();
             }
         },
-        onEvent(event, id, model) {
-            if (event.type === 'error' && event.fatal && id === 'deepgram-flux') {
-                answerWriter?.cancelDraft('fatal_error');
-                answerWriter?.cancel('answer_corrected');
-                writerRun = undefined;
-                finishTiming('cancelled');
-                orchestrator.clearClarification();
-                orchestrator.endProviderTurn();
-            }
-            if (event.type === 'error' && event.fatal && !options.pipeline) {
-                showStatus('Backup brain unavailable');
-                options.onFailure(event.code);
-                return;
-            }
-            const backup = id === 'pipeline' && preferred !== 'pipeline';
-            if (id !== 'pipeline') {
-                if (event.type === 'interviewer_speech_started') turnAnswered = false;
-                if (event.type === 'response_started') {
-                    presented = false;
-                }
-                if (event.type === 'response_delta' && event.text.trim()) {
-                    turnAnswered = true;
-                    pendingQuestion = undefined;
-                }
-                if (event.type === 'decision' && event.action === 'wait') {
-                    turnAnswered = true;
-                    pendingQuestion = undefined;
-                }
-                if (event.type === 'response_silent') {
-                    turnAnswered = true;
-                    pendingQuestion = undefined;
-                }
-                if (event.type === 'interviewer_transcript' && event.final) {
-                    notePendingQuestion(event.text, event.at);
-                }
-            } else if (event.type === 'response_started') {
-                presented = false;
-            }
-            if (event.type === 'status') {
-                if (event.status === 'ready') showStatus(id !== preferred ? 'Backup brain' : 'Listening');
-                if (event.status === 'connecting' || event.status === 'degraded') {
-                    if (id === 'deepgram-flux') {
-                        answerWriter?.cancelDraft('reconnecting');
-                        orchestrator.endProviderTurn();
-                    } else if (id !== 'pipeline') {
-                        systemTranscriptCaptureAt = undefined;
-                        unclaimedCaptureStops.length = 0;
-                        orchestrator.resetTurnState();
-                    }
-                    showStatus('Reconnecting');
-                }
-            } else if (!backup) {
-                if (event.type === 'interviewer_speech_started' || event.type === 'response_silent') showStatus('Listening');
-                if (event.type === 'interviewer_speech_stopped' || event.type === 'response_started') showStatus('Thinking');
-            }
-            if (event.type === 'interviewer_speech_stopped') {
-                if (id === 'deepgram-flux') speechStoppedAt = event.at;
-                else if (debug && id !== 'gemini-live') speechStoppedAt ??= event.at;
-            }
-            if (debug && event.type === 'response_started') {
-                finishTiming('cancelled');
-                timing = { brainId: id, model, responseId: event.responseId, responseStartedAt: event.at, speechStoppedAt };
-                speechStoppedAt = undefined;
-            }
-            if (debug && event.type === 'response_silent') speechStoppedAt = undefined;
-            // Pipeline emits observations for memory and diagnostics. Its native
-            // answer events already carry the generation IDs used by Phase 1.
-            const disposition = id !== 'pipeline' ? orchestrator.handleEvent(event) : undefined;
-            if (id === 'pipeline' && event.type === 'response_started') orchestrator.replaceWithExternalAnswer();
-            else if (id === 'pipeline' && event.type === 'response_delta') {
-                presented = true;
-                if (timing?.responseId === event.responseId && timing.firstTextAt === undefined) timing.firstTextAt = Date.now();
-            }
-            if (event.type === 'response_done') {
-                if (!backup && event.status === 'completed') showStatus(presented ? 'Answer ready' : 'Listening');
-                if (event.responseId === timing?.responseId) finishTiming(event.status);
-            }
-            return id === 'pipeline' && event.type === 'response_done' && event.status !== 'completed'
-                ? { kind: 'suppressed' } : disposition;
-        },
+        onEvent: handleProviderEvent,
     });
+
+    function handleProviderEvent(event: LiveBrainEvent, id: LiveBrain['id'], model: string): OrchestratorDisposition | undefined {
+        const backup = id === 'pipeline' && preferred !== 'pipeline';
+        if (id !== 'pipeline') {
+            const failed = event.type === 'error' && event.fatal;
+            const disconnected = event.type === 'status' && (event.status === 'degraded'
+                || (event.status === 'connecting' && realtimeWasReady && event.detail !== 'rollover'));
+            if (failed || disconnected) {
+                deferredRealtime.length = 0;
+                realtimeDisconnected = true;
+                orchestrator.interruptTextResponse();
+                if (!unanswered && visibleRealtimeTurn && !closedHandoff) closeHandoff(visibleRealtimeTurn);
+                if (id === 'deepgram-flux') {
+                    answerWriter?.cancelDraft(failed ? 'fatal_error' : 'reconnecting');
+                    if (writerRun) {
+                        answerWriter?.cancel(visibleRealtimeTurn ? 'live_brain_disconnected' : 'answer_corrected');
+                        writerRun = undefined;
+                        finishTiming('cancelled');
+                        supervisor.setExternalWriting(false);
+                    }
+                    orchestrator.endProviderTurn();
+                }
+                if (failed && !options.pipeline) {
+                    if (!unanswered && !closedHandoff && !backupRun) {
+                        showStatus('Backup brain unavailable');
+                        options.onFailure(event.code);
+                        return;
+                    }
+                    // Report the failure once the rescue settles, so its
+                    // status is not overwritten while it is answering.
+                    deferredFailure = event.code;
+                }
+                dispatchBackup();
+                flushDeferredFailure();
+            }
+
+            if (event.type === 'interviewer_speech_started') {
+                realtimeItemId = event.itemId;
+                turnAnswered = false;
+            }
+            if (event.type === 'interviewer_transcript') {
+                if (event.final) {
+                    if (event.itemId && realtimeItemId && event.itemId !== realtimeItemId) {
+                        return orchestrator.handleEvent(event);
+                    }
+                    if (duplicateHandoff(event.text, event.at, event.itemId)) return { kind: 'interviewer_already_recorded' };
+                    const confirmed = notePendingTurn(event.text, event.at, true);
+                    if (confirmed && realtimeDisconnected) dispatchBackup();
+                } else if (closedHandoff) {
+                    return { kind: 'suppressed' };
+                }
+            }
+            if ('responseId' in event && ignoredRealtimeResponses.has(event.responseId)) return { kind: 'suppressed' };
+            // Hold a newer confirmed turn's output until the backup finishes. A
+            // replay of the rescued turn has no newer confirmed transcript.
+            if ((closedHandoff || backupRun) && (
+                event.type === 'response_started' || event.type === 'response_delta'
+                || event.type === 'response_done' || event.type === 'response_silent'
+                || event.type === 'decision' || event.type === 'eager_end_of_turn'
+                || event.type === 'interviewer_barge_in_candidate'
+            )) {
+                if (backupRun && unanswered && !realtimeDisconnected && deferredRealtime.length < 512) {
+                    deferredRealtime.push({ event, id, model });
+                } else if ('responseId' in event) {
+                    ignoredRealtimeResponses.add(event.responseId);
+                    if (ignoredRealtimeResponses.size > 64) ignoredRealtimeResponses.delete(ignoredRealtimeResponses.values().next().value!);
+                }
+                return { kind: 'suppressed' };
+            }
+            if (event.type === 'decision' && event.action === 'wait') retireTurn();
+            if (event.type === 'response_silent') retireTurn();
+        }
+        if (event.type === 'response_started') {
+            presented = false;
+            visibleRealtimeTurn = undefined;
+            responseTurnId = unanswered?.turn.turnId;
+        }
+
+        if (event.type === 'status') {
+            if (event.status === 'ready') {
+                realtimeDisconnected = false;
+                realtimeWasReady = id !== 'pipeline';
+                showProviderStatus(id !== preferred ? 'Backup brain' : 'Listening');
+            }
+            if (event.status === 'connecting' || event.status === 'degraded') {
+                realtimeWasReady = false;
+                systemTranscriptCaptureAt = undefined;
+                unclaimedCaptureStops.length = 0;
+                orchestrator.resetTurnState();
+                showProviderStatus('Reconnecting');
+            }
+        } else if (!backup) {
+            if (event.type === 'interviewer_speech_started' || event.type === 'response_silent') showProviderStatus('Listening');
+            if (event.type === 'interviewer_speech_stopped' || event.type === 'response_started') showProviderStatus('Thinking');
+        }
+        if (event.type === 'interviewer_speech_stopped') {
+            if (id === 'deepgram-flux') speechStoppedAt = event.at;
+            else if (debug && id !== 'gemini-live') speechStoppedAt ??= event.at;
+        }
+        if (debug && event.type === 'response_started') {
+            finishTiming('cancelled');
+            timing = { brainId: id, model, responseId: event.responseId, responseStartedAt: event.at, speechStoppedAt };
+            speechStoppedAt = undefined;
+        }
+        if (debug && event.type === 'response_silent') speechStoppedAt = undefined;
+        // Pipeline emits observations for memory and diagnostics. Its native
+        // answer events already carry the generation IDs used by Phase 1.
+        const disposition = id !== 'pipeline' ? orchestrator.handleEvent(event) : undefined;
+        if (id === 'pipeline' && event.type === 'response_started') orchestrator.replaceWithExternalAnswer();
+        else if (id === 'pipeline' && event.type === 'response_delta') {
+            presented = true;
+            if (timing?.responseId === event.responseId && timing.firstTextAt === undefined) timing.firstTextAt = Date.now();
+        }
+        if (event.type === 'response_done') {
+            if (!backup && event.status === 'completed') showProviderStatus(presented ? 'Answer ready' : 'Listening');
+            if (event.responseId === timing?.responseId) finishTiming(event.status);
+        }
+        return id === 'pipeline' && event.type === 'response_done' && event.status !== 'completed'
+            ? { kind: 'suppressed' } : disposition;
+    }
 
     return {
         start() {
@@ -451,6 +669,27 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         stop() {
             if (!started) return;
             started = false;
+            if (backupRun) {
+                const { writer } = backupRun;
+                backupRun = undefined;
+                if (writer) writer.abort('auto_disabled_or_meeting_ended');
+                else options.pipeline?.cancel('auto_disabled_or_meeting_ended');
+            }
+            retireTurn();
+            turnAnswered = false;
+            closedHandoff = undefined;
+            closedItemId = undefined;
+            closedCaptureStop = undefined;
+            realtimeItemId = undefined;
+            visibleRealtimeTurn = undefined;
+            responseTurnId = undefined;
+            pipelineDedupe = undefined;
+            realtimeDisconnected = false;
+            realtimeWasReady = false;
+            lastCaptureStop = undefined;
+            deferredFailure = undefined;
+            deferredRealtime.length = 0;
+            ignoredRealtimeResponses.clear();
             writerRun = undefined;
             answerWriter?.cancelDraft('meeting_ended');
             answerWriter?.cancel('auto_disabled_or_meeting_ended');
@@ -470,6 +709,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         addCandidateText(text, at) { supervisor.addCandidateText(text, at); },
         noteSpeechStop(at) {
             if (debug) speechStoppedAt = at;
+            lastCaptureStop = at;
             orchestrator.noteCapturedSpeechStop(at);
             unclaimedCaptureStops.push(at);
             if (unclaimedCaptureStops.length > 2) unclaimedCaptureStops.shift();
@@ -480,21 +720,29 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         isUsingPipeline() { return supervisor.current?.id === 'pipeline'; },
         observePipelineTranscript(text, final, at) {
             const brain = supervisor.current;
+            if (final) {
+                const normalized = normalizeQuestion(text);
+                if (busyRetry && unanswered && normalized === normalizeQuestion(unanswered.turn.text)
+                    && (lastCaptureStop ?? -Infinity) <= unanswered.turn.at) return true;
+                if (pipelineDedupe && clock.now() > pipelineDedupe.expiresAt) pipelineDedupe = undefined;
+                if (duplicateHandoff(text, at)) return true;
+                if (pipelineDedupe?.normalized === normalized && (lastCaptureStop ?? -Infinity) <= pipelineDedupe.captureStop) return true;
+            }
             if (brain instanceof PipelineBrain) {
-                if (final && pipelineDedupe) {
-                    const now = clock.now();
-                    if (now > pipelineDedupe.expiresAt) {
-                        pipelineDedupe = undefined;
-                    } else if (normalizeQuestion(text) === pipelineDedupe.normalized) {
-                        pipelineDedupe = undefined;
-                        return true;
-                    }
+                if (busyRetry || backupRun) {
+                    if (final && notePendingTurn(text, at, false) && !backupRun) dispatchBackup();
+                    return true;
+                }
+                if (final && !isFillerOnly(text)) {
+                    closedHandoff = undefined;
+                    closedItemId = undefined;
+                    if (status === 'Answer failed') showStatus(preferred === 'pipeline' ? 'Listening' : 'Backup brain');
                 }
                 brain.interviewerTranscript(text, final, at);
                 return false;
             }
             // D14: the existing STT is the backup text for the interviewer bubble.
-            else if (brain) {
+            else if (brain || realtimeDisconnected) {
                 if (!final) systemTranscriptCaptureAt ??= at;
                 else {
                     const capturedAt = systemTranscriptCaptureAt;
@@ -509,17 +757,37 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                         // A final-only backend supplied no timestamp that identifies which capture it transcribed.
                         unclaimedCaptureStops.length = 0;
                     }
-                    notePendingQuestion(text, at);
+                    if (notePendingTurn(text, at, false) && (realtimeDisconnected || status === 'Backup busy')) dispatchBackup();
                 }
             }
             return false;
         },
         observePipelineOutput(output) {
+            if (backupRun) {
+                if (!backupRun.writer && output.question && output.text?.trim()
+                    && normalizeQuestion(output.question) === normalizeQuestion(backupRun.turn.text)) {
+                    if (output.type === 'token' || output.type === 'answer') backupRun.visible = true;
+                    if (output.type === 'answer') backupRun.answer = output.text.trim();
+                }
+                return;
+            }
             if (output.type === 'token' && output.text?.trim()) orchestrator.noteWriterProgress(output.generationId);
             const brain = supervisor.current;
             if (brain instanceof PipelineBrain) brain.observe(output);
         },
+        observePipelineIdle: retryBackup,
         cancelAnswer(reason) {
+            if (unanswered) closeHandoff(unanswered.turn);
+            else retireTurn();
+            deferredRealtime.length = 0;
+            if (backupRun) {
+                const { writer } = backupRun;
+                backupRun = undefined;
+                if (writer) writer.abort(reason);
+                else options.pipeline?.cancel(reason);
+                showStatus(realtimeDisconnected ? 'Reconnecting' : 'Listening');
+                if (supervisor.current?.id === 'pipeline') return;
+            }
             orchestrator.clearClarification();
             if (reason === 'manual_answer') orchestrator.noteManualCancel();
             if (supervisor.current?.id === 'deepgram-flux') {

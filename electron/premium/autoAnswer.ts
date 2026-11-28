@@ -68,6 +68,7 @@ export type AutoAnswerCancelReason =
     | 'transcript_revised'
     | 'answer_corrected'
     | 'manual_answer'
+    | 'live_brain_disconnected'
     | 'dispatch_timeout'
     | 'auto_disabled_or_meeting_ended'
     | 'engine_reset';

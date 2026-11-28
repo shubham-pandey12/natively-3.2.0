@@ -14,9 +14,9 @@ export function createLiveBrainOverlayPort(bridge: {
         showQuestion: liveBrainQuestion => bridge.emitQuestion({ liveBrainQuestion }),
         setOutdated: (generationId, outdated) => bridge.setAutomaticAnswerOutdated(generationId, outdated),
         setInterviewerSpeaking: (generationId, interviewerSpeaking) => bridge.emitQuestion({ generationId, interviewerSpeaking }),
-        showText: ({ generationId, text, done, updated }) => bridge.emitQuestion({
+        showText: ({ generationId, text, done, updated, interrupted }) => bridge.emitQuestion({
             generationId,
-            responseText: { text, done },
+            responseText: { text, done, ...(interrupted ? { interrupted } : {}) },
             updated,
         }),
         ...(bridge.discard ? { discard: (generationId, reason) => bridge.discard!(generationId, reason) } : {}),

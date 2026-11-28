@@ -16,7 +16,7 @@ export const liveBrainQuestionRowId = (questionId) => `live-brain-q-${questionId
  * turn that needs no answer leaves the partial visible rather than nothing.
  */
 export const keepsPartialOnDiscard = (reason) =>
-  reason === 'answer_corrected' || reason === 'interviewer_interrupted';
+  reason === 'answer_corrected' || reason === 'interviewer_interrupted' || reason === 'live_brain_disconnected';
 
 /**
  * Adds or updates the interviewer row for `question`. When the question is

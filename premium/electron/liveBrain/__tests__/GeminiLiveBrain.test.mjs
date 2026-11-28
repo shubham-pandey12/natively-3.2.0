@@ -8,7 +8,7 @@ import { FakeClock } from '../../autoAnswer/__tests__/fakeClock.mjs';
 
 const require = createRequire(import.meta.url);
 const { GeminiLiveBrain, GEMINI_AUTOMATIC_ACTIVITY_DETECTION } = require('../../../../dist-electron/premium/electron/liveBrain/brains/GeminiLiveBrain.js');
-const { testConnection } = require('../../../../dist-electron/premium/electron/liveBrain/meeting.js');
+const { createMeeting, testConnection } = require('../../../../dist-electron/premium/electron/liveBrain/meeting.js');
 const ctx = () => ({ sessionId: 'mock', instructions: 'Answer after speech.', signal: new AbortController().signal });
 const output = text => ({ serverContent: { outputTranscription: { text } } });
 const speech = text => ({ serverContent: { inputTranscription: { text, finished: true } } });
@@ -42,7 +42,7 @@ async function rig(t, options = {}) {
         });
     });
     const endpoint = `ws://127.0.0.1:${server.address().port}`;
-    const brain = new GeminiLiveBrain({ apiKey: 'fake-gemini-key-for-tests', model: options.model ?? 'test-model', ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}), endpoint, backoffMs: options.backoffMs ?? [10, 20], rolloverClock: options.rolloverClock });
+    const brain = new GeminiLiveBrain({ apiKey: 'fake-gemini-key-for-tests', model: options.model ?? 'test-model', ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}), endpoint, backoffMs: options.backoffMs === null ? undefined : options.backoffMs ?? [10, 20], rolloverClock: options.rolloverClock });
     const events = [];
     brain.onEvent(event => events.push(event));
     t.after(async () => {
@@ -529,3 +529,57 @@ test('GeminiLiveBrain setup omits thinkingConfig by default and wires supported 
     await unsupportedRig.brain.start(ctx());
     assert.equal(unsupportedRig.connections[0].requests[0].setup.generationConfig.thinkingConfig, undefined);
 });
+
+const cmsQuestion = "Yeah. Got it. I'll play interviewer. Here we go. First question. Tell me about a nasty production incident in your multi-tenant CMS. What was the very first thing you checked?";
+
+for (const writerAvailable of [true, false]) {
+    test(`CMS question is rescued by ${writerAvailable ? 'the writer' : 'the pipeline'} before four real adapter setup timeouts`, async t => {
+        const { brain, events, connections } = await rig(t, {
+            backoffMs: null,
+            replyToSetup: (socket, count) => { if (count === 1) send(socket, { setupComplete: {} }); },
+        });
+        t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 100_000 });
+        const statuses = [], writer = [], pipeline = [];
+        const session = createMeeting({
+            sessionId: 'cms-drop', apiKey: 'fake',
+            engine: {
+                setAutomaticAnswerOutdated() {},
+                ...(writerAvailable ? { runLiveBrainAnswer(request) {
+                    writer.push({ request, at: Date.now() });
+                    return { generationId: 1, done: Promise.resolve({ status: 'completed' }) };
+                } } : {}),
+            },
+            pipeline: {
+                activate(turn) {
+                    pipeline.push({ turn, at: Date.now() });
+                    return { status: 'accepted', done: Promise.resolve({ status: 'completed' }) };
+                },
+                cancel() {},
+            },
+            onFailure: code => assert.fail(code),
+            emitQuestion: event => { if (event.liveBrainStatus) statuses.push(event.liveBrainStatus); },
+        }, brain);
+        t.after(() => session.stop());
+        session.start();
+        await until(() => statuses.includes('Listening'));
+        session.addCandidateText('Earlier constraint: isolate tenants by account.', Date.now());
+        send(connections[0].socket, speech(cmsQuestion));
+        await until(() => events.some(event => event.type === 'interviewer_transcript' && event.final));
+        session.observePipelineTranscript(cmsQuestion, true, Date.now());
+        connections[0].socket.terminate();
+        await until(() => statuses.includes('Backup answering'));
+        const dispatched = writerAvailable ? writer[0] : pipeline[0];
+        assert.equal(dispatched.at, 100_000);
+        assert.equal(writerAvailable ? dispatched.request.question : dispatched.turn.text, cmsQuestion);
+        assert.match(writerAvailable ? dispatched.request.liveBrainNotebook : dispatched.turn.context, /isolate tenants by account/);
+        for (const [index, backoff] of [500, 1_000, 2_000, 4_000].entries()) {
+            t.mock.timers.tick(backoff);
+            await until(() => connections[index + 1]?.requests.some(request => request.setup));
+            t.mock.timers.tick(8_000);
+        }
+        await until(() => session.isPipeline());
+        assert.equal(Date.now() - dispatched.at, 39_500);
+        assert.equal(writer.length + pipeline.length, 1);
+        assert.ok(statuses.indexOf('Backup brain') > statuses.indexOf('Backup answering'));
+    });
+}

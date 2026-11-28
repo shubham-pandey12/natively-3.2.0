@@ -578,6 +578,7 @@ interface Message {
   kind?: 'ask';
   interviewerSpeaking?: boolean;
   liveBrainText?: boolean;
+  liveBrainInterrupted?: boolean;
   hasScreenshot?: boolean;
   screenshotPreview?: string;
   // Every attached screenshot's data-URL preview (screenshotPreview is the first
@@ -1419,6 +1420,7 @@ const MessageRow = React.memo(
             )}
             {msg.updated && <div className="text-[11px] overlay-text-muted">{t('Updated')}</div>}
             {msg.kind === 'ask' && <div className="text-[11px] overlay-text-muted">{t('Ask:')}</div>}
+            {msg.liveBrainInterrupted && <div className="mt-1 text-[12px] overlay-text-muted">{t('Answer interrupted')}</div>}
             {msg.interviewerSpeaking && (
               <div role="status" className="mt-1 text-[12px] overlay-text-muted">
                 <span aria-hidden="true">⏸ </span>{t('Interviewer speaking')}
@@ -8156,6 +8158,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           setMessages((prev) => {
             const existing = prev.find((message) => message.whatToAnswerGeneration === generationId);
             const patch = { text: responseText.text, isStreaming: !responseText.done,
+              ...(responseText.interrupted ? { liveBrainInterrupted: true } : {}),
               ...(responseText.done ? { liveBrainReplacementBackup: undefined } : {}) };
             if (existing) {
               if (!existing.isStreaming) return prev;
@@ -8332,6 +8335,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             : message));
           if (streamingIntentRef.current === 'what_to_answer' && streamingTextRef.current.trim()) {
             flushToken();
+            if (data.reason === 'live_brain_disconnected') {
+              setMessages((prev) => prev.map((message) => message.whatToAnswerGeneration === data.generationId
+                ? { ...message, liveBrainInterrupted: true } : message));
+            }
             return;
           }
         }

@@ -47,6 +47,7 @@ export interface LiveBrainOverlayPort {
         text: string;
         done: boolean;
         updated: boolean;
+        interrupted?: boolean;
     }): void;
     discard?(generationId: number, reason: string): void;
 }
@@ -305,7 +306,7 @@ export class ResponseOrchestrator<Timer> {
                     this.readTextEvents(response, response.parser.finish());
                     if (!response.kind && this.current) this.setSpeaking(this.current, false);
                 }
-                return this.closeTextResponse(event.status === 'completed', event.status === 'cancelled', event.finalText);
+                return this.closeTextResponse(event.status === 'completed', event.status === 'cancelled', event.finalText, event.status === 'failed');
             }
         }
     }
@@ -381,6 +382,10 @@ export class ResponseOrchestrator<Timer> {
     noteManualCancel(): void {
         if (this.response) this.manualCancelPending = true;
         if (this.current) this.current.cutOff = false;
+    }
+
+    interruptTextResponse(): void {
+        this.closeTextResponse(false, false, undefined, true);
     }
 
     resetTurnState(): void {
@@ -1133,7 +1138,7 @@ export class ResponseOrchestrator<Timer> {
         }
     }
 
-    private closeTextResponse(completed = false, cancelled = false, finalText?: string): OrchestratorDisposition {
+    private closeTextResponse(completed = false, cancelled = false, finalText?: string, interrupted = false): OrchestratorDisposition {
         const response = this.response;
         this.response = undefined;
         if (response?.suppressed) return { kind: 'suppressed' };
@@ -1185,7 +1190,7 @@ export class ResponseOrchestrator<Timer> {
         if (this.current?.generationId === response.generationId) {
             this.current.completedAt = this.ports.clock.now();
         }
-        const text = this.showText(response, true);
+        const text = this.showText(response, true, interrupted);
         if (cancelled || !completed || response.kind !== 'answer') return { kind: 'suppressed' };
         const turn = this.answerTurn;
         if (turn?.responseId === response.id && turn.awaitsTranscript) {
@@ -1196,7 +1201,7 @@ export class ResponseOrchestrator<Timer> {
         return { kind: 'answer', text };
     }
 
-    private showText(response: TextResponse, done: boolean): string {
+    private showText(response: TextResponse, done: boolean, interrupted = false): string {
         const cleanup = response.cleanup;
         const text = cleanup && this.ports.cleanupText
             ? cleanStreamingText(response.text, cleanup, this.ports.cleanupText, done)
@@ -1208,6 +1213,7 @@ export class ResponseOrchestrator<Timer> {
             text,
             done,
             updated: response.updated,
+            ...(interrupted ? { interrupted } : {}),
         });
         return text;
     }

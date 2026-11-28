@@ -94,6 +94,17 @@ export function resolveLiveBrainProfileContext(
     return [name && `Candidate: ${name}`, getGrounding()].filter(Boolean).join('\n\n');
 }
 
+export interface LiveBrainPendingTurn {
+    turnId: number;
+    text: string;
+    at: number;
+    context: string;
+}
+
+export type LiveBrainPipelineActivation =
+    | { status: 'accepted'; done: Promise<AutoAnswerDispatchResult> }
+    | 'busy' | 'failed' | 'unavailable';
+
 export interface LiveBrainMeetingOptions extends LiveBrainContextSnapshot {
     sessionId: string;
     apiKey?: string;
@@ -109,13 +120,15 @@ export interface LiveBrainMeetingOptions extends LiveBrainContextSnapshot {
     readGroundingState?(): LiveBrainGroundingState;
     engine: {
         setAutomaticAnswerOutdated(generationId: number, outdated: boolean): void;
+        canAutoAnswer?(skipCooldown?: boolean): boolean;
         runLiveBrainAnswer?: LiveBrainAnswerEngine['runLiveBrainAnswer'];
         startLiveBrainDraft?: LiveBrainAnswerEngine['startLiveBrainDraft'];
         getLiveBrainAiRouteKey?: LiveBrainAnswerEngine['getLiveBrainAiRouteKey'];
     };
     pipeline?: {
-        activate(pending?: { text: string; at: number }): 'accepted' | 'busy' | 'failed' | 'unavailable' | Promise<'accepted' | 'busy' | 'failed' | 'unavailable'> | void;
-        cancel(): void;
+        warm?(): void;
+        activate(turn: LiveBrainPendingTurn): LiveBrainPipelineActivation;
+        cancel(reason: 'manual_answer' | 'auto_disabled_or_meeting_ended'): void;
     };
     summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
@@ -134,6 +147,7 @@ export interface LiveBrainMeetingSession {
     isUsingPipeline?(): boolean;
     observePipelineTranscript?(text: string, final: boolean, at: number): boolean | void;
     observePipelineOutput?(output: { generationId: number; type: 'token' | 'answer' | 'discard' | 'failed'; text?: string; question?: string; cancelReason?: string }): void;
+    observePipelineIdle?(): void;
     cancelAnswer(reason: 'manual_answer'): void;
 }
 

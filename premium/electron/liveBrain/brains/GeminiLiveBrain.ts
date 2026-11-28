@@ -203,9 +203,9 @@ export class GeminiLiveBrain implements LiveBrain {
 
     private readonly abort = () => { void this.stop(); };
 
-    private connect(): void {
+    private connect(rollover = false): void {
         if (!this.context) return;
-        this.emit({ type: 'status', status: 'connecting' });
+        this.emit({ type: 'status', status: 'connecting', ...(rollover ? { detail: 'rollover' } : {}) });
         if (!this.context) return;
         try {
             this.lifecycleGeneration++;
@@ -518,7 +518,7 @@ export class GeminiLiveBrain implements LiveBrain {
             this.bufferedBytes = bytes;
             this.bufferLimit = bytes + AUDIO_BUFFER_BYTES;
         }
-        this.connect();
+        this.connect(true);
     }
 
     /** The interviewer is mid-question, Gemini has not answered yet, or an
