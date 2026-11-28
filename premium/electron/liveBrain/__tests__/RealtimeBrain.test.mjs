@@ -351,3 +351,19 @@ test('OpenAIRealtimeBrain omits reasoning by default and wires session.reasoning
     await elevenRig.brain.start(testContext());
     assert.equal(elevenRig.connections[0].messages[0].session.reasoning, undefined);
 });
+
+test('OpenAI connects speech boundaries and transcript deltas/finals by input item ID', async t => {
+    const { brain, connections, events } = await rig(t, 'openai-realtime');
+    await brain.start(testContext());
+    const { socket } = connections[0];
+    send(socket, 'input_audio_buffer.speech_started', { item_id: 'item-a' });
+    send(socket, 'input_audio_buffer.speech_stopped', { item_id: 'item-a' });
+    send(socket, 'conversation.item.input_audio_transcription.delta', { item_id: 'item-a', delta: 'First' });
+    send(socket, 'conversation.item.input_audio_transcription.delta', { item_id: 'item-a', delta: ' question?' });
+    send(socket, 'conversation.item.input_audio_transcription.completed', { item_id: 'item-a', transcript: 'First question?' });
+    const final = await until(() => events.find(event => event.type === 'interviewer_transcript' && event.final));
+    assert.ok(final.itemId?.endsWith(':item-a'));
+    assert.deepEqual(events.filter(event => event.type.startsWith('interviewer_')).map(event => event.itemId), Array(5).fill(final.itemId));
+    assert.deepEqual(events.filter(event => event.type === 'interviewer_transcript').map(event => event.text),
+        ['First', 'First question?', 'First question?']);
+});

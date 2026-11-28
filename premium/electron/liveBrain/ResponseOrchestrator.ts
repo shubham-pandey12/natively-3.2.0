@@ -12,7 +12,8 @@ import type { LiveBrainEvent } from './types';
 export type AnswerCompletion = 'completed' | 'cancelled' | 'failed';
 export type OrchestratorDisposition =
     | { kind: 'answer' | 'ask'; text: string }
-    | { kind: 'suppressed' | 'interviewer_already_recorded' };
+    | { kind: 'suppressed' }
+    | { kind: 'interviewer_already_recorded' | 'interviewer_confirmed'; deferredAnswer?: string };
 
 export interface AnswerWriterPort {
     write(
@@ -33,10 +34,11 @@ export interface AnswerWriterPort {
 
 export interface LiveBrainOverlayPort {
     showAsk(ask: { askId: string; clarification: string; askStreaming?: boolean }): void;
+    discardAsk?(askId: string): void;
     setOutdated(generationId: number, outdated: boolean): void;
     setInterviewerSpeaking(generationId: number, speaking: boolean): void;
     /** D14: the interviewer bubble shown directly above its answer. */
-    showQuestion?(question: { questionId: string; text: string; done: boolean; generationId?: number }): void;
+    showQuestion?(question: { questionId: string; text: string; done: boolean; generationId?: number; discard?: boolean }): void;
     showText(response: {
         responseId: string;
         generationId: number;
@@ -80,6 +82,8 @@ interface TextResponse {
     lastTextAt?: number;
     /** D15: the answer to a filler-only interviewer turn, never shown. */
     suppressed?: boolean;
+    previous?: CurrentAnswer;
+    previousWasOutdated?: boolean;
 }
 
 interface QuestionBubble {
@@ -92,15 +96,30 @@ interface QuestionBubble {
     open: boolean;
     source: 'provider' | 'stt';
     sttRecorded?: boolean;
+    transcriptFinal?: boolean;
     generationId?: number;
     /** Sent to the overlay at least once. */
     shown?: boolean;
+}
+
+interface SpeechTurn {
+    itemId?: string;
+    startedAt: number;
+    stoppedAt?: number;
+    capturedStopAt?: number;
+    bubble?: QuestionBubble;
+    stt?: { text: string; at: number };
+    answer?: AnswerTurn;
 }
 
 interface AnswerTurn {
     responseId: string;
     bubble?: QuestionBubble;
     generationId?: number;
+    response?: TextResponse;
+    awaitsTranscript?: boolean;
+    acceptsShortReply?: boolean;
+    pendingAnswer?: string;
     /** The interviewer spoke again, so late transcripts belong to a new turn. */
     superseded: boolean;
 }
@@ -123,6 +142,7 @@ const SINGLE_WORD_FRAGMENT = /^[\p{L}\p{N}'’-]+[\s.,!…-]*$/u;
 // interviewer says something that is not filler. Two words, not one: a lone
 // "Nice." or "Hmm?" would otherwise kill the answer with nothing to replace it.
 const INTERRUPT_MIN_WORDS = 2;
+const FILLER_PHRASE = new RegExp(String.raw`(?<![\p{L}\p{N}])${FILLER_WORD}(?![\p{L}\p{N}])`, 'giu');
 
 export function isFillerOnly(text: string): boolean {
     const clean = text.trim();
@@ -137,7 +157,6 @@ export function isNonQuestionTurn(text: string): boolean {
     return isFillerOnly(clean) || SINGLE_WORD_FRAGMENT.test(clean);
 }
 const CLARIFICATION_MS = 10_000;
-const PROVISIONAL_MS = 1_500;
 // The overlay can keep earlier answers when Live Brain is disabled and
 // re-enabled in the same meeting. Never reuse a text generation across sessions.
 let nextTextGeneration = -1;
@@ -148,14 +167,15 @@ export class ResponseOrchestrator<Timer> {
     private response?: TextResponse;
     private readonly seenResponseIds = new Set<string>();
     private clarification?: { timer: Timer };
-    private provisional?: { generationId: number; responseId: string; timer: Timer };
     private question?: QuestionBubble;
     private answerTurn?: AnswerTurn;
+    private readonly speechTurns: SpeechTurn[] = [];
     private sttPending?: { text: string; at: number };
     private questionSequence = 0;
     private readonly questionNamespace: string;
     /** An Ask is waiting for the interviewer: a short "yes" may answer it. */
     private askPending = false;
+    private realtimeAsk?: { id: string; listening: boolean };
     /** Answered (or abandoned) turns, oldest first, capped at MAX_RECENT_TURNS. */
     private recentTurns: FluxConfirmedTurn[] = [];
     /** The turn being answered now; joins recentTurns once answered or replaced. */
@@ -175,23 +195,35 @@ export class ResponseOrchestrator<Timer> {
         overlay: LiveBrainOverlayPort;
         clock: ResponseClock<Timer>;
         recordSttQuestion?(text: string, at: number): void;
+        recordDeferredAnswer?(text: string): void;
     }) {
         this.questionNamespace = `${ports.sessionId ?? 'lb'}:${++nextOrchestratorSession}`;
     }
 
     handleEvent(event: LiveBrainEvent): OrchestratorDisposition | undefined {
         switch (event.type) {
-            case 'interviewer_transcript':
-                if (!event.final) this.interruptActiveWriter(event.text);
-                if (this.noteProviderTranscript(event.text, event.final)) return { kind: 'interviewer_already_recorded' };
+            case 'interviewer_barge_in_candidate':
+                this.interruptActiveWriter(event.text);
                 break;
+            case 'interviewer_transcript':
+                if (event.final && (!event.itemId || this.findSpeechTurn(event.itemId) === this.speechTurns.at(-1))) {
+                    this.noteClarificationTranscript(event.text);
+                }
+                return this.noteProviderTranscript(event.text, event.final, event.itemId);
             case 'interviewer_speech_started':
                 if (this.answerTurn) this.answerTurn.superseded = true;
+                this.startSpeechTurn(event.at, event.itemId);
                 this.noteCutOff();
                 if (this.pendingClarification) this.writerClarificationHeardSpeech = true;
+                else if (this.realtimeAsk) this.realtimeAsk.listening = true;
                 else this.clearClarification();
                 if (this.current && this.isRecent(this.current)) this.setSpeaking(this.current, true);
                 break;
+            case 'interviewer_speech_stopped': {
+                const turn = this.findSpeechTurn(event.itemId);
+                if (turn) turn.stoppedAt = event.at;
+                break;
+            }
             case 'eager_end_of_turn': {
                 if (!this.ports.answerWriter) return;
                 const question = event.question?.trim();
@@ -216,10 +248,12 @@ export class ResponseOrchestrator<Timer> {
             case 'response_silent':
                 this.pendingDraftContext = undefined;
                 this.ports.answerWriter?.cancelDraft?.('silent_turn');
-                this.clearClarification();
-                this.askPending = false;
-                this.pendingClarification = undefined;
-                if (this.current) this.setSpeaking(this.current, false);
+                if (!this.realtimeAsk) {
+                    this.clearClarification();
+                    this.askPending = false;
+                    this.pendingClarification = undefined;
+                }
+                this.settleFiller();
                 this.closeQuestion();
                 this.answerTurn = undefined;
                 break;
@@ -233,6 +267,7 @@ export class ResponseOrchestrator<Timer> {
                     ...(this.ports.cleanupText && (this.ports.shouldCleanupText?.() ?? true)
                         ? { cleanup: { offset: 0, prefix: '' } } : {}),
                 };
+                if (this.answerTurn) this.answerTurn.response = this.response;
                 break;
             case 'response_delta': {
                 const response = this.response;
@@ -251,9 +286,12 @@ export class ResponseOrchestrator<Timer> {
                         this.noteCutOff();
                     } else if (this.current) {
                         this.current.cutOff = false;
+                        this.setSpeaking(this.current, false);
                     }
+                } else if (event.status === 'failed' && this.current) {
+                    this.setSpeaking(this.current, false);
                 }
-                if (event.status === 'completed') {
+                if (event.status === 'completed' && event.finalText === undefined) {
                     this.readTextEvents(response, response.parser.finish());
                     if (!response.kind && this.current) this.setSpeaking(this.current, false);
                 }
@@ -264,32 +302,45 @@ export class ResponseOrchestrator<Timer> {
 
     /** Backup question text from the existing STT (D14). Used only for a turn
      *  the provider left without a transcript. */
-    noteSttTranscript(text: string, at: number): void {
+    noteCapturedSpeechStop(at: number): void {
+        const turn = this.speechTurns.at(-1);
+        if (turn && turn.capturedStopAt === undefined) turn.capturedStopAt = at;
+    }
+
+    noteSttTranscript(text: string, at: number, capturedAt?: number): void {
         const clean = text.replace(/\s+/g, ' ').trim();
-        if (!clean || this.question?.open) return;
-        const turn = this.answerTurn;
-        if (turn && !turn.bubble && !turn.superseded) {
-            if (this.provisional?.generationId !== undefined && this.provisional.generationId === turn.generationId) {
-                if (!this.askPending && isFillerOnly(clean)) {
-                    this.retractProvisional();
-                    return;
-                }
-                this.clearProvisional();
-            }
-            turn.bubble = this.createSttBubble(clean, at, turn.generationId);
+        if (!clean || (capturedAt === undefined && this.speechTurns.length > 1)) return;
+        const speechAt = capturedAt ?? at;
+        if (at - speechAt > STT_QUESTION_MAX_AGE_MS) return;
+        const speech = this.speechTurns.findLast(turn => turn.capturedStopAt === speechAt)
+            ?? this.speechTurns.findLast(turn =>
+                turn.startedAt <= speechAt && (turn.stoppedAt === undefined || speechAt <= turn.stoppedAt));
+        if (speech) {
+            if (speech === this.speechTurns.at(-1)) this.noteClarificationTranscript(clean);
+            if (speech.bubble?.source === 'provider' || speech.answer?.bubble
+                || (speech === this.speechTurns.at(-1) && this.question?.open)) return;
+            if (speech.answer) this.attachSttToTurn(speech.answer, clean, at);
+            else speech.stt = { text: clean, at };
             return;
         }
-        this.sttPending = { text: clean, at };
+        if (capturedAt !== undefined || this.question?.open) return;
+        const turn = this.answerTurn;
+        if (turn && !turn.bubble && !turn.superseded) {
+            this.attachSttToTurn(turn, clean, at);
+            return;
+        }
+        if (!turn || !this.speechTurns.length) this.sttPending = { text: clean, at };
     }
 
     reset(): void {
         this.clearClarification();
-        this.clearProvisional();
         this.closeTextResponse();
-        this.question = undefined;
+        this.closeQuestion();
         this.answerTurn = undefined;
+        this.closeSpeechQuestions();
         this.sttPending = undefined;
         this.askPending = false;
+        this.realtimeAsk = undefined;
         this.recentTurns = [];
         this.openTurn = undefined;
         this.pendingClarification = undefined;
@@ -308,16 +359,12 @@ export class ResponseOrchestrator<Timer> {
 
     replaceWithExternalAnswer(): void {
         this.clearClarification();
-        this.clearProvisional();
         this.askPending = false;
+        this.realtimeAsk = undefined;
         this.pendingClarification = undefined;
         this.pendingDraftContext = undefined;
         this.ports.answerWriter?.cancelDraft?.('external_answer');
         this.supersedeForNewTurn(true);
-    }
-
-    closeOpenQuestion(): void {
-        this.closeQuestion();
     }
 
     noteManualCancel(): void {
@@ -327,13 +374,14 @@ export class ResponseOrchestrator<Timer> {
 
     resetTurnState(): void {
         this.clearClarification();
-        this.clearProvisional();
         this.pendingDraftContext = undefined;
         if (this.current) this.setSpeaking(this.current, false);
         this.closeQuestion();
         this.answerTurn = undefined;
+        this.closeSpeechQuestions();
         this.sttPending = undefined;
         this.askPending = false;
+        this.realtimeAsk = undefined;
         this.pendingClarification = undefined;
         this.writerClarificationHeardSpeech = false;
     }
@@ -410,28 +458,42 @@ export class ResponseOrchestrator<Timer> {
     }
 
     private showAsk(askId: string, clarification: string, question?: string, askStreaming?: boolean): void {
-        this.clearClarification();
         this.supersedeForNewTurn(false);
-        this.askPending = true;
         this.ports.overlay.showAsk({ askId, clarification, ...(askStreaming === undefined ? {} : { askStreaming }) });
         if (askStreaming) return;
+        this.clearClarification();
+        this.askPending = true;
+        this.realtimeAsk = askStreaming === false ? { id: askId, listening: false } : undefined;
         const requestAnswer = this.ports.requestClarificationAnswer;
         if (!question && !requestAnswer) return;
 
-        const pending = {
-            timer: this.ports.clock.setTimeout(() => {
-                if (this.clarification !== pending) return;
-                this.clarification = undefined;
-                if (requestAnswer) {
-                    requestAnswer();
-                    return;
-                }
-                this.replaceCurrent();
-                this.closeTextResponse();
-                this.write(`${question}\n\nThe interviewer did not clarify; state a reasonable assumption first, then answer.`, false);
-            }, CLARIFICATION_MS),
+        const onTimeout = () => {
+            if (this.clarification !== pending) return;
+            if (this.realtimeAsk?.id === askId && this.realtimeAsk.listening) {
+                pending.timer = this.ports.clock.setTimeout(onTimeout, 1_000);
+                return;
+            }
+            this.clarification = undefined;
+            if (requestAnswer) {
+                requestAnswer();
+                return;
+            }
+            this.replaceCurrent();
+            this.closeTextResponse();
+            this.write(`${question}\n\nThe interviewer did not clarify; state a reasonable assumption first, then answer.`, false);
         };
+        const pending = { timer: this.ports.clock.setTimeout(onTimeout, CLARIFICATION_MS) };
         this.clarification = pending;
+    }
+
+    private noteClarificationTranscript(text: string): void {
+        if (!this.realtimeAsk?.listening || !text.trim()) return;
+        this.realtimeAsk.listening = false;
+        if (!this.isBackchannel(text, true)) this.clearClarification();
+    }
+
+    private isBackchannel(text: string, acceptsShortReply = this.askPending): boolean {
+        return isFillerOnly(text) && (!acceptsShortReply || !/^yes[.!?]*$/i.test(text.trim()));
     }
 
     clearClarification(): void {
@@ -577,8 +639,7 @@ export class ResponseOrchestrator<Timer> {
 
     private isFillerTurn(response: TextResponse): boolean {
         const bubble = this.answerTurn?.responseId === response.id ? this.answerTurn.bubble : undefined;
-        if (!bubble || this.askPending) return false;
-        return isFillerOnly(joinText(bubble.base, bubble.live));
+        return Boolean(bubble && this.isBackchannel(joinText(bubble.base, bubble.live), this.answerTurn?.acceptsShortReply));
     }
 
     private noteCutOff(): void {
@@ -625,7 +686,9 @@ export class ResponseOrchestrator<Timer> {
         if (current?.source !== 'writer' || current.completedAt !== undefined || current.interrupted) return;
         if (this.askPending || !this.ports.answerWriter) return;
         const clean = text.replace(/\s+/g, ' ').trim();
-        if (!clean || isFillerOnly(clean) || clean.split(' ').length < INTERRUPT_MIN_WORDS) return;
+        if (!clean || isFillerOnly(clean)) return;
+        const words = clean.replace(FILLER_PHRASE, ' ').match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu);
+        if ((words?.length ?? 0) < INTERRUPT_MIN_WORDS) return;
         current.interrupted = true;
         this.setSpeaking(current, false);
         this.ports.answerWriter.cancel('interviewer_interrupted');
@@ -714,7 +777,7 @@ export class ResponseOrchestrator<Timer> {
         for (const event of events) {
             if (event.type === 'kind') {
                 response.kind = event.kind;
-                if (event.kind === 'wait' && this.current) this.setSpeaking(this.current, false);
+                if (event.kind === 'wait') this.settleFiller();
             } else {
                 response.text += event.text;
                 response.lastTextAt = this.ports.clock.now();
@@ -724,17 +787,24 @@ export class ResponseOrchestrator<Timer> {
         if (response.suppressed) return;
         if (response.generationId === undefined && this.isFillerTurn(response)) {
             response.suppressed = true;
+            this.settleFiller();
             return;
         }
         if (response.kind === 'ask' && response.text.trim()) {
+            if (!response.previous && this.current) {
+                response.previous = this.current;
+                response.previousWasOutdated = this.current.outdated;
+            }
             this.showAsk(response.id, response.text.trimStart(), undefined, true);
             return;
         }
         if (response.kind !== 'answer') return;
         if (response.generationId === undefined) {
             this.askPending = false;
+            this.realtimeAsk = undefined;
             this.clearClarification();
-            this.clearProvisional();
+            response.previous = this.current;
+            response.previousWasOutdated = this.current?.outdated;
             response.updated = this.supersedeForNewTurn(true);
             response.generationId = nextTextGeneration--;
             this.current = { generationId: response.generationId, source: 'text', outdated: false, speaking: false };
@@ -744,74 +814,139 @@ export class ResponseOrchestrator<Timer> {
                 if (turn.bubble) {
                     turn.bubble.generationId = response.generationId;
                     this.emitQuestion(turn.bubble);
-                } else {
-                    const generationId = response.generationId;
-                    const provisional = {
-                        generationId,
-                        responseId: response.id,
-                        timer: this.ports.clock.setTimeout(() => {
-                            if (this.provisional === provisional) this.provisional = undefined;
-                        }, PROVISIONAL_MS),
-                    };
-                    this.provisional = provisional;
                 }
             }
         }
         this.showText(response, false);
     }
 
-    private noteProviderTranscript(text: string, final: boolean): boolean | undefined {
+    private startSpeechTurn(at: number, itemId?: string): void {
+        const previous = this.speechTurns.at(-1);
+        if (itemId && previous?.itemId === itemId) return;
+        if (previous && previous.stoppedAt === undefined) previous.stoppedAt = at;
+        this.closeBubble(previous?.bubble);
+        this.speechTurns.push({ itemId, startedAt: at });
+        if (this.speechTurns.length > 16) this.speechTurns.shift();
+    }
+
+    private findSpeechTurn(itemId?: string): SpeechTurn | undefined {
+        return itemId ? this.speechTurns.findLast(turn => turn.itemId === itemId) : this.speechTurns.at(-1);
+    }
+
+    private noteProviderTranscript(text: string, final: boolean, itemId?: string): OrchestratorDisposition | undefined {
         const clean = text.replace(/\s+/g, ' ').trim();
         if (!clean) return;
+        if (itemId) {
+            const speech = this.findSpeechTurn(itemId);
+            if (!speech) return;
+            const answer = speech.answer;
+            if (answer && final && this.retractLateFiller(answer, clean)) return { kind: 'interviewer_already_recorded' };
+            const open = speech === this.speechTurns.at(-1) && !answer && !final;
+            let bubble = answer?.bubble ?? speech.bubble;
+            if (!bubble) {
+                bubble = this.createBubble(clean, 'provider', open, answer?.generationId, !final, false);
+                speech.bubble = bubble;
+                if (answer) answer.bubble = bubble;
+            } else {
+                bubble.transcriptFinal = final;
+                bubble.base = final ? clean : '';
+                bubble.live = final ? '' : clean;
+                bubble.open = open;
+                bubble.source = 'provider';
+                this.emitQuestion(bubble);
+            }
+            if (answer && final) return this.confirmProviderTranscript(answer, bubble);
+            return;
+        }
         const open = this.question?.open ? this.question : undefined;
         if (open) {
-            if (final) { open.base = joinText(open.base, clean); open.live = ''; }
-            else open.live = clean;
+            if (final) {
+                open.base = joinText(open.base, clean);
+                open.live = '';
+                open.transcriptFinal = true;
+                if (this.isBackchannel(open.base)) this.discardQuestion(open);
+            } else open.live = clean;
             this.emitQuestion(open);
             return;
         }
         // A provider that transcribes after speech end (OpenAI Whisper) can
         // deliver the question after its answer started: put it above that answer.
         const turn = this.answerTurn;
-        if (final && turn && !turn.superseded && turn.bubble?.source !== 'provider') {
-            if (this.provisional?.generationId !== undefined && this.provisional.generationId === turn.generationId) {
-                if (!this.askPending && isFillerOnly(clean)) {
-                    this.retractProvisional();
-                    return true;
-                }
-                this.clearProvisional();
-            }
+        if (final && turn && !turn.superseded && (turn.bubble?.source !== 'provider' || !turn.bubble.transcriptFinal)) {
+            if (this.retractLateFiller(turn, clean)) return { kind: 'interviewer_already_recorded' };
             if (turn.bubble) {
                 turn.bubble.base = clean;
                 turn.bubble.live = '';
                 turn.bubble.source = 'provider';
+                turn.bubble.transcriptFinal = true;
                 this.emitQuestion(turn.bubble);
             } else {
                 turn.bubble = this.createBubble(clean, 'provider', false, turn.generationId);
             }
-            return turn.bubble.sttRecorded;
+            return this.confirmProviderTranscript(turn, turn.bubble);
         }
         this.sttPending = undefined;
         this.createBubble(clean, 'provider', true, undefined, !final);
     }
 
     /** `open` bubbles keep growing until their answer starts. */
-    private createBubble(text: string, source: QuestionBubble['source'], open: boolean, generationId?: number, partial = false): QuestionBubble {
+    private createBubble(text: string, source: QuestionBubble['source'], open: boolean, generationId?: number, partial = false, makeCurrent = true): QuestionBubble {
         const bubble: QuestionBubble = {
             id: `${this.questionNamespace}:q${++this.questionSequence}`,
             base: partial ? '' : text,
             live: partial ? text : '',
             open,
             source,
+            transcriptFinal: !partial,
             ...(generationId === undefined ? {} : { generationId }),
         };
-        this.question = bubble;
+        if (makeCurrent) this.question = bubble;
         this.emitQuestion(bubble);
         return bubble;
     }
 
-    private createSttBubble(text: string, at: number, generationId?: number): QuestionBubble {
-        const bubble = this.createBubble(text, 'stt', false, generationId);
+    private attachSttToTurn(turn: AnswerTurn, text: string, at: number): void {
+        if (this.retractLateFiller(turn, text)) return;
+        turn.bubble = this.createSttBubble(text, at, turn.generationId, false);
+        const deferredAnswer = this.confirmTranscript(turn);
+        if (deferredAnswer !== undefined) this.ports.recordDeferredAnswer?.(deferredAnswer);
+    }
+
+    private retractLateFiller(turn: AnswerTurn, text: string): boolean {
+        const response = turn.response;
+        if (!response || !this.isBackchannel(text, turn.acceptsShortReply)) return false;
+        response.suppressed = true;
+        turn.pendingAnswer = undefined;
+        if (turn.bubble) this.discardQuestion(turn.bubble);
+        this.retractTextAnswer(response, 'filler_turn');
+        if (response.previous) response.previous.cutOff = false;
+        if (turn === this.answerTurn && !turn.superseded) this.settleFiller();
+        return true;
+    }
+
+    private confirmProviderTranscript(turn: AnswerTurn, bubble: QuestionBubble): OrchestratorDisposition | undefined {
+        const deferredAnswer = this.confirmTranscript(turn);
+        if (bubble.sttRecorded || deferredAnswer !== undefined) {
+            return { kind: bubble.sttRecorded ? 'interviewer_already_recorded' : 'interviewer_confirmed', deferredAnswer };
+        }
+    }
+
+    private confirmTranscript(turn: AnswerTurn): string | undefined {
+        turn.awaitsTranscript = false;
+        const text = turn.pendingAnswer;
+        turn.pendingAnswer = undefined;
+        return text;
+    }
+
+    private settleFiller(): void {
+        if (this.realtimeAsk) this.realtimeAsk.listening = false;
+        if (!this.current) return;
+        this.current.cutOff = false;
+        this.setSpeaking(this.current, false);
+    }
+
+    private createSttBubble(text: string, at: number, generationId?: number, makeCurrent = true): QuestionBubble {
+        const bubble = this.createBubble(text, 'stt', false, generationId, false, makeCurrent);
         if (bubble.shown && this.ports.recordSttQuestion) {
             bubble.sttRecorded = true;
             this.ports.recordSttQuestion(text, at);
@@ -820,21 +955,38 @@ export class ResponseOrchestrator<Timer> {
     }
 
     private startAnswerTurn(responseId: string): void {
-        let bubble = this.question?.open ? this.question : undefined;
-        if (bubble) this.closeQuestion();
-        else {
-            const pending = this.sttPending;
+        const speech = this.speechTurns.at(-1);
+        const unassignedSpeech = speech && !speech.answer ? speech : undefined;
+        const openQuestion = this.question?.open ? this.question : undefined;
+        let bubble = unassignedSpeech?.bubble ?? openQuestion;
+        if (openQuestion) this.closeQuestion();
+        this.closeBubble(bubble);
+        if (!bubble) {
+            const pending = unassignedSpeech?.stt ?? this.sttPending;
             if (pending && this.ports.clock.now() - pending.at <= STT_QUESTION_MAX_AGE_MS) {
                 bubble = this.createSttBubble(pending.text, pending.at);
             }
         }
         this.sttPending = undefined;
-        this.answerTurn = { responseId, superseded: false, ...(bubble ? { bubble } : {}) };
+        this.answerTurn = {
+            responseId, superseded: false, acceptsShortReply: this.askPending,
+            awaitsTranscript: Boolean(unassignedSpeech && !bubble?.transcriptFinal),
+            ...(bubble ? { bubble } : {}),
+        };
+        if (unassignedSpeech) unassignedSpeech.answer = this.answerTurn;
     }
 
     private closeQuestion(): void {
-        const bubble = this.question;
+        this.closeBubble(this.question);
         this.question = undefined;
+    }
+
+    private closeSpeechQuestions(): void {
+        for (const turn of this.speechTurns) this.closeBubble(turn.bubble);
+        this.speechTurns.length = 0;
+    }
+
+    private closeBubble(bubble?: QuestionBubble): void {
         if (!bubble?.open) return;
         bubble.open = false;
         bubble.base = joinText(bubble.base, bubble.live);
@@ -842,23 +994,13 @@ export class ResponseOrchestrator<Timer> {
         this.emitQuestion(bubble);
     }
 
-    private clearProvisional(): void {
-        if (!this.provisional) return;
-        this.ports.clock.clearTimeout(this.provisional.timer);
-        this.provisional = undefined;
-    }
-
-    private retractProvisional(): void {
-        const provisional = this.provisional;
-        if (!provisional) return;
-        this.clearProvisional();
-        if (this.response?.id === provisional.responseId) {
-            this.response.suppressed = true;
-        }
-        if (this.current?.generationId === provisional.generationId) {
-            this.current = undefined;
-        }
-        this.ports.overlay.discard?.(provisional.generationId, 'filler_turn');
+    private discardQuestion(bubble: QuestionBubble): void {
+        if (!bubble.shown) return;
+        this.ports.overlay.showQuestion?.({ questionId: bubble.id, text: '', done: true, discard: true });
+        bubble.shown = false;
+        // The overlay closes a discarded id for good. If the interviewer keeps
+        // talking in this turn ("Okay. So how would you…"), show it as a new row.
+        bubble.id = `${this.questionNamespace}:q${++this.questionSequence}`;
     }
 
     private emitQuestion(bubble: QuestionBubble): void {
@@ -867,7 +1009,7 @@ export class ResponseOrchestrator<Timer> {
         // D15: filler-only speech ("Mm-hmm.", "Okay.") stays out of the chat. A
         // bubble appears once its text is more than filler ("Okay, short one…"),
         // and a short reply to a waiting Ask ("Yes.") is still shown.
-        if (!bubble.shown && !this.askPending && isFillerOnly(text)) return;
+        if (!bubble.shown && (this.realtimeAsk ? this.isBackchannel(text) : !this.askPending && isFillerOnly(text))) return;
         bubble.shown = true;
         this.ports.overlay.showQuestion?.({
             questionId: bubble.id, text, done: !bubble.open,
@@ -875,15 +1017,44 @@ export class ResponseOrchestrator<Timer> {
         });
     }
 
+    private retractTextAnswer(response: TextResponse, reason: string): void {
+        const generationId = response.generationId;
+        if (generationId === undefined) return;
+        this.ports.overlay.discard?.(generationId, reason);
+        if (this.current?.generationId === generationId) this.current = response.previous;
+        this.restorePreviousAnswer(response);
+        response.generationId = undefined;
+    }
+
+    private restorePreviousAnswer(response: TextResponse): void {
+        const previous = response.previous;
+        if (previous?.outdated && !response.previousWasOutdated) {
+            previous.outdated = false;
+            this.ports.overlay.setOutdated(previous.generationId, false);
+        }
+    }
+
     private closeTextResponse(completed = false, cancelled = false, finalText?: string): OrchestratorDisposition {
         const response = this.response;
         this.response = undefined;
         if (response?.suppressed) return { kind: 'suppressed' };
         if (completed && finalText !== undefined && response) {
-            if (response.kind === undefined) {
-                this.readTextEvents(response, [...response.parser.push(finalText), ...response.parser.finish()]);
-            }
-            if (response.kind === 'answer') {
+            const parser = createResponseParser();
+            const events = [...parser.push(finalText), ...parser.finish()];
+            const kind = events.find(event => event.type === 'kind')?.kind;
+            if (kind !== response.kind) {
+                if (response.kind === 'ask') {
+                    this.ports.overlay.discardAsk?.(response.id);
+                    if (this.current === response.previous) this.restorePreviousAnswer(response);
+                }
+                this.retractTextAnswer(response, 'final_revision');
+                response.kind = undefined;
+                response.text = '';
+                if (response.cleanup) response.cleanup = { offset: 0, prefix: '' };
+                this.readTextEvents(response, events);
+            } else if (kind === 'ask') {
+                response.text = events.flatMap(event => event.type === 'text' ? [event.text] : []).join('');
+            } else if (kind === 'answer') {
                 const cleanup = response.cleanup;
                 if (cleanup && !finalText.startsWith(response.text.slice(0, cleanup.offset))) {
                     // Sonic can supply an authoritative revision of its speculative transcript.
@@ -892,6 +1063,7 @@ export class ResponseOrchestrator<Timer> {
                 response.text = finalText;
             }
         }
+        if (response?.suppressed) return { kind: 'suppressed' };
         if (response?.kind === 'ask' && response.text.trim()) {
             const clarification = response.text.trim();
             if (completed) {
@@ -906,10 +1078,13 @@ export class ResponseOrchestrator<Timer> {
             this.current.completedAt = this.ports.clock.now();
         }
         const text = this.showText(response, true);
-        if (cancelled) return { kind: 'suppressed' };
-        return completed && response.kind === 'answer' && !response.suppressed
-            ? { kind: 'answer', text }
-            : { kind: 'suppressed' };
+        if (cancelled || !completed || response.kind !== 'answer') return { kind: 'suppressed' };
+        const turn = this.answerTurn;
+        if (turn?.responseId === response.id && turn.awaitsTranscript) {
+            turn.pendingAnswer = text;
+            return { kind: 'suppressed' };
+        }
+        return { kind: 'answer', text };
     }
 
     private showText(response: TextResponse, done: boolean): string {

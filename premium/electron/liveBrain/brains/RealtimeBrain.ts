@@ -36,6 +36,7 @@ interface WireEvent {
     session?: { output_modalities?: string[] };
     error?: WireError;
     response_id?: string;
+    item_id?: string;
     delta?: string;
     transcript?: string;
     response?: { id?: string; status?: string; status_details?: { error?: WireError } };
@@ -81,6 +82,7 @@ export class RealtimeBrain implements LiveBrain {
     private speaking = false;
     private failures = 0;
     private sequence = 0;
+    private readonly inputTranscripts = new Map<string, string>();
     private response?: { providerId: string; visibleId?: string };
     private readonly finishedResponses = new Set<string>();
     private audio = Buffer.alloc(0);
@@ -252,19 +254,31 @@ export class RealtimeBrain implements LiveBrain {
             return;
         }
         const at = Date.now();
+        const itemId = typeof event.item_id === 'string' && event.item_id
+            ? `${this.context?.responseNamespace ?? this.context?.sessionId}:${event.item_id}` : undefined;
+        const item = itemId ? { itemId } : {};
         switch (event.type) {
             case 'input_audio_buffer.speech_started':
                 this.speaking = true;
-                this.emit({ type: 'interviewer_speech_started', at });
+                this.emit({ type: 'interviewer_speech_started', at, ...item });
                 this.cancelResponse();
                 break;
             case 'input_audio_buffer.speech_stopped':
                 this.speaking = false;
-                this.emit({ type: 'interviewer_speech_stopped', at });
+                this.emit({ type: 'interviewer_speech_stopped', at, ...item });
                 break;
+            case 'conversation.item.input_audio_transcription.delta': {
+                if (!itemId || typeof event.delta !== 'string' || !event.delta) break;
+                const text = ((this.inputTranscripts.get(itemId) ?? '') + event.delta).slice(0, 16_000);
+                this.inputTranscripts.set(itemId, text);
+                if (this.inputTranscripts.size > 16) this.inputTranscripts.delete(this.inputTranscripts.keys().next().value!);
+                this.emit({ type: 'interviewer_transcript', text, final: false, at, itemId });
+                break;
+            }
             case 'conversation.item.input_audio_transcription.completed':
+                if (itemId) this.inputTranscripts.delete(itemId);
                 if (typeof event.transcript === 'string' && event.transcript.trim()) {
-                    this.emit({ type: 'interviewer_transcript', text: event.transcript.trim(), final: true, at });
+                    this.emit({ type: 'interviewer_transcript', text: event.transcript.trim(), final: true, at, ...item });
                 }
                 break;
             case 'response.created':
@@ -273,6 +287,7 @@ export class RealtimeBrain implements LiveBrain {
                     this.cancelResponse();
                     this.response = { providerId: event.response.id };
                     if (this.speaking) this.cancelResponse();
+                    else this.emit({ type: 'provider_response_progress' });
                 }
                 break;
             case 'response.output_audio_transcript.delta':

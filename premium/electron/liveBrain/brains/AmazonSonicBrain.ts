@@ -1,3 +1,4 @@
+import { CLARIFICATION_ASSUMPTION } from '../instructions';
 import { randomUUID } from 'node:crypto';
 import {
     BedrockRuntimeClient, InvokeModelWithBidirectionalStreamCommand,
@@ -181,6 +182,11 @@ export class AmazonSonicBrain implements LiveBrain {
     /** The supervisor retains labelled candidate turns and seeds a fresh session. */
     addCandidateText(_text: string, _at: number): void {}
 
+    requestClarificationAnswer(): void {
+        if (!this.ready || this.currentResponse || [...this.blocks.values()].some(block => block.kind === 'user')) return;
+        this.sendText('USER', CLARIFICATION_ASSUMPTION, true);
+    }
+
     sendTestPrompt(): void {
         if (this.ready) this.sendText('USER', 'Reply with OK.', true);
     }
@@ -321,6 +327,9 @@ export class AmazonSonicBrain implements LiveBrain {
             const id = String(event.completionStart.completionId ?? '');
             if (id) this.completions.set(id, { id, responseId: `${this.context?.responseNamespace ?? this.promptName}:${id}`,
                 started: false, cancelled: false, speculative: [], final: [] });
+        } else if (event.contentStart?.type === 'AUDIO' && event.contentStart.role === 'ASSISTANT'
+            && this.completions.get(String(event.contentStart.completionId))?.cancelled === false) {
+            this.emit({ type: 'provider_response_progress' });
         } else if (event.contentStart?.type === 'TEXT') {
             const { contentId, completionId, additionalModelFields, role } = event.contentStart;
             if (typeof contentId !== 'string' || typeof completionId !== 'string') return;
@@ -328,6 +337,7 @@ export class AmazonSonicBrain implements LiveBrain {
             const kind = role === 'USER' ? 'user' : stage === 'SPECULATIVE' ? 'speculative' : 'final';
             this.blocks.set(contentId, { completionId, kind, text: '' });
             if (kind === 'user') this.emit({ type: 'interviewer_speech_started', at: Date.now() });
+            else if (this.completions.get(completionId)?.cancelled === false) this.emit({ type: 'provider_response_progress' });
         } else if (event.textOutput) {
             const { contentId, content, completionId } = event.textOutput;
             if (typeof content !== 'string') return;
@@ -404,7 +414,7 @@ export class AmazonSonicBrain implements LiveBrain {
     }
 
     private interrupt(id: string, generation: number): void {
-        const completion = this.completions.get(id) ?? this.currentResponse;
+        const completion = id ? this.completions.get(id) : this.currentResponse;
         if (!completion || completion.cancelled) return;
         completion.cancelled = true;
         this.emit({ type: 'interviewer_speech_started', at: Date.now() });

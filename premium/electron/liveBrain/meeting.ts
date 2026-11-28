@@ -89,6 +89,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
     let lastWriterStopAt: number | undefined;
     let pendingQuestion: { text: string; at: number } | undefined;
     let turnAnswered = false;
+    let systemTranscriptCaptureAt: number | undefined;
+    const unclaimedCaptureStops: number[] = [];
     let pipelineDedupe: { normalized: string; expiresAt: number } | undefined;
     const normalizeQuestion = (text: string): string => text.replace(/\s+/g, ' ').trim().toLowerCase();
     const notePendingQuestion = (text: string, at: number) => {
@@ -244,6 +246,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         }),
         requestClarificationAnswer: () => supervisor.current?.requestClarificationAnswer?.(),
         recordSttQuestion: (text, at) => supervisor.recordInterviewerTurn(text, at),
+        recordDeferredAnswer: text => supervisor.recordAssistantTurn(text),
     });
     const finishTiming = (status: 'completed' | 'cancelled' | 'failed') => {
         if (!timing) return;
@@ -315,8 +318,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         },
         onRollover: data => diagnostic('rollover', data),
         onLeaseDetached: (lease, reason, role) => {
-            if (role !== 'active' || reason === 'rollover') return;
-            if (lease.brain.id === 'deepgram-flux') {
+            if (role !== 'active') return;
+            systemTranscriptCaptureAt = undefined;
+            unclaimedCaptureStops.length = 0;
+            if (lease.brain.id === 'deepgram-flux' && reason !== 'rollover') {
                 answerWriter?.cancelDraft(reason);
                 answerWriter?.cancel('answer_corrected');
                 writerRun = undefined;
@@ -324,7 +329,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 supervisor.setExternalWriting(false);
                 orchestrator.endProviderTurn();
             } else {
-                orchestrator.closeOpenQuestion();
+                orchestrator.resetTurnState();
             }
         },
         onEvent(event, id, model) {
@@ -371,6 +376,10 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                     if (id === 'deepgram-flux') {
                         answerWriter?.cancelDraft('reconnecting');
                         orchestrator.endProviderTurn();
+                    } else if (id !== 'pipeline') {
+                        systemTranscriptCaptureAt = undefined;
+                        unclaimedCaptureStops.length = 0;
+                        orchestrator.resetTurnState();
                     }
                     showStatus('Reconnecting');
                 }
@@ -424,6 +433,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 || (previous.knowledgeEnabled && !grounding.knowledgeEnabled)
             ))) {
                 if (supervisor.current?.id === 'deepgram-flux' || supervisor.current?.id === 'pipeline') return;
+                systemTranscriptCaptureAt = undefined;
+                unclaimedCaptureStops.length = 0;
                 orchestrator.resetTurnState();
                 showStatus('Context changed — reconnecting');
                 supervisor.refreshContext();
@@ -451,6 +462,9 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         addCandidateText(text, at) { supervisor.addCandidateText(text, at); },
         noteSpeechStop(at) {
             if (debug) speechStoppedAt = at;
+            orchestrator.noteCapturedSpeechStop(at);
+            unclaimedCaptureStops.push(at);
+            if (unclaimedCaptureStops.length > 2) unclaimedCaptureStops.shift();
             supervisor.noteSpeechStop(at);
         },
         isPipeline() { return supervisor.current?.id === 'pipeline'; },
@@ -471,9 +485,23 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 return false;
             }
             // D14: the existing STT is the backup text for the interviewer bubble.
-            else if (brain && final) {
-                orchestrator.noteSttTranscript(text, at);
-                notePendingQuestion(text, at);
+            else if (brain) {
+                if (!final) systemTranscriptCaptureAt ??= at;
+                else {
+                    const capturedAt = systemTranscriptCaptureAt;
+                    systemTranscriptCaptureAt = undefined;
+                    if (capturedAt !== undefined) {
+                        const stop = unclaimedCaptureStops.findIndex(end => end >= capturedAt);
+                        orchestrator.noteSttTranscript(text, at, stop >= 0 ? unclaimedCaptureStops[stop] : capturedAt);
+                        if (stop >= 0) unclaimedCaptureStops.splice(0, stop + 1);
+                    } else if (unclaimedCaptureStops.length < 2) {
+                        orchestrator.noteSttTranscript(text, at, unclaimedCaptureStops.shift());
+                    } else {
+                        // A final-only backend supplied no timestamp that identifies which capture it transcribed.
+                        unclaimedCaptureStops.length = 0;
+                    }
+                    notePendingQuestion(text, at);
+                }
             }
             return false;
         },

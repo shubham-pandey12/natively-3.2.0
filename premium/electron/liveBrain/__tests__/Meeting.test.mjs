@@ -1667,3 +1667,24 @@ test('Flux: an interrupting follow-up is a follow-up, not a correction of the un
     assert.match(context, /A1: \(no answer was given; it may have been interrupted\)/);
     assert.match(context, /Never repeat or re-answer an earlier question/);
 });
+
+test('An adopted Flux draft returning the no-action sentinel stays silent', async t => {
+    const h = fluxEngineRig(t);
+    const release = Promise.withResolvers();
+    t.after(() => release.resolve());
+    h.queuedStreams.push(async function* () {
+        await release.promise;
+        yield '[[NO_ACTION]]';
+    });
+    const question = 'The interviewer is still thinking.';
+    const turnKey = 'filler-turn';
+    h.flux.emit({ type: 'eager_end_of_turn', question, turnKey, at: 10 });
+    await untilCondition(() => h.streamCalls.length === 1);
+    h.flux.emit({ type: 'decision', action: 'answer', decisionId: 'confirmed', question, turnKey, at: 20 });
+    release.resolve();
+    await untilCondition(() => h.engine.whatToAnswerCancellationToken === null);
+    assert.equal(h.streamCalls.length, 1);
+    assert.equal(h.tokens.length, 0);
+    assert.equal(h.answers.length, 0);
+    assert.equal(h.sessionAssistantWrites.length, 0);
+});

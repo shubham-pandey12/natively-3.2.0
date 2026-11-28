@@ -38,6 +38,8 @@ export interface DeepgramVoiceAgentOptions {
     model?: string;
     endpoint?: string;
     setupTimeoutMs?: number;
+    /** Test hook: how long after the next user turn the post-barge-in gate stays closed. */
+    agentBoundaryTimeoutMs?: number;
     backoffMs?: readonly number[];
     deepgramThink?: DeepgramThinkConfig;
 }
@@ -190,6 +192,10 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
     private awaitingAnswer = false;
     private injectedText?: string;
     private interrupted = false;
+    private awaitingAgentBoundary = false;
+    // AgentThinking is not guaranteed every turn, so the post-barge-in gate also
+    // opens when the agent starts speaking, or shortly after the next user turn.
+    private boundaryTimer?: ReturnType<typeof setTimeout>;
     private audio = Buffer.alloc(0);
     private audioThrough = 0;
     private lastBinarySentAt = 0;
@@ -270,6 +276,8 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
 
     cancelResponse(_reason: string): void {
         this.interrupted ||= this.awaitingAnswer;
+        this.awaitingAgentBoundary ||= this.awaitingAnswer;
+        this.clearBoundaryTimer();
         this.awaitingAnswer = false;
         this.finishResponse('cancelled');
     }
@@ -467,6 +475,18 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
                 if (this.context !== context || this.socket !== socket) return;
                 this.cancelResponse('barge_in');
                 break;
+            case 'AgentThinking':
+                if (this.awaitingAnswer && !this.speaking) {
+                    this.openAgentBoundary();
+                    this.emit({ type: 'provider_response_progress' });
+                }
+                break;
+            case 'AgentStartedSpeaking':
+                if (this.awaitingAnswer && !this.speaking) {
+                    this.openAgentBoundary();
+                    this.emit({ type: 'provider_response_progress' });
+                }
+                break;
             case 'ConversationText': {
                 const text = typeof event.content === 'string' ? event.content.trim() : '';
                 if (!text) break;
@@ -479,10 +499,17 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
                     }
                     this.speaking = false;
                     this.awaitingAnswer = true;
+                    if (this.awaitingAgentBoundary) {
+                        this.clearBoundaryTimer();
+                        this.boundaryTimer = setTimeout(() => {
+                            this.boundaryTimer = undefined;
+                            this.awaitingAgentBoundary = false;
+                        }, this.options.agentBoundaryTimeoutMs ?? 2_000);
+                    }
                     this.emit({ type: 'interviewer_transcript', text, final: true, at });
                     if (this.context !== context || this.socket !== socket) return;
                     this.emit({ type: 'interviewer_speech_stopped', at });
-                } else if (event.role === 'assistant' && this.awaitingAnswer && !this.speaking) {
+                } else if (event.role === 'assistant' && this.awaitingAnswer && !this.speaking && !this.awaitingAgentBoundary) {
                     this.failures = 0;
                     const continuing = this.activeResponseId !== undefined;
                     if (!continuing) {
@@ -498,7 +525,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
                 break;
             }
             case 'AgentAudioDone':
-                if (!this.awaitingAnswer || this.speaking || (this.interrupted && !this.activeResponseId)) break;
+                if (!this.awaitingAnswer || this.speaking || this.awaitingAgentBoundary || (this.interrupted && !this.activeResponseId)) break;
                 this.awaitingAnswer = false;
                 this.interrupted = false;
                 this.injectedText = undefined;
@@ -513,6 +540,8 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         this.ready = true;
         this.readyAt = Date.now();
         this.interrupted = false;
+        this.awaitingAgentBoundary = false;
+        this.clearBoundaryTimer();
         this.injectedText = undefined;
         this.audioThrough = Date.now();
         this.lastBinarySentAt = Date.now();
@@ -609,6 +638,16 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
         }
     }
 
+    private openAgentBoundary(): void {
+        this.awaitingAgentBoundary = false;
+        this.clearBoundaryTimer();
+    }
+
+    private clearBoundaryTimer(): void {
+        if (this.boundaryTimer !== undefined) clearTimeout(this.boundaryTimer);
+        this.boundaryTimer = undefined;
+    }
+
     private clearSetupTimer(): void {
         if (this.setupTimer !== undefined) clearTimeout(this.setupTimer);
         this.setupTimer = undefined;
@@ -616,6 +655,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
 
     private closeSocket(): void {
         this.clearSetupTimer();
+        this.clearBoundaryTimer();
         if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
         if (this.audioTimer !== undefined) clearInterval(this.audioTimer);
         if (this.keepAliveTimer !== undefined) clearInterval(this.keepAliveTimer);

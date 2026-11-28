@@ -243,3 +243,35 @@ test('speculative preview streams one delta and differing FINAL overrides respon
     t.output.end();
     await t.inputDone();
 });
+
+test('Sonic ignores a late interruption for a completed ID', async t => {
+    const wire = rig();
+    const brain = new AmazonSonicBrain({ sonicRegion: 'eu-north-1', transport: wire.transport });
+    t.after(async () => { await brain.stop(); wire.output.end(); await wire.inputDone(); });
+    const seen = [];
+    brain.onEvent(event => seen.push(event));
+    await brain.start(context);
+    for (const id of ['old', 'new']) {
+        wire.emit('completionStart', { completionId: id });
+        startText(wire, id, id, 'ASSISTANT', 'SPECULATIVE');
+        text(wire, id, id, 'Answer text.');
+        if (id === 'new') wire.emit('contentEnd', { completionId: 'old', contentId: 'old', stopReason: 'INTERRUPTED' });
+        wire.emit('completionEnd', { completionId: id, stopReason: 'END_TURN' });
+    }
+    await delay(0);
+    assert.deepEqual(seen.filter(event => event.type === 'response_done').map(event => event.status), ['completed', 'completed']);
+});
+
+test('Sonic sends the clarification assumption as interactive user text', async t => {
+    const wire = rig();
+    const brain = new AmazonSonicBrain({ sonicRegion: 'eu-north-1', transport: wire.transport });
+    t.after(async () => { await brain.stop(); wire.output.end(); await wire.inputDone(); });
+    await brain.start(context);
+    brain.requestClarificationAnswer?.();
+    await delay(0);
+    const interactive = wire.sent.find(event => event.contentStart?.type === 'TEXT' && event.contentStart.role === 'USER' && event.contentStart.interactive);
+    assert.ok(interactive);
+    const name = interactive.contentStart.contentName;
+    assert.ok(wire.sent.some(event => event.textInput?.contentName === name));
+    assert.ok(wire.sent.some(event => event.contentEnd?.contentName === name));
+});

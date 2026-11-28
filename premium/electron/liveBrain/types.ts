@@ -22,9 +22,10 @@ export interface ConversationTurn {
 
 export type LiveBrainEvent =
     | { type: 'status'; status: 'connecting' | 'ready' | 'degraded' | 'closed'; detail?: string }
-    | { type: 'interviewer_speech_started'; at: number }
-    | { type: 'interviewer_speech_stopped'; at: number }
-    | { type: 'interviewer_transcript'; text: string; final: boolean; at: number }
+    | { type: 'interviewer_speech_started'; at: number; itemId?: string }
+    | { type: 'interviewer_speech_stopped'; at: number; itemId?: string }
+    | { type: 'interviewer_transcript'; text: string; final: boolean; at: number; itemId?: string }
+    | { type: 'interviewer_barge_in_candidate'; text: string; at: number }
     | { type: 'eager_end_of_turn'; turnKey: string; question: string; at: number }
     | { type: 'turn_resumed'; turnKey: string; at: number }
     | {
@@ -37,6 +38,7 @@ export type LiveBrainEvent =
         kind?: 'new' | 'follow_up' | 'correction';
         at: number;
     }
+    | { type: 'provider_response_progress' }
     | { type: 'response_started'; responseId: string; at: number }
     | { type: 'response_delta'; responseId: string; text: string }
     | { type: 'response_done'; responseId: string; status: 'completed' | 'cancelled' | 'failed'; finalText?: string; cancelReason?: 'interviewer_barge_in' | 'manual' | 'rollover' | 'context_revoked' }

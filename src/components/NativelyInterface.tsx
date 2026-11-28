@@ -8061,9 +8061,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           if (closedLiveBrainQuestionIdsRef.current.has(liveBrainQuestion.questionId)) return;
           if (liveBrainQuestion.generationId !== undefined
             && closedLiveBrainGenIdsRef.current.has(liveBrainQuestion.generationId)) return;
+          if (liveBrainQuestion.discard) {
+            activeLiveBrainQuestionIdsRef.current.delete(liveBrainQuestion.questionId);
+            closedLiveBrainQuestionIdsRef.current.add(liveBrainQuestion.questionId);
+            setMessages((prev) => placeLiveBrainQuestion(prev, liveBrainQuestion));
+            return;
+          }
           activeLiveBrainQuestionIdsRef.current.add(liveBrainQuestion.questionId);
           setMessages((prev) => placeLiveBrainQuestion(prev, liveBrainQuestion));
           pinAnswerPanel();
+          return;
+        }
+        if (askId && discard) {
+          closedLiveBrainAskIdsRef.current.add(askId);
+          activeLiveBrainAskIdsRef.current.delete(askId);
+          setMessages((prev) => prev.filter((message) => message.id !== `live-brain-ask-${askId}`));
           return;
         }
         if (askId && clarification) {

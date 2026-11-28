@@ -161,6 +161,7 @@ test('keeps multiple text chunks in one answer and rejects late output after a c
     sendJson(socket, { type: 'ConversationText', role: 'assistant', content: 'Late output.' });
     sendJson(socket, { type: 'ConversationText', role: 'user', content: 'Actually, use MongoDB.' });
     sendJson(socket, { type: 'AgentAudioDone' }); // Late completion for the interrupted answer.
+    sendJson(socket, { type: 'AgentThinking' });
     sendJson(socket, { type: 'ConversationText', role: 'assistant', content: 'Start with a MongoDB sharding strategy.' });
     sendJson(socket, { type: 'AgentAudioDone' });
     await until(() => events.filter(event => event.type === 'response_done').length === 2);
@@ -554,3 +555,53 @@ test('BYO rejects private/localhost URL and unknown provider before connect with
         console.error = origError;
     }
 });
+
+test('Voice Agent ignores stale assistant text and audio done until the new turn boundary', async t => {
+    const { brain, events, connections } = await createRig(t);
+    await brain.start(makeContext());
+    const { socket } = connections[0];
+    const send = (type, fields = {}) => sendJson(socket, { type, ...fields });
+    const say = (role, content) => send('ConversationText', { role, content });
+    say('user', 'First question?');
+    say('assistant', 'First answer.');
+    await until(() => events.some(event => event.type === 'response_delta'));
+    send('UserStartedSpeaking');
+    say('user', 'Second question?');
+    say('assistant', 'Stale text.');
+    send('AgentAudioDone');
+    send('AgentThinking');
+    say('assistant', 'Second answer.');
+    send('AgentAudioDone');
+    await until(() => events.filter(event => event.type === 'response_done').length === 2);
+    assert.deepEqual(events.filter(event => event.type === 'response_delta').map(event => event.text), ['First answer.', 'Second answer.']);
+    assert.deepEqual(events.filter(event => event.type === 'response_done').map(event => event.status), ['cancelled', 'completed']);
+});
+
+// AgentThinking is not guaranteed every turn: the post-barge-in gate must not
+// mute every later answer when it never arrives.
+for (const [label, opener] of [['AgentStartedSpeaking', 'speaking'], ['the safety timeout', 'timeout']]) {
+    test(`Voice Agent reopens answers after a barge-in via ${label} without AgentThinking`, async t => {
+        const { brain, events, connections } = await createRig(t, { brainOptions: { agentBoundaryTimeoutMs: 50 } });
+        await brain.start(makeContext());
+        const { socket } = connections[0];
+        const send = (type, fields = {}) => sendJson(socket, { type, ...fields });
+        const say = (role, content) => send('ConversationText', { role, content });
+        say('user', 'First question?');
+        say('assistant', 'First answer.');
+        await until(() => events.some(event => event.type === 'response_delta'));
+        send('UserStartedSpeaking');
+        say('user', 'Second question?');
+        if (opener === 'speaking') send('AgentStartedSpeaking');
+        else await new Promise(resolve => setTimeout(resolve, 120));
+        say('assistant', 'Second answer.');
+        send('AgentAudioDone');
+        await until(() => events.filter(event => event.type === 'response_done').length === 2);
+        assert.deepEqual(events.filter(event => event.type === 'response_delta').map(event => event.text), ['First answer.', 'Second answer.']);
+        // A third turn after the gate opened still answers normally.
+        say('user', 'Third question?');
+        say('assistant', 'Third answer.');
+        send('AgentAudioDone');
+        await until(() => events.filter(event => event.type === 'response_done').length === 3);
+        assert.deepEqual(events.filter(event => event.type === 'response_done').map(event => event.status), ['cancelled', 'completed', 'completed']);
+    });
+}

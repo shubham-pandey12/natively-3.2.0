@@ -1158,3 +1158,25 @@ Windows validation: Electron build, premium typecheck, 224/224 Live Brain and se
 - Conversational answers (user decision after live testing): answers open by setting the scene in one line, tell what happened and what was done, and end with the result or lesson. Length now follows the question (2–3 sentences for quick answers, 5–7 for stories and incidents, 6–9 for architecture or detailed requests). Incidents must name the exact fix; vary openings; add one small specific detail. Examples rewritten as full stories. Rule-text budget raised to 6,500 characters.
 - Shared Natively prompts (user decision): `HUMAN_SPOKEN_ANSWER_CONTRACT` in `electron/llm/prompts.ts` gains a short simple Indian English language section, so Auto Answer, Deepgram Flux and the pipeline also use plain Indian English. It does not add the live-only background rule, openings and closings, or length rules.
 - No hardcoded answers (user decision after live testing showed the model reusing the example stories as the candidate's own): the live candidate prompt no longer contains example answers or sample phrases. It is instruction-only: stories must come from the candidate's background, answer shape and length are described, and new turn rules cover a repeated question (answer fresh), several questions in one turn (answer the first, then say you'll take the next), and interruptions (answer the newest question).
+
+### Interruption review fixes (2026-11-28)
+
+- Unit 1 — Hold Gemini handoff through the cancel-before-speech sequence, then resume normal rollover. Tag socket rollover cancellations so they do not mark the answer cut off. [Gemini Live API](https://ai.google.dev/gemini-api/docs/live)
+- Unit 2 — Ignore stale Sonic completion IDs. Classify authoritative final text again and retract a speculative row when the output kind changes. [Sonic output events](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-output-events.html)
+- Unit 3 — Associate OpenAI transcript revisions with the input item. Match fallback STT to captured speech when timing is available and skip ambiguous final-only associations. [OpenAI transcription event ordering](https://developers.openai.com/api/docs/guides/realtime-transcription)
+- Unit 4 — Restore the previous answer on late filler, defer notebook writes for answers awaiting their associated transcript, and clear speaking and cutoff state on filler.
+- Unit 5 — Start the clarification timer on a completed Ask. Keep it across filler, and request the Sonic assumption answer via interactive text. [Sonic cross-modal input](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-cross-modal.html)
+- Unit 6 — Gate Voice Agent output across barge-in on the next documented AgentThinking boundary. Managed and BYO still need live ordering traces. [Voice Agent message flow](https://developers.deepgram.com/docs/voice-agent-message-flow)
+- Unit 7 — Evaluate substantive words on each Flux Update independently of displaying a question. Remove a partial bubble revised to filler. An already-cancelled writer keeps any visible prefix. Restored writer cancellation and silent completion guards lost in the concurrent D20 change, and covered the adopted draft's no-action sentinel through the engine. The D20 experience prompt still applies.
+- Unit 8 — Settle the speaking flag and question state on lease transitions. Refresh the no-response watchdog on provider activity and retain silence fallback.
+- Unit 9 — Report only. Cancelled partials remain visible and stay out of the notebook. The retention policy is pending a decision.
+
+Windows validation passed the Electron build, Electron and premium type checks, 248 Live Brain tests, 203 Auto Answer tests, 11 focused overlay tests, and the whitespace check. Each implementation unit had a regression that failed before its fix.
+
+Requires physical macOS verification. Requires physical Windows verification. Check capture timing and STT attribution through overlapping turns, Gemini rollover order, both Voice Agent Think modes, and Sonic final transcripts and interactive clarification.
+
+### Interruption review follow-ups (2026-11-28)
+
+- Deepgram Voice Agent: the post-barge-in answer gate now also opens on `AgentStartedSpeaking` or 2 s after the next user turn, since `AgentThinking` is not guaranteed every turn. Previously a missing `AgentThinking` muted every later answer until reconnect.
+- Orchestrator: a filler bubble discarded at turn end gets a fresh question id, so a question that continues in the same turn ("Okay. So how would you…") is shown instead of being blocked by the overlay's closed-id set.
+- IntelligenceEngine: restored the Flux writer guards (`[[NO_ACTION]]`, writer cancellation signal, draft instruction) and the shared response cleanup guards (automatic reveal path; skip notices and truncated answers) that commit 2e441877 removed, keeping its background-rule change. `CodingResponseShape` wiring regex accepts the renamed `withLiveExperience` base.

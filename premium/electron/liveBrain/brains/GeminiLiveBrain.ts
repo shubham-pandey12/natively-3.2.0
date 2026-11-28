@@ -53,6 +53,7 @@ interface GeminiMessage {
         inputTranscription?: { text?: string; finished?: boolean };
         interimInputTranscription?: { text?: string };
         outputTranscription?: { text?: string };
+        modelTurn?: object;
         generationComplete?: boolean;
         turnComplete?: boolean;
         interactionStatus?: string;
@@ -335,7 +336,7 @@ export class GeminiLiveBrain implements LiveBrain {
             this.turnInterrupted = true;
             this.discardOutput = true;
             this.generationCompleted = false;
-            this.finishResponse('cancelled');
+            this.finishResponse('cancelled', 'interviewer_barge_in');
             if (!this.isCurrentLifecycle(socket, generation)) return;
         }
         if (content?.interrupted || message.voiceActivity?.type === 'ACTIVITY_START'
@@ -372,7 +373,12 @@ export class GeminiLiveBrain implements LiveBrain {
             this.stopSpeaking(at);
             if (!this.isCurrentLifecycle(socket, generation)) return;
         }
-        // modelTurn audio is ignored. The transcription is already incremental.
+        // Audio output is discarded, but it proves the server is generating.
+        if (content?.modelTurn && !this.discardOutput && !output && !this.responseId) {
+            this.emit({ type: 'provider_response_progress' });
+            if (!this.isCurrentLifecycle(socket, generation)) return;
+        }
+        // The transcription is already incremental.
         if (!this.discardOutput && typeof output === 'string' && output.length) {
             this.providerTurnActive = true;
             this.failures = 0;
@@ -433,10 +439,10 @@ export class GeminiLiveBrain implements LiveBrain {
         }
     }
 
-    private finishResponse(status: 'completed' | 'cancelled' | 'failed'): void {
+    private finishResponse(status: 'completed' | 'cancelled' | 'failed', cancelReason?: 'interviewer_barge_in' | 'rollover'): void {
         const responseId = this.responseId;
         this.responseId = undefined;
-        if (responseId) this.emit({ type: 'response_done', responseId, status });
+        if (responseId) this.emit({ type: 'response_done', responseId, status, ...(cancelReason ? { cancelReason } : {}) });
     }
 
     private stopSpeaking(at: number): void {
@@ -505,7 +511,7 @@ export class GeminiLiveBrain implements LiveBrain {
      *  because the old session took part of an unanswered question with it. */
     private rollover(replay = false): void {
         const recent = replay ? this.recentAudio.slice() : [];
-        this.disconnect(true);
+        this.disconnect(true, 'rollover');
         if (recent.length) {
             const bytes = recent.reduce((sum, chunk) => sum + chunk.length, 0);
             this.bufferedAudio = recent;
@@ -557,7 +563,7 @@ export class GeminiLiveBrain implements LiveBrain {
         this.rolloverTimer = this.rolloverClock.setTimeout(() => this.rollover(this.responseId === undefined), at - this.rolloverClock.now());
     }
 
-    private disconnect(graceful = false): void {
+    private disconnect(graceful = false, cancelReason?: 'rollover'): void {
         clearTimeout(this.setupTimer);
         if (this.rolloverTimer !== undefined) this.rolloverClock.clearTimeout(this.rolloverTimer);
         clearInterval(this.silencePump);
@@ -572,7 +578,7 @@ export class GeminiLiveBrain implements LiveBrain {
         if (this.responseId) {
             const status = graceful ? 'cancelled' : this.generationCompleted ? 'completed' : 'failed';
             this.generationCompleted = false;
-            this.finishResponse(status);
+            this.finishResponse(status, cancelReason);
         }
     }
 

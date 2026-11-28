@@ -514,3 +514,11 @@ test('replayed older sequence_id EagerEndOfTurn after TurnResumed is dropped', a
     await delay(20);
     assert.equal(events.filter(e => e.type === 'eager_end_of_turn').length, 1);
 });
+
+test('Flux reports a short two-word Update for barge-in without displaying it', async t => {
+    const { brain, connections, events } = await createRig(t);
+    await brain.start(makeContext());
+    sendJson(connections[0].socket, { type: 'TurnInfo', event: 'Update', turn_index: 0, transcript: 'Use Redis' });
+    await until(() => events.some(e => e.type === 'interviewer_barge_in_candidate' && e.text === 'Use Redis'));
+    assert.equal(events.some(e => e.type === 'interviewer_transcript'), false);
+});

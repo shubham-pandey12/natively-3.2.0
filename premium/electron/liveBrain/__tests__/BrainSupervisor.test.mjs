@@ -22,10 +22,11 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemi
     const seen = [];
     const switches = [];
     const rollovers = [];
+    const questions = [];
     const orchestrator = useOrchestrator ? new ResponseOrchestrator({
         clock,
         recordSttQuestion: (text, at) => supervisor.recordInterviewerTurn(text, at),
-        overlay: { showText() {}, showQuestion() {}, showAsk() {}, setOutdated() {}, setInterviewerSpeaking() {} },
+        overlay: { showText() {}, showQuestion(question) { questions.push(question); }, showAsk() {}, setOutdated() {}, setInterviewerSpeaking() {} },
     }) : undefined;
     const supervisor = new BrainSupervisor({
         sessionId: 'meeting', preferred,
@@ -56,7 +57,7 @@ function rig(preferred = 'gemini-live', standbyStartupMs = 0, available = ['gemi
         onSwitch: data => switches.push(data),
         onRollover: data => rollovers.push(data),
     });
-    return { clock, notebook, supervisor, realtime, attempted, seen, switches, rollovers, orchestrator };
+    return { clock, notebook, supervisor, realtime, attempted, seen, switches, rollovers, orchestrator, questions };
 }
 
 test('completed ready-to-display text is stored in the notebook', async () => {
@@ -384,4 +385,57 @@ test('U8-3: grounding change after standby launch prevents stale promotion; Soni
     await flush();
     assert.equal(sonicDetached.filter(([r]) => r === 'missed_turns').length, 2);
     sonicSup.stop();
+});
+
+test('Gemini cancel before speech keeps the interrupting question on the active lease', async () => {
+    const h = rig('gemini-live', 0, ['gemini-live'], undefined, true);
+    h.supervisor.start();
+    await flush();
+    const first = h.realtime[0];
+    const emit = (type, fields = {}) => first.emit({ type, at: h.clock.now(), ...fields });
+    emit('status', { status: 'ready' });
+    emit('response_started', { responseId: 'a' });
+    emit('response_delta', { responseId: 'a', text: 'An answer.' });
+    emit('session_expiring', { inMs: 30_000, resumable: false });
+    await flush();
+    h.realtime[1].emit({ type: 'status', status: 'ready' });
+    emit('response_done', { responseId: 'a', status: 'cancelled', cancelReason: 'interviewer_barge_in' });
+    emit('interviewer_speech_started');
+    emit('interviewer_transcript', { text: 'How do queues work?', final: true });
+    assert.equal(h.supervisor.current, first);
+    assert.ok(h.notebook.recentTurns().some(turn => turn.text === 'How do queues work?'));
+    emit('interviewer_speech_stopped');
+    emit('response_started', { responseId: 'b' });
+    emit('response_delta', { responseId: 'b', text: 'A queue answer.' });
+    assert.equal(h.questions.at(-1)?.text, 'How do queues work?');
+    assert.ok(h.questions.at(-1)?.generationId !== undefined);
+    emit('response_done', { responseId: 'b', status: 'completed' });
+    assert.equal(h.supervisor.current, h.realtime[1]);
+    h.supervisor.stop();
+});
+
+test('Provider progress keeps slow turns alive while real silence still triggers fallback', async () => {
+    const h = rig('deepgram-voice-agent', 0, ['deepgram-voice-agent']);
+    h.supervisor.start();
+    await flush();
+    const brain = h.realtime[0];
+    brain.emit({ type: 'status', status: 'ready' });
+    const endSpeech = () => {
+        brain.emit({ type: 'interviewer_speech_started', at: h.clock.now() });
+        brain.emit({ type: 'interviewer_speech_stopped', at: h.clock.now() });
+    };
+    for (let index = 0; index < 2; index++) {
+        endSpeech();
+        h.clock.advance(5000);
+        brain.emit({ type: 'provider_response_progress' });
+        h.clock.advance(2000);
+    }
+    assert.equal(h.supervisor.current, brain);
+    brain.emit({ type: 'response_silent' });
+    for (let index = 0; index < 2; index++) {
+        endSpeech();
+        h.clock.advance(6001);
+    }
+    assert.equal(h.supervisor.current?.id, 'pipeline');
+    h.supervisor.stop();
 });

@@ -918,10 +918,10 @@ test('Flux barge-in: a real interviewer partial stops the streaming answer; fill
     h.send({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Tell me about a project you built.', turnKey: 'c1:t0' });
     h.runs[0].options.onFirstText(1);
     h.send({ type: 'interviewer_speech_started' });
-    h.send({ type: 'interviewer_transcript', text: 'Take your time.', final: false });
-    h.send({ type: 'interviewer_transcript', text: 'Mm-hmm', final: false });
+    h.send({ type: 'interviewer_barge_in_candidate', text: 'Take your time.' });
+    h.send({ type: 'interviewer_barge_in_candidate', text: 'Mm-hmm' });
     assert.equal(h.calls.filter(([k]) => k === 'cancel').length, 0);
-    h.send({ type: 'interviewer_transcript', text: 'Okay, what was the hardest', final: false });
+    h.send({ type: 'interviewer_barge_in_candidate', text: 'Okay, what was the hardest' });
     assert.deepEqual(h.calls.filter(([k]) => k === 'cancel'), [['cancel', 'interviewer_interrupted']]);
     await flush();
     // The confirmed turn folds the interrupted answer (it showed text) and answers only the new question.
@@ -960,12 +960,12 @@ test('Flux barge-in: two real words stop the answer, a lone word does not', asyn
     const h = interruptRig();
     h.send({ type: 'decision', decisionId: 'd1', action: 'answer', question: 'Tell me about a project you built.', turnKey: 'c1:t0' });
     h.runs[0].options.onFirstText(1);
-    h.send({ type: 'interviewer_transcript', text: 'Nice', final: false });
+    h.send({ type: 'interviewer_barge_in_candidate', text: 'Nice' });
     assert.equal(h.calls.filter(([k]) => k === 'cancel').length, 0);
     // A lone word confirmed while the answer streams is dropped, so it cannot cancel it.
     h.send({ type: 'decision', decisionId: 'd2', action: 'answer', question: 'Nice.', turnKey: 'c1:t1' });
     assert.equal(h.runs.length, 1);
-    h.send({ type: 'interviewer_transcript', text: 'How did', final: false });
+    h.send({ type: 'interviewer_barge_in_candidate', text: 'How did' });
     assert.deepEqual(h.calls.filter(([k]) => k === 'cancel'), [['cancel', 'interviewer_interrupted']]);
 });
 
@@ -1007,4 +1007,212 @@ test('Flux history: the provider sees the last answered turns, oldest dropped fi
     assert.match(context, /Q1: Question number 2\?\nA1: Answer number 2\./);
     assert.match(context, /Q4: Question number 5\?\nA4: Answer number 5\./);
     assert.match(context, /Current interviewer turn: Question number 6\?/);
+});
+
+function interruptionRig() {
+    const clock = new FakeClock();
+    const events = [];
+    const orchestrator = new ResponseOrchestrator({
+        clock, requestClarificationAnswer: () => events.push(['assumption']),
+        overlay: {
+            showAsk: value => events.push(['ask', value]),
+            showQuestion: value => events.push(['question', value]),
+            showText: value => events.push(['text', value]),
+            discard: (...args) => events.push(['discard', ...args]),
+            setOutdated: (...args) => events.push(['outdated', ...args]),
+            setInterviewerSpeaking: (...args) => events.push(['speaking', ...args]),
+        },
+    });
+    const send = (type, fields = {}) => orchestrator.handleEvent({ type, at: clock.now(), ...fields });
+    const start = responseId => send('response_started', { responseId });
+    const delta = (responseId, text) => send('response_delta', { responseId, text });
+    const done = (responseId, status = 'completed', fields = {}) => send('response_done', { responseId, status, ...fields });
+    const transcript = (text, fields = {}) => send('interviewer_transcript', { text, final: true, ...fields });
+    return { clock, events, orchestrator, send, start, delta, done, transcript };
+}
+
+test('Sonic final control messages replace speculative prose with their real output kind', () => {
+    for (const [finalText, expected] of [
+        ['No action.', { kind: 'suppressed' }],
+        ['Ask: Which database?', { kind: 'ask', text: 'Which database?' }],
+    ]) {
+        const h = interruptionRig();
+        h.start('sonic');
+        h.delta('sonic', 'A speculative answer.');
+        assert.deepEqual(h.done('sonic', 'completed', { finalText }), expected);
+        assert.equal(h.events.filter(([name]) => name === 'discard').length, 1);
+        assert.equal(h.events.some(([name, value]) => name === 'text' && value.done), false);
+        assert.equal(h.events.some(([name, value]) => name === 'ask' && value.askStreaming === false), expected.kind === 'ask');
+    }
+});
+
+test('OpenAI late finals are put above their own answers by input item', () => {
+    const h = interruptionRig();
+    for (const id of ['a', 'b']) {
+        h.send('interviewer_speech_started', { itemId: id });
+        h.clock.advance(100);
+        h.send('interviewer_speech_stopped', { itemId: id });
+        h.start(id);
+        h.delta(id, 'Answer text.');
+        h.done(id);
+        h.clock.advance(100);
+    }
+    h.transcript('Second question?', { itemId: 'b' });
+    h.transcript('First question?', { itemId: 'a' });
+    const generations = h.events.filter(([kind, value]) => kind === 'text' && value.done).map(([, value]) => value.generationId);
+    const questions = h.events.filter(([kind]) => kind === 'question').map(([, value]) => [value.generationId, value.text]);
+    assert.deepEqual(questions, [[generations[1], 'Second question?'], [generations[0], 'First question?']]);
+});
+
+test('Late system STT uses the captured interval of the earlier question', () => {
+    const h = interruptionRig();
+    h.send('interviewer_speech_started');
+    h.clock.advance(100);
+    const capturedAt = h.clock.now();
+    h.send('interviewer_speech_stopped');
+    h.start('a');
+    h.delta('a', 'First answer.');
+    h.done('a');
+    h.clock.advance(500);
+    h.send('interviewer_speech_started');
+    h.clock.advance(100);
+    h.send('interviewer_speech_stopped');
+    h.start('b');
+    h.delta('b', 'Second answer.');
+    h.orchestrator.noteSttTranscript('First question?', h.clock.now(), capturedAt);
+    const firstGeneration = h.events.find(([kind]) => kind === 'text')[1].generationId;
+    assert.equal(h.events.findLast(([kind]) => kind === 'question')[1].generationId, firstGeneration);
+});
+
+function interruptWithBackchannel(h) {
+    h.transcript('First question?');
+    h.start('first');
+    h.delta('first', 'A partial answer.');
+    h.send('interviewer_speech_started');
+    h.done('first', 'cancelled', { cancelReason: 'interviewer_barge_in' });
+}
+
+test('Late filler restores the previous answer and retracts the duplicate', () => {
+    const h = interruptionRig();
+    interruptWithBackchannel(h);
+    h.start('duplicate');
+    h.delta('duplicate', 'A duplicate answer.');
+    h.transcript('Mm-hmm.');
+    assert.deepEqual(h.events.filter(([kind]) => kind === 'outdated').map(([, , flag]) => flag), [true, false]);
+    assert.equal(h.events.filter(([kind]) => kind === 'discard').length, 1);
+    assert.deepEqual(h.done('duplicate'), { kind: 'suppressed' });
+});
+
+test('Filler after the provisional window cannot enter notebook history', () => {
+    const h = interruptionRig();
+    interruptWithBackchannel(h);
+    h.start('duplicate');
+    h.delta('duplicate', 'A duplicate answer.');
+    h.clock.advance(2000);
+    assert.deepEqual(h.done('duplicate'), { kind: 'suppressed' });
+    h.transcript('Mm-hmm.');
+    assert.equal(h.events.filter(([kind]) => kind === 'discard').length, 1);
+});
+
+test('Known filler clears the interviewer speaking marker for suppressed prose', () => {
+    const h = interruptionRig();
+    interruptWithBackchannel(h);
+    h.transcript('Right.');
+    h.start('duplicate');
+    h.delta('duplicate', 'A duplicate answer.');
+    h.done('duplicate');
+    assert.equal(h.events.findLast(([kind]) => kind === 'speaking')[2], false);
+});
+
+test('Filler clears the cutoff before a later real question', () => {
+    const h = interruptionRig();
+    interruptWithBackchannel(h);
+    h.transcript('Right.');
+    h.start('filler');
+    h.delta('filler', 'No action.');
+    h.done('filler');
+    h.clock.advance(2000);
+    h.send('interviewer_speech_started');
+    h.transcript('A different question?');
+    h.start('new');
+    h.delta('new', 'A new answer.');
+    assert.equal(h.events.some(([kind]) => kind === 'outdated'), false);
+});
+
+test('Cancelled streaming Ask does not turn a later backchannel into a reply', () => {
+    const h = interruptionRig();
+    h.start('ask'); h.delta('ask', 'Ask: Which database');
+    h.send('interviewer_speech_started');
+    h.done('ask', 'cancelled');
+    h.transcript('Mm-hmm.');
+    h.start('filler'); h.delta('filler', 'A duplicate answer.'); h.done('filler');
+    assert.equal(h.events.some(([kind]) => kind === 'text' || kind === 'question'), false);
+});
+
+test('Silent filler keeps a completed Ask available for a short reply and its assumption timer', () => {
+    for (const receiveReply of [true, false]) {
+        const h = interruptionRig();
+        h.start('ask'); h.delta('ask', 'Ask: Which database?'); h.done('ask');
+        h.clock.advance(500);
+        h.send('interviewer_speech_started'); h.transcript('Mm-hmm.');
+        h.send('interviewer_speech_stopped'); h.send('response_silent');
+        if (receiveReply) {
+            h.send('interviewer_speech_started'); h.transcript('Yes.');
+            h.send('interviewer_speech_stopped');
+            h.start('reply'); h.delta('reply', 'Use the existing database.'); h.done('reply');
+            assert.ok(h.events.some(([kind, value]) => kind === 'question' && value.text === 'Yes.'));
+        }
+        h.clock.advance(10_000);
+        assert.equal(h.events.some(([kind]) => kind === 'assumption'), !receiveReply);
+    }
+});
+
+test('Flux counts substantive words in an Update without waiting for the bubble', () => {
+    const h = interruptRig();
+    h.send({ type: 'decision', action: 'answer', question: 'Old question?' });
+    h.send({ type: 'interviewer_barge_in_candidate', text: 'Okay, Postgres' });
+    assert.equal(h.calls.some(([kind]) => kind === 'cancel'), false);
+    h.send({ type: 'interviewer_barge_in_candidate', text: 'Use Redis' });
+    assert.deepEqual(h.calls.filter(([kind]) => kind === 'cancel'), [['cancel', 'interviewer_interrupted']]);
+});
+
+test('Flux final filler removes an interviewer bubble shown for its earlier partial', () => {
+    const h = interruptionRig();
+    h.transcript('Okay, tell me', { final: false });
+    h.transcript('Okay.');
+    const questions = h.events.filter(([kind]) => kind === 'question').map(([, value]) => value);
+    assert.equal(questions[0].discard, undefined);
+    assert.deepEqual(questions.at(-1), { questionId: questions[0].questionId, text: '', done: true, discard: true });
+});
+
+test('A discarded filler bubble comes back under a new id when the interviewer keeps talking', () => {
+    const h = interruptionRig();
+    h.transcript('Okay, tell me', { final: false });
+    h.transcript('Okay.');
+    h.transcript('So how would you scale Redis?');
+    const questions = h.events.filter(([kind]) => kind === 'question').map(([, value]) => value);
+    const discarded = questions.find(question => question.discard);
+    assert.ok(discarded, 'the filler bubble was discarded');
+    const last = questions.at(-1);
+    assert.equal(last.discard, undefined);
+    assert.match(last.text, /scale Redis/);
+    // The overlay closes a discarded id for good, so the real question needs a new one.
+    assert.notEqual(last.questionId, discarded.questionId);
+});
+
+test('Rollover cancellation clears speaking on the last answer', () => {
+    const h = interruptionRig();
+    h.start('old'); h.delta('old', 'Partial answer.');
+    h.send('interviewer_speech_started');
+    h.done('old', 'cancelled', { cancelReason: 'rollover' });
+    assert.equal(h.events.findLast(([kind]) => kind === 'speaking')[2], false);
+});
+
+test('Lease reset closes a keyed interviewer partial even if its answer never started', () => {
+    const h = interruptionRig();
+    h.send('interviewer_speech_started', { itemId: 'a' });
+    h.transcript('An open question', { itemId: 'a', final: false });
+    assert.equal(h.events.findLast(([kind]) => kind === 'question')[1].done, false);
+    h.orchestrator.resetTurnState();
+    assert.equal(h.events.findLast(([kind]) => kind === 'question')[1].done, true);
 });

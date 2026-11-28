@@ -36,3 +36,9 @@ test('a late Flux question is placed above the existing answer writer row', () =
   const next = placeLiveBrainQuestion(rows, { questionId: 'q2', text: 'How do you scale writes?', done: true, generationId: 42 });
   assert.deepEqual(next.map((row) => row.id), ['older', 'live-brain-q-q2', 'answer-writer-row']);
 });
+
+test('a Flux partial revised to filler is removed without removing adjacent answers', () => {
+    const answer = { id: 'live-brain-text-1', role: 'assistant', text: 'An answer.' };
+    const rows = placeLiveBrainQuestion([answer], { questionId: 'q1', text: 'A partial', done: false });
+    assert.deepEqual(placeLiveBrainQuestion(rows, { questionId: 'q1', text: '', done: true, discard: true }), [answer]);
+});

@@ -17,6 +17,7 @@ export const liveBrainQuestionRowId = (questionId) => `live-brain-q-${questionId
  */
 export function placeLiveBrainQuestion(messages, question) {
   const id = liveBrainQuestionRowId(question.questionId);
+  if (question.discard) return messages.filter((message) => message.id !== id);
   const patch = { text: question.text, isStreaming: !question.done };
   const index = messages.findIndex((message) => message.id === id);
   let next;

@@ -23,6 +23,7 @@ const ROLLOVER_MS = {
 const MAX_AUDIO_SAMPLES = 160_000; // 10 s of 16 kHz PCM
 const MAX_RESPONSE_CHARS = 16_000; // notebook only; the overlay receives the entire stream
 const NO_RESPONSE_MS = 6_000;
+const BARGE_IN_GRACE_MS = 1_500;
 
 interface Lease {
     brain: LiveBrain;
@@ -45,6 +46,7 @@ export class BrainSupervisor<Timer> {
     private rollover?: Timer;
     private deadline?: Timer;
     private responseTimeout?: Timer;
+    private bargeInGrace?: Timer;
     private latestSpeechStop?: number;
     private missed = 0;
     private speaking = false;
@@ -181,6 +183,10 @@ export class BrainSupervisor<Timer> {
         this.speaking = false;
         if (this.responseTimeout !== undefined || (this.latestSpeechStop !== undefined && at - this.latestSpeechStop < 1_500)) return;
         this.latestSpeechStop = at;
+        this.armResponseTimeout(lease);
+    }
+
+    private armResponseTimeout(lease: Lease): void {
         this.responseTimeout = this.options.clock.setTimeout(() => {
             this.responseTimeout = undefined;
             if (this.active === lease && ++this.missed >= 2) this.fail(lease, 'response_timeout');
@@ -272,6 +278,11 @@ export class BrainSupervisor<Timer> {
             this.clearResponseTimeout();
         }
         if (event.type === 'interviewer_speech_stopped') this.noteSpeechStop(event.at);
+        if (event.type === 'provider_response_progress' && this.responseTimeout !== undefined && !this.speaking) {
+            this.missed = 0;
+            this.clearResponseTimeout();
+            this.armResponseTimeout(lease);
+        }
         if (event.type === 'decision') {
             this.clearResponseTimeout();
             this.missed = 0;
@@ -279,6 +290,7 @@ export class BrainSupervisor<Timer> {
             if (event.action === 'answer') this.clearAudio();
         }
         if (event.type === 'response_started') {
+            this.clearBargeInGrace();
             this.clearResponseTimeout();
             this.missed = 0;
             this.speaking = false;
@@ -291,10 +303,21 @@ export class BrainSupervisor<Timer> {
         let rawResponse: string | undefined;
         if (event.type === 'response_done' && this.response?.id === event.responseId) {
             if (event.status === 'completed') rawResponse = event.finalText ?? this.response.text;
-            else if (event.status === 'cancelled') rawResponse = this.response.text;
+            else if (event.status === 'cancelled') {
+                rawResponse = this.response.text;
+                if (lease.brain.id !== 'pipeline' && !this.speaking
+                    && (event.cancelReason === 'interviewer_barge_in' || event.cancelReason === undefined)) {
+                    this.clearBargeInGrace();
+                    this.bargeInGrace = this.options.clock.setTimeout(() => {
+                        this.bargeInGrace = undefined;
+                        this.promote();
+                    }, BARGE_IN_GRACE_MS);
+                }
+            }
             this.response = undefined;
         }
         if (event.type === 'response_silent') {
+            this.clearBargeInGrace();
             this.clearResponseTimeout();
             this.missed = 0;
             this.speaking = false;
@@ -305,6 +328,10 @@ export class BrainSupervisor<Timer> {
             // Draft and final use the same pre-question notebook.
             if (lease.brain.id === 'deepgram-flux') lease.pendingFluxTranscript = event;
             else this.recordInterviewerTurn(event.text, event.at);
+        }
+        if ((disposition?.kind === 'interviewer_confirmed' || disposition?.kind === 'interviewer_already_recorded')
+            && disposition.deferredAnswer !== undefined) {
+            this.recordAssistantTurn(disposition.deferredAnswer);
         }
         if (event.type === 'decision' && lease.pendingFluxTranscript) {
             const { text, at } = lease.pendingFluxTranscript;
@@ -367,7 +394,7 @@ export class BrainSupervisor<Timer> {
 
     private promote(force = false): void {
         const replacement = this.standby;
-        if (!replacement?.ready || (!force && !this.forceHandoff && (this.response || this.externalWriting || this.speaking) && this.active?.ready)) return;
+        if (!replacement?.ready || (!force && !this.forceHandoff && (this.response || this.externalWriting || this.speaking || this.bargeInGrace !== undefined) && this.active?.ready)) return;
         if (replacement.groundingKey !== this.options.groundingKey?.() && !force && !this.forceHandoff && this.groundingDiscards < 3) {
             this.groundingDiscards++;
             this.standby = undefined;
@@ -488,7 +515,13 @@ export class BrainSupervisor<Timer> {
         if (this.responseTimeout !== undefined) this.options.clock.clearTimeout(this.responseTimeout);
         this.responseTimeout = undefined;
     }
+    private clearBargeInGrace(): void {
+        if (this.bargeInGrace !== undefined) this.options.clock.clearTimeout(this.bargeInGrace);
+        this.bargeInGrace = undefined;
+    }
+
     private clearTimers(): void {
+        this.clearBargeInGrace();
         this.clearResponseTimeout();
         if (this.rollover !== undefined) this.options.clock.clearTimeout(this.rollover);
         if (this.deadline !== undefined) this.options.clock.clearTimeout(this.deadline);

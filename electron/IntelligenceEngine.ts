@@ -95,6 +95,7 @@ import { beginTrace, commitTrace } from './intelligence/IntelligenceTrace';
 import * as contextOsStatic from './intelligence/context-os';
 import { isIntelligenceFlagEnabled } from './intelligence/intelligenceFlags';
 import { applyAnswerContract } from './intelligence/OutputShapeNormalizer';
+import { cleanupResponse } from './llm/responseCleanup';
 import { LiveTranscriptBrain } from './intelligence/LiveTranscriptBrain';
 import { recordAttribution } from './intelligence/IntelligenceAttribution';
 // Type-only (fully erased at runtime, adds no require()). `getKnowledgeOrchestrator()`
@@ -1733,14 +1734,18 @@ export class IntelligenceEngine extends EventEmitter {
             // recorded it as answered (forensics 2026-11-13, F-ACC-08 / D3).
             const generationBefore = this.currentGenerationId;
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
-                { outcomeOut, ...(trigger.automatic === true ? { skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain,
-                    ...(liveBrain?.reasoningEffort ? { reasoningEffort: liveBrain.reasoningEffort } : {}),
-                    ...(liveBrain?.onComplete
-                        ? { promptInstruction: LIVE_BRAIN_WRITER_INSTRUCTION }
-                        : trigger.liveBrainNotebook !== undefined
-                            ? { promptInstruction: LIVE_BRAIN_EXPERIENCE_RULE }
-                            : {}),
-                    ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {}) } : {}) });
+                {
+                    outcomeOut, ...(trigger.automatic === true ? {
+                        skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain,
+                        ...(liveBrain?.reasoningEffort ? { reasoningEffort: liveBrain.reasoningEffort } : {}),
+                        ...(liveBrain?.onComplete
+                            ? { promptInstruction: LIVE_BRAIN_WRITER_INSTRUCTION }
+                            : trigger.liveBrainNotebook !== undefined
+                                ? { promptInstruction: LIVE_BRAIN_EXPERIENCE_RULE }
+                                : {}),
+                        ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {})
+                    } : {})
+                });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
             await run;
             const outcome = outcomeOut.value;
@@ -1990,6 +1995,7 @@ export class IntelligenceEngine extends EventEmitter {
         //   • Without one (the legacy answerLLM path): record only. Reshaping text
         //     against a guessed plan could flatten an answer the model was asked to
         //     structure; recording still lets the NEXT answer be checked against it.
+        let humanizedAlready = false;
         if (isIntelligenceFlagEnabled('answerDiversityGuard')) {
             try {
                 if (finished.answerType) {
@@ -2001,11 +2007,18 @@ export class IntelligenceEngine extends EventEmitter {
                         question: finished.question || '',
                         guard: this.wtaDiversityGuard,
                     });
-                    if (shaped.changed && shaped.text.trim().length >= 10) text = shaped.text;
+                    if (shaped.changed && shaped.text.trim().length >= 10) {
+                        text = shaped.text;
+                        humanizedAlready = shaped.applied.includes('humanized_spoken_answer');
+                    }
                 } else {
                     this.wtaDiversityGuard.record(text, 'unknown_answer', finished.question || '');
                 }
             } catch { /* the guard never blocks an answer */ }
+        }
+        if (isIntelligenceFlagEnabled('sharedResponseCleanup') && !humanizedAlready && finished.answerType && !finished.answerIsNotice && !finished.stopReason) {
+            const cleaned = cleanupResponse({ text, mode: 'spoken', answerType: finished.answerType });
+            if (cleaned.text.trim().length >= 10) text = cleaned.text;
         }
         // Two shapes of adoption (2026-09-22):
         //  - adopted AFTER it finished, or adopted mid-stream but nothing crossed
@@ -2183,7 +2196,7 @@ export class IntelligenceEngine extends EventEmitter {
 
         const run = this.runWhatShouldISayInner(question, 0.85, undefined, {
             skipCooldown: true,
-            promptInstruction: 'If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.',
+            promptInstruction: LIVE_BRAIN_WRITER_INSTRUCTION,
             ...(request.liveBrainNotebook ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
             ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
             privateDraft: control,
@@ -2195,7 +2208,9 @@ export class IntelligenceEngine extends EventEmitter {
             if (!control.adopted) {
                 return { status: control.phase === 'cancelled' ? 'cancelled' : 'failed' };
             }
-            const declined = turnOut.writeDecision?.policy === 'do_not_store';
+            const declined = turnOut.writeDecision?.policy === 'do_not_store'
+                || outcomeOut.value?.reason === LIVE_BRAIN_NO_ACTION_REASON;
+            if (outcomeOut.value?.status === 'cancelled') return { status: 'cancelled' };
             if (answer && !declined) {
                 this.recordLiveTurn(answer, undefined, question, 0, undefined, 'meeting', { startedUnder });
             }
@@ -2277,6 +2292,7 @@ export class IntelligenceEngine extends EventEmitter {
                     generationId,
                     onFirstText: request.onFirstText,
                     onComplete: request.onComplete,
+                    signal: request.signal,
                     suppressQuestionRow: request.suppressQuestionRow,
                     ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
                 });
@@ -2776,7 +2792,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: (text: string) => void; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; reasoningEffort?: LiveBrainAnswerRequest['reasoningEffort']; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2830,11 +2846,12 @@ export class IntelligenceEngine extends EventEmitter {
         // as "what YOU said", with no completeness flag, so a cut-off partial
         // recorded here passed for a finished answer (#743). Same gate as the
         // Auto Answer reveal path.
-        const declined = turnOut.writeDecision?.policy === 'do_not_store';
+        const declined = turnOut.writeDecision?.policy === 'do_not_store'
+            || outcomeOut.value?.reason === LIVE_BRAIN_NO_ACTION_REASON;
         if (declined && !options?.speculative && answered) {
             console.warn(`[IntelligenceEngine] What to answer turn not recorded in the conversation ring (${turnOut.writeDecision?.reason ?? 'do_not_store'})`);
         }
-        if (!options?.speculative && answered && !declined) {
+        if (!options?.speculative && answered && !declined && !options?.liveBrain?.signal?.aborted) {
             // A run that resolved no question ('') and saw no screen or page
             // still answered something; filed with no question it took the
             // question of the turn before it.
@@ -3099,8 +3116,8 @@ export class IntelligenceEngine extends EventEmitter {
             };
         }
         const showWtaAnswer = (answer: string, answeredQuestion: string, score: number,
-            delivered: boolean, sourceLabel?: string, stopReason?: string) => {
-            if (privateDraft && !privateDraft.adopted) return;
+            delivered: boolean, sourceLabel?: string, stopReason?: string, storageVeto = false) => {
+            if (isLiveBrainCancelled() || (privateDraft && !privateDraft.adopted)) return;
             const out = options?.outcomeOut;
             const deliveredNow = delivered && Boolean(answer.trim()) && this.currentGenerationId === generationId;
             if (out?.value) out.value = { ...out.value, delivered: deliveredNow };
@@ -3109,7 +3126,8 @@ export class IntelligenceEngine extends EventEmitter {
                 if (privateDraft) privateDraft.visibleTextShown = true;
                 this.noteFirstVisibleText(generationId, answer, 'final');
             }
-            if (deliveredNow) (liveReqRef?.onComplete ?? options?.liveBrain?.onComplete)?.(answer);
+            if (deliveredNow) (liveReqRef?.onComplete ?? options?.liveBrain?.onComplete)?.(answer, { stopReason, storageVeto });
+            if (isLiveBrainCancelled()) return;
             this.emit('suggested_answer', answer, answeredQuestion, score, generationId, sourceLabel, stopReason, outcome);
         };
         // Stamp the run's identity before any await: a manual press racing in
@@ -3136,7 +3154,10 @@ export class IntelligenceEngine extends EventEmitter {
                 this.claimSpokenTurn(spokenQuestion ? this.spokenTurnFor(spokenQuestion) : this.latestSpokenTurn(), false, generationId);
             }
         }
-        const isWtaSuperseded = () => (
+        // The writer's signal represents explicit cancellation. The transport
+        // controller also aborts on a deadline, when a partial may still be delivered.
+        const isLiveBrainCancelled = () => Boolean((liveReqRef?.signal ?? options?.liveBrain?.signal)?.aborted);
+        const isWtaSuperseded = () => isLiveBrainCancelled() || (
             (privateDraft && !privateDraft.adopted)
                 ? whatToAnswerCancellationToken.signal.aborted
                 : (this.whatToAnswerCancellationToken !== whatToAnswerCancellationToken || this.currentGenerationId !== generationId)
@@ -7826,6 +7847,18 @@ export class IntelligenceEngine extends EventEmitter {
                         }));
                     } catch (e) { console.warn('[TRACE:LONGCTX] nonanswer_sentinel_discard logging failed', e); }
                 }
+                if ((options?.liveBrain || privateDraft?.adopted) && !isSpeculative) {
+                    // Live Brain writer (Deepgram Flux + My AI Provider): the model
+                    // chose No action for filler or an unfinished turn, as a
+                    // realtime brain would. Nothing is shown or recorded and the
+                    // previous answer stays on screen. Not the manual-press
+                    // fallback below: that is for an explicit press.
+                    if (openedStreamRow) this.emit('suggested_answer_discard', 'no_answer', generationId);
+                    setOutcome('success', LIVE_BRAIN_NO_ACTION_REASON, false);
+                    console.log('[IntelligenceEngine] Live Brain turn needs no answer (model chose No action)');
+                    this.setMode('idle');
+                    return null;
+                }
                 if (!isSpeculative) {
                     // ALWAYS ANSWER (2026-09-07): a manual press regenerates once
                     // before any canned line is considered.
@@ -8242,6 +8275,8 @@ export class IntelligenceEngine extends EventEmitter {
                 fullAnswer = stripVerificationSpec(fullAnswer);
             }
 
+            if (isLiveBrainCancelled()) return yieldToSupersedingRun(true);
+
             // Token-emit reconciliation — flush whatever is still buffered so the
             // streamed row holds the complete pre-validation text:
             //  - Coding: flush the gate's tail (covers a short answer that never
@@ -8393,8 +8428,7 @@ export class IntelligenceEngine extends EventEmitter {
                         });
                     }
                 }
-                if (isIntelligenceFlagEnabled('sharedResponseCleanup') && !humanizedAlready && !isCoding && finalWtaAnswer) {
-                    const { cleanupResponse } = require('./llm/responseCleanup') as typeof import('./llm/responseCleanup');
+                if (isIntelligenceFlagEnabled('sharedResponseCleanup') && !humanizedAlready && !isCoding && !answerIsNotice && (!wtaTruncation.truncated || streamedAnswerReplaced) && finalWtaAnswer) {
                     const cleaned = cleanupResponse({
                         text: finalWtaAnswer,
                         mode: 'spoken',
@@ -8402,7 +8436,6 @@ export class IntelligenceEngine extends EventEmitter {
                     });
                     if (cleaned.changed && cleaned.text.trim().length >= 10) {
                         finalWtaAnswer = cleaned.text;
-                        trace.mark('shared_response_cleanup_applied', { mode: 'spoken', answerType: answerPlan.answerType });
                     }
                 }
             } catch { /* normalizer never blocks the answer */ }
@@ -8460,7 +8493,8 @@ export class IntelligenceEngine extends EventEmitter {
             // error branch computed one, so every normal answer read 'General
             // knowledge' (F-ACC-04).
             showWtaAnswer(finalWtaAnswer, question || 'What to Answer', confidence,
-                !answerIsNotice, this.answerSourceLabel(requestSnapshot, _c3TurnPlan), wtaStopReason);
+                !answerIsNotice, this.answerSourceLabel(requestSnapshot, _c3TurnPlan), wtaStopReason,
+                wtaWriteDecision.policy === 'do_not_store');
             // Compile-only syntax check of fenced JavaScript (observe-only: the
             // turn trace + telemetry record it, the answer is never changed).
             try {
@@ -8587,6 +8621,7 @@ export class IntelligenceEngine extends EventEmitter {
                     this.speculativeTextExpiry = Infinity;
                 }
                 if (openedStreamRow && this.currentGenerationId === generationId) this.emit('suggested_answer_discard', 'superseded', generationId);
+                if (isLiveBrainCancelled() && this.whatToAnswerCancellationToken === whatToAnswerCancellationToken) this.setMode('idle');
                 return null;
             }
             if (privateDraft && privateDraft.adopted && !openedStreamRow && !privateDraft.visibleTextShown) {

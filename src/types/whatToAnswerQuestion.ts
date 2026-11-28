@@ -3,7 +3,7 @@ export type LiveBrainStatus = 'Listening' | 'Thinking' | 'Answer ready' | 'Recon
 
 /** D14: a Live Brain interviewer bubble, shown directly above its answer
  *  (`generationId`, once that answer exists). */
-export type LiveBrainQuestion = { questionId: string; text: string; done: boolean; generationId?: number };
+export type LiveBrainQuestion = { questionId: string; text: string; done: boolean; generationId?: number; discard?: boolean };
 
 export type WhatToAnswerQuestionEvent = {
     generationId?: number;

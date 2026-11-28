@@ -312,6 +312,8 @@ export class DeepgramFluxBrain implements LiveBrain {
                         this.emit({ type: 'interviewer_speech_started', at });
                         if (this.context !== context || this.socket !== socket) return;
                     }
+                    this.emit({ type: 'interviewer_barge_in_candidate', text: transcript, at });
+                    if (this.context !== context || this.socket !== socket) return;
                     this.emitPartialTranscript(transcript, at);
                 }
                 break;
