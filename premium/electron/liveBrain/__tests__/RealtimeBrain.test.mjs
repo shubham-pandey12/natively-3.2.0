@@ -182,6 +182,24 @@ for (const [id, { modality, model, deltaType }] of Object.entries(providers)) {
     });
 }
 
+for (const id of Object.keys(providers)) {
+    test(`${id} applies shared-history deltas on an open socket without requesting a response`, async t => {
+        const { brain, connections, events } = await rig(t, id);
+        await brain.start(testContext());
+        const { messages } = connections[0];
+        const before = messages.length;
+        brain.addHistoryContext('<interview_conversation>Candidate typed or captured request: Find top k values.\nAI suggestion: Use a min-heap.</interview_conversation>');
+        const update = await until(() => messages.slice(before).find(message => message.type === 'conversation.item.create'));
+        assert.deepEqual(update.item, {
+            type: 'message', role: 'user', content: [{
+                type: 'input_text', text: '<interview_conversation>Candidate typed or captured request: Find top k values.\nAI suggestion: Use a min-heap.</interview_conversation>',
+            }],
+        });
+        assert.equal(messages.slice(before).some(message => message.type === 'response.create'), false);
+        assert.equal(events.some(event => event.type === 'response_started' || event.type === 'response_delta'), false);
+    });
+}
+
 for (const [id, code, wireCode] of [
     ['openai-realtime', 'auth', 'invalid_api_key'],
     ['elevenlabs-realtime', 'quota', 'insufficient_quota'],

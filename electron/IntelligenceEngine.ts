@@ -1,3 +1,4 @@
+import { formatProviderMeetingHistory, withMeetingHistory } from './context-intelligence/meeting-history-formatter';
 // IntelligenceEngine.ts
 // LLM mode routing and orchestration.
 // Extracted from IntelligenceManager to decouple LLM logic from state management.
@@ -39,7 +40,7 @@ import { CODE_HINT_STREAM_FAILED } from './llm/CodeHintLLM';
 import { BRAINSTORM_STREAM_FAILED } from './llm/BrainstormLLM';
 import { EventEmitter } from 'events';
 import { LLMHelper } from './LLMHelper';
-import { SessionTracker, TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
+import { SessionTracker, TranscriptSegment, SuggestionTrigger, ContextItem, type MeetingTurnIdentity } from './SessionTracker';
 import {
     AnswerLLM, AssistLLM, BrainstormLLM, ClarifyLLM, CodeHintLLM, FollowUpLLM, RecapLLM,
     FollowUpQuestionsLLM, WhatToAnswerLLM,
@@ -737,6 +738,8 @@ export class IntelligenceEngine extends EventEmitter {
      * is the only non-automatic caller — but wrong on any caller.
      */
     private speculativeAdoptedGenerationId: number | null = null;
+    private speculativeMeetingTurn?: MeetingTurnIdentity;
+    private speculativeHistoryRevision?: number;
     /** The latest speculative run, so an adopted stream's dispatch can wait for it to settle. */
     private speculativeRun: { generationId: number; settled: Promise<unknown> } | null = null;
     /** Whether the last revealed prefetch actually reached the screen (empty-after-strip does not). */
@@ -1515,7 +1518,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Handle suggestion trigger from native audio service
      * This is the primary auto-trigger path
      */
-    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }): Promise<AutomaticAnswerResult> {
+    async handleSuggestionTrigger(trigger: SuggestionTrigger, speechStoppedAt?: number, liveBrain?: { generationId: number; meetingTurn?: MeetingTurnIdentity; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }): Promise<AutomaticAnswerResult> {
         // An absent confidence is not a low one: the planner substitutes the
         // intent classifier's score. Only an EXPLICIT sub-threshold value skips.
         // Not for an AUTOMATIC trigger: its confidence is the judge's
@@ -1571,7 +1574,7 @@ export class IntelligenceEngine extends EventEmitter {
         return true;
     }
 
-    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }): Promise<AutomaticAnswerResult> {
+    private async handleSuggestionTriggerInner(trigger: SuggestionTrigger, signal?: AbortSignal, speechStoppedAt?: number, liveBrain?: { generationId: number; meetingTurn?: MeetingTurnIdentity; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }): Promise<AutomaticAnswerResult> {
         if (this.skipOwnedAutomaticTrigger(trigger, trigger.confidence ?? 0)) return { status: 'skipped', reason: 'already_answered' };
         if (trigger.automatic && this.isManualAnswerActive()) return { status: 'skipped', reason: 'busy' };
         // Gemini already decided to answer. Keep manual/turn ownership guards,
@@ -1607,7 +1610,7 @@ export class IntelligenceEngine extends EventEmitter {
         // If a speculative stream answered (or is answering) this question, reuse it.
         if (!liveBrain && this.speculativeText !== null) {
             const expired = Date.now() > this.speculativeTextExpiry;
-            const stale = expired || !trigger.lastQuestion || trigger.replacesAutomaticAnswer;
+            const stale = expired || !trigger.lastQuestion || trigger.replacesAutomaticAnswer || this.speculativeHistoryRevision !== this.session.getMeetingHistoryRevision();
             if (!stale) {
                 // Keyed reuse (V3 Amendment 6): the controller already verified
                 // identity by questionId or embedding cosine; Jaccard is the fallback.
@@ -1630,6 +1633,9 @@ export class IntelligenceEngine extends EventEmitter {
                 this.speculativeAnswer = null;
                 this.speculativeAdoptedGenerationId = null;
                 if (similarity >= this.SPECULATIVE_SIMILARITY_THRESHOLD) {
+                    const meetingTurn = trigger.lastQuestion
+                        ? trigger.meetingTurn ?? this.session.findMeetingQuestion(trigger.lastQuestion) ?? this.session.beginMeetingTurn(trigger.lastQuestion, 'interviewer')
+                        : undefined;
                     this.lastTriggerTime = Date.now();
                     this.lastTriggerQuestion = trigger.lastQuestion ?? null;
                     const stillStreaming = this.activeMode === 'what_to_say'
@@ -1642,6 +1648,7 @@ export class IntelligenceEngine extends EventEmitter {
                         // generated first, then live); completion finishes the
                         // same row (see completeSpeculativeRun / revealSpeculativeAnswer).
                         this.speculativeAdoptedGenerationId = this.currentGenerationId;
+                        this.speculativeMeetingTurn = meetingTurn;
                         if (trigger.automatic) {
                             this.automaticGenerationId = this.currentGenerationId;
                             this.claimSpokenTurn(this.spokenTurnFor(draftQuestion, trigger.sourceSegments), true, this.currentGenerationId);
@@ -1661,7 +1668,7 @@ export class IntelligenceEngine extends EventEmitter {
                         }
                         if (trigger.automatic) this.claimSpokenTurn(this.spokenTurnFor(finished.question, trigger.sourceSegments), true, finished.generationId);
                         this.armSpeechStopTiming(finished.generationId, speechStoppedAt);
-                        this.revealSpeculativeAnswer(finished, trigger.automatic === true);
+                        this.revealSpeculativeAnswer(finished, trigger.automatic === true, undefined, meetingTurn);
                         const shown = this.lastSpeculativeReveal?.generationId === finished.generationId && this.lastSpeculativeReveal.shown;
                         return shown ? { status: 'completed' } : { status: 'failed', retryable: true, reason: 'adopted_draft_failed' };
                     }
@@ -1735,7 +1742,7 @@ export class IntelligenceEngine extends EventEmitter {
             const generationBefore = this.currentGenerationId;
             const run = this.runWhatShouldISay(trigger.lastQuestion, trigger.confidence ?? undefined, undefined,
                 {
-                    outcomeOut, ...(trigger.automatic === true ? {
+                    outcomeOut, meetingTurn: trigger.meetingTurn, ...(trigger.automatic === true ? {
                         skipCooldown: true, sourceSegments: trigger.sourceSegments, speechStoppedAt, replacesAutomaticAnswer: trigger.replacesAutomaticAnswer, liveBrain,
                         ...(liveBrain?.reasoningEffort ? { reasoningEffort: liveBrain.reasoningEffort } : {}),
                         ...(liveBrain?.onComplete
@@ -1937,7 +1944,11 @@ export class IntelligenceEngine extends EventEmitter {
             this.speculativeTextExpiry = Date.now() + this.triggerCooldown + 500;
         }
         this.setMode('idle');
-        if (adoptedInFlight) this.revealSpeculativeAnswer(finished, this.automaticGenerationId === generationId, streamed);
+        if (adoptedInFlight) {
+            const meetingTurn = this.speculativeMeetingTurn;
+            this.speculativeMeetingTurn = undefined;
+            this.revealSpeculativeAnswer(finished, this.automaticGenerationId === generationId, streamed, meetingTurn);
+        }
         return text;
     }
 
@@ -1952,7 +1963,7 @@ export class IntelligenceEngine extends EventEmitter {
      * cut short is shown, like any truncated live answer, but it must not
      * become prior_assistant_responses evidence for the next turn.
      */
-    private revealSpeculativeAnswer(finished: SpeculativeAnswer, automatic: boolean, streamed?: SpeculativeStreamed): void {
+    private revealSpeculativeAnswer(finished: SpeculativeAnswer, automatic: boolean, streamed?: SpeculativeStreamed, meetingTurn?: MeetingTurnIdentity): void {
         let text = finished.text;
         // A speculative run is never `isCoding` (see runWhatShouldISay), so it
         // never gets the live path's stripVerificationSpec (its STREAM gets a
@@ -2057,8 +2068,8 @@ export class IntelligenceEngine extends EventEmitter {
         // Recorded with the PREFETCH's start, not the reveal time, so a question
         // begun while it was generating is not joined onto this one.
         this.session.addAssistantMessage(text, finished.writeDecision, 'what_to_answer', undefined,
-            typeof finished.startedAt === 'number'
-                ? { startedAt: finished.startedAt, question: finished.question !== 'inferred' ? finished.question : undefined }
+            typeof finished.startedAt === 'number' || meetingTurn
+                ? { startedAt: finished.startedAt, question: finished.question !== 'inferred' ? finished.question : undefined, meetingTurn }
                 : undefined);
         if (finished.writeDecision?.policy !== 'do_not_store') {
             this.session.pushUsage({ type: 'assist', timestamp: Date.now(), question: finished.question, answer: text });
@@ -2111,7 +2122,7 @@ export class IntelligenceEngine extends EventEmitter {
         replacesAutomaticAnswer?: boolean;
         isFollowUp: boolean; endpointSource?: string; candidateGeneration: number;
         sourceSegments?: readonly number[];
-    }, options: { reuseSpeculative: boolean; context: string; speechStoppedAt?: number; liveBrainNotebook?: string }): Promise<AutomaticAnswerResult> {
+    }, options: { reuseSpeculative: boolean; context: string; speechStoppedAt?: number; liveBrainNotebook?: string; meetingTurn?: MeetingTurnIdentity }): Promise<AutomaticAnswerResult> {
         return this.handleSuggestionTrigger({
             context: options.context,
             lastQuestion: question.text,
@@ -2126,6 +2137,7 @@ export class IntelligenceEngine extends EventEmitter {
             candidateGeneration: question.candidateGeneration,
             sourceSegments: question.sourceSegments,
             reuseSpeculative: options.reuseSpeculative,
+            meetingTurn: options.meetingTurn,
             ...(options.liveBrainNotebook !== undefined ? { liveBrainNotebook: options.liveBrainNotebook } : {}),
         }, options.speechStoppedAt);
     }
@@ -2288,6 +2300,7 @@ export class IntelligenceEngine extends EventEmitter {
                     ...(request.liveBrainNotebook ? { liveBrainNotebook: request.liveBrainNotebook } : {}),
                 }, request.speechStoppedAt, {
                     generationId,
+                    meetingTurn: request.meetingTurn,
                     onFirstText: request.onFirstText,
                     onComplete: request.onComplete,
                     signal: request.signal,
@@ -2586,9 +2599,11 @@ export class IntelligenceEngine extends EventEmitter {
      * question (on the phone, or typed, What to answer or a button on the
      * desktop) had no record of the phone's question or of its screen.
      */
-    public recordPhoneTurn(answer: string, question: string, imagePaths: readonly string[] = [], startedUnder?: string): void {
+    public recordPhoneTurn(answer: string, question: string, imagePaths: readonly string[] = [], startedUnder?: string, meetingTurn?: MeetingTurnIdentity): void {
+        if (meetingTurn && imagePaths.length) this.session.enrichMeetingTurn(meetingTurn, { hasVisualInput: true });
         this.recordLiveTurn(answer, undefined, question, imagePaths.length, imagePaths, 'user', {
             ...(startedUnder ? { startedUnder } : {}),
+            meetingTurn,
             ...(imagePaths.length ? { backupDescribe: 'manual_use_screen' as const } : {}),
         });
     }
@@ -2625,6 +2640,7 @@ export class IntelligenceEngine extends EventEmitter {
              *  extension's automatic attach). It was read once and dropped:
              *  the next press, typed or hotkey, had no record of the page. */
             page?: string;
+            meetingTurn?: MeetingTurnIdentity;
             /** A turn kept for the record that is not part of the answer
              *  conversation (Brainstorm): "explain that" after it still means
              *  the last answer. See recordAnswerSummary's `aside`. */
@@ -2678,6 +2694,9 @@ export class IntelligenceEngine extends EventEmitter {
                 // faithful than a dedicated transcription, which is why the
                 // transcription replaces it below.
                 const fallbackText = screenContext ? (compose(screenContext as never) || '') : '';
+                if (fallbackText && extra.meetingTurn && !page) this.session.enrichMeetingTurn(extra.meetingTurn, {
+                    capture: { text: fallbackText, origin: 'model_inferred' },
+                });
                 // RECORDED AT ONCE (2026-10-01). This used to wait for the
                 // transcription and only then write the turn. That wait was the
                 // cloud pre-pass's 6 s at most; with a local model writing the
@@ -2737,7 +2756,12 @@ export class IntelligenceEngine extends EventEmitter {
                         extra.backupDescribe ? { backupDescribe: extra.backupDescribe } : {})).catch((): string => '');
                     // To THIS turn, by the turn object. By the answer alone, a later
                     // turn that happened to give the same answer took the text.
-                    if (screenText) attachScreenToAnsweredTurn(sessionId, answer, withPage(screenText)!, { turn, placeholder: recorded });
+                    if (screenText) {
+                        if (extra.meetingTurn && !page) this.session.enrichMeetingTurn(extra.meetingTurn, {
+                            capture: { text: screenText, origin: 'capture' },
+                        });
+                        attachScreenToAnsweredTurn(sessionId, answer, withPage(screenText)!, { turn, placeholder: recorded });
+                    }
                     else if (placeholder === SCREEN_BEING_READ) attachScreenToAnsweredTurn(sessionId, answer, withPage(SCREEN_NOT_TRANSCRIBED)!, { turn, placeholder: recorded });
                 }
             } catch (error: any) {
@@ -2790,7 +2814,7 @@ export class IntelligenceEngine extends EventEmitter {
         return press(source);
     }
 
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; reasoningEffort?: LiveBrainAnswerRequest['reasoningEffort']; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; meetingTurn?: MeetingTurnIdentity; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; reasoningEffort?: LiveBrainAnswerRequest['reasoningEffort']; liveBrain?: { generationId: number; meetingTurn?: MeetingTurnIdentity; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean }; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; onSettled?: (result: { answered: boolean; question?: string }) => void; outcomeOut?: WhatToSayOutcomeOut }): Promise<string | null> {
         // The question the turn actually answered, read out of the inner run.
         // A Cmd+1 press passes none (it is resolved from the transcript), and
         // recording `question` filed the turn under whatever question last
@@ -2798,6 +2822,15 @@ export class IntelligenceEngine extends EventEmitter {
         // its screenshot were simply never recorded.
         const turnOut: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } = {};
         const outcomeOut = options?.outcomeOut ?? {};
+        const spokenQuestion = options?.spokenQuestion ?? (options?.skipCooldown && !imagePaths?.length && !options.domContext ? question : undefined);
+        const meetingTurn = options?.speculative ? undefined
+            : options?.meetingTurn ?? options?.liveBrain?.meetingTurn
+                ?? (spokenQuestion ? this.session.findMeetingQuestion(spokenQuestion) : undefined)
+                ?? this.session.beginMeetingTurn(question ?? '');
+        if (meetingTurn && (imagePaths?.length || options?.screenContext)) this.session.enrichMeetingTurn(meetingTurn, { hasVisualInput: true });
+        if (meetingTurn && options?.domContext) this.session.enrichMeetingTurn(meetingTurn, {
+            capture: { text: options.domContext, origin: 'extension_untrusted' },
+        });
         outcomeOut.value = { status: 'failed', retryable: true, reason: 'generation_not_completed' };
         const startedUnder = this.conversationSessionId();
         let delivered = false;
@@ -2808,7 +2841,7 @@ export class IntelligenceEngine extends EventEmitter {
         };
         if (options?.onSettled) this.on('suggested_answer', onShown);
         const generationBefore = this.currentGenerationId;
-        const run = this.runWhatShouldISayInner(question, confidence, imagePaths, { ...options, turnOut, outcomeOut });
+        const run = this.runWhatShouldISayInner(question, confidence, imagePaths, { ...options, turnOut, outcomeOut, meetingTurn });
         if (options?.speculative && this.currentGenerationId !== generationBefore) {
             // Tracked here, not at the launch sites: an adoption must wait for
             // the run it adopted however it was started (see handleSuggestionTriggerInner).
@@ -2858,7 +2891,7 @@ export class IntelligenceEngine extends EventEmitter {
             this.recordLiveTurn(answer, options?.screenContext,
                 heard || (sawScreen ? undefined : IntelligenceEngine.UNPROMPTED_TURN_QUESTION),
                 imagePaths?.length ?? 0, imagePaths, 'meeting', {
-                page: options?.domContext, startedUnder,
+                page: options?.domContext, startedUnder, meetingTurn,
                 // The describe call this press skipped (screenPrepass.ts) runs
                 // after the answer instead, if the transcription fails.
                 ...(options?.screenFromImage ? { backupDescribe: 'what_to_say' as const } : {}),
@@ -2867,7 +2900,7 @@ export class IntelligenceEngine extends EventEmitter {
         return answer;
     }
 
-    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort; liveBrain?: { generationId: number; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }; privateDraft?: InternalPrivateLiveBrainDraft; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
+    private async runWhatShouldISayInner(question?: string, confidence: number = 0.8, imagePaths?: string[], options?: { liveBrainNotebook?: string; meetingTurn?: MeetingTurnIdentity; speculative?: boolean; skipCooldown?: boolean; screenContext?: ScreenContext; screenFromImage?: boolean; promptInstruction?: string; activeSkill?: { id: string; name: string; promptBlock: string }; domContext?: string; forceFresh?: boolean; pressedAt?: number; overlayQuestionId?: string; spokenQuestion?: string; joinAutomatic?: boolean; sourceSegments?: readonly number[]; speechStoppedAt?: number; replacesAutomaticAnswer?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort; liveBrain?: { generationId: number; meetingTurn?: MeetingTurnIdentity; onFirstText?: (at: number) => void; onComplete?: LiveBrainAnswerRequest['onComplete']; signal?: AbortSignal; suppressQuestionRow?: boolean; reasoningEffort?: import('../src/types/liveBrainReasoning').LiveBrainExplicitReasoningEffort }; privateDraft?: InternalPrivateLiveBrainDraft; onStart?: (press: { spoken: boolean; spokenQuestion?: string }) => void; outcomeOut?: WhatToSayOutcomeOut; turnOut?: { question?: string; generationId?: number; writeDecision?: SessionWriteDecision } }): Promise<string | null> {
         const setOutcome = (status: WhatToSayOutcome['status'], reason?: string, retryable = status === 'failed') => {
             if (options?.outcomeOut) options.outcomeOut.value = { status, retryable, ...(reason ? { reason } : {}) };
             return options?.outcomeOut?.value;
@@ -2880,6 +2913,10 @@ export class IntelligenceEngine extends EventEmitter {
         // recorded, no leak.
         const wtaTrace = beginTrace(typeof question === 'string' ? question : '');
         const isSpeculative = options?.speculative === true;
+        const historySnapshot = options?.liveBrainNotebook ?? formatProviderMeetingHistory(this.session.getMeetingTurns(), {
+            question, currentTurn: options?.meetingTurn,
+        });
+        if (isSpeculative) this.speculativeHistoryRevision = this.session.getMeetingHistoryRevision();
         const skipCooldown = options?.skipCooldown === true;
         const forceFresh = options?.forceFresh === true;
         // A manual press that asks only "answer what was just said": no typed
@@ -3001,6 +3038,7 @@ export class IntelligenceEngine extends EventEmitter {
 
         const isPrivateDraft = Boolean(privateDraft);
         let liveReqRef: LiveBrainAnswerRequest | null = null;
+        let ledgerMeetingTurn = options?.meetingTurn;
         let onLiveSignalAbort: (() => void) | null = null;
         let pendingDesignQuestion: string | null = null;
         let fgToken: string | null = null;
@@ -3064,6 +3102,7 @@ export class IntelligenceEngine extends EventEmitter {
             this.whatToAnswerBackgroundCancellationTokens.clear();
             this.whatToAnswerCancellationToken = whatToAnswerCancellationToken;
             liveReqRef = liveReq;
+            ledgerMeetingTurn = liveReq.meetingTurn;
             generationId = assignedGenerationId;
             this.currentGenerationId = generationId;
             this.automaticGenerationId = generationId;
@@ -3390,7 +3429,7 @@ export class IntelligenceEngine extends EventEmitter {
                     return noKeyMsg;
                 }
                 const transcript = this.session.getFormattedContext(180);
-                const context = options?.liveBrainNotebook ? `${options.liveBrainNotebook}\n\n${transcript}` : transcript;
+                const context = withMeetingHistory(transcript, historySnapshot);
                 const answer = await this.answerLLM.generate(question || '', context);
                 if (isWtaSuperseded()) {
                     recordWtaCancellation();
@@ -3405,7 +3444,7 @@ export class IntelligenceEngine extends EventEmitter {
                 }
                 if (answer) {
                     setOutcome('success');
-                    this.session.addAssistantMessage(answer, undefined, 'what_to_answer');
+                    this.session.addAssistantMessage(answer, undefined, 'what_to_answer', undefined, { meetingTurn: ledgerMeetingTurn });
                     showWtaAnswer(answer, question || 'inferred', confidence, true);
                     this.setMode('idle');
                     return answer;
@@ -3609,7 +3648,7 @@ export class IntelligenceEngine extends EventEmitter {
                 }
                 this.setMode('idle');
                 const noContextMsg = "I don't have anything to answer yet — no conversation, screen capture, or question has come in. Ask something or start the meeting audio, then press again.";
-                this.session.addAssistantMessage(noContextMsg, undefined, 'what_to_answer');
+                this.session.addAssistantMessage(noContextMsg, undefined, 'what_to_answer', undefined, { skipMeetingLedger: true });
                 setOutcome('failed', 'no_context', false);
                 showWtaAnswer(noContextMsg, 'inferred', 1.0, false);
                 return noContextMsg;
@@ -3728,7 +3767,7 @@ export class IntelligenceEngine extends EventEmitter {
                         }
                         piTelemetry.emit('wta_context_free_clarification', { surface: 'what_to_answer', via: (fr as any).resolvedVia ?? 'clarification' });
                         setOutcome('success');
-                        this.session.addAssistantMessage(fr.clarificationText, undefined, 'what_to_answer');
+                        this.session.addAssistantMessage(fr.clarificationText, undefined, 'what_to_answer', undefined, { meetingTurn: ledgerMeetingTurn });
                         showWtaAnswer(fr.clarificationText, extractedQuestion.latestQuestion || 'inferred', 0.9, true);
                         this.setMode('idle');
                         trace.mark('repair_used', { reason: 'context_free_clarification' });
@@ -5064,7 +5103,7 @@ export class IntelligenceEngine extends EventEmitter {
                             hasLiveTranscript: true, // WTA is always transcript-driven
                         });
                     setOutcome('success');
-                    this.session.addAssistantMessage(clarify, undefined, 'what_to_answer');
+                    this.session.addAssistantMessage(clarify, undefined, 'what_to_answer', undefined, { meetingTurn: ledgerMeetingTurn });
                     // Generation id is minted at request t0, before every
                     // await or early-return branch, so even this clarification
                     // participates in the renderer's newest-wins guard.
@@ -5682,7 +5721,7 @@ export class IntelligenceEngine extends EventEmitter {
                     }
                     return _v3 ? {
                         system: _v3.system,
-                        user: options?.liveBrainNotebook ? `${options.liveBrainNotebook}\n\n${_v3.user}` : _v3.user,
+                        user: withMeetingHistory(historySnapshot, _v3.user),
                         // T4: the evidence this prompt was composed from. The
                         // post-stream doc-grounded validator uses THIS rather
                         // than a fresh legacy retrieval — see the validator's
@@ -5760,7 +5799,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
             const wtaTruncation: { truncated: boolean; reason?: string } = { truncated: false };
-            const answerTranscript = options?.liveBrainNotebook ? `${options.liveBrainNotebook}\n\n${preparedTranscript}` : preparedTranscript;
+            const answerTranscript = withMeetingHistory(preparedTranscript, historySnapshot);
             const stream = this.whatToAnswerLLM.generateStream(answerTranscript, temporalContext, intentResult, imagePaths, screenContext, options?.promptInstruction, options?.activeSkill, options?.domContext, candidateProfile || undefined, answerPlan, modeContextPromise, requestSnapshot, whatToAnswerCancellationToken.signal, wtaTruncation);
             let streamAborted = false;
             let emittedStreamingToken = false;
@@ -6553,7 +6592,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 if (openedStreamRow) emitChunk(stubFallback);
                 if (options?.turnOut) options.turnOut.writeDecision = stubWriteDecision;
-                this.session.addAssistantMessage(stubFallback, stubWriteDecision, 'what_to_answer');
+                this.session.addAssistantMessage(stubFallback, stubWriteDecision, 'what_to_answer', undefined, { meetingTurn: ledgerMeetingTurn });
                 // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
                 showWtaAnswer(stubFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, false);
                 this.setMode('idle');
@@ -6581,7 +6620,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 if (openedStreamRow) emitChunk(fullAnswer);
                 if (options?.turnOut) options.turnOut.writeDecision = transportWriteDecision;
-                this.session.addAssistantMessage(fullAnswer, transportWriteDecision, 'what_to_answer');
+                this.session.addAssistantMessage(fullAnswer, transportWriteDecision, 'what_to_answer', undefined, { meetingTurn: ledgerMeetingTurn });
                 // Campaign-3 (fix/answer-policy-engine, 2026-07-19, founder §2.6):
                 // Source badge label. Computed from the TurnPlan (already
                 // available as `_c3TurnPlan` in scope above) via the pure
@@ -6649,7 +6688,7 @@ export class IntelligenceEngine extends EventEmitter {
                 if (isWtaSuperseded()) return yieldToSupersedingRun(false);
                 if (openedStreamRow) emitChunk(tagLeakFallback);
                 if (options?.turnOut) options.turnOut.writeDecision = tagLeakWriteDecision;
-                this.session.addAssistantMessage(tagLeakFallback, tagLeakWriteDecision, 'what_to_answer');
+                this.session.addAssistantMessage(tagLeakFallback, tagLeakWriteDecision, 'what_to_answer', undefined, { meetingTurn: ledgerMeetingTurn });
                 // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
                 showWtaAnswer(tagLeakFallback, question || extractedQuestion.latestQuestion || 'inferred', confidence, false);
                 this.setMode('idle');
@@ -7890,7 +7929,7 @@ export class IntelligenceEngine extends EventEmitter {
                     if (openedStreamRow) {
                         emitChunk(honestFallback);
                     }
-                    this.session.addAssistantMessage(honestFallback, undefined, 'what_to_answer');
+                    this.session.addAssistantMessage(honestFallback, undefined, 'what_to_answer', undefined, { meetingTurn: ledgerMeetingTurn });
                     // Phase 4 defense-in-depth (forensic-report §6b): carry generationId.
                     showWtaAnswer(honestFallback, question || extractedQuestion.latestQuestion || 'inferred', 0.9, Boolean(regenerated));
                     this.setMode('idle');
@@ -8460,8 +8499,13 @@ export class IntelligenceEngine extends EventEmitter {
             // answered question tells the late-arriving tail of THIS question
             // apart from that new speech.
             if (options?.turnOut) options.turnOut.writeDecision = wtaWriteDecision;
+            const meetingTurn = ledgerMeetingTurn;
+            if (meetingTurn) this.session.enrichMeetingTurn(meetingTurn, {
+                resolvedQuestion: extractedQuestion.latestQuestion || question,
+            });
             this.session.addAssistantMessage(finalWtaAnswer, wtaWriteDecision, 'what_to_answer', undefined, {
                 startedAt: now,
+                meetingTurn,
                 question: question || extractedQuestion.latestQuestion || lastInterviewerTurn || undefined,
             });
 
@@ -9605,6 +9649,7 @@ export class IntelligenceEngine extends EventEmitter {
         this.setMode('recap');
         let generationId: number | null = null;
         const startedUnder = this.conversationSessionId();
+        const meetingTurn = this.session.beginMeetingTurn(IntelligenceEngine.actionTurnQuestion(button.name));
         try {
             if (!this.customButtonLLM) {
                 this.setMode('idle');
@@ -9612,7 +9657,9 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
             const actionContext = this.buildActionContextWithManualFallback(readSeconds, { withHistory: true, durableSpeech: readSeconds > CUSTOM_BUTTON_WINDOW_SECONDS });
-            const context = actionContext?.text?.trim() ? actionContext.text : '';
+            const context = withMeetingHistory(actionContext?.text, formatProviderMeetingHistory(this.session.getMeetingTurns(), {
+                question: button.name, currentTurn: meetingTurn,
+            }));
             if (!context && imagePaths.length === 0) {
                 this.setMode('idle');
                 this.emit('custom_button', CUSTOM_BUTTON_EMPTY, button.name);
@@ -9639,6 +9686,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
             if (full && this.currentGenerationId === generationId) {
+                this.session.recordMeetingAnswer(meetingTurn, full, { surface: imagePaths.length ? 'screenshot' : 'what_to_answer' });
                 this.emit('custom_button', full, button.name);
                 this.session.pushUsage({
                     type: 'chat',
@@ -9654,7 +9702,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // and the screenshot it read was never recorded.
                 this.recordLiveTurn(full, undefined, IntelligenceEngine.actionTurnQuestion(button.name),
                     imagePaths.length, imagePaths, 'user', {
-                    startedUnder,
+                    startedUnder, meetingTurn,
                     ...(imagePaths.length ? { backupDescribe: 'manual_use_screen' as const } : {}),
                 });
             }
@@ -9778,10 +9826,11 @@ export class IntelligenceEngine extends EventEmitter {
         // surfaces, had no writer — so its own answers never became history.
         const startedUnder = this.conversationSessionId();
         const id = Symbol();
+        const meetingTurn = this.session.findMeetingQuestion(question) ?? this.session.beginMeetingTurn(question, 'user');
         this.emit('manual_answer_started', id);
         try {
             this.cancelAutomaticAnswer('manual_answer');
-            const manualAnswer = await this.runManualAnswerInner(question);
+            const manualAnswer = await this.runManualAnswerInner(question, meetingTurn);
             this.recordLiveTurn(manualAnswer, undefined, question, 0, undefined, 'meeting', { startedUnder });
             return manualAnswer;
         } finally {
@@ -9789,7 +9838,8 @@ export class IntelligenceEngine extends EventEmitter {
         }
     }
 
-    private async runManualAnswerInner(question: string): Promise<string | null> {
+    private async runManualAnswerInner(question: string, meetingTurn?: MeetingTurnIdentity): Promise<string | null> {
+        const historySnapshot = formatProviderMeetingHistory(this.session.getMeetingTurns(), { question, currentTurn: meetingTurn });
         this.setMode('manual');
 
         try {
@@ -9920,7 +9970,7 @@ export class IntelligenceEngine extends EventEmitter {
             if (_v3) {
                 // V3 owns the system prompt entirely; the legacy universal prompt
                 // and the raw context blob are both bypassed.
-                answer = await this.answerLLM.generate(_v3.user, undefined, answerPlan, _v3.system, manualDiagramTurn);
+                answer = await this.answerLLM.generate(withMeetingHistory(historySnapshot, _v3.user), undefined, answerPlan, _v3.system, manualDiagramTurn);
             } else {
                 // R5 (2026-08-12, review finding): the broad flag stripped the
                 // live transcript from this fallback for template-seeded modes
@@ -9945,7 +9995,7 @@ export class IntelligenceEngine extends EventEmitter {
                     answerType: answerPlan.answerType,
                     modeId: (activeModeInfo as any)?.id ?? null,
                 });
-                const context = [transcriptContext, personalBlock].filter(Boolean).join('\n\n') || undefined;
+                const context = [transcriptContext, historySnapshot, personalBlock].filter(Boolean).join('\n\n') || undefined;
                 answer = await this.answerLLM.generate(question, context, answerPlan, undefined, manualDiagramTurn);
             }
             const _manualSignals = require('./llm/codingPromptSignals').resolveCodingPromptSignals({
@@ -9974,7 +10024,7 @@ export class IntelligenceEngine extends EventEmitter {
                 // mistagged 'what_to_answer' (code-review round 2, 2026-07-14);
                 // fixed to match this function's own source: 'manual_input'
                 // plan and the pushUsage({source: 'manual_chat'}) call below.
-                this.session.addAssistantMessage(answer, undefined, 'manual_chat');
+                this.session.addAssistantMessage(answer, undefined, 'manual_chat', undefined, { meetingTurn });
                 this.emit('manual_answer_result', answer, question);
 
                 this.session.pushUsage({
@@ -10006,6 +10056,7 @@ export class IntelligenceEngine extends EventEmitter {
      */
     async runCodeHint(imagePaths?: string[], problemStatement?: string): Promise<string | null> {
         const startedUnder = this.conversationSessionId();
+        const meetingTurn = this.session.beginMeetingTurn(problemStatement ?? 'Give me a code hint.');
         if (this.assistCancellationToken) {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
@@ -10022,6 +10073,7 @@ export class IntelligenceEngine extends EventEmitter {
             // Resolve question context from available sources (priority order)
             const sessionQuestion = this.session.getDetectedCodingQuestion();
             const questionContext = problemStatement ?? sessionQuestion.question ?? null;
+            const history = formatProviderMeetingHistory(this.session.getMeetingTurns(), { question: questionContext ?? undefined, currentTurn: meetingTurn });
             const questionSource = problemStatement
                 ? 'screenshot'
                 : sessionQuestion.source;
@@ -10061,9 +10113,9 @@ export class IntelligenceEngine extends EventEmitter {
                 imagePaths,
                 questionContext ?? undefined,
                 questionSource,
-                transcriptContext ?? undefined,
-                codeHintV3 ?? undefined,
-                pinnedHistory || undefined,
+                questionContext ? transcriptContext ?? undefined : withMeetingHistory(transcriptContext ?? undefined, history),
+                codeHintV3 ? { ...codeHintV3, user: withMeetingHistory(history, codeHintV3.user) } : undefined,
+                questionContext ? withMeetingHistory(pinnedHistory, history) || undefined : undefined,
             );
 
             let streamAborted = false;
@@ -10089,7 +10141,8 @@ export class IntelligenceEngine extends EventEmitter {
                 fullHint = "I couldn't detect any code in the screenshot. Try screenshotting your code editor directly.";
             }
 
-            this.session.addAssistantMessage(fullHint, undefined, 'screenshot');
+            this.session.addAssistantMessage(fullHint, undefined, 'screenshot', undefined, { meetingTurn });
+            this.session.enrichMeetingTurn(meetingTurn, { resolvedQuestion: questionContext ?? undefined });
             this.session.pushUsage({
                 type: 'assist',
                 timestamp: Date.now(),
@@ -10104,7 +10157,7 @@ export class IntelligenceEngine extends EventEmitter {
             this.recordLiveTurn(IntelligenceEngine.actionTurnAnswer(hinted, fullHint, imagePaths),
                 undefined, IntelligenceEngine.actionTurnQuestion('Code hint', questionContext),
                 imagePaths?.length ?? 0, imagePaths, 'user', {
-                startedUnder,
+                startedUnder, meetingTurn,
                 // If the screen's transcription fails, a short read is kept instead (2026-11-06).
                 ...(imagePaths?.length ? { backupDescribe: 'manual_use_screen' as const } : {}),
             });
@@ -10126,6 +10179,7 @@ export class IntelligenceEngine extends EventEmitter {
      */
     async runBrainstorm(imagePaths?: string[], problemStatement?: string): Promise<string | null> {
         const startedUnder = this.conversationSessionId();
+        const meetingTurn = this.session.beginMeetingTurn(problemStatement ?? 'Suggest approaches for this problem.');
         if (this.assistCancellationToken) {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
@@ -10141,15 +10195,18 @@ export class IntelligenceEngine extends EventEmitter {
 
             // With the conversation so far: a problem shared on a screenshot a
             // few turns ago is what a later Brainstorm press is about.
-            const context = this.withConversationHistory(this.session.getFormattedContext(180));
+            const priorContext = this.withConversationHistory(this.session.getFormattedContext(180));
             // The problem statement goes with it so the LLM knows exactly what to brainstorm
             const resolvedProblem = problemStatement?.trim() ||
                 this.session.getDetectedCodingQuestion().question?.trim();
+            const context = withMeetingHistory(priorContext, formatProviderMeetingHistory(this.session.getMeetingTurns(), {
+                question: resolvedProblem, currentTurn: meetingTurn,
+            }));
 
             if (!context.trim() && !resolvedProblem && (!imagePaths || imagePaths.length === 0)) {
                 this.setMode('idle');
                 const msg = "There's nothing to brainstorm right now. Make sure your question is visible or spoken aloud, then try again.";
-                this.session.addAssistantMessage(msg, undefined, 'screenshot');
+                this.session.addAssistantMessage(msg, undefined, 'screenshot', undefined, { skipMeetingLedger: true });
                 this.emit('suggested_answer', msg, 'Brainstorming Approaches', 1.0);
                 return msg;
             }
@@ -10220,7 +10277,8 @@ export class IntelligenceEngine extends EventEmitter {
                 fullResult = "I couldn't generate brainstorm approaches. Make sure your question is visible and try again.";
             }
 
-            this.session.addAssistantMessage(fullResult, undefined, 'screenshot');
+            this.session.addAssistantMessage(fullResult, undefined, 'screenshot', undefined, { meetingTurn });
+            this.session.enrichMeetingTurn(meetingTurn, { resolvedQuestion: resolvedProblem ?? undefined });
             this.session.pushUsage({
                 type: 'assist',
                 timestamp: Date.now(),
@@ -10232,7 +10290,7 @@ export class IntelligenceEngine extends EventEmitter {
             this.recordLiveTurn(IntelligenceEngine.actionTurnAnswer(generated, fullResult, imagePaths),
                 undefined, IntelligenceEngine.actionTurnQuestion('Brainstorm approaches', resolvedProblem),
                 imagePaths?.length ?? 0, imagePaths, 'user', {
-                aside: true, startedUnder,
+                aside: true, startedUnder, meetingTurn,
                 // If the screen's transcription fails, a short read is kept instead (2026-11-06).
                 ...(imagePaths?.length ? { backupDescribe: 'manual_use_screen' as const } : {}),
             });

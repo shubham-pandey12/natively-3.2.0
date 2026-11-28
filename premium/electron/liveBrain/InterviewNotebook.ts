@@ -1,3 +1,6 @@
+import { formatProviderMeetingHistory } from '../../../electron/context-intelligence/meeting-history-formatter';
+import type { LiveBrainMeetingOptions } from '../../../electron/premium/liveBrain';
+import type { MeetingTurn } from '../../../electron/SessionTracker';
 import { compressConversation } from '../../../electron/llm/ConversationSummarizer';
 import { isFillerOnly } from './ResponseOrchestrator';
 import type { ConversationTurn, NotebookSnapshot } from './types';
@@ -30,6 +33,11 @@ function truncate(text: string, maxChars: number): string {
 function append(items: string[], text: string): string[] {
     const entry = truncate(text, 170);
     return [...items.filter(item => item !== entry), entry].slice(-6);
+}
+
+function appendConstraint(items: string[], text: string): string[] {
+    const entry = truncate(text, 170);
+    return [...items.filter(item => item !== entry), entry].slice(-24);
 }
 
 function sentences(text: string): string[] {
@@ -102,13 +110,29 @@ export class InterviewNotebook {
     private controller = new AbortController();
     private revision = 0;
     private summaryTimer?: ReturnType<typeof setTimeout>;
+    private ledgerRevision = -1;
+    private rebuildingLedger = false;
 
     constructor(private readonly options: {
         now(): number;
+        readMeetingHistory?: LiveBrainMeetingOptions['readMeetingHistory'];
         summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
         onUpdate?(sizes: { turns: number; notebookChars: number; summaryChars: number }): void;
     }) {}
 
+    projectHistory(question?: string, seeded?: ReadonlyMap<number, string>, trackSeed = false): {
+        text: string; revision: number; fingerprints?: ReadonlyMap<number, string>;
+    } | undefined {
+        const snapshot = this.options.readMeetingHistory?.();
+        if (!snapshot) return undefined;
+        if (snapshot.revision !== this.ledgerRevision) this.rebuildFromLedger(snapshot.turns, snapshot.revision);
+        const fingerprints = trackSeed ? new Map(snapshot.turns.map(turn => [turn.turnId, JSON.stringify(turn)])) : undefined;
+        const turns = seeded ? snapshot.turns.filter(turn => seeded.get(turn.turnId) !== JSON.stringify(turn)) : snapshot.turns;
+        return {
+            text: formatProviderMeetingHistory(turns, { question, rollingSummary: renderNotebook(this.state) }),
+            revision: snapshot.revision, fingerprints,
+        };
+    }
     snapshot(): NotebookSnapshot { return structuredClone(this.state); }
     renderNotebook(): string { return renderNotebook(this.state); }
     recentTurns(): ConversationTurn[] {
@@ -173,7 +197,7 @@ export class InterviewNotebook {
                     else requirement = sentence;
                     this.state.requirements = append(this.state.requirements, sentence);
                 }
-                if (CONSTRAINT.test(sentence)) this.state.constraints = append(this.state.constraints, sentence);
+                if (CONSTRAINT.test(sentence)) this.state.constraints = appendConstraint(this.state.constraints, sentence);
             }
             const topic = question || requirement;
             if (topic) {
@@ -192,9 +216,41 @@ export class InterviewNotebook {
                 this.state.answered = append(this.state.answered, this.latestQuestion);
             }
         }
-        if (this.working || turn.role === 'assistant' || (turn.role === 'interviewer' && !interviewerFiller && CONSTRAINT.test(text))) {
+        if (!this.rebuildingLedger && (this.working || turn.role === 'assistant' || (turn.role === 'interviewer' && !interviewerFiller && CONSTRAINT.test(text)))) {
             this.updateInBackground();
         }
+    }
+
+    private rebuildFromLedger(ledgerTurns: readonly MeetingTurn[], revision: number): void {
+        this.controller.abort();
+        clearTimeout(this.summaryTimer);
+        this.controller = new AbortController();
+        this.summaryTimer = undefined;
+        this.state = emptyNotebook();
+        this.turns = [];
+        this.chars = 0;
+        this.latestQuestion = '';
+        this.facts = [];
+        this.refinedSummary = '';
+        this.pending = false;
+        this.working = false;
+        this.revision = 0;
+        this.rebuildingLedger = true;
+        for (const turn of ledgerTurns) {
+            // Captured material is projected by the provider-scoped formatter.
+            // Keep it out of the notebook summary so it cannot bypass screenshot
+            // scope when a provider is not allowed to see captured content.
+            if (turn.hasVisualInput || turn.capture || turn.answer?.surface === 'screenshot') continue;
+            const questionRole = turn.role === 'interviewer' ? 'interviewer' : 'candidate';
+            const question = turn.resolvedQuestion?.trim() || turn.question.trim();
+            if (question) this.record({ role: questionRole, text: question, at: turn.timestamp });
+            if (turn.answer && turn.answer.status !== 'replaced') {
+                this.record({ role: 'assistant', text: turn.answer.text, at: turn.timestamp });
+            }
+        }
+        this.rebuildingLedger = false;
+        this.ledgerRevision = revision;
+        if (ledgerTurns.length) this.updateInBackground();
     }
 
     clear(): void {
@@ -210,6 +266,7 @@ export class InterviewNotebook {
         this.refinedSummary = '';
         this.pending = false;
         this.working = false;
+        this.ledgerRevision = -1;
     }
 
     private updateInBackground(): void {
@@ -223,7 +280,7 @@ export class InterviewNotebook {
     private async summarize(signal: AbortSignal): Promise<void> {
         this.pending = false;
         const revision = this.revision;
-        const batch = this.turns.slice(-14);
+        const batch = this.turns;
         const spoken = batch.filter(turn => turn.role !== 'assistant').flatMap(turn => sentences(turn.text).map(text => ({ text })));
         const { compressed } = compressConversation(spoken, spoken.length);
         for (const fact of compressed.importantFacts) this.facts = append(this.facts, fact);

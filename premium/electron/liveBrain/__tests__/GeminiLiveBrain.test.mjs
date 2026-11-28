@@ -141,6 +141,36 @@ test('silence emits no answer and clarification follow-up sends a new client tur
     assert.equal(content.turns[0].role, 'user');
 });
 
+test('shared-history delta reaches an open Gemini session silently', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { requests } = connections[0];
+    const before = requests.length;
+    brain.addHistoryContext('<interview_conversation>AI suggestion: Use a min-heap.</interview_conversation>');
+    const update = await until(() => requests.slice(before).find(message => message.clientContent)?.clientContent);
+    assert.deepEqual(update, {
+        turns: [{ role: 'user', parts: [{ text: '<interview_conversation>AI suggestion: Use a min-heap.</interview_conversation>' }] }],
+        turnComplete: false,
+    });
+    assert.equal(requests.slice(before).some(message => message.clientContent?.turnComplete === true), false);
+    assert.equal(events.some(event => event.type === 'response_started' || event.type === 'response_delta'), false);
+    assert.equal(connections.length, 1);
+});
+
+test('queues a shared-history delta during an active speech turn and flushes it before the next answer', async t => {
+    const { brain, events, connections } = await rig(t);
+    await brain.start(ctx());
+    const { socket, requests } = connections[0];
+    send(socket, speech('Why did you choose a heap?'));
+    await until(() => events.some(event => event.type === 'interviewer_transcript' && event.final));
+    brain.addHistoryContext('AI suggestion from the screenshot answer: Use a min-heap.');
+    assert.equal(requests.some(message => message.clientContent?.turns?.[0]?.parts?.[0]?.text.includes('screenshot answer')), false);
+    send(socket, { serverContent: { turnComplete: true } });
+    const delta = await until(() => requests.find(message => message.clientContent?.turns?.[0]?.parts?.[0]?.text.includes('screenshot answer')));
+    assert.equal(delta.clientContent.turnComplete, false);
+    assert.equal(events.some(event => event.type === 'response_started'), false);
+});
+
 test('goAway emits the deadline and reconnects with the resumable handle', async t => {
     const { brain, events, connections } = await rig(t);
     await brain.start(ctx());

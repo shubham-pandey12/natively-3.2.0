@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const require = createRequire(import.meta.url);
 const dist = '../../../../dist-electron/';
 const { IntelligenceEngine } = require(`${dist}electron/IntelligenceEngine.js`);
+const { SessionTracker } = require(`${dist}electron/SessionTracker.js`);
 const { LiveBrainRouting, resolveLiveBrainProfileContext } = require(`${dist}electron/premium/liveBrain.js`);
 const { clearPromptDebugState, getPromptDebugState } = require(`${dist}electron/llm/promptDebug.js`);
 const { SkillsManager } = require(`${dist}electron/services/SkillsManager.js`);
@@ -107,6 +108,42 @@ test('incremental Gemini answers replace a cancelled answer and drop late chunks
     done('replacement');
     assert.deepEqual(questions.at(-1).responseText, { text: 'Use MongoDB.', done: true });
     session.stop();
+});
+
+test('meeting session forwards a screenshot answer from SessionTracker before the spoken follow-up', async t => {
+    const ledger = new SessionTracker();
+    const brain = new FakeLiveBrain();
+    const contextUpdates = [];
+    const protocolOrder = [];
+    brain.addHistoryContext = text => { contextUpdates.push(text); protocolOrder.push('history'); };
+    const session = createMeeting({
+        sessionId: 'shared-history-integration',
+        engine: { setAutomaticAnswerOutdated() {} },
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
+        subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
+        emitQuestion() {},
+        onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+    }, brain);
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+
+    const screenshot = ledger.beginMeetingTurn('Answer the shared screen question.', 'request', Date.now(), 'captured');
+    ledger.enrichMeetingTurn(screenshot, {
+        hasVisualInput: true,
+        resolvedQuestion: 'Find the k largest values.',
+        capture: { origin: 'capture', text: 'Constraints: 1 <= n <= 100000; k <= n.' },
+    });
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap of size k.', { surface: 'screenshot' });
+    assert.equal(contextUpdates.length, 1);
+    assert.match(contextUpdates[0], /Find the k largest values/);
+    assert.match(contextUpdates[0], /1 <= n <= 100000/);
+    assert.match(contextUpdates[0], /Use a min-heap of size k/);
+
+    protocolOrder.push('spoken-follow-up');
+    brain.emit({ type: 'interviewer_transcript', text: 'Why did you use a heap?', final: true, at: Date.now() });
+    assert.ok(protocolOrder.indexOf('history') < protocolOrder.indexOf('spoken-follow-up'));
+    assert.equal(contextUpdates.length, 1);
 });
 
 function useSkillsFixture(t) {

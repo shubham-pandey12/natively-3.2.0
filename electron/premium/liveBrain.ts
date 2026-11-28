@@ -10,6 +10,7 @@ import type {
     LiveBrainSettingsResult,
 } from '../../src/types/liveBrainSettings';
 import type { AutoAnswerDispatchResult } from './autoAnswer';
+import type { MeetingTurn, MeetingTurnIdentity } from '../SessionTracker';
 export type { AutoAnswerDispatchResult };
 
 export interface DeepgramThinkConfig {
@@ -25,6 +26,8 @@ export interface DeepgramThinkConfig {
 
 export interface LiveBrainAnswerRequest {
     question: string;
+    meetingTurn?: MeetingTurnIdentity;
+    replacesMeetingTurn?: MeetingTurnIdentity;
     replacesAutomaticAnswer: boolean;
     signal: AbortSignal;
     onFirstText?: (at: number) => void;
@@ -95,6 +98,7 @@ export function resolveLiveBrainProfileContext(
 }
 
 export interface LiveBrainPendingTurn {
+    meetingTurn?: MeetingTurnIdentity;
     turnId: number;
     text: string;
     at: number;
@@ -131,6 +135,10 @@ export interface LiveBrainMeetingOptions extends LiveBrainContextSnapshot {
         cancel(reason: 'manual_answer' | 'auto_disabled_or_meeting_ended'): void;
     };
     summarize?(prompt: string, signal: AbortSignal): Promise<string | null>;
+    readMeetingHistory?(): { turns: MeetingTurn[]; revision: number };
+    subscribeExternalMeetingAnswers?(listener: (turn: MeetingTurn, revision: number) => void): () => void;
+    identifyInterviewTurn?(question: string, at: number): MeetingTurnIdentity | undefined;
+    recordInterviewAnswer?(turn: MeetingTurnIdentity, answer: string, status: 'completed' | 'interrupted', replaces?: MeetingTurnIdentity): void;
     emitQuestion(event: WhatToAnswerQuestionEvent): void;
     onFailure(code: string): void;
 }
@@ -142,8 +150,9 @@ export interface LiveBrainMeetingSession {
     addCandidateText(text: string, at: number): void;
     noteSpeechStop(at: number): void;
     refreshContext?(change?: 'skills'): void;
+    syncExternalHistory?(turn: MeetingTurn, revision: number): void;
     isPipeline?(): boolean;
-    pipelineContext?(): string;
+    pipelineContext?(question?: string): string;
     isUsingPipeline?(): boolean;
     observePipelineTranscript?(text: string, final: boolean, at: number): boolean | void;
     observePipelineOutput?(output: { generationId: number; type: 'token' | 'answer' | 'discard' | 'failed'; text?: string; question?: string; cancelReason?: string }): void;

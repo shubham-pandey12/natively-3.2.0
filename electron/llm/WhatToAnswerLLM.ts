@@ -1,3 +1,4 @@
+import { meetingHistoryScopes } from '../context-intelligence/meeting-history-formatter';
 import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_WHAT_TO_ANSWER_PROMPT } from "./prompts";
 import { TINY_WHAT_TO_ANSWER_PROMPT } from "./tinyPrompts";
@@ -1283,7 +1284,7 @@ The user triggered this action with a coding problem on screen and NO new questi
             // what exposed it. Typing the tuple as the callee's own parameter list
             // fixes that and additionally checks arity and order against the real
             // signature — which an `as const` tuple silently did not.
-            const _wtaArgs: Parameters<LLMHelper['streamChat']> = [_wtaUserMessage, imagePaths, undefined, _wtaSystemPrompt, true, true, packetScopes, abortSignal, wtaThinkingBudget, _wtaRoute];
+            const _wtaArgs: Parameters<LLMHelper['streamChat']> = [_wtaUserMessage, imagePaths, undefined, _wtaSystemPrompt, true, true, [...new Set([...packetScopes, ...meetingHistoryScopes(_wtaUserMessage)])], abortSignal, wtaThinkingBudget, _wtaRoute];
             // Hand this turn's fully-composed answer call to LLMHelper so the
             // post-answer repair passes can reuse it. Because positions 5 and 6
             // are both `true`, everything the answer knows — transcript,

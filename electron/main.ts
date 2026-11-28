@@ -3984,7 +3984,7 @@ export class AppState {
       const stop = this.debugInterviewerStop;
       const speechStoppedAt = stop && stop.meetingGeneration === this._meetingGeneration
         && stop.capture === this.systemAudioCapture ? stop.at : undefined;
-      const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
+      const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.(question.text);
       return this.intelligenceManager.runAutoAnswer(question, this.liveBrainRouting.activeSession?.isUsingPipeline?.()
         ? { reuseSpeculative: false, speechStoppedAt, liveBrainNotebook: notebook }
         : { reuseSpeculative, speechStoppedAt }).catch((error) => {
@@ -8163,6 +8163,7 @@ export class AppState {
     this.windowHelper.setWindowMode('overlay', undefined, { hidden: startPlan.overlayHidden });
 
     const meetingGeneration = ++this._meetingGeneration;
+    this.intelligenceManager.resetMeetingHistory();
     this.isMeetingActive = true;
     const liveBrainOn = this.getLiveBrainEnabled();
     console.log(`[LiveBrain] meeting start: Live Brain is ${liveBrainOn ? 'on' : 'off'}`);
@@ -10908,6 +10909,7 @@ export class AppState {
       const done = this.intelligenceManager.runAutoAnswer(candidate, {
         reuseSpeculative: false,
         liveBrainNotebook: turn.context,
+        meetingTurn: turn.meetingTurn,
       });
       return { status: 'accepted', done };
     };
@@ -10950,6 +10952,7 @@ export class AppState {
           standingSkills,
         };
       };
+      const meetingEpoch = this.intelligenceManager.getMeetingHistoryEpoch();
       return loadLiveBrainPremium()?.createMeeting({
         provider, apiKey, model, reasoningEffort, deepgramThink, sonicRegion, sessionId: crypto.randomUUID(), promptVariant: promptVariant ?? undefined,
         resolveProvider: (p) => resolveLiveBrainRuntime(p, this.processingHelper?.getLLMHelper?.()),
@@ -10959,6 +10962,15 @@ export class AppState {
           return skill?.alwaysOn === true && skill.enabled !== false;
         },
         engine: this.intelligenceManager,
+        readMeetingHistory: () => this.intelligenceManager.readMeetingHistory(),
+        subscribeExternalMeetingAnswers: listener => this.intelligenceManager.subscribeExternalMeetingAnswers(listener),
+        identifyInterviewTurn: (question, at) => {
+          if (!question.trim() || this.intelligenceManager.getMeetingHistoryEpoch() !== meetingEpoch) return undefined;
+          return this.intelligenceManager.noteMeetingSpeech(question, 'interviewer', at, 'realtime');
+        },
+        recordInterviewAnswer: (turn, answer, status, replaces) => {
+          this.intelligenceManager.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces });
+        },
         emitQuestion: event => this.intelligenceManager.emitLiveBrainQuestion(event),
         summarize: (prompt, signal) => this.processingHelper.getLLMHelper().summarizeLiveInterview(prompt, signal),
         ...(this.isAutoAnswerAvailable() ? {

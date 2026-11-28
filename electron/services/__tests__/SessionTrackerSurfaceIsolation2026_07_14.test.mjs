@@ -34,6 +34,92 @@ function freshTracker() {
   return new SessionTracker();
 }
 
+describe('Phase 10 meeting ledger', () => {
+  test('keeps a short reply and older turns while preserving legacy views', () => {
+    const tracker = freshTracker();
+    const short = tracker.beginMeetingTurn('Should we use a heap?');
+    assert.equal(tracker.addAssistantMessage('Yes.', undefined, 'manual_chat', undefined, { meetingTurn: short }), false);
+    assert.equal(tracker.getLastAssistantMessage(), null);
+    assert.equal(tracker.getFormattedContext(), '');
+    assert.equal(tracker.getPersistableTranscript().length, 0);
+    assert.equal(tracker.getMeetingTurns()[0].answer.text, 'Yes.');
+
+    for (let i = 0; i < 12; i++) {
+      const turn = tracker.beginMeetingTurn(`Question ${i}`);
+      assert.equal(tracker.addAssistantMessage(`A complete answer ${i}`, undefined, 'manual_chat', undefined, { meetingTurn: turn }), true);
+    }
+    assert.equal(tracker.getMeetingTurns().filter(turn => turn.answer).length, 13);
+    assert.equal(tracker.getAssistantResponseHistory().length, 10);
+  });
+
+  test('excludes non-answers and rejects writes to retired meetings or completed turns', () => {
+    const tracker = freshTracker();
+    const turn = tracker.beginMeetingTurn('What is the expected load?');
+    assert.equal(tracker.recordMeetingAnswer(turn, '[[NO_ACTION]]'), false);
+    assert.equal(tracker.recordMeetingAnswer(turn, 'A blocked reply.', { writeDecision: { blockedFromSessionTracker: true } }), false);
+    assert.equal(tracker.recordMeetingAnswer(turn, 'A blocked reply.', { writeDecision: { policy: 'do_not_store' } }), false);
+    assert.equal(tracker.recordMeetingAnswer(turn, "I don't know."), false);
+    assert.equal(tracker.recordMeetingAnswer(turn, 'Around', { status: 'interrupted' }), true);
+    assert.equal(tracker.getMeetingTurns()[0].answer.status, 'interrupted');
+    assert.equal(tracker.recordMeetingAnswer(turn, 'Around 100 requests per second.'), true);
+    assert.equal(tracker.recordMeetingAnswer(turn, 'Stale completion.'), false);
+    tracker.reset();
+    assert.deepEqual(tracker.getMeetingTurns(), []);
+    assert.equal(tracker.recordMeetingAnswer(turn, 'Late completion.'), false);
+    assert.equal(tracker.enrichMeetingTurn(turn, { resolvedQuestion: 'Late screenshot' }), false);
+  });
+
+  test('deduplicates speech finals and clears history on meeting start', () => {
+    const tracker = freshTracker();
+    const turn = tracker.noteMeetingSpeech('What is a heap?', 'interviewer', 1_000);
+    const repeated = tracker.noteMeetingSpeech('What is a heap', 'interviewer', 4_100, 'realtime');
+    assert.equal(repeated.turnId, turn.turnId);
+    assert.equal(tracker.getMeetingTurns().length, 1);
+    const newSpeech = tracker.noteMeetingSpeech('What is a heap?', 'interviewer', 4_300);
+    assert.notEqual(newSpeech.turnId, turn.turnId);
+    tracker.resetMeetingHistory();
+    assert.deepEqual(tracker.getMeetingTurns(), []);
+    assert.equal(tracker.recordMeetingAnswer(turn, 'Late answer.'), false);
+  });
+
+  test('Auto Answer attaches to speech and a mid-meeting reset preserves the ledger', () => {
+    const tracker = freshTracker();
+    const spoken = tracker.noteMeetingSpeech('What is the time complexity?', 'interviewer', 1_500);
+    tracker.addAssistantMessage('It takes logarithmic time.', undefined, 'meeting_auto_answer');
+    assert.equal(tracker.getMeetingTurns().length, 1);
+    assert.equal(tracker.getMeetingTurns()[0].turnId, spoken.turnId);
+    tracker.reset({ keepMeetingRecord: true });
+    assert.equal(tracker.getMeetingTurns()[0].answer.text, 'It takes logarithmic time.');
+    assert.equal(tracker.getLastAssistantMessage(), null);
+    tracker.reset();
+    assert.deepEqual(tracker.getMeetingTurns(), []);
+  });
+
+  test('a second answer to the same question gets a fresh ledger turn', () => {
+    const tracker = freshTracker();
+    const question = 'How does a heap work?';
+    tracker.noteMeetingSpeech(question, 'interviewer', 1000);
+    tracker.addAssistantMessage('The first completed answer.', undefined, 'meeting_auto_answer', undefined, { question });
+    tracker.addAssistantMessage('A fresh manual answer.', undefined, 'what_to_answer', undefined, { question });
+    assert.deepEqual(tracker.getMeetingTurns().map(turn => turn.answer?.text), [
+      'The first completed answer.', 'A fresh manual answer.',
+    ]);
+  });
+  test('a completed correction links both turns and retains the replaced text', () => {
+    const tracker = freshTracker();
+    const first = tracker.beginMeetingTurn('Design a store.');
+    const next = tracker.beginMeetingTurn('Use MongoDB.');
+    tracker.recordMeetingAnswer(first, 'Use PostgreSQL', { status: 'interrupted' });
+    tracker.recordMeetingAnswer(next, 'Use an index in MongoDB.', { replaces: first });
+    const [replaced, replacement] = tracker.getMeetingTurns();
+    assert.equal(replaced.answer.status, 'replaced');
+    assert.equal(replaced.answer.text, 'Use PostgreSQL');
+    assert.equal(replaced.replacedByTurnId, next.turnId);
+    assert.equal(replacement.replacesTurnId, first.turnId);
+    assert.equal(tracker.recordMeetingAnswer(first, 'Late completion.'), false);
+  });
+});
+
 describe('SessionTracker surface isolation (Phase 9)', () => {
   test('no-surface calls (legacy callers) behave EXACTLY as before: shared lastAssistantMessage sees every write', () => {
     const s = freshTracker();
@@ -126,9 +212,9 @@ describe('SessionTracker surface isolation (Phase 9)', () => {
     const fnEnd = intelligenceEngineSrc.indexOf('async runCodeHint(', fnStart);
     assert.ok(fnEnd > fnStart, 'expected to find the next method (runCodeHint) bounding runManualAnswer');
     const body = intelligenceEngineSrc.slice(fnStart, fnEnd);
-    assert.match(body, /addAssistantMessage\([^)]*'manual_chat'\)/,
+    assert.match(body, /addAssistantMessage\([^)]*'manual_chat',\s*undefined,\s*\{ meetingTurn \}\)/,
       'runManualAnswer must tag its addAssistantMessage write manual_chat (it is the manual-chat fallback path, confirmed by its own pushUsage({source: \'manual_chat\'}) call)');
-    assert.doesNotMatch(body, /addAssistantMessage\([^)]*'what_to_answer'\)/,
+    assert.doesNotMatch(body, /addAssistantMessage\([^)]*'what_to_answer'(?:,|\))/,
       'runManualAnswer must NOT be tagged what_to_answer — that mislabels a manual-chat answer as a WTA suggestion');
   });
 });

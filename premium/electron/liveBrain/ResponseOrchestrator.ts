@@ -9,6 +9,7 @@ import {
 } from './fluxTurnContext';
 import type { LiveBrainReplacement } from '../../../src/types/whatToAnswerQuestion';
 import type { LiveBrainEvent } from './types';
+import type { MeetingTurnIdentity } from '../../../electron/SessionTracker';
 
 export type AnswerCompletion = 'completed' | 'cancelled' | 'failed';
 export type OrchestratorDisposition =
@@ -22,6 +23,8 @@ export interface AnswerWriterPort {
             question: string;
             replacesAutomaticAnswer: boolean;
             turnKey?: string;
+            meetingTurn?: MeetingTurnIdentity;
+            replacesMeetingTurn?: MeetingTurnIdentity;
         },
         options?: { suppressQuestionRow?: boolean; onFirstText?: (at: number) => void; liveBrainNotebook?: string; contextKey?: string },
     ): {
@@ -59,6 +62,8 @@ export interface ResponseClock<Timer> {
 }
 
 interface CurrentAnswer {
+    meetingTurn?: MeetingTurnIdentity;
+    visibleWriterText?: string;
     generationId: number;
     source: 'writer' | 'text';
     completedAt?: number;
@@ -123,6 +128,7 @@ interface SpeechTurn {
 }
 
 interface AnswerTurn {
+    meetingTurn?: MeetingTurnIdentity;
     responseId: string;
     bubble?: QuestionBubble;
     generationId?: number;
@@ -174,6 +180,7 @@ let nextOrchestratorSession = 0;
 
 export class ResponseOrchestrator<Timer> {
     private current?: CurrentAnswer;
+    private replacedWriterTurn?: MeetingTurnIdentity;
     private response?: TextResponse;
     private readonly seenResponseIds = new Set<string>();
     private clarification?: { timer: Timer };
@@ -199,13 +206,15 @@ export class ResponseOrchestrator<Timer> {
         sessionId?: string;
         answerWriter?: AnswerWriterPort;
         requestClarificationAnswer?: () => void;
-        getContextSnapshot?: () => { baseNotebook: string; constraints: readonly string[]; groundingKey?: string };
+        getContextSnapshot?: (question: string) => { baseNotebook: string; constraints: readonly string[]; groundingKey?: string; historyRevision?: number };
         cleanupText?: (text: string) => string;
         shouldCleanupText?: () => boolean;
         overlay: LiveBrainOverlayPort;
         clock: ResponseClock<Timer>;
         recordSttQuestion?(text: string, at: number): void;
         recordDeferredAnswer?(text: string, isClarification?: boolean): void;
+        identifyInterviewTurn?(question: string, at: number): MeetingTurnIdentity | undefined;
+        recordInterviewAnswer?(turn: MeetingTurnIdentity, text: string, status: 'completed' | 'interrupted', replaces?: MeetingTurnIdentity): void;
         recordMergedQuestion?(previous: string, next: string, at: number): void;
     }) {
         this.questionNamespace = `${ports.sessionId ?? 'lb'}:${++nextOrchestratorSession}`;
@@ -400,6 +409,7 @@ export class ResponseOrchestrator<Timer> {
         this.realtimeAsk = undefined;
         this.pendingClarification = undefined;
         this.writerClarificationHeardSpeech = false;
+        this.replacedWriterTurn = undefined;
     }
 
     private handleDecision(event: Extract<LiveBrainEvent, { type: 'decision' }>): void {
@@ -429,6 +439,7 @@ export class ResponseOrchestrator<Timer> {
                     && previous.completedAt !== undefined
                     && isCorrectionTurn(question)
                     && this.isRecent(previous);
+                if (completedWriterCorrection) this.replacedWriterTurn = previous.meetingTurn;
                 const replacesAutomaticAnswer = deferWriterOutdated
                     ? this.cancelActiveWriterForCorrection()
                     : completedWriterCorrection
@@ -458,6 +469,7 @@ export class ResponseOrchestrator<Timer> {
                     interrupted,
                     turnCtx?.liveBrainNotebook,
                     turnCtx?.contextKey,
+                    event.at,
                 );
                 break;
             }
@@ -592,10 +604,11 @@ export class ResponseOrchestrator<Timer> {
         isDraft = false,
     ): { liveBrainNotebook: string; contextKey: string } | undefined {
         if (!this.ports.getContextSnapshot) return undefined;
-        const { baseNotebook, constraints, groundingKey } = this.ports.getContextSnapshot();
+        const { baseNotebook, constraints, groundingKey: sourceGroundingKey, historyRevision } = this.ports.getContextSnapshot(question);
+        const groundingKey = historyRevision === undefined ? sourceGroundingKey : JSON.stringify([sourceGroundingKey, historyRevision]);
         // The current transcript is already keyed separately. Its final event can
         // add these same sentences to the notebook just before confirmation.
-        const history = this.historyTurns();
+        const history = historyRevision === undefined ? this.historyTurns() : [];
         const currentSentences = new Set(question.split(/(?<=[.!?])\s+/u).map(sentence => sentence.slice(0, 170)));
         const conversationalKey = buildFluxTurnContext({
             question,
@@ -670,6 +683,12 @@ export class ResponseOrchestrator<Timer> {
         const lastTextAt = current.source === 'writer' ? current.lastTextAt
             : current.generationId === (response?.generationId ?? response?.askGenerationId) ? response?.lastTextAt : undefined;
         if (lastTextAt !== undefined && this.ports.clock.now() - lastTextAt <= MID_STREAM_MS) {
+            if (!current.cutOff) {
+                if (current.source === 'text' && response?.text.trim()) this.recordRealtimeAnswer(response, response.text, 'interrupted');
+                if (current.meetingTurn && current.visibleWriterText) {
+                    this.ports.recordInterviewAnswer?.(current.meetingTurn, current.visibleWriterText, 'interrupted');
+                }
+            }
             current.cutOff = true;
         }
     }
@@ -699,9 +718,10 @@ export class ResponseOrchestrator<Timer> {
      * very short partials ("Mm", "Take your time") never stop an answer, and
      * neither does a reply while an Ask is waiting.
      */
-    noteWriterProgress(generationId: number): void {
+    noteWriterProgress(generationId: number, token?: string): void {
         if (this.current?.source === 'writer' && this.current.generationId === generationId) {
             this.current.lastTextAt = this.ports.clock.now();
+            if (token) this.current.visibleWriterText = (this.current.visibleWriterText ?? '') + token;
         }
     }
 
@@ -727,6 +747,8 @@ export class ResponseOrchestrator<Timer> {
     private cancelActiveWriterForCorrection(): boolean {
         const previous = this.current;
         if (!previous) return false;
+        this.noteCutOff();
+        this.replacedWriterTurn = previous.meetingTurn;
         this.setSpeaking(previous, false);
         this.current = undefined;
         if (previous.source === 'writer' && previous.completedAt === undefined) {
@@ -752,6 +774,7 @@ export class ResponseOrchestrator<Timer> {
         interrupted?: CurrentAnswer,
         liveBrainNotebook?: string,
         contextKey?: string,
+        at = this.ports.clock.now(),
     ): void {
         const writer = this.ports.answerWriter;
         if (!writer) return;
@@ -759,13 +782,18 @@ export class ResponseOrchestrator<Timer> {
         const bubble = this.question?.open ? this.question
             : interrupted?.bubble ? this.createBubble(question, 'provider', false, undefined, false, false) : undefined;
         if (this.question?.open) this.closeQuestion();
-        const request = { question, replacesAutomaticAnswer, ...(turnKey ? { turnKey } : {}) };
+        const meetingTurn = this.ports.identifyInterviewTurn?.(question, at);
+        const replacesMeetingTurn = interrupted?.meetingTurn ?? this.replacedWriterTurn;
+        this.replacedWriterTurn = undefined;
+        const request = { question, replacesAutomaticAnswer, ...(turnKey ? { turnKey } : {}),
+            ...(meetingTurn ? { meetingTurn } : {}), ...(replacesMeetingTurn ? { replacesMeetingTurn } : {}) };
         const answer: CurrentAnswer = {
             generationId: 0,
             source: 'writer',
             outdated: false,
             speaking: false,
             bubble,
+            meetingTurn,
         };
         const writeOptions: { suppressQuestionRow?: boolean; onFirstText?: (at: number) => void; liveBrainNotebook?: string; contextKey?: string } = {
             ...(bubble ? { suppressQuestionRow: true } : {}),
@@ -992,7 +1020,21 @@ export class ResponseOrchestrator<Timer> {
         if (turn.response?.finished) this.commitMergedQuestion(turn.bubble);
         const text = turn.pendingAnswer;
         turn.pendingAnswer = undefined;
+        if (text && turn.response) this.recordRealtimeAnswer(turn.response, text, 'completed', turn);
         return text;
+    }
+
+    private recordRealtimeAnswer(response: TextResponse, text: string, status: 'completed' | 'interrupted', associated?: AnswerTurn): void {
+        const speech = this.speechTurns.findLast(candidate => candidate.answer?.responseId === response.id);
+        const turn = associated ?? speech?.answer ?? (this.answerTurn?.responseId === response.id ? this.answerTurn : undefined);
+        if (!turn?.bubble || turn.bubble.retired) return;
+        const question = joinText(turn.bubble.base, turn.bubble.live);
+        turn.meetingTurn ??= this.ports.identifyInterviewTurn?.(question, speech?.stt?.at ?? speech?.stoppedAt ?? this.ports.clock.now());
+        if (!turn.meetingTurn) return;
+        if (this.current && (this.current.generationId === response.generationId || this.current.askId === response.id)) {
+            this.current.meetingTurn = turn.meetingTurn;
+        }
+        this.ports.recordInterviewAnswer?.(turn.meetingTurn, text, status, response.replaced ? response.previous?.meetingTurn : undefined);
     }
 
     private settleFiller(): void {
@@ -1176,6 +1218,7 @@ export class ResponseOrchestrator<Timer> {
             if (completed) {
                 this.commitMergedQuestion(this.answerTurn?.bubble);
                 this.showAsk(response.id, clarification, undefined, false);
+                this.recordRealtimeAnswer(response, clarification, 'completed');
                 return { kind: 'ask', text: clarification };
             }
             this.ports.overlay.showAsk({ askId: response.id, clarification, askStreaming: false });
@@ -1191,6 +1234,7 @@ export class ResponseOrchestrator<Timer> {
             this.current.completedAt = this.ports.clock.now();
         }
         const text = this.showText(response, true, interrupted);
+        if (interrupted) this.recordRealtimeAnswer(response, text, 'interrupted');
         if (cancelled || !completed || response.kind !== 'answer') return { kind: 'suppressed' };
         const turn = this.answerTurn;
         if (turn?.responseId === response.id && turn.awaitsTranscript) {
@@ -1198,6 +1242,7 @@ export class ResponseOrchestrator<Timer> {
             return { kind: 'suppressed' };
         }
         this.commitMergedQuestion(turn?.bubble);
+        this.recordRealtimeAnswer(response, text, 'completed');
         return { kind: 'answer', text };
     }
 

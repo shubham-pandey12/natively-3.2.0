@@ -94,12 +94,12 @@ export function buildFluxTurnContext(input: FluxTurnContextInput): string {
     const turns = (input.recentTurns ?? (input.lastConfirmedTurn ? [input.lastConfirmedTurn] : []))
         .filter(turn => turn.question.trim())
         .slice(-MAX_RECENT_TURNS);
-    if (!turns.length) return '';
+    if (!turns.length && !base) return '';
 
     const constraints = (input.constraints ?? []).filter(Boolean);
     const lines = [
         '<turn_context kind="conversation">',
-        'Recent interview turns, oldest first:',
+        turns.length ? 'Recent interview turns, oldest first:' : 'Use the shared interview conversation below for prior turns.',
         ...turns.flatMap((turn, index) => [
             `Q${index + 1}: ${truncate(turn.question, MAX_HISTORY_ANSWER_CHARS)}`,
             `A${index + 1}: ${turn.answer?.trim() ? truncate(turn.answer, MAX_HISTORY_ANSWER_CHARS) : '(no answer was given; it may have been interrupted)'}`,

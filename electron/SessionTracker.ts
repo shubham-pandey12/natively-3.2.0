@@ -81,6 +81,7 @@ export interface TranscriptSegment {
 }
 
 export interface SuggestionTrigger {
+    meetingTurn?: MeetingTurnIdentity;
     liveBrainNotebook?: string;
     replacesAutomaticAnswer?: boolean;
     context: string;
@@ -143,7 +144,36 @@ export interface ContextItem {
  * (absent = legacy/unknown caller) so this is purely additive — no existing
  * write site is required to change.
  */
-export type ConversationSurface = 'manual_chat' | 'what_to_answer' | 'screenshot' | 'meeting_auto_answer' | 'phone_mirror';
+export type ConversationSurface = 'manual_chat' | 'what_to_answer' | 'screenshot' | 'meeting_auto_answer' | 'phone_mirror' | 'live_brain';
+
+export interface MeetingTurnIdentity {
+    turnId: number;
+    meetingEpoch: number;
+}
+
+export interface MeetingCaptureText {
+    text: string;
+    origin: 'capture' | 'model_inferred' | 'extension_untrusted';
+}
+
+export interface MeetingTurn extends MeetingTurnIdentity {
+    role: 'interviewer' | 'user' | 'request';
+    inputKind?: 'speech' | 'typed' | 'captured';
+    question: string;
+    timestamp: number;
+    resolvedQuestion?: string;
+    capture?: MeetingCaptureText;
+    hasVisualInput?: boolean;
+    replacesTurnId?: number;
+    replacedByTurnId?: number;
+    answer?: {
+        text: string;
+        status: 'completed' | 'interrupted' | 'replaced';
+        surface?: ConversationSurface;
+    };
+    /** Global ledger revision at the most recent context-bearing mutation. */
+    historyRevision?: number;
+}
 
 export interface AssistantResponse {
     text: string;
@@ -154,6 +184,139 @@ export interface AssistantResponse {
 }
 
 export class SessionTracker {
+    private static readonly MAX_MEETING_TURNS = 2_000;
+    private static readonly MAX_MEETING_TURN_FIELD_CHARS = 24_000;
+    private readonly meetingTurns = new Map<number, MeetingTurn>();
+    private readonly meetingSpeechSources = new Map<number, 'stt' | 'realtime'>();
+    private nextMeetingTurnId = 0;
+    private meetingHistoryEpoch = 0;
+    private meetingHistoryRevision = 0;
+    private readonly externalMeetingAnswerListeners = new Set<(turn: MeetingTurn, revision: number) => void>();
+
+    getMeetingHistoryRevision(): number { return this.meetingHistoryRevision; }
+
+    getMeetingHistoryEpoch(): number {
+        return this.meetingHistoryEpoch;
+    }
+
+    subscribeExternalMeetingAnswers(listener: (turn: MeetingTurn, revision: number) => void): () => void {
+        this.externalMeetingAnswerListeners.add(listener);
+        return () => this.externalMeetingAnswerListeners.delete(listener);
+    }
+
+    resetMeetingHistory(): void {
+        this.meetingTurns.clear();
+        this.meetingSpeechSources.clear();
+        this.meetingHistoryEpoch++;
+        this.meetingHistoryRevision++;
+    }
+
+    beginMeetingTurn(question: string, role: MeetingTurn['role'] = 'request', timestamp = Date.now(), inputKind?: MeetingTurn['inputKind']): MeetingTurnIdentity {
+        const identity = { turnId: ++this.nextMeetingTurnId, meetingEpoch: this.meetingHistoryEpoch };
+        this.meetingHistoryRevision++;
+        this.meetingTurns.set(identity.turnId, {
+            ...identity, role, timestamp, inputKind: inputKind ?? (role === 'interviewer' ? 'speech' : role === 'request' ? 'typed' : undefined),
+            historyRevision: this.meetingHistoryRevision,
+            question: question.trim().slice(0, SessionTracker.MAX_MEETING_TURN_FIELD_CHARS),
+        });
+        if (this.meetingTurns.size > SessionTracker.MAX_MEETING_TURNS) {
+            const oldest = this.meetingTurns.keys().next();
+            if (!oldest.done) {
+                this.meetingTurns.delete(oldest.value);
+                this.meetingSpeechSources.delete(oldest.value);
+            }
+        }
+        return identity;
+    }
+
+    getMeetingTurns(): MeetingTurn[] {
+        return structuredClone([...this.meetingTurns.values()]);
+    }
+
+    findMeetingQuestion(question: string): MeetingTurnIdentity | undefined {
+        const normalized = question.trim();
+        return [...this.meetingTurns.values()].findLast(turn => turn.role === 'interviewer' && !turn.answer && turn.question === normalized);
+    }
+
+    noteMeetingSpeech(question: string, role: 'interviewer' | 'user', timestamp: number, source: 'stt' | 'realtime' = 'stt'): MeetingTurnIdentity {
+        const normalize = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+        const key = normalize(question);
+        const recent = [...this.meetingTurns.values()].slice(-20).reverse();
+        const duplicate = recent.find(turn => turn.role === role && Math.abs(turn.timestamp - timestamp) <= 5_000
+            && this.meetingSpeechSources.has(turn.turnId) && this.meetingSpeechSources.get(turn.turnId) !== source
+            && key && normalize(turn.question) === key);
+        if (duplicate) {
+            this.meetingSpeechSources.delete(duplicate.turnId);
+            return duplicate;
+        }
+        const identity = this.beginMeetingTurn(question, role, timestamp, 'speech');
+        this.meetingSpeechSources.set(identity.turnId, source);
+        return identity;
+    }
+
+    enrichMeetingTurn(identity: MeetingTurnIdentity, details: { resolvedQuestion?: string; capture?: MeetingCaptureText; hasVisualInput?: boolean }): boolean {
+        const turn = this.findMeetingTurn(identity);
+        if (!turn) return false;
+        const limit = SessionTracker.MAX_MEETING_TURN_FIELD_CHARS;
+        if (details.resolvedQuestion?.trim() || details.capture?.text.trim() || (details.hasVisualInput && !turn.hasVisualInput)) {
+            this.meetingHistoryRevision++;
+            turn.historyRevision = this.meetingHistoryRevision;
+        }
+        if (details.hasVisualInput) turn.hasVisualInput = true;
+        if (details.hasVisualInput && turn.role !== 'interviewer') turn.inputKind = 'captured';
+        if (details.resolvedQuestion?.trim()) turn.resolvedQuestion = details.resolvedQuestion.trim().slice(0, limit);
+        if (details.capture?.text.trim()) {
+            turn.capture = { ...details.capture, text: details.capture.text.trim().slice(0, limit) };
+        }
+        return true;
+    }
+
+    recordMeetingAnswer(identity: MeetingTurnIdentity, text: string, options: {
+        status?: NonNullable<MeetingTurn['answer']>['status'];
+        surface?: ConversationSurface;
+        writeDecision?: Parameters<SessionTracker['addAssistantMessage']>[1];
+        replaces?: MeetingTurnIdentity;
+    } = {}): boolean {
+        const turn = this.findMeetingTurn(identity);
+        const status = options.status ?? 'completed';
+        if (!turn || options.writeDecision?.policy === 'do_not_store' || options.writeDecision?.blockedFromSessionTracker) return false;
+        if (turn.answer?.status === 'completed') {
+            if (status === 'completed' && options.replaces && turn.answer.text === stripGistTrailer(text).trim()) {
+                this.linkReplacement(turn, options.replaces);
+            }
+            if (status !== 'replaced') return false;
+            turn.answer.status = 'replaced';
+            return true;
+        }
+        if (turn.answer?.status === 'replaced' || status === 'replaced') return false;
+        const cleanText = stripGistTrailer(text).trim();
+        if (!cleanText || isCannedFallbackPhrase(cleanText)) return false;
+        const { shouldSuppressModelOutput } = require('./llm/promptSystemV2') as typeof import('./llm/promptSystemV2');
+        if (shouldSuppressModelOutput(cleanText)) return false;
+        this.meetingHistoryRevision++;
+        turn.historyRevision = this.meetingHistoryRevision;
+        turn.answer = { text: cleanText.slice(0, SessionTracker.MAX_MEETING_TURN_FIELD_CHARS), status, surface: options.surface };
+        if (status === 'completed' && options.replaces) this.linkReplacement(turn, options.replaces);
+        if (status === 'completed' && options.surface !== 'live_brain') {
+            const snapshot = structuredClone(turn);
+            for (const listener of this.externalMeetingAnswerListeners) listener(snapshot, this.meetingHistoryRevision);
+        }
+        return true;
+    }
+
+    private linkReplacement(turn: MeetingTurn, identity: MeetingTurnIdentity): void {
+        const previous = this.findMeetingTurn(identity);
+        if (!previous?.answer || previous === turn || previous.replacedByTurnId !== undefined) return;
+        this.meetingHistoryRevision++;
+        previous.answer.status = 'replaced';
+        previous.replacedByTurnId = turn.turnId;
+        turn.replacesTurnId = previous.turnId;
+    }
+
+    private findMeetingTurn(identity: MeetingTurnIdentity): MeetingTurn | undefined {
+        if (identity.meetingEpoch !== this.meetingHistoryEpoch) return undefined;
+        return this.meetingTurns.get(identity.turnId);
+    }
     // Context management (mirrors Swift ContextManager)
     private contextItems: ContextItem[] = [];
     // Grounding-campaign2 fix (H7, 2026-07-17): this eviction bound must be >=
@@ -540,6 +703,9 @@ export class SessionTracker {
         const isInternalPrompt = isExactInternalPrompt || isContextInjection;
 
         if (!isInternalPrompt) {
+            if (role !== 'assistant' && segment.origin !== 'system_instruction' && segment.origin !== 'manual_chat') {
+                this.noteMeetingSpeech(text, role, segment.timestamp);
+            }
             // Add to session transcript
             this.keepForPersistence(segment);
             // Fire-and-forget; errors are caught internally
@@ -610,7 +776,7 @@ export class SessionTracker {
         // lastCommittedAttemptBySurface above).
         identity?: TurnIdentity,
         // When the answer started and what it answered (see ContextItem.startedAt).
-        answered?: { startedAt: number; question?: string },
+        answered?: { startedAt?: number; question?: string; meetingTurn?: MeetingTurnIdentity; skipMeetingLedger?: boolean },
     ): boolean {
         // A diagram of this answer that the overlay already repaired (the
         // repair can land while the answer is still streaming, before any of
@@ -668,6 +834,14 @@ export class SessionTracker {
         // usage log and every follow-up that re-reads the last answer get the
         // answer without it. One chokepoint for all ~30 callers.
         const cleanText = stripGistTrailer(text).trim();
+        if (!answered?.skipMeetingLedger && cleanText && !isCannedFallbackPhrase(cleanText)) {
+            const question = answered?.question?.trim();
+            const spoken = surface === 'what_to_answer' || surface === 'meeting_auto_answer' || writeDecision?.answersSpokenQuestion;
+            const existing = spoken && [...this.meetingTurns.values()].findLast(turn =>
+                turn.role === 'interviewer' && !turn.answer && (!question || turn.question === question));
+            const meetingTurn = answered?.meetingTurn || existing || this.beginMeetingTurn(question ?? '');
+            this.recordMeetingAnswer(meetingTurn, cleanText, { surface, writeDecision });
+        }
         if (cleanText.length < 10) {
             console.warn(`[SessionTracker] Ignored short message (<10 chars)`);
             return false;
@@ -683,7 +857,7 @@ export class SessionTracker {
             role: 'assistant',
             text: cleanText,
             timestamp: recordedAt,
-            ...(answered && Number.isFinite(answered.startedAt) && answered.startedAt <= recordedAt
+            ...(answered?.startedAt !== undefined && Number.isFinite(answered.startedAt) && answered.startedAt <= recordedAt
                 ? {
                     startedAt: answered.startedAt,
                     ...(answered.question?.trim() ? { answeredQuestion: answered.question.trim() } : {}),
@@ -1371,6 +1545,7 @@ export class SessionTracker {
      * before the reset).
      */
     reset(opts: { keepMeetingRecord?: boolean } = {}): void {
+        if (!opts.keepMeetingRecord) this.resetMeetingHistory();
         this.contextItems = [];
         if (!opts.keepMeetingRecord) {
             this.persistedTranscript = [];

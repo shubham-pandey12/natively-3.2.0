@@ -175,7 +175,7 @@ Acceptance: scenarios pass manually; full short answer visible ≤ ~5 s; latency
 
 ---
 
-## Phase 4b — Gemini Live writes the answer, streamed in real time (D12)  *(≈3–4 days)*  ← **next**
+## Phase 4b — Gemini Live writes the answer, streamed in real time (D12)  *(≈3–4 days)*
 
 **Objective:** ChatGPT-Voice behaviour per ARCHITECTURE D12 and §4.1: Gemini Live answers by itself; its output transcription streams into the overlay word by word as Gemini speaks. No `decide_turn`, no AnswerWriter/text model for GeminiLiveBrain.
 
@@ -276,6 +276,28 @@ Tasks:
 
 ---
 
+## Phase 10 — Shared interview context  ← **next**
+
+Phase 10 takes precedence over the remaining Phase 7 validation (user decision 2026-11-28).
+
+**Objective:** Give each answering route access to the same meeting history while preserving the input routing in ARCHITECTURE §9.
+
+Tasks:
+
+1. **Make SessionTracker authoritative.** Add stable turn IDs, a link from each answer to its question, and answer status to the shared history contract. Add the `live_brain` surface and record the finalized text shown in chat. Keep visible interrupted text with an interrupted status. Exclude speculative drafts, silent actions, failed responses, and stale completions from completed-answer history. Use the meeting epoch and turn identity to reject late writes and deduplicate transcripts and retries. Leave the conversation-state store in its existing follow-up resolution role.
+2. **Project the notebook from SessionTracker.** Read the shared turns for recent history, summaries, reconnects, rollover, and fallback. Audit typed and pasted chat, screenshots, extension captures through What to Answer and Direct Assist, manual What to Answer, Auto Answer, and other entry points that publish into meeting chat. Record the resolved question and relevant capture text alongside the answer. Carry forward extracted screenshot text or the resolved question only. Keep extension DOM labelled as untrusted content. Bind late extraction to the originating turn ID. Pass the same meeting history to regular AI Provider requests, Flux writers, and Auto Answer. Keep recent exchanges and exact relevant constraints available within provider budgets, and retrieve relevant older turns when needed.
+3. **Synchronize open realtime sessions.** Track the history revision applied to each connection. Reuse `addHistoryContext` for external turns on Gemini Live, OpenAI Realtime, ElevenLabs Realtime, and Deepgram Voice Agent where verified safe. Check that mid-session updates remain silent and arrive before the next answer. Verify Gemini's non-completing update, both RealtimeBrain implementations' item injection, and Deepgram's UpdatePrompt behavior and prompt budget. Prevent native turns already present in the connection from being replayed. Confirm Flux reads the shared snapshot on each generation and invalidates stale drafts.
+4. **Handle Sonic and catch-up failures.** Verify whether Sonic can reseed safely at a turn boundary. If the active realtime connection cannot receive the relevant history before an immediate follow-up, use the existing writer or Auto Answer fallback with the current snapshot. Ensure only one route owns the response and a late completion cannot replace it.
+5. **Validate cross-route continuity.** Test screenshot, typed, and extension questions followed by spoken follow-ups, and realtime answers followed by typed requests. Cover both extension answer routes, fallback followed by realtime recovery, provider switch, reconnect, long meetings, interrupted and corrected answers, delayed capture extraction, and meeting isolation. Inspect the actual context delivered to already-open mock sessions and regular model requests. Verify silent updates and timing with live providers on Windows and macOS and log coverage and outstanding checks in PROGRESS.md.
+
+Implementation files, in task order:
+
+1. `electron/SessionTracker.ts`, `electron/IntelligenceManager.ts`, answer call sites in `electron/IntelligenceEngine.ts` and `electron/ipcHandlers.ts`, and `premium/electron/liveBrain/meeting.ts` and `ResponseOrchestrator.ts`.
+2. `premium/electron/liveBrain/InterviewNotebook.ts` and `fluxTurnContext.ts`, `electron/main.ts`, `electron/IntelligenceEngine.ts`, and `electron/ipcHandlers.ts`.
+3. `premium/electron/liveBrain/BrainSupervisor.ts`, `types.ts`, and `brains/GeminiLiveBrain.ts`, `brains/RealtimeBrain.ts`, and `brains/DeepgramVoiceAgentBrain.ts`.
+4. `premium/electron/liveBrain/brains/AmazonSonicBrain.ts`, `BrainSupervisor.ts`, and `meeting.ts`.
+5. `premium/electron/liveBrain/__tests__/Meeting.test.mjs`, `BrainSupervisor.test.mjs`, the provider socket tests in that directory, and the existing SessionTracker tests.
+
 ## Baseline & Tuning Plan (Post-Phase 9)
 
 ### Baseline Phase 1 — Baseline Flux against GPT Realtime and Gemini Live  ✅ Done
@@ -341,7 +363,7 @@ Tasks:
 
    **Live acceptance** (Windows `dev:agent`, Flux + `codex-cli`, then forced pipeline fallback): S8 smoke (one ask appears; the timeout answers under an assumption) and S13 (scripted multi-turn: each reply uncovers a different consequential constraint; the final answer uses all of them; no fourth ask). Physical macOS verification is a separate open item.
 
-7. **Live Brain integration of shared response cleanup (approved 2026-11-27).** ← **next** (before Phase 6, user decision 2026-11-27). Not started. Cleanup is a shared project covering Auto Answer, text replies, and Live Brain; see [../response-cleanup/PLAN.md](../response-cleanup/PLAN.md). Live Brain is one integration: it calls the shared component in spoken mode on streamed answer text, never alters `Ask:` or `No action.` before the sentinel parser and filler rules see them, and keeps D3 (Natively answer style). Live Brain replies are part of the replay set, and their first-text and first-cleaned-sentence latency is measured per provider route. No user-visible change without a separate user decision.
+7. **Live Brain integration of shared response cleanup (approved 2026-11-27).** Code complete; physical validation pending, runs in parallel with Phase 10 (user decision 2026-11-28). Cleanup is a shared project covering Auto Answer, text replies, and Live Brain; see [../response-cleanup/PLAN.md](../response-cleanup/PLAN.md). Live Brain is one integration: it calls the shared component in spoken mode on streamed answer text, never alters `Ask:` or `No action.` before the sentinel parser and filler rules see them, and keeps D3 (Natively answer style). Live Brain replies are part of the replay set, and their first-text and first-cleaned-sentence latency is measured per provider route. No user-visible change without a separate user decision.
 
 8. **Manual Reasoning effort setting (approved 2026-11-28).** Add a manual `Reasoning effort` setting in Settings → Audio → Live Brain Provider, below the model picker in each applicable provider card (`ModelSelect` / `Managed by provider` when unsupported). Default to `Provider default` (preserving current request behavior). Persist per provider; fall back to `Provider default` if a model switch invalidates the saved value. Wire through `SettingsManager`, `live-brain:get-config` / `live-brain:set-options`, `GeminiLiveBrain` (`generationConfig.thinkingConfig`), `OpenAIRealtimeBrain` / `RealtimeBrain` (`session.reasoning.effort`), and `DeepgramFluxBrain` + `AnswerWriter` / `IntelligenceEngine` / `LLMHelper` (private drafts + confirmed turns, with draft invalidation when effort changes). Automatic routing by question difficulty is out of scope.
 

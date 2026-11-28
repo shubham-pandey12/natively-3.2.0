@@ -138,6 +138,24 @@ test('handshake Welcome -> Settings -> SettingsApplied transitions to ready and 
     assert.equal(frame.readInt16LE(0), 512);
 });
 
+test('shared-history delta updates the open Voice Agent prompt without creating an answer', async t => {
+    const { brain, events, connections } = await createRig(t);
+    await brain.start(makeContext());
+    const messages = connections[0].jsonMessages;
+    const before = messages.length;
+    brain.addHistoryContext('<interview_conversation>Constraints: 1 <= n <= 100000. AI suggestion: Use a heap.</interview_conversation>');
+    const update = await until(() => messages.slice(before).find(message => message.type === 'UpdatePrompt'));
+    assert.match(update.prompt, /1 <= n <= 100000/);
+    assert.match(update.prompt, /Use a heap/);
+    assert.equal(messages.slice(before).some(message => ['InjectUserMessage', 'AgentThinking'].includes(message.type)), false);
+    assert.equal(events.some(event => event.type === 'response_started' || event.type === 'response_delta'), false);
+    const secondBefore = messages.length;
+    brain.addHistoryContext('Candidate typed request: Explain why a heap is efficient.');
+    const accumulated = await until(() => messages.slice(secondBefore).find(message => message.type === 'UpdatePrompt'));
+    assert.match(accumulated.prompt, /Use a heap/);
+    assert.match(accumulated.prompt, /Explain why a heap is efficient/);
+});
+
 test('keeps multiple text chunks in one answer and rejects late output after a correction', async t => {
     const { brain, events, connections } = await createRig(t);
     await brain.start(makeContext());

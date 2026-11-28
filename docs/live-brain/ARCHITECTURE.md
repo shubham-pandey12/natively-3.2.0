@@ -463,6 +463,8 @@ export interface NotebookSnapshot {
 | Screenshots, screen/DOM context requests | Default Natively |
 | Recap, follow-up questions, notes, coding hints and other modes | Default Natively |
 
+Phase 10 adds shared interview context across these routes. SessionTracker owns the meeting history, and InterviewNotebook projects recent turns and summaries from it. Cross-route history carries the resolved question, relevant captured text, and the answer shown in chat. Interrupted answers retain their status. Screenshot history carries extracted text or the resolved question, and extension text retains its untrusted-source label.
+
 Live Brain never intercepts text input. The candidate's own mic speech is context for Live Brain (`Candidate said: …`), never a trigger.
 
 Rules:

@@ -92,6 +92,7 @@ export function createMeeting(
         if (debug) notePromptDebugLiveBrain({ surface: 'live-brain', promptSource, system: '', user: '', extra });
     };
     const notebook = new InterviewNotebook({
+        readMeetingHistory: options.readMeetingHistory,
         now: clock.now, summarize: options.summarize,
         onUpdate: sizes => diagnostic('notebook', sizes),
     });
@@ -112,6 +113,7 @@ export function createMeeting(
     let closedHandoff: LiveBrainPendingTurn | undefined;
     let backupRun: BackupRun | undefined;
     const ignoredRealtimeResponses = new Set<string>();
+    let unsubscribeExternalAnswers: (() => void) | undefined;
     const deferredRealtime: { event: LiveBrainEvent; id: LiveBrain['id']; model: string }[] = [];
     let busyRetry: { turnId: number; route: 'writer' | 'pipeline'; timer: MeetingTimer } | undefined;
     let systemTranscriptCaptureAt: number | undefined;
@@ -161,7 +163,7 @@ export function createMeeting(
         clearBusyRetry();
         deferredRealtime.length = 0;
         unanswered = {
-            turn: { turnId: ++turnSequence, text: clean, at, context: supervisor.notebookContext },
+            turn: { turnId: ++turnSequence, text: clean, at, context: notebook.projectHistory(clean)?.text ?? supervisor.notebookContext },
             providerFinal,
         };
         if (status === 'Answer failed') showStatus(realtimeDisconnected ? 'Reconnecting' : 'Thinking');
@@ -185,6 +187,10 @@ export function createMeeting(
         const pending = unanswered;
         if (!started || !pending || backupRun || busyRetry) return;
         const { turn, providerFinal } = pending;
+        const identity = turn.meetingTurn ?? options.identifyInterviewTurn?.(turn.text, turn.at);
+        if (identity) turn.meetingTurn = identity;
+        const projected = notebook.projectHistory(turn.text);
+        if (projected) turn.context = projected.text;
         const writer = route === 'writer' ? options.engine.runLiveBrainAnswer : undefined;
         if (!writer && route === 'writer') {
             dispatchBackup('pipeline');
@@ -200,6 +206,7 @@ export function createMeeting(
                     run.writer = controller;
                     const output = writer.call(options.engine, {
                         question: turn.text,
+                        ...(turn.meetingTurn ? { meetingTurn: turn.meetingTurn } : {}),
                         replacesAutomaticAnswer: false,
                         signal: controller.signal,
                         liveBrainNotebook: turn.context,
@@ -299,7 +306,7 @@ export function createMeeting(
     ): T | null => {
         const liveBrainNotebook = request.liveBrainNotebook !== undefined
             ? (request.liveBrainNotebook || undefined)
-            : (supervisor?.notebookContext || undefined);
+            : ((notebook.projectHistory(request.question)?.text ?? supervisor?.notebookContext) || undefined);
         const reasoningEffort = request.reasoningEffort ?? fluxReasoningEffort();
         const stopAt = request.reuseGenerationId !== undefined ? lastWriterStopAt : speechStoppedAt;
         lastWriterStopAt = stopAt;
@@ -340,6 +347,7 @@ export function createMeeting(
                 presented = true;
                 const clarification = /^Ask:\s*(\S[\s\S]*)$/i.exec(text.trim());
                 if (!disposition?.stopReason && !disposition?.storageVeto) {
+                    if (request.meetingTurn) options.recordInterviewAnswer?.(request.meetingTurn, clarification?.[1] ?? text, 'completed', request.replacesMeetingTurn);
                     orchestrator.commitMergedQuestion();
                     supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
                     if (clarification) orchestrator.noteWriterClarification(request.question, clarification[1]);
@@ -370,7 +378,7 @@ export function createMeeting(
                     startLiveBrainDraft: (request) => {
                         const liveBrainNotebook = request.liveBrainNotebook !== undefined
                             ? (request.liveBrainNotebook || undefined)
-                            : (supervisor?.notebookContext || undefined);
+                            : ((notebook.projectHistory(request.question)?.text ?? supervisor?.notebookContext) || undefined);
                         const reasoningEffort = request.reasoningEffort ?? fluxReasoningEffort();
                         const inner = options.engine.startLiveBrainDraft!({
                             ...request,
@@ -404,11 +412,15 @@ export function createMeeting(
         sessionId: options.sessionId,
         clock,
         ...(answerWriter ? { answerWriter } : {}),
-        getContextSnapshot: () => ({
-            baseNotebook: supervisor?.notebookContext ?? '',
-            constraints: notebook.snapshot().constraints,
-            groundingKey: options.readGroundingState?.().groundingKey,
-        }),
+        getContextSnapshot: (question) => {
+            const projected = notebook.projectHistory(question);
+            return {
+                baseNotebook: projected?.text ?? supervisor?.notebookContext ?? '',
+                constraints: notebook.snapshot().constraints,
+                groundingKey: options.readGroundingState?.().groundingKey,
+                historyRevision: projected?.revision,
+            };
+        },
         shouldCleanupText: () => {
             if (isIntelligenceFlagEnabled('sharedResponseCleanup')) return true;
             try {
@@ -439,6 +451,8 @@ export function createMeeting(
         requestClarificationAnswer: () => supervisor.current?.requestClarificationAnswer?.(),
         recordSttQuestion: (text, at) => supervisor.recordInterviewerTurn(text, at),
         recordDeferredAnswer: (text, isClarification) => supervisor.recordAssistantTurn(text, isClarification),
+        identifyInterviewTurn: options.identifyInterviewTurn,
+        recordInterviewAnswer: options.recordInterviewAnswer,
         recordMergedQuestion: (previous, next, at) => supervisor.mergeInterviewerTurn(previous, next, at),
     });
     const finishTiming = (status: 'completed' | 'cancelled' | 'failed') => {
@@ -643,6 +657,9 @@ export function createMeeting(
         start() {
             if (started) return;
             started = true;
+            unsubscribeExternalAnswers = options.subscribeExternalMeetingAnswers?.((turn, revision) => {
+                supervisor.syncExternalHistory(turn, revision);
+            });
             if (debug) notePromptDebugLiveBrain({
                 surface: 'live-brain', promptSource: 'answer', provider: preferred === 'gemini-live' ? 'gemini' : preferred,
                 model: (options.model?.trim() || DEFAULT_MODELS[preferred]).replace(/^models\//, ''), system: instructions(preferred), user: '',
@@ -669,6 +686,8 @@ export function createMeeting(
         stop() {
             if (!started) return;
             started = false;
+            unsubscribeExternalAnswers?.();
+            unsubscribeExternalAnswers = undefined;
             if (backupRun) {
                 const { writer } = backupRun;
                 backupRun = undefined;
@@ -698,6 +717,7 @@ export function createMeeting(
             finishTiming('cancelled');
             showStatus(null);
         },
+        syncExternalHistory(turn, revision) { supervisor.syncExternalHistory(turn, revision); },
         acceptAudio(channel, pcm, sampleRate, channels = 1) {
             if (channel !== 'system' || !started || supervisor.current?.id === 'pipeline') return;
             const mono = toPcm16kMono(pcm, sampleRate, channels);
@@ -716,7 +736,10 @@ export function createMeeting(
             supervisor.noteSpeechStop(at);
         },
         isPipeline() { return supervisor.current?.id === 'pipeline'; },
-        pipelineContext() { return supervisor.pipelineContext; },
+        pipelineContext(question) {
+            if (supervisor.current?.id !== 'pipeline') return '';
+            return notebook.projectHistory(question)?.text ?? supervisor.pipelineContext;
+        },
         isUsingPipeline() { return supervisor.current?.id === 'pipeline'; },
         observePipelineTranscript(text, final, at) {
             const brain = supervisor.current;
@@ -771,7 +794,7 @@ export function createMeeting(
                 }
                 return;
             }
-            if (output.type === 'token' && output.text?.trim()) orchestrator.noteWriterProgress(output.generationId);
+            if (output.type === 'token' && output.text) orchestrator.noteWriterProgress(output.generationId, output.text);
             const brain = supervisor.current;
             if (brain instanceof PipelineBrain) brain.observe(output);
         },

@@ -124,6 +124,7 @@ export class GeminiLiveBrain implements LiveBrain {
     private recentAudio: Buffer[] = [];
     private recentBytes = 0;
     private bufferedCandidate: string[] = [];
+    private bufferedHistoryContext: string[] = [];
     private silencePump?: ReturnType<typeof setInterval>;
     private streamStartedAt = 0;
     private audioSentMs = 0;
@@ -182,7 +183,10 @@ export class GeminiLiveBrain implements LiveBrain {
     }
 
     addHistoryContext(history: string): void {
-        if (this.readyAt !== undefined && !this.providerTurnActive && history.trim()) this.sendClientTurn(history, false);
+        const text = history.trim();
+        if (!text) return;
+        if (this.readyAt !== undefined && !this.providerTurnActive) this.sendClientTurn(text, false);
+        else this.bufferedHistoryContext.push(text);
     }
 
     cancelResponse(_reason: string): void {
@@ -295,6 +299,7 @@ export class GeminiLiveBrain implements LiveBrain {
             this.turnInterrupted = false;
             this.generationCompleted = false;
             this.lastTurnClosedAt = undefined;
+            this.flushHistoryContext();
             this.flushCandidate();
             this.streamStartedAt = Date.now();
             this.audioSentMs = 0;
@@ -416,6 +421,7 @@ export class GeminiLiveBrain implements LiveBrain {
             if (!interrupted) this.lastTurnClosedAt = at;
             if (!interrupted && content.interactionStatus !== 'IN_PROGRESS') {
                 this.providerTurnActive = false;
+                this.flushHistoryContext();
                 this.flushCandidate();
             }
         }
@@ -478,6 +484,11 @@ export class GeminiLiveBrain implements LiveBrain {
     private flushCandidate(): void {
         const candidates = this.bufferedCandidate.splice(0);
         for (const text of candidates) this.sendCandidate(text);
+    }
+
+    private flushHistoryContext(): void {
+        if (this.readyAt === undefined || this.providerTurnActive) return;
+        for (const history of this.bufferedHistoryContext.splice(0)) this.sendClientTurn(history, false);
     }
 
     private send(message: object): void {

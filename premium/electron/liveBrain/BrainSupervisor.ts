@@ -1,4 +1,6 @@
 import { REALTIME_READY_RESET_MS } from '../../../electron/audio/realtimeTransport';
+import { formatProviderMeetingHistory } from '../../../electron/context-intelligence/meeting-history-formatter';
+import type { MeetingTurn } from '../../../electron/SessionTracker';
 import { InterviewNotebook, renderRecentTurns } from './InterviewNotebook';
 import { createResponseParser } from './responseParser';
 import type { OrchestratorDisposition, ResponseClock } from './ResponseOrchestrator';
@@ -34,9 +36,12 @@ interface Lease {
     ready: boolean;
     controller: AbortController;
     seeded?: ConversationTurn[];
+    seededHistory?: ReadonlyMap<number, string>;
     groundingKey?: string;
     pendingFluxTranscript?: { text: string; at: number };
     unsubscribe?: () => void;
+    historyRevision: number;
+    pendingExternalHistory: Map<number, { turn: MeetingTurn; revision: number }>;
 }
 
 export class BrainSupervisor<Timer> {
@@ -80,6 +85,8 @@ export class BrainSupervisor<Timer> {
 
     get current(): LiveBrain | undefined { return this.active?.brain; }
     get notebookContext(): string {
+        const projected = this.options.notebook.projectHistory();
+        if (projected) return projected.text;
         return [this.options.notebook.renderNotebook(), renderRecentTurns(this.options.notebook.recentTurns())].filter(Boolean).join('\n\n');
     }
     get pipelineContext(): string {
@@ -94,6 +101,29 @@ export class BrainSupervisor<Timer> {
     recordAssistantTurn(text: string, isClarification = false): void {
         if (!this.stopped && text.trim()) {
             this.options.notebook.record({ role: 'assistant', text: text.trim(), at: this.options.clock.now() }, isClarification);
+        }
+    }
+
+    /** Apply completed turns written by non-Live-Brain routes to the open provider session. */
+    syncExternalHistory(turn: MeetingTurn, revision: number): void {
+        const lease = this.active;
+        if (this.stopped || !lease || turn.answer?.status !== 'completed'
+            || turn.answer.surface === 'live_brain' || revision <= lease.historyRevision) return;
+        lease.pendingExternalHistory.set(turn.turnId, { turn: structuredClone(turn), revision });
+        this.flushExternalHistory(lease);
+    }
+
+    private flushExternalHistory(lease: Lease): void {
+        if (lease !== this.active || !lease.ready || !lease.pendingExternalHistory.size) return;
+        const missed = [...lease.pendingExternalHistory.values()].sort((a, b) => a.revision - b.revision);
+        for (const entry of missed) {
+            if (entry.revision <= lease.historyRevision) continue;
+            const history = formatProviderMeetingHistory([entry.turn], { includeQuestion: entry.turn.role !== 'interviewer' });
+            // addHistoryContext is deliberately a context-only protocol method;
+            // it must not create a response or audible answer.
+            if (history) lease.brain.addHistoryContext?.(history);
+            lease.historyRevision = entry.revision;
+            lease.pendingExternalHistory.delete(entry.turn.turnId);
         }
     }
 
@@ -203,7 +233,10 @@ export class BrainSupervisor<Timer> {
         const provider = this.options.create(id);
         if (!provider) return undefined;
         if (provider.brain.id !== id) throw new Error(`Live brain factory returned ${provider.brain.id} for ${id}`);
-        return { ...provider, reason, since: this.options.clock.now(), ready: false, controller: new AbortController() };
+        return {
+            ...provider, reason, since: this.options.clock.now(), ready: false, controller: new AbortController(),
+            historyRevision: 0, pendingExternalHistory: new Map(),
+        };
     }
 
     private select(reason: string, from?: LiveBrainId): void {
@@ -231,16 +264,19 @@ export class BrainSupervisor<Timer> {
         const refreshContext = () => {
             const recentTurns = notebook.recentTurns();
             const id = lease.brain.id;
-            // Deepgram already gets verbatim turns separately in agent.context.messages.
-            const notebookText = [notebook.renderNotebook(), id !== 'deepgram-voice-agent' && renderRecentTurns(recentTurns)]
+            // Without a ledger reader, Deepgram gets the legacy turns as separate context messages.
+            const projected = notebook.projectHistory(undefined, undefined, lease === this.standby);
+            if (lease === this.standby) lease.seededHistory = projected?.fingerprints;
+            const notebookText = projected?.text ?? [notebook.renderNotebook(), id !== 'deepgram-voice-agent' && renderRecentTurns(recentTurns)]
                 .filter(Boolean).join('\n\n');
             return {
-                notebook: notebook.snapshot(), recentTurns,
+                notebook: notebook.snapshot(), recentTurns: projected ? [] : recentTurns,
                 instructions: this.options.instructions(id, notebookText),
             };
         };
         const initial = refreshContext();
-        if (lease === this.standby) lease.seeded = initial.recentTurns;
+        lease.historyRevision = notebook.projectHistory()?.revision ?? 0;
+        if (lease === this.standby) lease.seeded = notebook.recentTurns();
         else this.quoteAfter = this.options.clock.now();
         const ctx: LiveBrainStartContext = {
             sessionId: this.options.sessionId, responseNamespace: `${this.options.sessionId}:${++this.connectionSequence}`,
@@ -367,6 +403,7 @@ export class BrainSupervisor<Timer> {
     private ready(lease: Lease): void {
         const id = lease.brain.id;
         lease.readyAt = this.options.clock.now();
+        this.flushExternalHistory(lease);
         const began = this.rolloverAt;
         if (began !== undefined) {
             this.options.onRollover?.({ brain: id, reason: lease.reason, elapsedMs: this.options.clock.now() - began });
@@ -418,7 +455,9 @@ export class BrainSupervisor<Timer> {
         const history = this.options.notebook.recentTurns().filter(
             turn => !seeded.some(before => before.at === turn.at && before.role === turn.role && before.text === turn.text),
         );
-        if (history.length > 0 && !replacement.brain.addHistoryContext && !force && !this.forceHandoff && this.missedTurnsDiscards < 1) {
+        const projectedHistory = this.options.notebook.projectHistory(undefined, replacement.seededHistory);
+        const historyText = projectedHistory?.text ?? renderRecentTurns(history);
+        if (historyText && !replacement.brain.addHistoryContext && !force && !this.forceHandoff && this.missedTurnsDiscards < 1) {
             this.missedTurnsDiscards++;
             this.standby = undefined;
             if (this.deadline !== undefined) {
@@ -442,10 +481,12 @@ export class BrainSupervisor<Timer> {
         this.clearTimers();
         this.release(previous, detachReason, 'active');
         if (replacement.brain.addHistoryContext) {
-            replacement.brain.addHistoryContext(renderRecentTurns(history));
+            replacement.brain.addHistoryContext(historyText);
             this.candidates = [];
         }
+        if (projectedHistory) replacement.historyRevision = projectedHistory.revision;
         replacement.seeded = undefined;
+        replacement.seededHistory = undefined;
         this.ready(replacement);
         this.options.onEvent({ type: 'status', status: 'ready' }, replacement.brain.id, replacement.model);
     }

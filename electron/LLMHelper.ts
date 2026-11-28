@@ -1,3 +1,4 @@
+import { meetingHistoryScopes } from './context-intelligence/meeting-history-formatter';
 import { nativelyApiBase } from './services/nativelyApiBase'
 import { GoogleGenAI, ThinkingLevel } from "@google/genai"
 import Groq from "groq-sdk"
@@ -1260,7 +1261,7 @@ export class LLMHelper {
     // 2026-07-30 and packs every source as `<evidence source_type="…">`, which
     // matched none of them — so a V3-composed payload was inferred to carry no
     // scope at all and no toggle was enforced on the shipped default path.
-    scopes.push(...dataScopesForEvidenceMarkup(context));
+    scopes.push(...dataScopesForEvidenceMarkup(context), ...meetingHistoryScopes(context));
     return [...new Set(scopes)];
   }
 
@@ -1274,7 +1275,7 @@ export class LLMHelper {
     // V3 evidence markup — see inferContextScopes. A V3 prompt carries its
     // evidence in the MESSAGE (context is undefined), so this is the branch
     // that actually fires on the default path.
-    scopes.push(...dataScopesForEvidenceMarkup(message));
+    scopes.push(...dataScopesForEvidenceMarkup(message), ...meetingHistoryScopes(message));
     // V3 renders prior-turn continuity as a labelled prose section rather than
     // as evidence; it is CONVERSATION_STATE data, i.e. transcript scope.
     if (/^# Conversation so far$/m.test(message)) scopes.push('transcript');

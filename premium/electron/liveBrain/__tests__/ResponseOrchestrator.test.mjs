@@ -12,13 +12,14 @@ const question = 'Design a product catalog.';
 const clarification = 'How many writes per second?';
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-async function rig() {
+async function rig(ports = {}) {
     const brain = new FakeLiveBrain();
     const clock = new FakeClock();
     const calls = [];
     const completions = [];
     const orchestrator = new ResponseOrchestrator({
         clock,
+        ...ports,
         answerWriter: {
             write(request) {
                 calls.push(['write', request]);
@@ -1021,11 +1022,12 @@ test('Flux history: the provider sees the last answered turns, oldest dropped fi
     assert.match(context, /Current interviewer turn: Question number 6\?/);
 });
 
-function interruptionRig() {
+function interruptionRig(ports = {}) {
     const clock = new FakeClock();
     const events = [];
     const orchestrator = new ResponseOrchestrator({
         clock, requestClarificationAnswer: () => events.push(['assumption']),
+        ...ports,
         overlay: {
             showAsk: value => events.push(['ask', value]),
             replaceAnswer: (...args) => events.push(['replace', ...args]),
@@ -1060,21 +1062,50 @@ test('Sonic final control messages replace speculative prose with their real out
 });
 
 test('OpenAI late finals are put above their own answers by input item', () => {
-    const h = interruptionRig();
+    const recorded = [];
+    const ledger = new Map();
+    const h = interruptionRig({
+        identifyInterviewTurn: question => {
+            const identity = { turnId: ledger.size + 1, meetingEpoch: 1 };
+            ledger.set(identity, question);
+            return identity;
+        },
+        recordInterviewAnswer: (turn, text, status) => recorded.push([ledger.get(turn), text, status]),
+    });
     for (const id of ['a', 'b']) {
         h.send('interviewer_speech_started', { itemId: id });
         h.clock.advance(100);
         h.send('interviewer_speech_stopped', { itemId: id });
         h.start(id);
-        h.delta(id, 'Answer text.');
+        h.delta(id, `Answer ${id}.`);
         h.done(id);
         h.clock.advance(100);
     }
     h.transcript('Second question?', { itemId: 'b' });
     h.transcript('First question?', { itemId: 'a' });
+    h.transcript('First question?', { itemId: 'a' });
+    assert.deepEqual(recorded, [
+        ['Second question?', 'Answer b.', 'completed'],
+        ['First question?', 'Answer a.', 'completed'],
+    ]);
     const generations = h.events.filter(([kind, value]) => kind === 'text' && value.done).map(([, value]) => value.generationId);
     const questions = h.events.filter(([kind]) => kind === 'question').map(([, value]) => [value.generationId, value.text]);
-    assert.deepEqual(questions, [[generations[1], 'Second question?'], [generations[0], 'First question?']]);
+    assert.deepEqual(questions.slice(0, 2), [[generations[1], 'Second question?'], [generations[0], 'First question?']]);
+});
+
+test('writer interruption keeps only the visible prefix and carries the original turn into the correction', async () => {
+    const stored = [];
+    let turnId = 0;
+    const h = await rig({
+        identifyInterviewTurn: () => ({ turnId: ++turnId, meetingEpoch: 1 }),
+        recordInterviewAnswer: (...args) => stored.push(args),
+    });
+    h.decision('answer', { question: 'Design a store.' });
+    h.orchestrator.noteWriterProgress(1, 'Use PostgreSQL');
+    h.orchestrator.noteWriterProgress(99, ' stale text');
+    h.decision('answer', { question: 'Use MongoDB.' });
+    assert.deepEqual(stored, [[{ turnId: 1, meetingEpoch: 1 }, 'Use PostgreSQL', 'interrupted']]);
+    assert.equal(h.calls.filter(([type]) => type === 'write')[1][1].replacesMeetingTurn.turnId, 1);
 });
 
 test('Late system STT uses the captured interval of the earlier question', () => {

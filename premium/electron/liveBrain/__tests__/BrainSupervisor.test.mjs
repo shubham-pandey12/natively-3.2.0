@@ -8,6 +8,7 @@ const dist = '../../../../dist-electron/';
 const load = name => require(`${dist}premium/electron/liveBrain/${name}.js`);
 const { BrainSupervisor } = load('BrainSupervisor');
 const { InterviewNotebook } = load('InterviewNotebook');
+const { SessionTracker } = require('../../../../dist-electron/electron/SessionTracker.js');
 const { ResponseOrchestrator } = load('ResponseOrchestrator');
 const { PipelineBrain } = load('brains/PipelineBrain');
 const { FakeLiveBrain } = load('__tests__/FakeLiveBrain');
@@ -69,6 +70,46 @@ test('completed ready-to-display text is stored in the notebook', async () => {
     brain.emit({ type: 'response_delta', responseId: 'r1', text: 'I found actionable insights.' });
     brain.emit({ type: 'response_done', responseId: 'r1', status: 'completed' });
     assert.equal(h.notebook.recentTurns().at(-1).text, 'I found useful takeaways.');
+});
+
+test('syncs one screenshot answer delta to the already-open brain before the spoken follow-up', async () => {
+    const h = rig('gemini-live', 0, ['gemini-live']);
+    const ledger = new SessionTracker();
+    h.supervisor.start();
+    await flush();
+    const brain = h.realtime[0];
+    const protocolOrder = [];
+    const addContext = brain.addHistoryContext;
+    brain.addHistoryContext = history => { protocolOrder.push('context_update'); addContext(history); };
+    const screenshot = ledger.beginMeetingTurn('Please solve the screenshot question.', 'request', 1, 'captured');
+    ledger.enrichMeetingTurn(screenshot, {
+        hasVisualInput: true,
+        resolvedQuestion: 'Find the k largest values from the input array.',
+        capture: { origin: 'capture', text: 'Constraints: 1 <= n <= 100000; k <= n.' },
+    });
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap of size k. The heap keeps the best candidates in O(n log k).', { surface: 'screenshot' });
+    const [turn] = ledger.getMeetingTurns();
+    h.supervisor.syncExternalHistory(turn, ledger.getMeetingHistoryRevision());
+    h.supervisor.syncExternalHistory(turn, ledger.getMeetingHistoryRevision());
+    assert.equal(brain.history.length, 1);
+    assert.match(brain.history[0], /Find the k largest values/);
+    assert.match(brain.history[0], /1 <= n <= 100000/);
+    assert.match(brain.history[0], /Use a min-heap of size k/);
+    assert.equal(h.seen.some(([, event]) => ['response_started', 'response_delta', 'response_done'].includes(event.type)), false);
+    assert.deepEqual(protocolOrder, ['context_update']);
+
+    protocolOrder.push('spoken_followup');
+    brain.emit({ type: 'interviewer_transcript', text: 'Why did you use a heap?', final: true, at: h.clock.now() });
+    assert.equal(protocolOrder.indexOf('context_update') < protocolOrder.indexOf('spoken_followup'), true);
+    assert.equal(brain.history.length, 1, 'a repeated ledger revision is not replayed');
+
+    const heardQuestion = ledger.beginMeetingTurn('How would you cache the lookup?', 'interviewer', 5_000, 'speech');
+    ledger.recordMeetingAnswer(heardQuestion, 'Use an LRU cache with O(1) lookup.', { surface: 'meeting_auto_answer' });
+    const second = ledger.getMeetingTurns().at(-1);
+    h.supervisor.syncExternalHistory(second, ledger.getMeetingHistoryRevision());
+    assert.match(brain.history[1], /AI suggestion: Use an LRU cache/);
+    assert.doesNotMatch(brain.history[1], /How would you cache the lookup/);
+    h.supervisor.stop();
 });
 
 test('handled suppressed answers and cancelled filler stay out of the notebook while Ask is recorded', async () => {

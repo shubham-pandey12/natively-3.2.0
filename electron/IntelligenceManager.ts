@@ -1,3 +1,4 @@
+import { formatProviderMeetingHistory } from './context-intelligence/meeting-history-formatter';
 // IntelligenceManager.ts
 // Thin facade that delegates to focused sub-modules.
 // Maintains full backward compatibility — all existing callers continue to work unchanged.
@@ -10,7 +11,7 @@
 import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
 import { EventEmitter } from 'events';
 import { LLMHelper } from './LLMHelper';
-import { SessionTracker, type ConversationSurface } from './SessionTracker';
+import { SessionTracker, type ConversationSurface, type MeetingTurnIdentity } from './SessionTracker';
 import type { TurnIdentity } from './llm/turnIdentity';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { MeetingPersistence } from './MeetingPersistence';
@@ -156,8 +157,44 @@ export class IntelligenceManager extends EventEmitter {
         writeDecision?: { policy?: 'store_conversational_only' | 'store_non_authoritative' | 'do_not_store'; reason?: string; blockedFromSessionTracker?: boolean; answersSpokenQuestion?: boolean },
         surface?: ConversationSurface,
         identity?: TurnIdentity,
+        answered?: Parameters<SessionTracker['addAssistantMessage']>[4],
     ): boolean {
-        return this.session.addAssistantMessage(text, writeDecision, surface, identity);
+        return this.session.addAssistantMessage(text, writeDecision, surface, identity, answered);
+    }
+
+    beginMeetingTurn(...args: Parameters<SessionTracker['beginMeetingTurn']>) {
+        return this.session.beginMeetingTurn(...args);
+    }
+
+    readMeetingHistory() {
+        return { turns: this.session.getMeetingTurns(), revision: this.session.getMeetingHistoryRevision() };
+    }
+
+    subscribeExternalMeetingAnswers(listener: Parameters<SessionTracker['subscribeExternalMeetingAnswers']>[0]): () => void {
+        return this.session.subscribeExternalMeetingAnswers(listener);
+    }
+
+    formatMeetingHistory(question?: string, turn?: MeetingTurnIdentity, maxChars?: number): string {
+        return formatProviderMeetingHistory(this.session.getMeetingTurns(), { question, currentTurn: turn, maxChars });
+    }
+    getMeetingHistoryEpoch(): number {
+        return this.session.getMeetingHistoryEpoch();
+    }
+
+    resetMeetingHistory(): void {
+        this.session.resetMeetingHistory();
+    }
+
+    noteMeetingSpeech(...args: Parameters<SessionTracker['noteMeetingSpeech']>) {
+        return this.session.noteMeetingSpeech(...args);
+    }
+
+    recordMeetingAnswer(...args: Parameters<SessionTracker['recordMeetingAnswer']>) {
+        return this.session.recordMeetingAnswer(...args);
+    }
+
+    enrichMeetingTurn(...args: Parameters<SessionTracker['enrichMeetingTurn']>) {
+        return this.session.enrichMeetingTurn(...args);
     }
 
     getContext(lastSeconds: number = 120) {
@@ -350,7 +387,7 @@ export class IntelligenceManager extends EventEmitter {
     }
     runAutoAnswer(
         question: Parameters<IntelligenceEngine['runAutoAnswer']>[0],
-        options: { reuseSpeculative: boolean; speechStoppedAt?: number; liveBrainNotebook?: string },
+        options: { reuseSpeculative: boolean; speechStoppedAt?: number; liveBrainNotebook?: string; meetingTurn?: MeetingTurnIdentity },
     ): ReturnType<IntelligenceEngine['runAutoAnswer']> {
         return this.engine.runAutoAnswer(question, { ...options, context: this.getFormattedContext(120) });
     }
@@ -416,8 +453,8 @@ export class IntelligenceManager extends EventEmitter {
     }
 
     /** A question asked on the phone, into the conversation. See IntelligenceEngine.recordPhoneTurn. */
-    recordPhoneTurn(answer: string, question: string, imagePaths?: readonly string[], startedUnder?: string): void {
-        this.engine.recordPhoneTurn(answer, question, imagePaths, startedUnder);
+    recordPhoneTurn(answer: string, question: string, imagePaths?: readonly string[], startedUnder?: string, meetingTurn?: MeetingTurnIdentity): void {
+        this.engine.recordPhoneTurn(answer, question, imagePaths, startedUnder, meetingTurn);
     }
 
     async runManualAnswer(question: string): Promise<string | null> {

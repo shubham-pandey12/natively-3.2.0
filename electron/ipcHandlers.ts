@@ -1,3 +1,4 @@
+import { meetingHistoryScopes, withMeetingHistory } from './context-intelligence/meeting-history-formatter';
 // ipcHandlers.ts
 
 import type { WhatToSayOutcome, WhatToSayOutcomeOut } from '../src/types/whatToSayOutcome';
@@ -2469,9 +2470,12 @@ export function initializeIpcHandlers(appState: AppState): void {
         // `message`. The renderer does NOT currently inject it on either path;
         // both strips are belt-and-suspenders.
         const strippedMessage = stripEmbeddedAnswerContract(message);
+        const intelligenceManager = appState.getIntelligenceManager();
+        const meetingTurn = intelligenceManager.beginMeetingTurn(strippedMessage, 'user');
+        if (imagePaths?.length) intelligenceManager.enrichMeetingTurn(meetingTurn, { hasVisualInput: true });
         const result = await appState.processingHelper
           .getLLMHelper()
-          .chatWithGemini(strippedMessage, imagePaths, context, options?.skipSystemPrompt);
+          .chatWithGemini(strippedMessage, imagePaths, withMeetingHistory(context, intelligenceManager.formatMeetingHistory(strippedMessage, meetingTurn)), options?.skipSystemPrompt);
 
         console.log(`[IPC] gemini - chat response received`, { length: result?.length ?? 0 });
 
@@ -2482,8 +2486,6 @@ export function initializeIpcHandlers(appState: AppState): void {
         }
 
         // Sync with IntelligenceManager so Follow-Up/Recap work
-        const intelligenceManager = appState.getIntelligenceManager();
-
         // 1. Add user question to context (as 'user')
         // CRITICAL: Skip refinement check to prevent auto-triggering follow-up logic
         // The user's manual question is a NEW input, not a refinement of previous answer.
@@ -2500,7 +2502,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // 2. Add assistant response and set as last message
         console.log(`[IPC] Updating IntelligenceManager with assistant message...`);
-        intelligenceManager.addAssistantMessage(result, undefined, 'manual_chat');
+        intelligenceManager.addAssistantMessage(result, undefined, 'manual_chat', undefined, { meetingTurn });
         console.log(`[IPC] Updated IntelligenceManager.Last message`, {
           length: intelligenceManager.getLastAssistantMessage()?.length ?? 0,
         });
@@ -2584,6 +2586,14 @@ export function initializeIpcHandlers(appState: AppState): void {
       // stays a chat reply, so the pair is kept or dropped together instead of
       // leaving a "typed" question with its answer removed.
       let questionOnRecordAsSpeech = false;
+      const historyStartedAt = Date.now();
+      const historyManager = appState.getIntelligenceManager?.();
+      const historyTurn = typeof message === 'string' && message.trim()
+        ? historyManager?.beginMeetingTurn?.(message, 'user', historyStartedAt)
+        : undefined;
+      if (historyTurn && imagePaths?.length) historyManager?.enrichMeetingTurn?.(historyTurn, { hasVisualInput: true });
+      const answerHistory = { question: message, meetingTurn: historyTurn };
+      const sharedHistory = historyManager?.formatMeetingHistory?.(message, historyTurn) ?? '';
       const forThisTurn = <T extends object>(decision: T | undefined): (T & { answersSpokenQuestion?: boolean }) | undefined =>
         questionOnRecordAsSpeech ? { ...(decision ?? ({} as T)), answersSpokenQuestion: true } : decision;
       // Intelligence OS observe-only trace (Phase 1). Hoisted so the catch can record
@@ -3407,7 +3417,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               extra: { v3Sections: composed.sections ?? null, hasImages: (imagePaths?.length ?? 0) > 0 },
             });
             const v3Stream = llmHelper.streamChatWithOutcome(
-              composed.user,
+              withMeetingHistory(sharedHistory, composed.user),
               imagePaths,
               undefined,
               v3SystemPrompt,
@@ -3421,7 +3431,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               // already filtered the evidence against the same policy, so these
               // scopes are by construction permitted; declaring them keeps the
               // transport's routing/denial decision honest instead of guessed.
-              composed.packedDataScopes ?? [],
+              [...new Set([...(composed.packedDataScopes ?? []), ...meetingHistoryScopes(sharedHistory)])],
               myController.signal,
               undefined, // thinkingBudget — keep the interactive default
               // v3Owned: LLMHelper must TRANSPORT this prompt, not rewrite it.
@@ -3686,7 +3696,10 @@ export function initializeIpcHandlers(appState: AppState): void {
                       v3ScreenEvidence ? { backupDescribe: 'manual_use_screen' } : {})
                       .catch((): string => '')
                       .then((screenText) => {
-                        if (screenText) attachScreenToAnsweredTurn(ringKey, finalText, screenText, { turn, placeholder: screenPlaceholder });
+                        if (screenText) {
+                          if (historyTurn) historyManager?.enrichMeetingTurn?.(historyTurn, { capture: { text: screenText, origin: 'capture' } });
+                          attachScreenToAnsweredTurn(ringKey, finalText, screenText, { turn, placeholder: screenPlaceholder });
+                        }
                         else if (screenPlaceholder === SCREEN_BEING_READ) attachScreenToAnsweredTurn(ringKey, finalText, SCREEN_NOT_TRANSCRIBED, { turn, placeholder: screenPlaceholder });
                       })
                       .catch(() => { /* the pre-pass text stays */ });
@@ -3711,7 +3724,11 @@ export function initializeIpcHandlers(appState: AppState): void {
                 if (!questionOnRecordAsSpeech) {
                   im?.addTranscript?.({ text: String(message || ''), speaker: 'user', timestamp: Date.now(), final: true, origin: 'manual_chat' }, true);
                 }
-                if (!v3Truncated) im?.addAssistantMessage?.(finalText, forThisTurn(undefined), 'manual_chat');
+                if (historyTurn && !v3Truncated) historyManager?.enrichMeetingTurn?.(historyTurn, {
+                  resolvedQuestion: v3Question,
+                  ...(v3ScreenDescription ? { capture: { text: v3ScreenDescription, origin: v3ScreenIsTranscription ? 'capture' : 'model_inferred' } } : {}),
+                });
+                if (!v3Truncated) im?.addAssistantMessage?.(finalText, forThisTurn(undefined), 'manual_chat', undefined, answerHistory);
                 // Usage too: ai_interactions ("usage" in Meeting Notes) is
                 // populated solely from SessionTracker's usage log at
                 // saveMeeting time. Every legacy exit logs it; without this,
@@ -3872,7 +3889,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             } catch (_) {
               /* noop */
             }
-            intelligenceManager.addAssistantMessage(identityHit, forThisTurn(undefined), 'manual_chat');
+            intelligenceManager.addAssistantMessage(identityHit, forThisTurn(undefined), 'manual_chat', undefined, answerHistory);
             intelligenceManager.logUsage('chat', message, identityHit, imagePaths);
             // Observe-only trace for the app-identity canned reply (common path). The
             // hoisted iTrace is still the NOOP here (real trace is created post-planAnswer),
@@ -4570,7 +4587,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           event.sender.send('gemini-stream-done', { finalText: clarification, streamId: myStreamId });
           try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), clarification); } catch (_) { /* noop */ }
           try { PhoneMirrorService.getInstance().publishDone(String(myStreamId), clarification); } catch (_) { /* noop */ }
-          intelligenceManager.addAssistantMessage(clarification, forThisTurn(undefined), 'manual_chat');
+          intelligenceManager.addAssistantMessage(clarification, forThisTurn(undefined), 'manual_chat', undefined, answerHistory);
           intelligenceManager.logUsage('chat', message, clarification, imagePaths);
           chatTrace.markFirstUseful({ via: 'context_free_clarification' });
           chatTrace.mark('response_completed', { chars: clarification.length, deterministic: true });
@@ -4654,7 +4671,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), clarify); } catch (_) { /* noop */ }
             try { PhoneMirrorService.getInstance().publishDone(String(myStreamId), clarify); } catch (_) { /* noop */ }
             const clarifyWrite = decideSessionWritePolicy({ finalGenerationMode: 'source_safe_refusal', validationOk: true, sourceContractHonored: true });
-            intelligenceManager.addAssistantMessage(clarify, forThisTurn(clarifyWrite), 'manual_chat');
+            intelligenceManager.addAssistantMessage(clarify, forThisTurn(clarifyWrite), 'manual_chat', undefined, answerHistory);
             intelligenceManager.logUsage('chat', message, clarify, imagePaths);
             chatTrace.markFirstUseful({ via: 'context_os_clarification' });
             chatTrace.mark('response_completed', { chars: clarify.length, deterministic: true, finalGenerationMode: 'source_safe_refusal' });
@@ -4889,7 +4906,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), clarify); } catch (_) { /* noop */ }
             try { PhoneMirrorService.getInstance().publishDone(String(myStreamId), clarify); } catch (_) { /* noop */ }
             const clarifyWrite = decideSessionWritePolicy({ finalGenerationMode: 'source_safe_refusal', validationOk: true, sourceContractHonored: true });
-            intelligenceManager.addAssistantMessage(clarify, forThisTurn(clarifyWrite), 'manual_chat');
+            intelligenceManager.addAssistantMessage(clarify, forThisTurn(clarifyWrite), 'manual_chat', undefined, answerHistory);
             intelligenceManager.logUsage('chat', message, clarify, imagePaths);
             chatTrace.markFirstUseful({ via: 'source_switch_clarification' });
             chatTrace.mark('response_completed', { chars: clarify.length, deterministic: false, finalGenerationMode: 'source_safe_refusal' });
@@ -5757,11 +5774,11 @@ export function initializeIpcHandlers(appState: AppState): void {
           const _manualAnswerArgs: StreamChatArgs = [
             message,
             imagePaths,
-            context,
+            withMeetingHistory(context, sharedHistory),
             systemPromptOverride,
             ignoreKnowledge,
             isCodingChat, // skipModeInjection; coding must not pull active-mode resume/JD/reference context
-            [],    // extraDataScopes
+            meetingHistoryScopes(sharedHistory),
             myController.signal,
             // Coding gets a small reasoning budget (correctness); everything else
             // streams with thinking off (fastest TTFT).
@@ -7788,7 +7805,7 @@ export function initializeIpcHandlers(appState: AppState): void {
                 && !blockedFromSessionTracker
                 && !sessionWriteDecision.blockedFromSessionTracker
                 && !contextChangedSinceAsk()) {
-              intelligenceManager.addAssistantMessage(fullResponse, forThisTurn(sessionWriteDecision), 'manual_chat');
+              intelligenceManager.addAssistantMessage(fullResponse, forThisTurn(sessionWriteDecision), 'manual_chat', undefined, answerHistory);
               // Log Usage for streaming chat
               intelligenceManager.logUsage('chat', message, fullResponse, imagePaths);
               // CONTEXT OS memory safety (Phase 9, 2026-07-10): persist the
@@ -8037,7 +8054,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               event.sender.send('gemini-stream-token', safe, { streamId: myStreamId });
               event.sender.send('gemini-stream-done', { finalText: safe, streamId: myStreamId });
               try { PhoneMirrorService.getInstance().publishToken(String(myStreamId), safe); PhoneMirrorService.getInstance().publishDone(String(myStreamId), safe); } catch (_) { /* noop */ }
-              intelligenceManager.addAssistantMessage(safe, forThisTurn(sessionWriteDecision), 'manual_chat');
+              intelligenceManager.addAssistantMessage(safe, forThisTurn(sessionWriteDecision), 'manual_chat', undefined, answerHistory);
               _emitAttr({ answer_type: answerPlan.answerType, profile_tree_used: false, profile_tree_fast_path_used: false, structured_resume_used: false });
               return null;
             }
@@ -9162,6 +9179,15 @@ export function initializeIpcHandlers(appState: AppState): void {
     };
     activeDirectAssistBySurface.set(surfaceKey, active);
     activeDirectAssistByRequest.set(requestKey, active);
+    const historyManager = appState.getIntelligenceManager?.();
+    const directHistoryTurn = historyManager?.beginMeetingTurn?.(request.currentRequest, 'user');
+    if (directHistoryTurn && request.imagePaths?.length) historyManager?.enrichMeetingTurn?.(directHistoryTurn, { hasVisualInput: true });
+    const directCaptureText = [request.pageContext?.dom, request.pageContext?.ocr].filter(Boolean).join('\n');
+    if (directHistoryTurn && directCaptureText) {
+      historyManager.enrichMeetingTurn(directHistoryTurn, {
+        capture: { text: directCaptureText, origin: 'extension_untrusted' },
+      });
+    }
 
     const onSenderDestroyed = (): void => controller.abort();
     event.sender.once?.('destroyed', onSenderDestroyed);
@@ -9216,7 +9242,8 @@ export function initializeIpcHandlers(appState: AppState): void {
 
     let meetingTranscript = '';
     try {
-      meetingTranscript = appState.getIntelligenceManager()?.getFormattedContext?.(180) ?? '';
+      meetingTranscript = withMeetingHistory(historyManager?.getFormattedContext?.(180),
+        historyManager?.formatMeetingHistory?.(request.currentRequest, directHistoryTurn) ?? '');
     } catch (error) {
       console.warn('[direct-assist] live session transcript unavailable, proceeding without it:', (error as Error)?.message);
     }
@@ -9343,6 +9370,11 @@ export function initializeIpcHandlers(appState: AppState): void {
           // exactly like provider_switch would have without its branch above.
           lastSequence = Math.max(lastSequence, streamEvent.sequence);
           if (streamEvent.type === 'done') {
+            if (directHistoryTurn && !controller.signal.aborted && activeDirectAssistBySurface.get(surfaceKey) === active) {
+              historyManager.recordMeetingAnswer(directHistoryTurn, fullText, {
+                surface: request.imagePaths?.length ? 'screenshot' : 'manual_chat',
+              });
+            }
             sendTerminal({ ...streamEvent, fullText } as DirectAssistStreamEvent);
             // ── TRANSCRIBE THIS TURN'S SCREENSHOT, AFTER the answer ─────────
             // Direct Assist deliberately has no vision pre-pass: it is one
@@ -9361,7 +9393,12 @@ export function initializeIpcHandlers(appState: AppState): void {
             // (2026-11-06); the history below reads it (getBackupScreenRead).
             if (request.imagePaths?.length) {
               void require('./services/screen/screenTranscription')
-                .transcribeScreenForMemory(request.imagePaths, request.currentRequest, { backupDescribe: 'manual_use_screen' });
+                .transcribeScreenForMemory(request.imagePaths, request.currentRequest, { backupDescribe: 'manual_use_screen' })
+                .then((screenText: string) => {
+                  if (screenText && directHistoryTurn && !directCaptureText) {
+                    historyManager.enrichMeetingTurn(directHistoryTurn, { capture: { text: screenText, origin: 'capture' } });
+                  }
+                }).catch(() => {});
             }
           } else {
             sendTerminal(streamEvent);
@@ -22583,6 +22620,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const message = stripEmbeddedAnswerContract(cmd.message);
       const phoneMirror = PhoneMirrorService.getInstance();
       const intelligenceManager = appState.getIntelligenceManager();
+      const phoneHistoryTurn = intelligenceManager.beginMeetingTurn(message, 'user');
+      const phoneHistory = intelligenceManager.formatMeetingHistory(message, phoneHistoryTurn);
       // Read before the stream is awaited. Unlike desktop chat, a phone stream is
       // not in _chatStreamsBySender, so neither the overlay's cancelChatStream()
       // on session-reset nor modes:set-active's abort reaches it: a meeting stop
@@ -22783,7 +22822,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             try { phoneMirror.publishDone(String(myStreamId), clarify); } catch (_) {}
             win?.webContents.send('gemini-stream-token', clarify, { streamId: myStreamId, source: 'phone' });
             win?.webContents.send('gemini-stream-done', { streamId: myStreamId, source: 'phone' });
-            intelligenceManager.addAssistantMessage(clarify, undefined, 'phone_mirror');
+            intelligenceManager.addAssistantMessage(clarify, undefined, 'phone_mirror', undefined, { meetingTurn: phoneHistoryTurn });
             intelligenceManager.logUsage('chat', message, clarify);
             if (isIntelligenceFlagEnabled('trace')) {
               console.log('[SOURCE-GUARD] phone: blocked source=profile reason=explicit_profile_ask_in_reference_mode', { owner: _pOwn.owner });
@@ -22841,7 +22880,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         // The design on the table joins this turn's context (a follow-up typed
         // on the phone refines the design drawn on the desktop).
         if (phoneDiagramTurn) context = withDiagramTurnBlock(context, phoneDiagramTurn) || context;
-        const stream = llmHelper.streamChat(message, phoneImagePaths.length ? phoneImagePaths : undefined, context, phoneBasePrompt(resolveCodingPromptSignals({ answerType: phoneRouteOptions?.answerType as any, question: message }), 'live'), false, false, [], phoneController.signal, undefined, phoneRouteOptions);
+        const stream = llmHelper.streamChat(message, phoneImagePaths.length ? phoneImagePaths : undefined, withMeetingHistory(context, phoneHistory), phoneBasePrompt(resolveCodingPromptSignals({ answerType: phoneRouteOptions?.answerType as any, question: message }), 'live'), false, false, meetingHistoryScopes(phoneHistory), phoneController.signal, undefined, phoneRouteOptions);
         let full = '';
         let phoneSuperseded = false;
         // Deadline-guarded (Issue 1) — this is a live streaming surface too: a hung
@@ -22950,14 +22989,14 @@ export function initializeIpcHandlers(appState: AppState): void {
             console.log('[PhoneMirror] session reset or mode switched during this answer — not saving it', { chars: phoneTrim.length });
           }
           if (phoneTrim.length > 0 && !phoneInvalid && !phoneContextChanged) {
-            intelligenceManager.addAssistantMessage(full, undefined, 'phone_mirror');
+            intelligenceManager.addAssistantMessage(full, undefined, 'phone_mirror', undefined, { meetingTurn: phoneHistoryTurn });
             intelligenceManager.logUsage('chat', message, full);
             // Into the conversation with its screenshots and photos (2026-11-06),
             // like a question typed on the desktop: the next question, on the
             // phone (conversationHistoryBlock, above) or the desktop (typed,
             // What to answer, a button), can then refer to it and its screen.
             try {
-              intelligenceManager.recordPhoneTurn(full, String(message || ''), phoneImagePaths, myPhoneConversationKey);
+              intelligenceManager.recordPhoneTurn(full, String(message || ''), phoneImagePaths, myPhoneConversationKey, phoneHistoryTurn);
             } catch (recordErr: any) {
               console.warn('[PhoneMirror] phone turn not recorded in the conversation:', recordErr?.message ?? recordErr);
             }

@@ -191,6 +191,7 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
     private activeResponseId?: string;
     private awaitingAnswer = false;
     private injectedText?: string;
+    private historyContext = '';
     private interrupted = false;
     private awaitingAgentBoundary = false;
     // AgentThinking is not guaranteed every turn, so the post-barge-in gate also
@@ -252,9 +253,14 @@ export class DeepgramVoiceAgentBrain implements LiveBrain {
 
     addHistoryContext(history: string): void {
         if (!this.ready || !history.trim() || !this.context) return;
-        const extra = `\n\nRecent interview context from the prior session:\n${history.slice(-2_000)}`;
         const instructions = this.context.instructions;
-        const prompt = this.options.deepgramThink?.thinkMode === 'byo'
+        const byo = this.options.deepgramThink?.thinkMode === 'byo';
+        const available = byo ? 16_000 : Math.max(0, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - instructions.length - 80);
+        const historyBudget = Math.min(16_000, available);
+        const accumulated = `${this.historyContext}\n\n${history}`.trim();
+        this.historyContext = historyBudget ? accumulated.slice(-historyBudget) : '';
+        const extra = this.historyContext ? `\n\nRecent interview context from the prior session:\n${this.historyContext}` : '';
+        const prompt = byo
             ? instructions + extra
             : instructions.slice(0, Math.max(0, DEEPGRAM_MAX_MANAGED_PROMPT_CHARS - extra.length)) + extra;
         this.sendJson({ type: 'UpdatePrompt', prompt: this.boundPrompt(prompt) });
