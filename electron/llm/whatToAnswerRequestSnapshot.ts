@@ -49,6 +49,9 @@ import type { ActiveModeInfo } from './modeProfiles';
  */
 export interface WhatToAnswerRequestSnapshot {
   readonly spokenInterview?: { allowBackgroundDetails: boolean };
+  /** Live Brain writer turn (Deepgram Flux + AI provider, or a Live Brain
+   *  draft): the live writer system prompt owns voice and shape. */
+  readonly liveBrainWriter?: true;
   /** The system-design diagram decision for this turn (diagramPromptSignals.ts),
    *  resolved once by the engine and frozen here so the non-V3 prompt assembly
    *  in WhatToAnswerLLM carries the SAME contract and the same design-on-the-

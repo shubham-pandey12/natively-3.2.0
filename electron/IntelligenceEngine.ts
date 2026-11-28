@@ -5698,6 +5698,7 @@ export class IntelligenceEngine extends EventEmitter {
 
             const requestSnapshot: WhatToAnswerRequestSnapshot = Object.freeze({
                 ...(spokenInterview ? { spokenInterview: { allowBackgroundDetails: allowInterviewDetails } } : {}),
+                ...(options?.liveBrain || options?.privateDraft ? { liveBrainWriter: true as const } : {}),
                 activeModeInfo: snapshotModeInfo,
                 modeId: snapshotModeId,
                 modeUniqueId: snapshotModeInfo?.id,

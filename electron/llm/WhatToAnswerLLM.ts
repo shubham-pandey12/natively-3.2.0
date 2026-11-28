@@ -3,6 +3,7 @@ import { UNIVERSAL_WHAT_TO_ANSWER_PROMPT } from "./prompts";
 import { TINY_WHAT_TO_ANSWER_PROMPT } from "./tinyPrompts";
 import { resolveV2SystemPrompt, v2TierForPromptTier } from "./promptSystemV2";
 import { withSpokenInterviewRules } from './answerStyle';
+import { buildLiveBrainWriterSystemPrompt } from './liveBrainWriterPrompt';
 import { composeWtaSystemPrompt } from "./wtaSystemPrompt";
 import { estimateTokens } from "./modelCapabilities";
 import { TemporalContext } from "./TemporalContextBuilder";
@@ -1198,13 +1199,22 @@ The user triggered this action with a coding problem on screen and NO new questi
             // ACTIVE SKILL block on every V3 turn — finalPromptOverride is its only
             // carrier and V3 is default ON, so `??` never fell through.
             let _wtaSystemPrompt = composeWtaSystemPrompt(_v3p?.system, finalPromptOverride, activeSkill);
-            if (requestSnapshot?.spokenInterview) {
+            if (requestSnapshot?.spokenInterview && !requestSnapshot.liveBrainWriter) {
                 _wtaSystemPrompt = withSpokenInterviewRules(_wtaSystemPrompt, requestSnapshot.spokenInterview.allowBackgroundDetails);
             }
             // A V3 system whose persona was null (v2 kill-switch) has no diagram
             // contract; every other composition already carries exactly one, and
             // the helper never adds a second.
             _wtaSystemPrompt = withDiagramContract(_wtaSystemPrompt, diagramTurn, { tier: v2Tier, surface: 'live' });
+            // Live Brain writer turns (Deepgram Flux + AI provider, drafts): the
+            // live writer prompt leads and closes; the composed prompt stays in
+            // between as grounding, source and diagram rules only.
+            if (requestSnapshot?.liveBrainWriter) {
+                _wtaSystemPrompt = buildLiveBrainWriterSystemPrompt(
+                    _wtaSystemPrompt,
+                    requestSnapshot.spokenInterview?.allowBackgroundDetails ?? false,
+                );
+            }
             if (_v3p) console.log('[WhatToAnswerLLM] V3 prompt in effect (Phase 6 wiring)');
             // INSTRUMENTATION FIX (session C forensics, 2026-08-21): the
             // prompt_assembled trace above describes the V1 packet, which is
