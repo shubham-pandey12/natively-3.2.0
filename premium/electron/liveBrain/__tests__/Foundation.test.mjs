@@ -38,7 +38,7 @@ test('D20 realtime providers use the short candidate prompt and keep their turn 
         assert.doesNotMatch(prompt, /Examples of tone|→/);
         assert.match(prompt, /simple Indian English/);
         assert.match(prompt, /Never announce your thinking/);
-        assert.match(prompt, /Every story, project, number and detail must come from your own background/);
+        assert.match(prompt, /Base every story on your own work/);
         assert.match(prompt, /Start with one natural line that sets the scene in your own words/);
         assert.match(prompt, /Length, so answers are not all the same size/);
         assert.match(prompt, /always say the exact fix you made/);
@@ -309,4 +309,25 @@ test('the fake records calls, emits scripted events and stops idempotently', asy
     assert.deepEqual(events, script);
     await brain.stop();
     assert.equal(brain.stopCalls, 2);
+});
+
+test('D21 spoken interview prompt blocks are shared once across realtime, Flux and What to Answer', () => {
+    const { SPOKEN_INTERVIEW_STYLE, SPOKEN_INTERVIEW_BACKGROUND, withSpokenInterviewRules } = require(`${dist}electron/llm/answerStyle.js`);
+    const { LIVE_BRAIN_WRITER_INSTRUCTION } = require(`${dist}electron/IntelligenceEngine.js`);
+    const { composeWtaSystemPrompt } = require(`${dist}electron/llm/wtaSystemPrompt.js`);
+    const ctx = { modeTemplate: 'technical-interview', profileContext: 'Worked on order queues.' };
+    const prompts = [
+        ...['gemini-live', 'openai-realtime', 'elevenlabs-realtime', 'amazon-sonic', 'deepgram-voice-agent']
+            .map(id => buildProviderInstructions(ctx, 'full', id)),
+        buildProviderInstructions(ctx, 'full', 'deepgram-voice-agent', 'byo'),
+        buildProviderInstructions(ctx, 'full', 'pipeline'),
+        withSpokenInterviewRules(composeWtaSystemPrompt(null, LIVE_BRAIN_WRITER_INSTRUCTION)),
+        withSpokenInterviewRules(composeWtaSystemPrompt(null, MODE_TECHNICAL_INTERVIEW_PROMPT)),
+        withSpokenInterviewRules(composeWtaSystemPrompt(withSpokenInterviewRules('V3 system'), 'Legacy')),
+    ];
+    for (const prompt of prompts) {
+        assert.equal(prompt.split(SPOKEN_INTERVIEW_STYLE).length, 2);
+        assert.equal(prompt.split(SPOKEN_INTERVIEW_BACKGROUND).length, 2);
+        assert.doesNotMatch(prompt, /Only claim experience supported by the candidate's résumé/);
+    }
 });

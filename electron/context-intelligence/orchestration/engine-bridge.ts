@@ -632,6 +632,7 @@ export async function buildV3Prompt(input: BridgeInput): Promise<BridgeResult | 
     const composed = composePrompt({
       decision: result.decision,
       policy,
+      spokenInterview: input.surface === 'what-to-answer',
       personaBase,
       evidence: scopeFilter.evidence,
       withheldScopes: [...withheldScopes],

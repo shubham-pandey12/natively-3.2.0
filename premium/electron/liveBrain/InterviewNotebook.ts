@@ -116,6 +116,30 @@ export class InterviewNotebook {
         return this.turns.filter(turn => turn.at >= cutoff).map(turn => ({ ...turn }));
     }
 
+    mergeInterviewerTurn(previous: string, next: string, at: number): void {
+        for (const text of [next, previous]) {
+            // A second interruption can arrive before the first replacement
+            // completed. In that case the prefix is still several raw turns.
+            let remaining = truncate(text.trim(), MAX_TURN_CHARS);
+            const indices: number[] = [];
+            for (let index = this.turns.length - 1; index >= 0; index--) {
+                const turn = this.turns[index];
+                if (turn.role === 'assistant') break;
+                if (turn.role !== 'interviewer') continue;
+                if (remaining !== turn.text && !remaining.endsWith(' ' + turn.text)) continue;
+                indices.push(index);
+                remaining = remaining.slice(0, -turn.text.length).trimEnd();
+                if (!remaining) {
+                    for (const match of indices) this.chars -= this.turns.splice(match, 1)[0].text.length;
+                    break;
+                }
+            }
+        }
+        const merged = `${previous} ${next}`.trim();
+        this.record({ role: 'interviewer', text: merged, at });
+        this.latestQuestion = truncate(merged, MAX_TURN_CHARS);
+    }
+
     record(turn: ConversationTurn, clarification = false): void {
         const text = truncate(turn.text.trim(), MAX_TURN_CHARS);
         if (!text) return;

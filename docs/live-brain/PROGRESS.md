@@ -1180,3 +1180,21 @@ Requires physical macOS verification. Requires physical Windows verification. Ch
 - Deepgram Voice Agent: the post-barge-in answer gate now also opens on `AgentStartedSpeaking` or 2 s after the next user turn, since `AgentThinking` is not guaranteed every turn. Previously a missing `AgentThinking` muted every later answer until reconnect.
 - Orchestrator: a filler bubble discarded at turn end gets a fresh question id, so a question that continues in the same turn ("Okay. So how would you…") is shown instead of being blocked by the overlay's closed-id set.
 - IntelligenceEngine: restored the Flux writer guards (`[[NO_ACTION]]`, writer cancellation signal, draft instruction) and the shared response cleanup guards (automatic reveal path; skip notices and truncated answers) that commit 2e441877 removed, keeping its background-rule change. `CodingResponseShape` wiring regex accepts the renamed `withLiveExperience` base.
+
+### D21 — Answer replacement and consistent interview style (2026-11-28)
+
+- D21 keeps one answer and one interviewer bubble across a substantive interruption, with separate generation guards and merged question history. Finished answers and filler keep their existing rows.
+- Live Brain targets the Technical Interview mode template. The other mode templates remain available to Natively.
+- The spoken interview style and background rule live in answerStyle.ts. The interview-only profile and claim checks respect inferred details while protecting identity, coding and source-only answers.
+
+D21 validator audit
+
+- `validateProfileEvidence` skips unsupported-metric and unsupported-employer heuristics only for spoken interview detail filling. `validateProfileOutput`, `buildProfileRepairInstruction` and the repair recheck keep assistant identity, false-refusal, wrong-person, salary and generic/coding profile-leak checks. The evidence validator regression covers a plausible metric alongside the retained identity check.
+- `sanitizeCandidateAnswer` and `detectAssistantVoiceMisfire` keep their existing identity, artifact and unusable-reply handling. They do not check plausible details against the résumé.
+- The claim verifier leaves permitted personal interview synthesis alone, including when the interview comparison flag is enabled. Its source, product, company and other answer routes still run under the existing rules. Document-grounded validation and regeneration, explicit source requests, and “Only answer from references” retain evidence enforcement.
+- Legacy V2, V3, Profile JIT, Flux and Pipeline dispatch now compose the shared spoken rules or refer to them. V3 typed and JIT non-spoken routes retain separately scoped source-grounded policies. `customContextClassifier`, derived résumé support, retrieval, injection protection and coding contracts still limit what counts as trusted input. The spoken policy affects the generated answer and does not authorize a new source.
+
+Prompt lengths in characters for the same Technical Interview queue-design fixture, cloud V2 persona composed through V3, without a supplied profile or notebook. Gemini 4,447 to 4,467. Flux writer system plus turn protocol 26,558 to 26,679. Normal Auto Answer system 25,174 to 26,268.
+
+Windows validation passed the Electron build and type checks, 257 Live Brain, 203 Auto Answer, 13 focused overlay, and 105 focused profile, source-policy, and cleanup tests. The broader LLM and context-intelligence run had 9,071 passes, 57 skips, and 12 failures. All 12 reproduced on the clean 1db08a69d checkout in CutOffAnswerNotInRing, HotkeyTurnsRecorded, SpeculativeAdoptionRecorded, and RepairReplaysAnswerCall. Requires physical macOS verification. Requires physical Windows verification.
+- D21 review fix (Flux / AnswerWriter): the renderer now keeps and seals the streamed partial on an `interviewer_interrupted` discard, the same as `answer_corrected` (`keepsPartialOnDiscard` in `src/lib/liveBrainChat.mjs`). Before, the writer's cut-off row was deleted, so the replacement opened a new row instead of reusing it, and a turn that ended in No action left nothing on screen.

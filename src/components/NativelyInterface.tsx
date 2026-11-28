@@ -330,7 +330,7 @@ import {
   type OverlayResizeDirection,
 } from '../lib/overlayCustomSize.mjs';
 import { decideResetCancel, resolveChatStreamToken, resolveChatStreamDone, resolveLiveAnswerBatch, resolveChatStreamSurfaceError, isStaleDesktopChatEvent, shouldApplyLiveAnswerDiscard } from '../lib/chatStreamGuard.mjs';
-import { placeLiveBrainQuestion } from '../lib/liveBrainChat.mjs';
+import { keepsPartialOnDiscard, placeLiveBrainQuestion, replaceLiveBrainAnswer } from '../lib/liveBrainChat.mjs';
 import { buildDirectWhatToSayPayload } from '../lib/directAssistWhatToSayPayload.mjs';
 import { resolveScreenshotPromptText, getScreenshotPresetPrompt } from '../lib/screenshotPrompt';
 import { chatFailureFromError, isProviderFailureSentence } from '../lib/chatFailure.mjs';
@@ -564,6 +564,8 @@ const CHROME_MOTION_FALLBACK_MS = 600;
 const RESIZE_SUPPRESSION_TAIL_MS = 320;
 
 interface Message {
+  liveBrainAskId?: string;
+  liveBrainReplacementBackup?: Message;
   id: string;
   role: 'user' | 'system' | 'interviewer';
   text: string;
@@ -8042,16 +8044,37 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     );
 
     cleanups.push(
-      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status, liveBrainQuestion, liveBrainAnswerStart, discard }) => {
+      window.electronAPI.onWhatToAnswerQuestion?.(({ generationId, question, overlayQuestionId, pending, failed, outdated, updated, askId, clarification, askStreaming, interviewerSpeaking, responseText, liveBrainStatus: status, liveBrainQuestion, liveBrainAnswerStart, liveBrainReplacement, discard }) => {
         if (status !== undefined) {
           setLiveBrainStatus(status);
           return;
         }
+        if (liveBrainReplacement && generationId !== undefined) {
+          if (activeDirectAssistRef.current || closedLiveBrainGenIdsRef.current.has(generationId)) return;
+          const oldGeneration = liveBrainReplacement.previousGenerationId;
+          closedLiveBrainGenIdsRef.current.add(oldGeneration);
+          activeLiveBrainGenIdsRef.current.delete(oldGeneration);
+          activeLiveBrainGenIdsRef.current.add(generationId);
+          if (liveBrainReplacement.previousAskId) closedLiveBrainAskIdsRef.current.add(liveBrainReplacement.previousAskId);
+          if (streamingIntentRef.current === 'what_to_answer') flushToken();
+          if (liveBrainReplacement.writer) {
+            const row = boundAnswerRowRef.current;
+            liveAnswerGenIdRef.current = generationId;
+            if (row?.generationId === oldGeneration && !streamingMsgIdRef.current) {
+              streamingMsgIdRef.current = row.id;
+              streamingIntentRef.current = 'what_to_answer';
+              boundAnswerRowRef.current = { id: row.id, generationId };
+            }
+          }
+          setMessages((prev) => replaceLiveBrainAnswer(prev, generationId, liveBrainReplacement));
+          return;
+        }
         if (discard && generationId !== undefined) {
+          if (closedLiveBrainGenIdsRef.current.has(generationId)) return;
           closedLiveBrainGenIdsRef.current.add(generationId);
           activeLiveBrainGenIdsRef.current.delete(generationId);
           const id = `live-brain-text-${generationId}`;
-          setMessages((prev) => prev.filter((message) => message.id !== id));
+          setMessages((prev) => prev.filter((message) => message.id !== id && message.whatToAnswerGeneration !== generationId));
           return;
         }
         // D14: chat-style Live Brain. The interviewer's words stream into this
@@ -8073,9 +8096,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           return;
         }
         if (askId && discard) {
+          if (closedLiveBrainAskIdsRef.current.has(askId)) return;
           closedLiveBrainAskIdsRef.current.add(askId);
           activeLiveBrainAskIdsRef.current.delete(askId);
-          setMessages((prev) => prev.filter((message) => message.id !== `live-brain-ask-${askId}`));
+          setMessages((prev) => prev.filter((message) => message.id !== `live-brain-ask-${askId}` && message.liveBrainAskId !== askId));
           return;
         }
         if (askId && clarification) {
@@ -8085,8 +8109,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           const id = `live-brain-ask-${askId}`;
           pinAnswerPanel();
           setMessages((prev) => {
-            const existing = prev.find((message) => message.id === id);
-            const patch = { text: clarification, isStreaming: askStreaming === true };
+            const existing = prev.find((message) => message.id === id || message.liveBrainAskId === askId);
+            const patch = { liveBrainAskId: askId, text: clarification, isStreaming: askStreaming === true,
+              ...(askStreaming !== true ? { liveBrainReplacementBackup: undefined } : {}) };
             if (existing) {
               if (!existing.isStreaming) return prev;
               return prev.map((message) => message === existing ? { ...message, ...patch } : message);
@@ -8129,8 +8154,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           const id = `live-brain-text-${generationId}`;
           pinAnswerPanel();
           setMessages((prev) => {
-            const existing = prev.find((message) => message.id === id);
-            const patch = { text: responseText.text, isStreaming: !responseText.done };
+            const existing = prev.find((message) => message.whatToAnswerGeneration === generationId);
+            const patch = { text: responseText.text, isStreaming: !responseText.done,
+              ...(responseText.done ? { liveBrainReplacementBackup: undefined } : {}) };
             if (existing) {
               if (!existing.isStreaming) return prev;
               return prev.map((message) => message === existing ? { ...message, ...patch } : message);
@@ -8297,7 +8323,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (!shouldApplyLiveAnswerDiscard(liveAnswerGenIdRef.current, data?.generationId)) return;
         if (!resolveLiveAnswerBatch(liveAnswerGenIdRef.current, data?.generationId, liveAnswerFloorRef.current).accept) return;
         if (!hasOtherLiveRequest()) setIsProcessing(false);
-        if (data.reason === 'answer_corrected' && data.generationId !== undefined) {
+        if (keepsPartialOnDiscard(data.reason) && data.generationId !== undefined) {
           liveAnswerFloorRef.current = Math.max(liveAnswerFloorRef.current ?? 0, data.generationId);
           liveAnswerGenIdRef.current = null;
           const questionId = `interviewer-answer-${data.generationId}`;

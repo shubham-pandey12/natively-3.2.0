@@ -2,6 +2,7 @@ import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_WHAT_TO_ANSWER_PROMPT } from "./prompts";
 import { TINY_WHAT_TO_ANSWER_PROMPT } from "./tinyPrompts";
 import { resolveV2SystemPrompt, v2TierForPromptTier } from "./promptSystemV2";
+import { withSpokenInterviewRules } from './answerStyle';
 import { composeWtaSystemPrompt } from "./wtaSystemPrompt";
 import { estimateTokens } from "./modelCapabilities";
 import { TemporalContext } from "./TemporalContextBuilder";
@@ -1197,6 +1198,9 @@ The user triggered this action with a coding problem on screen and NO new questi
             // ACTIVE SKILL block on every V3 turn — finalPromptOverride is its only
             // carrier and V3 is default ON, so `??` never fell through.
             let _wtaSystemPrompt = composeWtaSystemPrompt(_v3p?.system, finalPromptOverride, activeSkill);
+            if (requestSnapshot?.spokenInterview) {
+                _wtaSystemPrompt = withSpokenInterviewRules(_wtaSystemPrompt, requestSnapshot.spokenInterview.allowBackgroundDetails);
+            }
             // A V3 system whose persona was null (v2 kill-switch) has no diagram
             // contract; every other composition already carries exactly one, and
             // the helper never adds a second.

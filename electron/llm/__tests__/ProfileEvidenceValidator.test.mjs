@@ -196,3 +196,14 @@ describe('Phase 6: latency — deterministic & fast', () => {
     assert.ok(ms < 5, `avg ${ms.toFixed(3)}ms per validation`);
   });
 });
+
+test('D21 spoken interview gap filling preserves plausible details and still flags assistant identity', () => {
+  const input = { plan: plan(), evidence: 'Built a queue service.', profileAvailable: true, candidateDirected: true };
+  const answer = 'I reduced the waiting time by 20% by batching calls.';
+  assert.ok(validateProfileEvidence({ ...input, answer }).errorCodes.includes('unsupported_metric'));
+  const spoken = validateProfileEvidence({ ...input, answer, allowInterviewDetails: true });
+  assert.equal(spoken.ok, true);
+  assert.equal(spoken.repairInstruction, '');
+  const identity = validateProfileEvidence({ ...input, answer: 'I am an AI assistant.', allowInterviewDetails: true });
+  assert.ok(identity.errorCodes.includes('assistant_identity_leak'));
+});

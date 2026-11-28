@@ -5,6 +5,15 @@ export type LiveBrainStatus = 'Listening' | 'Thinking' | 'Answer ready' | 'Recon
  *  (`generationId`, once that answer exists). */
 export type LiveBrainQuestion = { questionId: string; text: string; done: boolean; generationId?: number; discard?: boolean };
 
+export type LiveBrainReplacement = {
+    previousGenerationId: number;
+    previousAskId?: string;
+    askId?: string;
+    writer?: boolean;
+    pipelineQuestion?: string;
+    restore?: boolean;
+};
+
 export type WhatToAnswerQuestionEvent = {
     generationId?: number;
     question?: string;
@@ -21,5 +30,6 @@ export type WhatToAnswerQuestionEvent = {
     liveBrainStatus?: LiveBrainStatus | null;
     liveBrainQuestion?: LiveBrainQuestion;
     liveBrainAnswerStart?: boolean;
+    liveBrainReplacement?: LiveBrainReplacement;
     discard?: boolean;
 } & ({ generationId: number } | { askId: string; clarification: string } | { liveBrainStatus: LiveBrainStatus | null } | { liveBrainQuestion: LiveBrainQuestion });

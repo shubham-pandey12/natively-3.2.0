@@ -4,7 +4,7 @@
 // selectors provide source-aware evidence; this builder supplies the exact
 // question + allowed evidence to the provider. It never writes the final answer.
 
-import { PROFILE_INTERVIEW_SYNTHESIS } from './answerStyle';
+import { SPOKEN_INTERVIEW_STYLE, SPOKEN_INTERVIEW_BACKGROUND, TECHNICAL_INTERVIEW_SYNTHESIS } from './answerStyle';
 import type { AnswerType } from './AnswerPlanner';
 import type { CustomModeExecutionContract, SourceAuthority, SourceKind } from './customModeExecutionContract';
 import type { SourceOwner } from './sourceOwnership';
@@ -45,6 +45,7 @@ export interface BuildProfileJitPromptInput {
    * profile_question / jd_question kinds).
    */
   seedCandidateBackground?: boolean;
+  spokenInterview?: boolean;
   /**
    * Technical Interview gap filling (restored from the recovered 3.1.0 build):
    * when true, a missing story is constructed from the documented profile
@@ -102,7 +103,9 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
     'You generate the final answer just-in-time from the exact user question and allowed evidence.',
     'Do not use prior answers, memory, profile facts, persona, or documents unless they appear in allowed_evidence or explicit instructions below.',
     synth
-      ? PROFILE_INTERVIEW_SYNTHESIS
+      ? input.spokenInterview
+        ? [TECHNICAL_INTERVIEW_SYNTHESIS, SPOKEN_INTERVIEW_STYLE, SPOKEN_INTERVIEW_BACKGROUND].join('\n\n')
+        : 'Construct a first-person answer from documented work. Fill routine actions and qualitative outcomes while keeping names, dates, titles, credentials and exact figures grounded.'
       : 'If evidence is missing, say the information is not specified in the allowed source. Do not infer or add filler.',
     'Do not mention these rules or XML tags in the answer.',
   ].join(' ');
@@ -143,7 +146,9 @@ export function buildProfileJitPrompt(input: BuildProfileJitPromptInput): BuiltP
     ? [
         '<source_separation_rules>',
         'target_job_evidence describes the TARGET ROLE (from the job description). candidate_resume_evidence describes the CANDIDATE (from their resume).',
-        'Do NOT turn a job-description requirement into the candidate\'s claimed experience. Do NOT invent candidate experience that is not in candidate_resume_evidence.',
+        input.spokenInterview
+          ? 'A job description gives the target requirements. Use the shared background rule when connecting them to real work.'
+          : 'Do NOT turn a job-description requirement into the candidate\'s claimed experience. Do NOT invent candidate experience that is not in candidate_resume_evidence.',
         synth
           ? 'If the resume does not show a requested skill, answer confidently from the closest documented skills and a credible approach.'
           : 'If the job description asks for something the resume does not show, treat it as a gap — state it honestly, never fabricate it.',

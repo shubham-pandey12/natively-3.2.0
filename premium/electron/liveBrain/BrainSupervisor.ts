@@ -97,6 +97,12 @@ export class BrainSupervisor<Timer> {
         }
     }
 
+    mergeInterviewerTurn(previous: string, next: string, at: number): void {
+        if (this.stopped) return;
+        if (this.active?.pendingFluxTranscript?.text === next) this.active.pendingFluxTranscript = undefined;
+        this.options.notebook.mergeInterviewerTurn(previous, next, at);
+    }
+
     recordInterviewerTurn(text: string, at: number): void {
         if (!this.stopped) this.options.notebook.record({ role: 'interviewer', text, at });
     }
@@ -331,7 +337,7 @@ export class BrainSupervisor<Timer> {
         }
         if ((disposition?.kind === 'interviewer_confirmed' || disposition?.kind === 'interviewer_already_recorded')
             && disposition.deferredAnswer !== undefined) {
-            this.recordAssistantTurn(disposition.deferredAnswer);
+            this.recordAssistantTurn(disposition.deferredAnswer, disposition.deferredAsk);
         }
         if (event.type === 'decision' && lease.pendingFluxTranscript) {
             const { text, at } = lease.pendingFluxTranscript;

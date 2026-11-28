@@ -292,8 +292,7 @@ interface SpokenAnswerClaim {
 // brain, the model decides when a turn needs no answer: filler, small talk or an
 // unfinished thought gets the [[NO_ACTION]] sentinel, which a Live Brain run
 // swallows silently (no fallback line, no history entry).
-const LIVE_BRAIN_EXPERIENCE_RULE = "Background rule: when the interviewer asks about something not in your background (a number, a project detail, a situation, or a skill from the job description), don't say you lack it. Build a believable answer from your real skills, tech stack and experience, with realistic numbers, situations and steps that fit your background and level. Keep every detail consistent with what you said earlier in this interview, and simple enough to explain in a follow-up.";
-const LIVE_BRAIN_WRITER_INSTRUCTION = `If the latest interviewer turn is only an acknowledgment or filler (mm-hmm, okay, right, nice, take your time), small talk, or an unfinished thought, output exactly [[NO_ACTION]] and nothing else. Never repeat or continue your previous answer because of such a turn. If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.\n\n${LIVE_BRAIN_EXPERIENCE_RULE}`;
+export const LIVE_BRAIN_WRITER_INSTRUCTION = `If the latest interviewer turn is only an acknowledgment or filler (mm-hmm, okay, right, nice, take your time), small talk, or an unfinished thought, output exactly [[NO_ACTION]] and nothing else. Never repeat or continue your previous answer because of such a turn. If a clarification is essential before answering, start the reply with Ask: and give only the clarification question. Otherwise answer directly.`;
 const LIVE_BRAIN_NO_ACTION_REASON = 'live_brain_no_action';
 const SPOKEN_TURN_MATCH_WINDOW_MS = 15_000;
 /** Longest a manual press waits on the automatic answer it joined before answering itself. */
@@ -503,10 +502,11 @@ export class IntelligenceEngine extends EventEmitter {
         signal: AbortSignal;
         isSuperseded: () => boolean;
         trace: PiLatencyTrace;
+        allowInterviewDetails?: boolean;
     }): Promise<string> {
         const cv = require('./llm/claimVerifier') as typeof import('./llm/claimVerifier');
         const kind = cv.claimVerifierKind({ modeId: opts.modeId, question: opts.question, draft: opts.answer, surface: 'spoken' });
-        if (!kind || !opts.modeId) return opts.answer;
+        if (!kind || !opts.modeId || (opts.allowInterviewDetails && kind === 'personal')) return opts.answer;
         // Only when documents are attached (F-LAT-04, owner's decision 2026-11-13).
         if (cv.materialHasNoDocuments(opts.material) && !cv.claimVerifierRunsWithoutDocuments()) {
             opts.trace.mark('claim_verifier_skipped' as any, { reason: 'no_documents' });
@@ -1740,10 +1740,8 @@ export class IntelligenceEngine extends EventEmitter {
                         ...(liveBrain?.reasoningEffort ? { reasoningEffort: liveBrain.reasoningEffort } : {}),
                         ...(liveBrain?.onComplete
                             ? { promptInstruction: LIVE_BRAIN_WRITER_INSTRUCTION }
-                            : trigger.liveBrainNotebook !== undefined
-                                ? { promptInstruction: LIVE_BRAIN_EXPERIENCE_RULE }
-                                : {}),
-                        ...(trigger.liveBrainNotebook ? { liveBrainNotebook: trigger.liveBrainNotebook } : {})
+                            : {}),
+                        ...(trigger.liveBrainNotebook !== undefined ? { liveBrainNotebook: trigger.liveBrainNotebook } : {})
                     } : {})
                 });
             if (this.currentGenerationId !== generationBefore) ownGeneration = this.currentGenerationId;
@@ -2128,7 +2126,7 @@ export class IntelligenceEngine extends EventEmitter {
             candidateGeneration: question.candidateGeneration,
             sourceSegments: question.sourceSegments,
             reuseSpeculative: options.reuseSpeculative,
-            ...(options.liveBrainNotebook ? { liveBrainNotebook: options.liveBrainNotebook } : {}),
+            ...(options.liveBrainNotebook !== undefined ? { liveBrainNotebook: options.liveBrainNotebook } : {}),
         }, options.speechStoppedAt);
     }
 
@@ -3243,6 +3241,14 @@ export class IntelligenceEngine extends EventEmitter {
             || (snapshotModeInfo?.documentGroundedCustomModeActive === true
                 && Boolean((snapshotModeInfo as any)?.hasReferenceFiles));
         const snapshotModeId = this.getActiveModeId();
+        const spokenInterview = Boolean(snapshotModeId === 'technical-interview' || options?.liveBrain
+            || options?.privateDraft || options?.liveBrainNotebook !== undefined);
+        const allowInterviewDetails = spokenInterview && !documentGroundedCustomModeActive && (() => {
+            try {
+                const { getStoredAnswerPolicy } = require('./context-intelligence/policies/answer-policy-store') as typeof import('./context-intelligence/policies/answer-policy-store');
+                return getStoredAnswerPolicy(snapshotModeInfo?.id ?? snapshotModeId) !== 'only_answer_from_references';
+            } catch { return true; }
+        })();
         // The narrow ActiveModeInfo snapshot is enough for planning, but a
         // multi-family typed reference pack also needs the full mode row and its
         // reference files. Capture both at the same t0 boundary: a later mode
@@ -4596,7 +4602,8 @@ export class IntelligenceEngine extends EventEmitter {
                                 // F-ACC-12: a failed plan does not seed (was `?? true`).
                                 seedCandidateBackground: (_c3TurnPlan?.answerDirectives?.seedCandidateBackground ?? false),
                                 // Technical Interview gap filling (recovered 3.1.0 build).
-                                interviewSynthesis: snapshotModeInfo?.id === 'technical-interview' && wtaDecisionAllowsCandidateProfile,
+                                interviewSynthesis: allowInterviewDetails && wtaDecisionAllowsCandidateProfile,
+                                spokenInterview: allowInterviewDetails && wtaDecisionAllowsCandidateProfile,
                             });
                             candidateProfile = `<profile_jit_evidence_request>\n${jit.userPrompt}\n</profile_jit_evidence_request>`;
                             trace.mark('repair_used', { reason: 'identity_jit_evidence_grounding', evidenceItems: evidence.items.length, promptChars: jit.promptChars });
@@ -5658,13 +5665,9 @@ export class IntelligenceEngine extends EventEmitter {
                                 // solution". The shape alone is not enough:
                                 // `solve` is also the default for a real question
                                 // that matched no narrower shape (#742).
-                                const isLiveBrainRun = Boolean(options?.liveBrain || options?.privateDraft || options?.liveBrainNotebook !== undefined);
-                                const withLiveExperience = _base && isLiveBrainRun
-                                    ? `${_base}\n\n<live_experience_rule>\n${LIVE_BRAIN_EXPERIENCE_RULE}\n</live_experience_rule>`
-                                    : _base;
-                                if (!_promoted || !withLiveExperience
-                                    || !(require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals')).isRepeatPressAsk(answerPlan.question, _codingShape)) return withLiveExperience;
-                                return `${withLiveExperience}\n\n<repeat_press_directive>\nThe user triggered this action with a coding problem on screen and NO new question. That is a request for the COMPLETE solution to the on-screen problem, in the shape the coding contract asks for, even if a previous answer in this conversation already covered it, and even if this looks like a follow-up. Never respond with commentary on, agreement with, or a summary of an earlier answer. Produce the answer as if asked for the first time.\n</repeat_press_directive>`;
+                                if (!_promoted || !_base
+                                    || !(require('./llm/codingPromptSignals') as typeof import('./llm/codingPromptSignals')).isRepeatPressAsk(answerPlan.question, _codingShape)) return _base;
+                                return `${_base}\n\n<repeat_press_directive>\nThe user triggered this action with a coding problem on screen and NO new question. That is a request for the COMPLETE solution to the on-screen problem, in the shape the coding contract asks for, even if a previous answer in this conversation already covered it, and even if this looks like a follow-up. Never respond with commentary on, agreement with, or a summary of an earlier answer. Produce the answer as if asked for the first time.\n</repeat_press_directive>`;
                             } catch { return null; } // no persona ⇒ composition unchanged
                         },
                     });
@@ -5694,6 +5697,7 @@ export class IntelligenceEngine extends EventEmitter {
             })();
 
             const requestSnapshot: WhatToAnswerRequestSnapshot = Object.freeze({
+                ...(spokenInterview ? { spokenInterview: { allowBackgroundDetails: allowInterviewDetails } } : {}),
                 activeModeInfo: snapshotModeInfo,
                 modeId: snapshotModeId,
                 modeUniqueId: snapshotModeInfo?.id,
@@ -7380,6 +7384,7 @@ export class IntelligenceEngine extends EventEmitter {
                         evidence: candidateProfile,
                         profileAvailable: true,
                         candidateDirected: true,
+                        allowInterviewDetails,
                     });
                     // WTA candidate-voice contract: identity leak, false refusal,
                     // wrong-person voice, AND (for profile-REQUIRED answers) a
@@ -7488,7 +7493,7 @@ export class IntelligenceEngine extends EventEmitter {
                             const reCheck = validateProfileEvidence({
                                 answer: repairedTrim, plan: answerPlan,
                                 evidence: candidateProfile,
-                                profileAvailable: true, candidateDirected: true,
+                                profileAvailable: true, candidateDirected: true, allowInterviewDetails,
                             });
                             // Accept the repair only if NO critical violation remains
                             // — not just the original one (a regen that fixes the
@@ -7694,6 +7699,7 @@ export class IntelligenceEngine extends EventEmitter {
                     fullAnswer = await this.verifyAnswerClaims({
                         answer: fullAnswer,
                         modeId: requestSnapshot.modeId ?? null,
+                        allowInterviewDetails,
                         question: question || extractedQuestion.latestQuestion || lastInterviewerTurn || '',
                         material: requestSnapshot.v3Prompt.user ?? '',
                         turnKey: whatToAnswerCancellationToken.signal,

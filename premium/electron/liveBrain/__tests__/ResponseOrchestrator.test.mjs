@@ -31,6 +31,7 @@ async function rig() {
         overlay: {
             showAsk: payload => calls.push(['ask', payload]),
             setOutdated: (...args) => calls.push(['outdated', ...args]),
+            replaceAnswer: (...args) => calls.push(['replace', ...args]),
             setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
             showText: payload => calls.push(['text', payload]),
         },
@@ -49,7 +50,7 @@ async function rig() {
     return { brain, clock, calls, completions, orchestrator, decision };
 }
 
-test('an answer decision writes once; a second decision cancels the streaming draft and folds after replacement first text', async () => {
+test('an answer decision writes once; a second decision cancels the streaming draft and rebinds on replacement first text', async () => {
     const brain = new FakeLiveBrain();
     const clock = new FakeClock();
     const calls = [];
@@ -70,6 +71,7 @@ test('an answer decision writes once; a second decision cancels the streaming dr
         overlay: {
             showAsk: payload => calls.push(['ask', payload]),
             setOutdated: (...args) => calls.push(['outdated', ...args]),
+            replaceAnswer: (...args) => calls.push(['replace', ...args]),
             setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
             showText: payload => calls.push(['text', payload]),
         },
@@ -92,7 +94,8 @@ test('an answer decision writes once; a second decision cancels the streaming dr
         ['write', { question: 'Use MongoDB for the catalog.', replacesAutomaticAnswer: true }],
     ]);
     firstTextCallbacks[1]?.(clock.now());
-    assert.deepEqual(calls.at(-1), ['outdated', 1, true]);
+    assert.equal(calls.at(-1)[0], 'replace');
+    assert.equal(calls.at(-1)[2].previousGenerationId, 1);
     completions[0].resolve('cancelled');
     await flush();
     brain.emit({ type: 'interviewer_speech_started', at: clock.now() });
@@ -113,11 +116,11 @@ for (const elapsed of [1_000, 10_000, 25_000]) {
     });
 }
 
-test('ask folds an in-flight streaming answer and writes the asked question with an assumption after ten seconds', async () => {
+test('ask keeps an answer without visible text and writes the asked question with an assumption after ten seconds', async () => {
     const h = await rig();
     h.decision('answer', { question });
     h.decision('ask', { question, clarification });
-    assert.deepEqual(h.calls.slice(1), [['outdated', 1, true], ['ask', { askId: 'd2', clarification }]]);
+    assert.deepEqual(h.calls.slice(1), [['ask', { askId: 'd2', clarification }]]);
     h.clock.advance(9999);
     assert.equal(h.completions.length, 1);
     h.clock.advance(1);
@@ -180,7 +183,6 @@ test('a split bracket ASK updates the same clarification row without leaking it 
     emit({ type: 'response_done', status: 'completed' });
     h.clock.advance(20_000);
     assert.deepEqual(h.calls.slice(1), [
-        ['outdated', 1, true],
         ['ask', { askId: 'r1', clarification: 'How many ', askStreaming: true }],
         ['ask', { askId: 'r1', clarification, askStreaming: true }],
         ['ask', { askId: 'r1', clarification, askStreaming: false }],
@@ -194,8 +196,9 @@ test('text uses the same replacement state and ignores older, cancelled and dupl
     const done = (responseId, status = 'completed') => h.brain.emit({ type: 'response_done', responseId, status });
     start('r1');
     delta('r1', 'Old answer');
-    // D14: the interviewer cuts r1 off mid-stream, so its replacement marks it outdated.
+    // D21 rebinds the existing display slot and keeps a fresh generation.
     h.brain.emit({ type: 'interviewer_speech_started', at: h.clock.now() });
+    h.brain.emit({ type: 'interviewer_transcript', text: 'Use a queue.', final: true, at: h.clock.now() });
     start('r2');
     delta('r1', 'late');
     start('r1'); // A duplicate start cannot revive a closed response.
@@ -205,7 +208,7 @@ test('text uses the same replacement state and ignores older, cancelled and dupl
     delta('r2', 'late');
     done('r2');
     assert.deepEqual(h.calls.filter(([event]) => event !== 'speaking').map(([event, payload]) => [event, typeof payload === 'object' ? payload.text : payload]), [
-        ['text', 'Old answer'], ['text', 'Old answer'], ['outdated', h.calls[0][1].generationId],
+        ['text', 'Old answer'], ['text', 'Old answer'], ['replace', h.calls.find(([event]) => event === 'replace')[1]],
         ['text', 'New '], ['text', 'New answer'], ['text', 'New answer'],
     ]);
     assert.equal(h.calls.at(-1)[1].done, true);
@@ -325,6 +328,7 @@ test('D14: the STT final fills a bubble only when the provider sent no transcrip
     assert.equal(new Set(h.shown.map(payload => payload.questionId)).size, 1);
 
     // With a provider bubble, the STT final for the same turn is ignored.
+    h.send({ type: 'response_done', responseId: 'r1', status: 'completed' });
     h.send({ type: 'interviewer_speech_started' });
     h.send({ type: 'interviewer_transcript', text: 'What about writes?', final: false });
     h.orchestrator.noteSttTranscript('What about rights?', h.clock.now());
@@ -348,6 +352,7 @@ test('D14: a new question after a finished answer keeps that answer visible (not
         clock: h.clock,
         overlay: {
             showAsk: () => { }, setInterviewerSpeaking: () => { }, showQuestion: () => { },
+            replaceAnswer: (generationId, replacement) => h.order.push(['replace', generationId, replacement.previousGenerationId]),
             setOutdated: (...args) => outdated.push(args),
             showText: payload => h.order.push(['answer', payload.generationId, payload.updated]),
         },
@@ -364,13 +369,14 @@ test('D14: a new question after a finished answer keeps that answer visible (not
     assert.equal(h.order.at(-1)[2], false);
 });
 
-test('D14: an answer cut off while its text was streaming is marked outdated by its replacement', () => {
+test('D21: a realtime cancellation before speech still reuses the answer slot', () => {
     const h = chatRig();
     const outdated = [];
     const orchestrator = new ResponseOrchestrator({
         clock: h.clock,
         overlay: {
             showAsk: () => { }, setInterviewerSpeaking: () => { }, showQuestion: () => { },
+            replaceAnswer: (generationId, replacement) => h.order.push(['replace', generationId, replacement.previousGenerationId]),
             setOutdated: (...args) => outdated.push(args),
             showText: payload => h.order.push(['answer', payload.generationId, payload.updated]),
         },
@@ -381,9 +387,11 @@ test('D14: an answer cut off while its text was streaming is marked outdated by 
     h.clock.advance(300);
     send({ type: 'response_done', responseId: 'r1', status: 'cancelled' }); // Gemini barge-in order
     send({ type: 'interviewer_speech_started' });
+    send({ type: 'interviewer_transcript', text: 'Use MongoDB.', final: true });
     send({ type: 'response_started', responseId: 'r2' });
     send({ type: 'response_delta', responseId: 'r2', text: 'Use MongoDB.' });
-    assert.equal(outdated.length, 1);
+    assert.equal(outdated.length, 0);
+    assert.equal(h.order.find(([kind]) => kind === 'replace')[2], h.order[0][1]);
     assert.equal(h.order.at(-1)[2], true);
 });
 
@@ -528,6 +536,7 @@ test('Phase 2: ResponseOrchestrator skips empty/filler eager turns, allows Yes o
         overlay: {
             showAsk: payload => calls.push(['ask', payload]),
             setOutdated: (...args) => calls.push(['outdated', ...args]),
+            replaceAnswer: (...args) => calls.push(['replace', ...args]),
             setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
             showQuestion: payload => calls.push(['question', payload]),
             showText: payload => calls.push(['text', payload]),
@@ -625,7 +634,7 @@ test('Phase 3: initial M partial growing into a real question shows normally, wh
     assert.equal(completions.length, 1);
 });
 
-test('Phase 3: replacement failure before showing text restores outdated flag; repeated corrections preserve original until text arrives', async () => {
+test('Phase 3: replacement failure before first text keeps the original answer slot', async () => {
     const brain = new FakeLiveBrain();
     const clock = new FakeClock();
     const calls = [];
@@ -646,6 +655,7 @@ test('Phase 3: replacement failure before showing text restores outdated flag; r
         overlay: {
             showAsk: payload => calls.push(['ask', payload]),
             setOutdated: (...args) => calls.push(['outdated', ...args]),
+            replaceAnswer: (...args) => calls.push(['replace', ...args]),
             setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
             showText: payload => calls.push(['text', payload]),
         },
@@ -678,9 +688,8 @@ test('Phase 3: replacement failure before showing text restores outdated flag; r
     firstTextCallbacks[4]?.(55);
     completions[4].resolve('failed');
     await flush();
-    assert.deepEqual(calls.filter(([k]) => k === 'outdated'), [
-        ['outdated', 4, true],
-    ]);
+    assert.deepEqual(calls.filter(([k]) => k === 'outdated'), []);
+    assert.equal(calls.find(([kind]) => kind === 'replace')[2].previousGenerationId, 4);
 });
 
 test('Phase 4: clarification expiry, unrelated question consumption, reconnect reset, and stale-context draft discard', async () => {
@@ -707,6 +716,7 @@ test('Phase 4: clarification expiry, unrelated question consumption, reconnect r
         overlay: {
             showAsk: payload => calls.push(['ask', payload]),
             setOutdated: (...args) => calls.push(['outdated', ...args]),
+            replaceAnswer: (...args) => calls.push(['replace', ...args]),
             setInterviewerSpeaking: (...args) => calls.push(['speaking', ...args]),
             showQuestion: () => {},
             showText: () => {},
@@ -873,7 +883,7 @@ test('U7-3: manual/rollover cancel is not marked outdated, cancelled is not reco
     assert.equal(texts.at(-1).done, true);
 });
 
-test('U7-4: Flux completed answer followed by a correction 10 s later marks previous answer outdated', async () => {
+test('U7-4: Flux completed answer followed by a correction keeps the finished row', async () => {
     const h = await rig();
     h.brain.emit({ type: 'interviewer_transcript', text: 'Design a cache.', final: true, at: h.clock.now() });
     h.decision('answer', { question: 'Design a cache.' });
@@ -907,6 +917,7 @@ function interruptRig() {
             showAsk: () => {}, showText: () => {}, showQuestion: () => {},
             setInterviewerSpeaking: () => {},
             setOutdated: (...args) => calls.push(['outdated', ...args]),
+            replaceAnswer: (...args) => calls.push(['replace', ...args]),
         },
     });
     const send = event => orchestrator.handleEvent({ at: clock.now(), ...event });
@@ -929,7 +940,8 @@ test('Flux barge-in: a real interviewer partial stops the streaming answer; fill
     assert.equal(h.runs.length, 2);
     assert.equal(h.runs[1].request.replacesAutomaticAnswer, true);
     h.runs[1].options.onFirstText(2);
-    assert.deepEqual(h.calls.filter(([k]) => k === 'outdated'), [['outdated', 1, true]]);
+    assert.deepEqual(h.calls.filter(([k]) => k === 'outdated'), []);
+    assert.equal(h.calls.find(([kind]) => kind === 'replace')[2].previousGenerationId, 1);
 });
 
 test('Flux: an answer replaced before its first word is not marked outdated', async () => {
@@ -1016,6 +1028,7 @@ function interruptionRig() {
         clock, requestClarificationAnswer: () => events.push(['assumption']),
         overlay: {
             showAsk: value => events.push(['ask', value]),
+            replaceAnswer: (...args) => events.push(['replace', ...args]),
             showQuestion: value => events.push(['question', value]),
             showText: value => events.push(['text', value]),
             discard: (...args) => events.push(['discard', ...args]),
@@ -1098,8 +1111,7 @@ test('Late filler restores the previous answer and retracts the duplicate', () =
     h.start('duplicate');
     h.delta('duplicate', 'A duplicate answer.');
     h.transcript('Mm-hmm.');
-    assert.deepEqual(h.events.filter(([kind]) => kind === 'outdated').map(([, , flag]) => flag), [true, false]);
-    assert.equal(h.events.filter(([kind]) => kind === 'discard').length, 1);
+    assert.equal(h.events.some(([kind]) => kind === 'replace' || kind === 'outdated' || kind === 'discard'), false);
     assert.deepEqual(h.done('duplicate'), { kind: 'suppressed' });
 });
 
@@ -1111,7 +1123,7 @@ test('Filler after the provisional window cannot enter notebook history', () => 
     h.clock.advance(2000);
     assert.deepEqual(h.done('duplicate'), { kind: 'suppressed' });
     h.transcript('Mm-hmm.');
-    assert.equal(h.events.filter(([kind]) => kind === 'discard').length, 1);
+    assert.equal(h.events.some(([kind]) => kind === 'replace' || kind === 'discard'), false);
 });
 
 test('Known filler clears the interviewer speaking marker for suppressed prose', () => {
@@ -1215,4 +1227,52 @@ test('Lease reset closes a keyed interviewer partial even if its answer never st
     assert.equal(h.events.findLast(([kind]) => kind === 'question')[1].done, false);
     h.orchestrator.resetTurnState();
     assert.equal(h.events.findLast(([kind]) => kind === 'question')[1].done, true);
+});
+
+test('D21 merges question identity and rebinds the answer while ignoring the cancelled stream', () => {
+    const h = interruptionRig();
+    h.send('interviewer_speech_started');
+    h.transcript('Design a store.');
+    h.start('old'); h.delta('old', 'A partial.');
+    const initialQuestion = h.events.find(([kind]) => kind === 'question')[1];
+    const initialGeneration = h.events.find(([kind]) => kind === 'text')[1].generationId;
+    h.clock.advance(100);
+    h.send('interviewer_speech_started');
+    h.done('old', 'cancelled', { cancelReason: 'interviewer_barge_in' });
+    h.transcript('Use MongoDB.');
+    h.start('next'); h.delta('next', 'Use indexes.');
+    h.delta('old', 'A stale token.');
+    h.done('old');
+    assert.deepEqual(h.done('next'), { kind: 'answer', text: 'Use indexes.' });
+    const replacement = h.events.find(([kind]) => kind === 'replace');
+    assert.equal(replacement[2].previousGenerationId, initialGeneration);
+    assert.notEqual(replacement[1], initialGeneration);
+    const questions = h.events.filter(([kind]) => kind === 'question').map(([, value]) => value);
+    assert.ok(questions.every(question => question.questionId === initialQuestion.questionId));
+    assert.equal(questions.at(-1).text, 'Design a store. Use MongoDB.');
+    assert.equal(h.events.some(([kind, event]) => kind === 'text' && event.text.includes('stale')), false);
+});
+
+test('D21 an interrupted streaming Ask shares its answer slot with the replacement', () => {
+    const h = interruptionRig();
+    h.transcript('Design a store.');
+    h.start('ask'); h.delta('ask', 'Ask: How many');
+    h.send('interviewer_speech_started');
+    h.done('ask', 'cancelled');
+    h.transcript('Use MongoDB.');
+    h.start('answer'); h.delta('answer', 'Use indexes.');
+    assert.equal(h.events.find(([kind]) => kind === 'replace')[2].previousAskId, 'ask');
+    assert.equal(h.events.findLast(([kind]) => kind === 'question')[1].text, 'Design a store. Use MongoDB.');
+});
+
+test('D21 a Sonic no-action final restores the earlier answer slot and question', () => {
+    const h = interruptionRig();
+    interruptWithBackchannel(h);
+    h.transcript('Please pause here.');
+    h.start('sonic');
+    h.delta('sonic', 'A preview that will be removed.');
+    assert.equal(h.events.filter(([kind]) => kind === 'replace').length, 1);
+    assert.deepEqual(h.done('sonic', 'completed', { finalText: 'No action.' }), { kind: 'suppressed' });
+    assert.equal(h.events.filter(([kind]) => kind === 'replace').at(-1)[2].restore, true);
+    assert.equal(h.events.findLast(([kind]) => kind === 'question')[1].text, 'First question?');
 });

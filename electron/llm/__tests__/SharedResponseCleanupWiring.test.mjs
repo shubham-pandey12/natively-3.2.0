@@ -193,6 +193,7 @@ describe('Live Brain ResponseOrchestrator — final-text cleanup integration', (
     assert.equal(cleanupCalls, 1);
     assert.equal(h.shownTexts.at(-1).text, 'The service is reliable and scalable ');
 
+    h.orchestrator.handleEvent({ type: 'interviewer_transcript', text: 'How does the pipeline work?', final: true, at: 1150 });
     h.orchestrator.handleEvent({ type: 'response_started', responseId: 'r2', at: 1200 });
     h.orchestrator.handleEvent({ type: 'response_delta', responseId: 'r2', text: 'The pipeline turns raw data into actionable intelligence.' });
     h.orchestrator.handleEvent({ type: 'response_done', responseId: 'r1', status: 'completed' });

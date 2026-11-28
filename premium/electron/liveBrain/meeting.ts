@@ -156,6 +156,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 presented = true;
                 const clarification = /^Ask:\s*(\S[\s\S]*)$/i.exec(text.trim());
                 if (!disposition?.stopReason && !disposition?.storageVeto) {
+                    orchestrator.commitMergedQuestion();
                     supervisor.recordAssistantTurn(clarification?.[1] ?? text, Boolean(clarification));
                     if (clarification) orchestrator.noteWriterClarification(request.question, clarification[1]);
                     else orchestrator.noteWriterAnswer(text);
@@ -246,7 +247,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         }),
         requestClarificationAnswer: () => supervisor.current?.requestClarificationAnswer?.(),
         recordSttQuestion: (text, at) => supervisor.recordInterviewerTurn(text, at),
-        recordDeferredAnswer: text => supervisor.recordAssistantTurn(text),
+        recordDeferredAnswer: (text, isClarification) => supervisor.recordAssistantTurn(text, isClarification),
+        recordMergedQuestion: (previous, next, at) => supervisor.mergeInterviewerTurn(previous, next, at),
     });
     const finishTiming = (status: 'completed' | 'cancelled' | 'failed') => {
         if (!timing) return;
@@ -259,7 +261,12 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         groundingKey: () => options.readGroundingState?.().groundingKey,
         create(id) {
             if (id === 'pipeline') {
-                return options.pipeline ? { brain: new PipelineBrain(options.pipeline.cancel), model: 'pipeline' } : undefined;
+                return options.pipeline ? {
+                    brain: new PipelineBrain(options.pipeline.cancel, (generationId, previousGenerationId, previous, next) => {
+                        supervisor.mergeInterviewerTurn(previous, next, clock.now());
+                        options.emitQuestion({ generationId, liveBrainReplacement: { previousGenerationId, pipelineQuestion: next, writer: true } });
+                    }), model: 'pipeline',
+                } : undefined;
             }
             const config = options.resolveProvider?.(id) ?? (id === preferred ? options : undefined);
             const model = (config?.model?.trim() || DEFAULT_MODELS[id]).replace(/^models\//, '');
@@ -409,7 +416,8 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
                 if (!backup && event.status === 'completed') showStatus(presented ? 'Answer ready' : 'Listening');
                 if (event.responseId === timing?.responseId) finishTiming(event.status);
             }
-            return disposition;
+            return id === 'pipeline' && event.type === 'response_done' && event.status !== 'completed'
+                ? { kind: 'suppressed' } : disposition;
         },
     });
 
@@ -469,6 +477,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
         },
         isPipeline() { return supervisor.current?.id === 'pipeline'; },
         pipelineContext() { return supervisor.pipelineContext; },
+        isUsingPipeline() { return supervisor.current?.id === 'pipeline'; },
         observePipelineTranscript(text, final, at) {
             const brain = supervisor.current;
             if (brain instanceof PipelineBrain) {
@@ -506,6 +515,7 @@ export function createMeeting(options: LiveBrainMeetingOptions, injectedBrain?: 
             return false;
         },
         observePipelineOutput(output) {
+            if (output.type === 'token' && output.text?.trim()) orchestrator.noteWriterProgress(output.generationId);
             const brain = supervisor.current;
             if (brain instanceof PipelineBrain) brain.observe(output);
         },

@@ -3961,7 +3961,9 @@ export class AppState {
     // withdrawn mid-meeting stops the next answer, not just the next toggle.
     isEnabled: () => this.isAutoAnswerActive(),
     correctionsEnabled: () => this.getLiveBrainEnabled(),
-    setAnswerOutdated: (generationId, outdated) => this.intelligenceManager.setAutomaticAnswerOutdated(generationId, outdated),
+    setAnswerOutdated: (generationId, outdated) => {
+      if (!this.liveBrainRouting.activeSession?.isUsingPipeline?.()) this.intelligenceManager.setAutomaticAnswerOutdated(generationId, outdated);
+    },
     isMeetingActive: () => this.isMeetingActive,
     meetingGeneration: () => this._meetingGeneration,
     engineAccepting: (skipCooldown) => this.intelligenceManager.canAutoAnswer(skipCooldown),
@@ -3983,7 +3985,7 @@ export class AppState {
       const speechStoppedAt = stop && stop.meetingGeneration === this._meetingGeneration
         && stop.capture === this.systemAudioCapture ? stop.at : undefined;
       const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
-      return this.intelligenceManager.runAutoAnswer(question, notebook
+      return this.intelligenceManager.runAutoAnswer(question, this.liveBrainRouting.activeSession?.isUsingPipeline?.()
         ? { reuseSpeculative: false, speechStoppedAt, liveBrainNotebook: notebook }
         : { reuseSpeculative, speechStoppedAt }).catch((error) => {
         console.warn('[Main] Automatic interviewer answer failed:', error);
@@ -9100,17 +9102,17 @@ export class AppState {
       flushBatchesBeforeFinal();
       this.autoAnswerUsage.answerShown();
       const win = answerWindow()
+      if (typeof generationId === 'number' && this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
+        this.liveBrainRouting.activeSession?.observePipelineOutput?.({
+          type: outcome?.delivered === false ? 'failed' : 'answer', generationId, text: answer, question,
+        });
+      }
       // emittedAt (2026-07-31): WTA supersession is generation-relative only —
       // a slow generation stays "current" through any number of manual turns
       // and mode switches, so a minutes-old answer appeared with no marker of
       // what it answered (the live "late CGPA answer" report). The renderer
       // uses this stamp to drop or visibly label stale finals.
       this.sendToWindow(win, 'intelligence-suggested-answer', { answer, question, confidence, generationId, sourceLabel: sourceLabel ?? 'General knowledge', emittedAt: Date.now(), ...(stopReason ? { stopReason } : {}) })
-      if (typeof generationId === 'number' && this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
-        this.liveBrainRouting.activeSession?.observePipelineOutput?.({
-          type: outcome?.delivered === false ? 'failed' : 'answer', generationId, text: answer,
-        });
-      }
       if (this.getLiveBrainEnabled() && outcome?.delivered && answer.trim() && this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
         this.simpleAutoAnswer.onAutomaticAnswerProgress(generationId);
       }
@@ -9124,7 +9126,7 @@ export class AppState {
       queueBatch('suggested_answer', { token, question, confidence, generationId });
       this.autoAnswerUsage.answerShown();
       if (this.intelligenceManager.isAutomaticAnswerGeneration(generationId)) {
-        if (typeof generationId === 'number') this.liveBrainRouting.activeSession?.observePipelineOutput?.({ type: 'token', generationId, text: token });
+        if (typeof generationId === 'number') this.liveBrainRouting.activeSession?.observePipelineOutput?.({ type: 'token', generationId, text: token, question });
         this.simpleAutoAnswer.onAutomaticAnswerProgress(token.trim() ? generationId : undefined);
       }
     })
@@ -9138,7 +9140,7 @@ export class AppState {
     // The generation id rides along so the overlay ignores a late discard from
     // a replaced run instead of clearing the newer answer (F-CTX-09, 2026-11-13).
     this.intelligenceManager.on('suggested_answer_discard', (reason: string, generationId?: number) => {
-      if (typeof generationId === 'number') this.liveBrainRouting.activeSession?.observePipelineOutput?.({ type: 'discard', generationId });
+      if (typeof generationId === 'number') this.liveBrainRouting.activeSession?.observePipelineOutput?.({ type: 'discard', generationId, cancelReason: reason });
       this.autoAnswerUsage.stopAwaitingAnswer();
       flushBatchesBeforeFinal();
       const win = answerWindow()
@@ -10900,7 +10902,7 @@ export class AppState {
       const notebook = this.liveBrainRouting.activeSession?.pipelineContext?.();
       void this.intelligenceManager.runAutoAnswer(candidate, {
         reuseSpeculative: false,
-        ...(notebook ? { liveBrainNotebook: notebook } : {}),
+        liveBrainNotebook: notebook ?? '',
       }).catch((error) => console.warn('[Main] Pipeline fallback answer failed:', error));
       return 'accepted';
     };

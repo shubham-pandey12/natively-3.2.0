@@ -48,6 +48,7 @@ import type { ActiveModeInfo } from './modeProfiles';
  * current live reads (backward compatible).
  */
 export interface WhatToAnswerRequestSnapshot {
+  readonly spokenInterview?: { allowBackgroundDetails: boolean };
   /** The system-design diagram decision for this turn (diagramPromptSignals.ts),
    *  resolved once by the engine and frozen here so the non-V3 prompt assembly
    *  in WhatToAnswerLLM carries the SAME contract and the same design-on-the-

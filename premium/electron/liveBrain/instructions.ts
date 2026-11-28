@@ -1,3 +1,4 @@
+import { SPOKEN_INTERVIEW_STYLE, SPOKEN_INTERVIEW_BACKGROUND, withSpokenInterviewRules } from '../../../electron/llm/answerStyle';
 import {
     CONTEXT_INTELLIGENCE_LAYER,
     CORE_IDENTITY,
@@ -46,10 +47,6 @@ const ELEVENLABS_TURN_OUTPUT = 'MANDATORY TURN OUTPUT: Never greet, acknowledge,
 export const FILLER_TURN_RULE = 'MANDATORY FILLER RULE: If the entire interviewer turn is only an acknowledgment or filler (for example: mm-hmm, uh-huh, okay, right, yeah, sure, got it, thank you), is small talk, or is an unfinished question, output exactly No action. and nothing else. After an interruption, never repeat, continue, or rephrase your previous answer because of a filler turn. If you previously asked a clarification (Ask:) and the interviewer replies briefly (e.g. \'yes\', \'the second one\', \'Postgres\'), that reply is NOT filler — answer the original question using it.';
 
 export const DEEPGRAM_MAX_MANAGED_PROMPT_CHARS = 25_000;
-// D20 amendment (2026-11-28, user decision): Live Brain (including Pipeline and
-// Deepgram Flux) fills missing details believably instead of declining.
-export const LIVE_EXPERIENCE_RULE = "Background rule: when the interviewer asks about something not in your background (a number, a project detail, a situation, or a skill from the job description), don't say you lack it. Build a believable answer from your real skills, tech stack and experience, with realistic numbers, situations and steps that fit your background and level. Keep every detail consistent with what you said earlier in this interview, and simple enough to explain in a follow-up.";
-const PROFILE_EXPERIENCE_RULE = "Job-description requirements describe the target role, not the candidate. Only claim experience supported by the candidate's résumé or profile. If asked about a JD skill absent from the résumé, say so honestly and relate the closest real experience.";
 
 const CONTEXT_TRUNCATED = '\n\n[context truncated]';
 
@@ -58,7 +55,7 @@ export function buildDeepgramInstructions(ctx: AnswerContext): string {
         .map(block => block.trim())
         .filter(Boolean)
         .join('\n\n');
-    const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${turnProtocol('spoken', ctx)}\n\n${FILLER_TURN_RULE}`;
+    const core = `${LIVE_PREAMBLE}\n\n${base}\n\n${turnProtocol('spoken')}\n\n${FILLER_TURN_RULE}`;
     const blocks = [
         ctx.modePrompt?.trim(),
         contextBlocks({ modeName: ctx.modeName }).trim(),
@@ -108,37 +105,7 @@ export function buildProviderInstructions(
     });
 }
 
-const LIVE_CANDIDATE_STYLE = `You are the candidate in a live job interview. You hear the interviewer. Text lines beginning 'Candidate said:' are things you already said. Say exactly what you would say out loud next, as yourself, in first person.
-
-How you speak: simple Indian English, like an Indian software engineer talking normally in an interview. English is not your first language, so use common everyday words. No idioms, no American slang, no fancy, dramatic or corporate words.
-
-Where your answers come from:
-- Every story, project, number and detail must come from your own background given below (résumé, profile, projects, job description, notes) and from what you already said in this interview.
-- If a detail is missing, fill it in as the background rule below says, so it fits your real background.
-- Never use a generic or textbook story that is not tied to your own work.
-
-How to shape an answer:
-- Talk like a real person, not a list. Start with one natural line that sets the scene in your own words: which project or situation this is about. Then say what happened, what you did, and how it ended.
-- End with the result or what you learned, in one short natural line. No formal summary or recap.
-- Answer the question directly. No greeting, no praise for the question, never repeat the question.
-- Never announce your thinking (do not say you are thinking out loud or need to think).
-- Vary how you begin and end. Never start or end several answers in a row with the same words or the same pattern.
-- For incidents and bugs, always say the exact fix you made. Never end vaguely, like saying it was fixed quickly or things became fine.
-- Add one small specific detail from your background when it helps, such as how many users, how long it took, or which service.
-- For "what would you check" scenarios, talk through your real steps in order, the way you would actually debug it, without sounding like a checklist.
-
-Length, so answers are not all the same size:
-- quick yes/no, a definition, or a small follow-up: 2–3 sentences
-- a story about a past situation, a production incident, or a bug: 5–7 sentences
-- architecture, "walk me through", or when they ask for a longer or detailed answer: 6–9 sentences
-Keep each sentence short and simple, one idea per sentence.
-
-Turn situations:
-- If the interviewer asks the same question again, answer it fresh from the beginning. Never continue from the middle of an earlier answer.
-- If the interviewer asks several questions in one turn, answer the first one fully, then say in one short line that you will take the next one.
-- After you are interrupted, answer the newest question, not the old one.
-
-No headings, bullets, or markdown in what you say.`;
+const LIVE_CANDIDATE_ROLE = `You are the candidate in a live job interview. You hear the interviewer. Text lines beginning 'Candidate said:' are things you already said. Say exactly what you would say out loud next, as yourself, in first person.`;
 const LIVE_CANDIDATE_CLOSING = '\n\nRemember: you are talking, not writing. Simple Indian English, natural and real. Sound like yourself.';
 
 export function buildLiveCandidateInstructions(
@@ -147,7 +114,7 @@ export function buildLiveCandidateInstructions(
     options: { elevenLabs?: boolean; managedDeepgram?: boolean } = {},
 ): string {
     const core = [
-        LIVE_CANDIDATE_STYLE, turnProtocol(output, ctx, LIVE_EXPERIENCE_RULE), FILLER_TURN_RULE,
+        LIVE_CANDIDATE_ROLE, SPOKEN_INTERVIEW_STYLE, SPOKEN_INTERVIEW_BACKGROUND, turnProtocol(output), FILLER_TURN_RULE,
         options.elevenLabs ? ELEVENLABS_TURN_OUTPUT : '',
     ].filter(Boolean).join('\n\n');
     const skills = ctx.standingSkills?.trim();
@@ -203,10 +170,10 @@ export function buildAnswerInstructions(ctx: AnswerContext, variant: 'full' | 't
         : [CORE_IDENTITY, EXECUTION_CONTRACT, CONTEXT_INTELLIGENCE_LAYER, HUMAN_SPOKEN_ANSWER_CONTRACT];
 
     const modeContext = ctx.modeContext?.trim();
-    return `${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${turnProtocol(output, ctx, LIVE_EXPERIENCE_RULE)}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`;
+    return withSpokenInterviewRules(`${LIVE_PREAMBLE}\n\n${base.map(block => block.trim()).filter(Boolean).join('\n\n')}\n\n${turnProtocol(output)}${contextBlocks(ctx, ctx.profileContext)}${modeContext ? `\n\n${modeContext}` : ''}`);
 }
 
-function turnProtocol(output: 'text' | 'spoken', ctx: AnswerContext, liveExperienceRule?: string): string {
+function turnProtocol(output: 'text' | 'spoken'): string {
     const format = output === 'spoken'
         ? `Speak only what the candidate should say next, without reading formatting aloud.
 For a clarification, start with "Ask:" and say only the clarification question.
@@ -217,5 +184,5 @@ Otherwise, write the answer directly without a sentinel.`;
     return `${format}
 ${CLARIFICATION_RULE} If the interviewer moves on without clarifying, answer with a stated assumption.
 ${CORRECTION_RULE}
-If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.${liveExperienceRule ? `\n\n${liveExperienceRule}` : ctx.profileContext?.trim() ? `\n\n${PROFILE_EXPERIENCE_RULE}` : ''}`;
+If an earlier instruction conflicts with this live turn protocol, follow the live turn protocol.`;
 }

@@ -131,8 +131,9 @@ export interface LiveBrainMeetingSession {
     refreshContext?(change?: 'skills'): void;
     isPipeline?(): boolean;
     pipelineContext?(): string;
+    isUsingPipeline?(): boolean;
     observePipelineTranscript?(text: string, final: boolean, at: number): boolean | void;
-    observePipelineOutput?(output: { generationId: number; type: 'token' | 'answer' | 'discard' | 'failed'; text?: string }): void;
+    observePipelineOutput?(output: { generationId: number; type: 'token' | 'answer' | 'discard' | 'failed'; text?: string; question?: string; cancelReason?: string }): void;
     cancelAnswer(reason: 'manual_answer'): void;
 }
 

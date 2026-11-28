@@ -439,3 +439,51 @@ test('Provider progress keeps slow turns alive while real silence still triggers
     assert.equal(h.supervisor.current?.id, 'pipeline');
     h.supervisor.stop();
 });
+
+test('D21 notebook keeps the merged question and one final answer', async () => {
+    const clock = new FakeClock();
+    const notebook = new InterviewNotebook({ now: () => clock.now() });
+    const brain = new FakeLiveBrain('gemini-live');
+    const orchestrator = new ResponseOrchestrator({
+        clock,
+        recordMergedQuestion: (previous, next, at) => notebook.mergeInterviewerTurn(previous, next, at),
+        overlay: { showText() {}, showAsk() {}, setOutdated() {}, setInterviewerSpeaking() {} },
+    });
+    const supervisor = new BrainSupervisor({
+        sessionId: 'test', preferred: 'gemini-live', clock, notebook, instructions: () => '',
+        create: () => ({ brain, model: 'test' }),
+        onEvent: event => orchestrator.handleEvent(event),
+    });
+    supervisor.start();
+    await flush();
+    const emit = (type, fields = {}) => brain.emit({ type, at: clock.now(), ...fields });
+    emit('interviewer_speech_started');
+    emit('interviewer_transcript', { text: 'Design a store.', final: true });
+    emit('response_started', { responseId: 'old' });
+    emit('response_delta', { responseId: 'old', text: 'Discard this partial.' });
+    clock.advance(100);
+    emit('interviewer_speech_started');
+    emit('response_done', { responseId: 'old', status: 'cancelled', cancelReason: 'interviewer_barge_in' });
+    emit('interviewer_transcript', { text: 'Use MongoDB.', final: true });
+    emit('response_started', { responseId: 'new' });
+    emit('response_delta', { responseId: 'new', text: 'Use indexes.' });
+    emit('response_done', { responseId: 'new', status: 'completed' });
+    assert.deepEqual(notebook.recentTurns().map(({ role, text }) => [role, text]), [
+        ['interviewer', 'Design a store. Use MongoDB.'], ['assistant', 'Use indexes.'],
+    ]);
+    supervisor.stop();
+});
+
+test('D21 pipeline reuses a slot only after a streaming correction', async () => {
+    const replacements = [];
+    const brain = new PipelineBrain(() => {}, (...args) => replacements.push(args));
+    await brain.start({ signal: new AbortController().signal });
+    brain.observe({ generationId: 1, type: 'token', text: 'A partial.', question: 'Design a store.' });
+    brain.interviewerTranscript('Use MongoDB.', true, Date.now());
+    brain.observe({ generationId: 1, type: 'discard', cancelReason: 'answer_corrected' });
+    brain.observe({ generationId: 2, type: 'answer', text: 'Use indexes.', question: 'Design a store. Use MongoDB.' });
+    brain.interviewerTranscript('Add a queue.', true, Date.now());
+    brain.observe({ generationId: 3, type: 'answer', text: 'Use a queue.', question: 'Add a queue.' });
+    assert.deepEqual(replacements, [[2, 1, 'Design a store.', 'Use MongoDB.']]);
+    await brain.stop();
+});

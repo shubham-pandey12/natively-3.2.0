@@ -93,10 +93,12 @@ test('incremental Gemini answers replace a cancelled answer and drop late chunks
     brain.emit({ type: 'interviewer_speech_started', at: Date.now() });
     assert.deepEqual(questions.at(-1), { generationId: oldGeneration, interviewerSpeaking: true });
 
+    brain.emit({ type: 'interviewer_transcript', text: 'Use MongoDB.', final: true, at: Date.now() });
     start('replacement');
     delta('first', 'late old output');
     delta('replacement', 'Use MongoDB.');
-    assert.deepEqual(outdated, [[oldGeneration, true]]);
+    assert.deepEqual(outdated, []);
+    assert.equal(questions.find(event => event.liveBrainReplacement).liveBrainReplacement.previousGenerationId, oldGeneration);
     assert.notEqual(questions.at(-1).generationId, oldGeneration);
     assert.deepEqual(questions.at(-1).responseText, { text: 'Use MongoDB.', done: false });
     assert.equal(questions.at(-1).updated, true);
@@ -464,7 +466,8 @@ test('D17: Deepgram Flux streams answers through IntelligenceEngine, cancels on 
     assert.equal(overlay.filter(event => event.liveBrainStatus).at(-1)?.liveBrainStatus, 'Thinking');
     runs[1].options.outcomeOut.value = { status: 'success' };
     runs[1].options.liveBrain.onFirstText?.(35);
-    assert.equal(outdated.length, 1);
+    assert.equal(outdated.length, 0);
+    assert.equal(overlay.find(event => event.liveBrainReplacement).liveBrainReplacement.previousGenerationId, runs[0].options.liveBrain.generationId);
     runs[1].options.liveBrain.onComplete?.('Use sharded write logs.');
     runs[1].resolve('Use sharded write logs.');
     await flush();

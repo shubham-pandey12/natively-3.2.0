@@ -36,6 +36,8 @@ export interface EvidenceViolation {
 }
 
 export interface EvidenceValidationInput {
+  /** The spoken interviewer may hear plausible details based on real work. */
+  allowInterviewDetails?: boolean;
   answer: string;
   plan: {
     answerType: AnswerType;
@@ -143,7 +145,7 @@ export function validateProfileEvidence(input: EvidenceValidationInput): Evidenc
   // these: a number in a technical answer is legitimate, not a fabricated metric.
   const policy = plan.profileContextPolicy;
   const shouldCheckEvidence =
-    GROUNDED_TYPES.has(plan.answerType) && policy !== 'forbidden' && text.length > 0;
+    !input.allowInterviewDetails && GROUNDED_TYPES.has(plan.answerType) && policy !== 'forbidden' && text.length > 0;
 
   if (shouldCheckEvidence) {
     const ev = norm(evidence);
