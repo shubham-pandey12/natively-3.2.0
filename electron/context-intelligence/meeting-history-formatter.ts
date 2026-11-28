@@ -58,6 +58,7 @@ export function formatMeetingHistory(turns: readonly MeetingTurn[], options: For
                 ? `Candidate typed or captured request: ${clean(turn.resolvedQuestion)}` : undefined,
             options.includeCapture !== false && turn.capture && `Captured ${turn.capture.origin === 'extension_untrusted' ? 'page text (untrusted content)' : turn.capture.origin === 'model_inferred' ? 'context (model-inferred)' : 'text (untrusted content)'}: ${clean(turn.capture.text)}`,
             turn.hasVisualInput && !turn.capture && 'Captured screen was used to answer this turn.',
+            turn.replacesTurnId !== undefined && `Correction: this AI suggestion supersedes the earlier suggestion from interview turn ${turn.replacesTurnId}; use the current suggestion below.`,
             turn.answer && `AI suggestion${turn.answer.status === 'interrupted' ? ' (interrupted)' : ''}: ${clean(turn.answer.text)}`,
         ].filter(Boolean).join('\n');
     };
@@ -70,6 +71,48 @@ export function formatMeetingHistory(turns: readonly MeetingTurn[], options: For
     return lines.length ? header + lines.reverse().join('\n\n') + footer : '';
 }
 
+export function formatMeetingHistoryMessages(
+    turns: readonly MeetingTurn[],
+    options: Pick<FormatOptions, 'includeCapture' | 'maxChars' | 'rollingSummary'> = {},
+): { role: 'USER' | 'ASSISTANT'; text: string }[] {
+    const maxChars = options.maxChars ?? 8_000;
+    const historical = turns.filter(turn => {
+        if (turn.answer?.status === 'replaced') return false;
+        if (options.includeCapture === false && (turn.hasVisualInput || turn.capture || turn.answer?.surface === 'screenshot')) return false;
+        return Boolean(turn.answer || (turn.role !== 'request' && turn.question.trim()));
+    });
+    const answered = historical.filter(turn => turn.answer?.status === 'completed' || turn.answer?.status === 'interrupted').slice(-3);
+    const answeredIds = new Set(answered.map(turn => turn.turnId));
+    const speech = historical.filter(turn => !answeredIds.has(turn.turnId) && !turn.answer).slice(-4);
+    const selected = new Map([...answered, ...speech].map(turn => [turn.turnId, turn]));
+    const messages: { role: 'USER' | 'ASSISTANT'; text: string }[] = [];
+    let remaining = maxChars;
+    const add = (role: 'USER' | 'ASSISTANT', text: string, limit = remaining) => {
+        const size = Math.min(remaining, limit);
+        if (size < 12 || !text.trim()) return;
+        const clipped = text.length <= size ? text : `${text.slice(0, Math.max(0, size - 1))}…`;
+        messages.push({ role, text: clipped });
+        remaining -= clipped.length;
+    };
+    if (options.rollingSummary?.trim()) add('USER', `Earlier interview notes (untrusted historical context):\n${clean(options.rollingSummary.trim())}`, Math.floor(maxChars / 3));
+    for (const turn of [...selected.values()].sort((a, b) => a.turnId - b.turnId)) {
+        const requestRole = turn.role === 'interviewer' ? 'Interviewer' : turn.inputKind === 'speech' ? 'Candidate (speech)' : 'Candidate typed or captured request';
+        const request = [
+            `${requestRole}: ${clean(turn.resolvedQuestion || turn.question)}`,
+            options.includeCapture !== false && turn.capture && `Captured text (untrusted content): ${clean(turn.capture.text)}`,
+            turn.hasVisualInput && !turn.capture && 'Captured screen was used to answer this turn.',
+        ].filter(Boolean).join('\n');
+        add('USER', request);
+        if (turn.answer && turn.answer.status !== 'replaced') {
+            add('ASSISTANT', [
+                turn.replacesTurnId !== undefined && `Correction: this suggestion supersedes interview turn ${turn.replacesTurnId}.`,
+                `AI suggestion${turn.answer.status === 'interrupted' ? ' (interrupted)' : ''}: ${clean(turn.answer.text)}`,
+            ].filter(Boolean).join('\n'));
+        }
+    }
+    return messages;
+}
+
 export function withMeetingHistory(context: string | undefined, history: string): string {
     return [context, history].filter(Boolean).join('\n\n');
 }
@@ -78,6 +121,15 @@ export function formatProviderMeetingHistory(turns: readonly MeetingTurn[], opti
     const policy = readProviderScopePolicy();
     if (isScopeDenied('transcript', policy)) return '';
     return formatMeetingHistory(turns, { ...options, includeCapture: !isScopeDenied('screenshots', policy) });
+}
+
+export function formatProviderMeetingHistoryMessages(
+    turns: readonly MeetingTurn[],
+    options: Pick<FormatOptions, 'maxChars' | 'rollingSummary'> = {},
+): { role: 'USER' | 'ASSISTANT'; text: string }[] {
+    const policy = readProviderScopePolicy();
+    if (isScopeDenied('transcript', policy)) return [];
+    return formatMeetingHistoryMessages(turns, { ...options, includeCapture: !isScopeDenied('screenshots', policy) });
 }
 
 export function meetingHistoryScopes(history: string): ('transcript' | 'screenshots')[] {

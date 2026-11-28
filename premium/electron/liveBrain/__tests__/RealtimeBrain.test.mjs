@@ -188,13 +188,17 @@ for (const id of Object.keys(providers)) {
         await brain.start(testContext());
         const { messages } = connections[0];
         const before = messages.length;
-        brain.addHistoryContext('<interview_conversation>Candidate typed or captured request: Find top k values.\nAI suggestion: Use a min-heap.</interview_conversation>');
-        const update = await until(() => messages.slice(before).find(message => message.type === 'conversation.item.create'));
-        assert.deepEqual(update.item, {
-            type: 'message', role: 'user', content: [{
-                type: 'input_text', text: '<interview_conversation>Candidate typed or captured request: Find top k values.\nAI suggestion: Use a min-heap.</interview_conversation>',
-            }],
-        });
+        const history = '<interview_conversation>Candidate typed or captured request: Find top k values.\nAI suggestion: Use a min-heap.</interview_conversation>';
+        brain.addHistoryContext(history);
+        if (id === 'elevenlabs-realtime') {
+            const update = await until(() => messages.slice(before).find(message => message.type === 'contextual_update'));
+            assert.deepEqual(update, { type: 'contextual_update', text: history });
+        } else {
+            const update = await until(() => messages.slice(before).find(message => message.type === 'conversation.item.create'));
+            assert.deepEqual(update.item, {
+                type: 'message', role: 'user', content: [{ type: 'input_text', text: history }],
+            });
+        }
         assert.equal(messages.slice(before).some(message => message.type === 'response.create'), false);
         assert.equal(events.some(event => event.type === 'response_started' || event.type === 'response_delta'), false);
     });

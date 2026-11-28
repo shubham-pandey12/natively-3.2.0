@@ -124,6 +124,9 @@ export class AmazonSonicBrain implements LiveBrain {
         this.send('promptStart', { promptName: this.promptName, textOutputConfiguration: TEXT,
             audioOutputConfiguration: { ...AUDIO, sampleRateHertz: 24_000, voiceId: 'tiffany' } });
         this.sendText('SYSTEM', context.instructions, false);
+        // Nova Sonic accepts historical turns once, before audio starts. Keep
+        // these non-interactive so seeding context does not request a reply.
+        for (const message of context.historyMessages ?? []) this.sendText(message.role, message.text, false);
         this.send('contentStart', { promptName: this.promptName, contentName: this.audioName, type: 'AUDIO',
             role: 'USER', interactive: true, audioInputConfiguration: { ...AUDIO, sampleRateHertz: 16_000 } });
         this.timer = setInterval(() => this.flushAudio(), FRAME_MS);
@@ -256,7 +259,7 @@ export class AmazonSonicBrain implements LiveBrain {
         this.wake?.();
     }
 
-    private sendText(role: 'USER' | 'SYSTEM', content: string, interactive: boolean): void {
+    private sendText(role: 'USER' | 'ASSISTANT' | 'SYSTEM', content: string, interactive: boolean): void {
         if (!content) return;
         const names = { promptName: this.promptName, contentName: randomUUID() };
         this.send('contentStart', { ...names, type: 'TEXT', role, interactive, textInputConfiguration: TEXT });

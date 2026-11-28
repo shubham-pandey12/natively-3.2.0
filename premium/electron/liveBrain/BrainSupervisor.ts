@@ -105,23 +105,55 @@ export class BrainSupervisor<Timer> {
     }
 
     /** Apply completed turns written by non-Live-Brain routes to the open provider session. */
-    syncExternalHistory(turn: MeetingTurn, revision: number): void {
+    syncExternalHistory(turn: MeetingTurn, revision: number): 'ignored' | 'sent' | 'pending' | 'snapshot_route' | 'reseed' {
         const lease = this.active;
         if (this.stopped || !lease || turn.answer?.status !== 'completed'
-            || turn.answer.surface === 'live_brain' || revision <= lease.historyRevision) return;
+            || turn.answer.surface === 'live_brain' || revision <= lease.historyRevision) return 'ignored';
+        if (lease.brain.id === 'deepgram-flux' || lease.brain.id === 'pipeline') {
+            lease.historyRevision = revision;
+            return 'snapshot_route';
+        }
         lease.pendingExternalHistory.set(turn.turnId, { turn: structuredClone(turn), revision });
+        if (!lease.brain.addHistoryContext) {
+            if (lease.brain.id === 'amazon-sonic') {
+                this.restartStandbyForHistory(lease);
+                return 'reseed';
+            }
+            return 'pending';
+        }
         this.flushExternalHistory(lease);
+        return lease.pendingExternalHistory.size ? 'pending' : 'sent';
+    }
+
+    hasPendingExternalHistory(): boolean {
+        return Boolean(this.active?.pendingExternalHistory.size);
+    }
+
+    getPendingHistoryRevision(): number {
+        const revisions = [...(this.active?.pendingExternalHistory.values() ?? [])].map(entry => entry.revision);
+        return revisions.length ? Math.max(...revisions) : this.active?.historyRevision ?? 0;
+    }
+
+    private restartStandbyForHistory(active: Lease): void {
+        if (this.standby) {
+            const stale = this.standby;
+            this.standby = undefined;
+            if (this.deadline !== undefined) this.options.clock.clearTimeout(this.deadline);
+            this.deadline = undefined;
+            this.release(stale, 'history_stale', 'standby');
+        }
+        this.prepareFresh(active, 30_000, 'shared_history');
     }
 
     private flushExternalHistory(lease: Lease): void {
-        if (lease !== this.active || !lease.ready || !lease.pendingExternalHistory.size) return;
+        if (lease !== this.active || !lease.ready || !lease.brain.addHistoryContext || !lease.pendingExternalHistory.size) return;
         const missed = [...lease.pendingExternalHistory.values()].sort((a, b) => a.revision - b.revision);
         for (const entry of missed) {
             if (entry.revision <= lease.historyRevision) continue;
             const history = formatProviderMeetingHistory([entry.turn], { includeQuestion: entry.turn.role !== 'interviewer' });
             // addHistoryContext is deliberately a context-only protocol method;
             // it must not create a response or audible answer.
-            if (history) lease.brain.addHistoryContext?.(history);
+            if (history) lease.brain.addHistoryContext(history);
             lease.historyRevision = entry.revision;
             lease.pendingExternalHistory.delete(entry.turn.turnId);
         }
@@ -269,9 +301,17 @@ export class BrainSupervisor<Timer> {
             if (lease === this.standby) lease.seededHistory = projected?.fingerprints;
             const notebookText = projected?.text ?? [notebook.renderNotebook(), id !== 'deepgram-voice-agent' && renderRecentTurns(recentTurns)]
                 .filter(Boolean).join('\n\n');
+            const initialHistory = projected?.messages ?? [
+                ...(notebook.renderNotebook() ? [{ role: 'USER' as const, text: notebook.renderNotebook() }] : []),
+                ...recentTurns.map(turn => ({
+                    role: turn.role === 'assistant' ? 'ASSISTANT' as const : 'USER' as const,
+                    text: `${turn.role}: ${turn.text}`,
+                })),
+            ];
             return {
                 notebook: notebook.snapshot(), recentTurns: projected ? [] : recentTurns,
-                instructions: this.options.instructions(id, notebookText),
+                instructions: this.options.instructions(id, id === 'amazon-sonic' ? undefined : notebookText),
+                ...(id === 'amazon-sonic' ? { historyMessages: initialHistory } : {}),
             };
         };
         const initial = refreshContext();
@@ -457,7 +497,17 @@ export class BrainSupervisor<Timer> {
         );
         const projectedHistory = this.options.notebook.projectHistory(undefined, replacement.seededHistory);
         const historyText = projectedHistory?.text ?? renderRecentTurns(history);
-        if (historyText && !replacement.brain.addHistoryContext && !force && !this.forceHandoff && this.missedTurnsDiscards < 1) {
+        if (replacement.brain.id === 'amazon-sonic' && projectedHistory
+            && projectedHistory.revision > replacement.historyRevision) {
+            this.standby = undefined;
+            if (this.deadline !== undefined) this.options.clock.clearTimeout(this.deadline);
+            this.deadline = undefined;
+            this.release(replacement, 'history_stale', 'standby');
+            if (this.active) this.prepareFresh(this.active, 30_000, 'shared_history');
+            return;
+        }
+        if (historyText && !(replacement.brain.id === 'amazon-sonic' && projectedHistory) && !replacement.brain.addHistoryContext
+            && !force && !this.forceHandoff && this.missedTurnsDiscards < 1) {
             this.missedTurnsDiscards++;
             this.standby = undefined;
             if (this.deadline !== undefined) {
@@ -485,6 +535,7 @@ export class BrainSupervisor<Timer> {
             this.candidates = [];
         }
         if (projectedHistory) replacement.historyRevision = projectedHistory.revision;
+        if (replacement.brain.id === 'amazon-sonic') replacement.pendingExternalHistory.clear();
         replacement.seeded = undefined;
         replacement.seededHistory = undefined;
         this.ready(replacement);

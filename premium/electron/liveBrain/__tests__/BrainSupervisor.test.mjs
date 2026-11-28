@@ -109,6 +109,13 @@ test('syncs one screenshot answer delta to the already-open brain before the spo
     h.supervisor.syncExternalHistory(second, ledger.getMeetingHistoryRevision());
     assert.match(brain.history[1], /AI suggestion: Use an LRU cache/);
     assert.doesNotMatch(brain.history[1], /How would you cache the lookup/);
+
+    const correction = ledger.beginMeetingTurn('Correction to the screenshot answer.', 'request', 6_000, 'typed');
+    ledger.recordMeetingAnswer(correction, 'Use a bounded max-heap for the largest values.', { surface: 'manual_chat', replaces: screenshot });
+    const corrected = ledger.getMeetingTurns().at(-1);
+    h.supervisor.syncExternalHistory(corrected, ledger.getMeetingHistoryRevision());
+    assert.match(brain.history[2], /supersedes the earlier suggestion from interview turn/);
+    assert.match(brain.history[2], /Use a bounded max-heap/);
     h.supervisor.stop();
 });
 
@@ -169,11 +176,11 @@ test('Amazon Sonic reconnects with notebook context and rolls over before the ei
     await flush();
     const second = h.realtime[1];
     assert.equal(h.supervisor.current, second);
-    assert.match(second.starts[0].instructions, /single database/);
+    assert.ok(second.starts[0].historyMessages?.some(message => /single database/.test(message.text)));
     h.clock.advance(7.5 * MIN);
     await flush();
     assert.equal(h.supervisor.current, h.realtime[2]);
-    assert.match(h.realtime[2].starts[0].instructions, /single database/);
+    assert.ok(h.realtime[2].starts[0].historyMessages?.some(message => /single database/.test(message.text)));
     h.supervisor.stop();
 });
 

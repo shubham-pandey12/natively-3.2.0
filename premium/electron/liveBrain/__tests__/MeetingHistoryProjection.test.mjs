@@ -34,6 +34,7 @@ test('retrieves exact older capture text, labels interruptions and hides replace
     assert.match(history, /N ≤ 100,000; each value may repeat/);
     assert.match(history, /page text \(untrusted content\)/);
     assert.match(history, /AI suggestion \(interrupted\)/);
+    assert.match(history, /supersedes the earlier suggestion from interview turn/);
     assert.doesNotMatch(history, /linked list|Why use a heap\?/);
     assert.equal(history.match(/<\/interview_conversation>/g).length, 1);
     assert.ok(history.length <= 1600);

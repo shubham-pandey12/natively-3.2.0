@@ -81,6 +81,37 @@ test('Sonic sends PCM and instructions, streams answers, drops audio and consume
     assert.equal(seen.filter(event => event.type === 'status' && event.status === 'closed').length, 1);
 });
 
+test('Sonic seeds USER and ASSISTANT history non-interactively before audio without an unsolicited answer', async () => {
+    const t = rig();
+    const brain = new AmazonSonicBrain({ sonicRegion: 'eu-north-1', model: 'amazon.nova-2-5-sonic', transport: t.transport });
+    const seen = [];
+    brain.onEvent(event => seen.push(event));
+    try {
+        await brain.start({
+            ...context,
+            historyMessages: [
+                { role: 'USER', text: 'Interviewer: Find the k largest values. Constraints: k <= n.' },
+                { role: 'ASSISTANT', text: 'AI suggestion: Use a min-heap of size k.' },
+            ],
+        });
+        await delay(0);
+        const userStart = t.sent.findIndex(event => event.contentStart?.role === 'USER' && event.contentStart.type === 'TEXT');
+        const assistantStart = t.sent.findIndex(event => event.contentStart?.role === 'ASSISTANT' && event.contentStart.type === 'TEXT');
+        const audioStart = t.sent.findIndex(event => event.contentStart?.type === 'AUDIO');
+        assert.ok(userStart > 0 && assistantStart > userStart && audioStart > assistantStart);
+        for (const [index, expected] of [[userStart, 'Interviewer: Find the k largest values. Constraints: k <= n.'], [assistantStart, 'AI suggestion: Use a min-heap of size k.']]) {
+            assert.equal(t.sent[index].contentStart.interactive, false);
+            assert.equal(t.sent[index + 1].textInput.content, expected);
+            assert.equal(t.sent[index + 2].contentEnd.contentName, t.sent[index].contentStart.contentName);
+        }
+        assert.equal(seen.some(event => event.type === 'response_started' || event.type === 'response_delta'), false);
+    } finally {
+        await brain.stop();
+        t.output.end();
+        await t.inputDone();
+    }
+});
+
 test('Sonic connection test invokes the chosen model and waits for an actual text reply', async () => {
     const t = rig();
     const pending = testConnection({ apiKey: '', provider: 'amazon-sonic', model: 'amazon.nova-2-sonic-v1:0', sonicRegion: 'us-west-2', transport: t.transport });

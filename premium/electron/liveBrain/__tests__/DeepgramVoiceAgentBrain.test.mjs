@@ -145,6 +145,7 @@ test('shared-history delta updates the open Voice Agent prompt without creating 
     const before = messages.length;
     brain.addHistoryContext('<interview_conversation>Constraints: 1 <= n <= 100000. AI suggestion: Use a heap.</interview_conversation>');
     const update = await until(() => messages.slice(before).find(message => message.type === 'UpdatePrompt'));
+    assert.match(update.prompt, /Earlier in this interview:/);
     assert.match(update.prompt, /1 <= n <= 100000/);
     assert.match(update.prompt, /Use a heap/);
     assert.equal(messages.slice(before).some(message => ['InjectUserMessage', 'AgentThinking'].includes(message.type)), false);

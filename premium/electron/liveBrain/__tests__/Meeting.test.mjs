@@ -146,6 +146,144 @@ test('meeting session forwards a screenshot answer from SessionTracker before th
     assert.equal(contextUpdates.length, 1);
 });
 
+test('Sonic external answers start a fresh session with the current ledger before the next boundary', async t => {
+    const ledger = new SessionTracker();
+    const brains = [];
+    const session = createMeeting({
+        sessionId: 'sonic-history-reseed', provider: 'amazon-sonic',
+        engine: { setAutomaticAnswerOutdated() {} },
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
+        subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
+        emitQuestion() {}, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+    }, id => {
+        const brain = new FakeLiveBrain(id);
+        brains.push(brain);
+        return brain;
+    });
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+    const screenshot = ledger.beginMeetingTurn('Answer the screenshot question.', 'request', Date.now(), 'captured');
+    ledger.enrichMeetingTurn(screenshot, {
+        hasVisualInput: true,
+        resolvedQuestion: 'Find the k largest values.',
+        capture: { origin: 'capture', text: 'Constraints: k <= n.' },
+    });
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap of size k.', { surface: 'screenshot' });
+    await flush();
+    assert.equal(brains.length, 2);
+    assert.equal(brains[0].stopCalls, 1);
+    const seeded = brains[1].starts[0].historyMessages;
+    assert.ok(seeded.some(message => message.role === 'USER' && /Find the k largest values/.test(message.text)));
+    assert.ok(seeded.some(message => message.role === 'USER' && /k <= n/.test(message.text)));
+    assert.ok(seeded.some(message => message.role === 'ASSISTANT' && /Use a min-heap of size k/.test(message.text)));
+    assert.equal(session.isPipeline(), false);
+});
+
+test('unflushed realtime history uses the writer once and ignores a late realtime completion', async t => {
+    const ledger = new SessionTracker();
+    const realtime = new FakeLiveBrain('gemini-live');
+    const originalStart = realtime.start.bind(realtime);
+    realtime.start = async context => { await originalStart(context); await new Promise(() => {}); };
+    const writerRequests = [];
+    const session = createMeeting({
+        sessionId: 'pending-history-fallback', provider: 'gemini-live',
+        engine: {
+            setAutomaticAnswerOutdated() {}, canAutoAnswer: () => true,
+            runLiveBrainAnswer(request) {
+                writerRequests.push(request);
+                request.onFirstText(Date.now());
+                request.onComplete('A heap keeps the best k candidates.', {});
+                ledger.recordMeetingAnswer(request.meetingTurn, 'A heap keeps the best k candidates.', { surface: 'meeting_auto_answer' });
+                return { generationId: 700, done: Promise.resolve({ status: 'completed' }) };
+            },
+        },
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
+        subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
+        identifyInterviewTurn: (question, at) => ledger.noteMeetingSpeech(question, 'interviewer', at, 'realtime'),
+        recordInterviewAnswer: (turn, answer, status, replaces) => ledger.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces }),
+        emitQuestion() {}, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+    }, realtime);
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+
+    const screenshot = ledger.beginMeetingTurn('Answer the screenshot question.', 'request', Date.now(), 'captured');
+    ledger.enrichMeetingTurn(screenshot, {
+        hasVisualInput: true,
+        resolvedQuestion: 'Find the k largest values.',
+        capture: { origin: 'capture', text: 'Constraints: k <= n.' },
+    });
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap of size k.', { surface: 'screenshot' });
+    realtime.emit({ type: 'interviewer_transcript', text: 'Why did you use a heap?', final: true, at: Date.now() });
+    await flush();
+    assert.equal(writerRequests.length, 1);
+    assert.match(writerRequests[0].liveBrainNotebook, /Use a min-heap of size k/);
+    assert.match(writerRequests[0].liveBrainNotebook, /k <= n/);
+    assert.equal(ledger.getMeetingTurns().filter(turn => turn.question === 'Why did you use a heap?' && turn.answer?.status === 'completed').length, 1);
+
+    realtime.emit({ type: 'response_started', responseId: 'stale', at: Date.now() });
+    realtime.emit({ type: 'response_delta', responseId: 'stale', text: 'A binary tree is enough.' });
+    realtime.emit({ type: 'response_done', responseId: 'stale', status: 'completed' });
+    assert.equal(ledger.getMeetingTurns().filter(turn => turn.question === 'Why did you use a heap?' && turn.answer?.status === 'completed').length, 1);
+    assert.equal(writerRequests.length, 1);
+});
+
+test('Sonic uses the writer while its history-seeded replacement is still connecting', async t => {
+    const ledger = new SessionTracker();
+    const brains = [];
+    const writerRequests = [];
+    const session = createMeeting({
+        sessionId: 'sonic-pending-history-fallback', provider: 'amazon-sonic',
+        resolveProvider: () => ({ sonicRegion: 'us-east-1' }),
+        engine: {
+            setAutomaticAnswerOutdated() {}, canAutoAnswer: () => true,
+            runLiveBrainAnswer(request) {
+                writerRequests.push(request);
+                request.onFirstText(Date.now());
+                request.onComplete('A min-heap keeps the best k candidates.', {});
+                ledger.recordMeetingAnswer(request.meetingTurn, 'A min-heap keeps the best k candidates.', { surface: 'meeting_auto_answer' });
+                return { generationId: 701, done: Promise.resolve({ status: 'completed' }) };
+            },
+        },
+        readMeetingHistory: () => ({ turns: ledger.getMeetingTurns(), revision: ledger.getMeetingHistoryRevision() }),
+        subscribeExternalMeetingAnswers: listener => ledger.subscribeExternalMeetingAnswers(listener),
+        identifyInterviewTurn: (question, at) => ledger.noteMeetingSpeech(question, 'interviewer', at, 'realtime'),
+        recordInterviewAnswer: (turn, answer, status, replaces) => ledger.recordMeetingAnswer(turn, answer, { status, surface: 'live_brain', replaces }),
+        emitQuestion() {}, onFailure: code => assert.fail(`Unexpected fallback: ${code}`),
+    }, id => {
+        if (id !== 'amazon-sonic') return undefined;
+        const brain = new FakeLiveBrain(id);
+        if (brains.length) {
+            const original = brain.start.bind(brain);
+            brain.start = async context => { await original(context); await new Promise(() => {}); };
+        }
+        brains.push(brain);
+        return brain;
+    });
+    t.after(() => session.stop());
+    session.start();
+    await flush();
+    const screenshot = ledger.beginMeetingTurn('Answer the screenshot question.', 'request', Date.now(), 'captured');
+    ledger.enrichMeetingTurn(screenshot, {
+        hasVisualInput: true,
+        resolvedQuestion: 'Find the k largest values.',
+        capture: { origin: 'capture', text: 'Constraints: k <= n.' },
+    });
+    ledger.recordMeetingAnswer(screenshot, 'Use a min-heap of size k.', { surface: 'screenshot' });
+    await flush();
+    assert.equal(brains.length, 2);
+    assert.ok(brains[1].starts[0].historyMessages.some(message => /Use a min-heap of size k/.test(message.text)));
+    brains[0].emit({ type: 'interviewer_transcript', text: 'Why did you use a heap?', final: true, at: Date.now() });
+    await flush();
+    assert.equal(writerRequests.length, 1);
+    assert.match(writerRequests[0].liveBrainNotebook, /k <= n/);
+    brains[0].emit({ type: 'response_started', responseId: 'stale-sonic', at: Date.now() });
+    brains[0].emit({ type: 'response_delta', responseId: 'stale-sonic', text: 'An AVL tree is always better.' });
+    brains[0].emit({ type: 'response_done', responseId: 'stale-sonic', status: 'completed' });
+    assert.equal(ledger.getMeetingTurns().filter(turn => turn.question === 'Why did you use a heap?' && turn.answer?.status === 'completed').length, 1);
+});
+
 function useSkillsFixture(t) {
     const skills = Object.create(SkillsManager.prototype);
     skills.skillsDir = mkdtempSync(join(tmpdir(), 'live-brain-skills-'));

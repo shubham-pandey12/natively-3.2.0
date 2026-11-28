@@ -130,7 +130,10 @@ export class RealtimeBrain implements LiveBrain {
     }
 
     addHistoryContext(history: string): void {
-        if (history.trim()) this.addContext(history);
+        const text = history.trim();
+        if (!text) return;
+        if (this.id === 'elevenlabs-realtime') this.send({ type: 'contextual_update', text });
+        else this.addContext(text);
     }
 
     requestClarificationAnswer(): void {

@@ -1,4 +1,4 @@
-import { formatProviderMeetingHistory } from '../../../electron/context-intelligence/meeting-history-formatter';
+import { formatProviderMeetingHistory, formatProviderMeetingHistoryMessages } from '../../../electron/context-intelligence/meeting-history-formatter';
 import type { LiveBrainMeetingOptions } from '../../../electron/premium/liveBrain';
 import type { MeetingTurn } from '../../../electron/SessionTracker';
 import { compressConversation } from '../../../electron/llm/ConversationSummarizer';
@@ -122,6 +122,7 @@ export class InterviewNotebook {
 
     projectHistory(question?: string, seeded?: ReadonlyMap<number, string>, trackSeed = false): {
         text: string; revision: number; fingerprints?: ReadonlyMap<number, string>;
+        messages: { role: 'USER' | 'ASSISTANT'; text: string }[];
     } | undefined {
         const snapshot = this.options.readMeetingHistory?.();
         if (!snapshot) return undefined;
@@ -130,7 +131,9 @@ export class InterviewNotebook {
         const turns = seeded ? snapshot.turns.filter(turn => seeded.get(turn.turnId) !== JSON.stringify(turn)) : snapshot.turns;
         return {
             text: formatProviderMeetingHistory(turns, { question, rollingSummary: renderNotebook(this.state) }),
-            revision: snapshot.revision, fingerprints,
+            revision: snapshot.revision,
+            messages: formatProviderMeetingHistoryMessages(turns, { rollingSummary: renderNotebook(this.state) }),
+            fingerprints,
         };
     }
     snapshot(): NotebookSnapshot { return structuredClone(this.state); }

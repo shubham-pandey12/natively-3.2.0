@@ -580,6 +580,13 @@ export function createMeeting(
                     if (duplicateHandoff(event.text, event.at, event.itemId)) return { kind: 'interviewer_already_recorded' };
                     const confirmed = notePendingTurn(event.text, event.at, true);
                     if (confirmed && realtimeDisconnected) dispatchBackup();
+                    else if (confirmed && supervisor.hasPendingExternalHistory()) {
+                        diagnostic('history-sync-fallback', {
+                            ledgerRevision: supervisor.getPendingHistoryRevision(),
+                            route: supervisor.current?.id ?? 'none', outcome: 'writer_before_followup',
+                        });
+                        dispatchBackup('writer');
+                    }
                 } else if (closedHandoff) {
                     return { kind: 'suppressed' };
                 }
@@ -658,7 +665,8 @@ export function createMeeting(
             if (started) return;
             started = true;
             unsubscribeExternalAnswers = options.subscribeExternalMeetingAnswers?.((turn, revision) => {
-                supervisor.syncExternalHistory(turn, revision);
+                const outcome = supervisor.syncExternalHistory(turn, revision);
+                diagnostic('history-sync', { ledgerRevision: revision, route: supervisor.current?.id ?? 'none', outcome });
             });
             if (debug) notePromptDebugLiveBrain({
                 surface: 'live-brain', promptSource: 'answer', provider: preferred === 'gemini-live' ? 'gemini' : preferred,

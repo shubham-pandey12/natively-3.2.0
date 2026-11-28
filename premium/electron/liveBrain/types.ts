@@ -9,8 +9,10 @@ export interface LiveBrainStartContext {
     instructions: string;
     notebook: NotebookSnapshot;
     recentTurns: ConversationTurn[];
+    /** Initial, non-interactive provider history for protocols that only seed at session start. */
+    historyMessages?: { role: 'USER' | 'ASSISTANT'; text: string }[];
     needsFreshContext?(): boolean;
-    refreshContext?(): Pick<LiveBrainStartContext, 'instructions' | 'notebook' | 'recentTurns'>;
+    refreshContext?(): Pick<LiveBrainStartContext, 'instructions' | 'notebook' | 'recentTurns' | 'historyMessages'>;
     signal: AbortSignal;
 }
 
