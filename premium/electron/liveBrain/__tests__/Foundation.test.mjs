@@ -27,16 +27,24 @@ test('D20 realtime providers use the short candidate prompt and keep their turn 
         ['deepgram-voice-agent', 'managed'], ['deepgram-voice-agent', 'byo'],
     ];
     const role = "You are the candidate in a live job interview. You hear the interviewer. Text lines beginning 'Candidate said:' are things you already said. Say exactly what you would say out loud next, as yourself, in first person.";
-    const closing = 'Remember: you are talking, not writing. Simple Indian English, short and real. Sound like yourself.';
+    const closing = 'Remember: you are talking, not writing. Simple Indian English, natural and real. Sound like yourself.';
     for (const [id, thinkMode] of providers) {
         const profileContext = 'Built an order queue';
         const inputs = { modeTemplate: 'technical-interview', modePrompt: 'Old mode suffix', profileContext };
         const prompt = buildProviderInstructions(inputs, 'full', id, thinkMode);
         assert.ok(prompt.startsWith(role), id);
         assert.ok(prompt.endsWith(closing), id);
-        assert.match(prompt, /Examples of tone, do not reuse their facts/);
+        // No hardcoded example answers: the model follows instructions only.
+        assert.doesNotMatch(prompt, /Examples of tone|→/);
         assert.match(prompt, /simple Indian English/);
         assert.match(prompt, /Never announce your thinking/);
+        assert.match(prompt, /Every story, project, number and detail must come from your own background/);
+        assert.match(prompt, /Start with one natural line that sets the scene in your own words/);
+        assert.match(prompt, /Length, so answers are not all the same size/);
+        assert.match(prompt, /always say the exact fix you made/);
+        assert.match(prompt, /If the interviewer asks the same question again, answer it fresh from the beginning/);
+        assert.match(prompt, /If the interviewer asks several questions in one turn, answer the first one fully/);
+        assert.doesNotMatch(prompt, /Usually 2–3 short sentences|Stop when the point is made/);
         assert.match(prompt, /Build a believable answer from your real skills, tech stack and experience/);
         assert.match(prompt, /Keep every detail consistent with what you said earlier/);
         assert.doesNotMatch(prompt, /don't make one up|Say honestly what you haven't done/);
@@ -50,7 +58,7 @@ test('D20 realtime providers use the short candidate prompt and keep their turn 
             assert.ok(!prompt.includes(oldPrompt.trim()), id);
         }
         assert.equal(prompt, buildProviderInstructions(inputs, 'trimmed', id, thinkMode), id);
-        assert.ok(prompt.indexOf('Candidate profile context:') + closing.length <= 4_500, id);
+        assert.ok(prompt.indexOf('Candidate profile context:') + closing.length <= 6_500, id);
         assert.equal(prompt.includes(`For a clarification, start with ${ASK_SENTINEL}`), id === 'openai-realtime', id);
         assert.equal(prompt.includes('For a clarification, start with "Ask:"'), id !== 'openai-realtime', id);
         assert.equal(prompt.includes('MANDATORY TURN OUTPUT: Never greet, acknowledge, or offer help.'), id === 'elevenlabs-realtime', id);
