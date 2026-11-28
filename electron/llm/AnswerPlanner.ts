@@ -2321,9 +2321,16 @@ const systemDesignDiagramTemplate = (plan: Pick<AnswerPlan, 'answerType'>): stri
   }
 };
 
-export const formatAnswerPlanForPrompt = (plan: AnswerPlan, includeVerificationSpec = false, codingShape?: CodingShape): string => {
+export const formatAnswerPlanForPrompt = (
+  plan: AnswerPlan,
+  includeVerificationSpec = false,
+  codingShape?: CodingShape,
+  liveBrainScenario = false,
+): string => {
   const shapedTemplate = shapedCodingTemplate(plan, codingShape);
-  const diagramTemplate = systemDesignDiagramTemplate(plan);
+  const isGatedLiveBrainDesign = liveBrainScenario && plan.answerType === 'system_design_answer';
+  const diagramTemplate = isGatedLiveBrainDesign ? null : systemDesignDiagramTemplate(plan);
+  const baseTemplate = isGatedLiveBrainDesign ? GENERAL_TEMPLATE : plan.responseTemplate;
   // The hidden test block only makes sense when the answer writes new code.
   const writesCode = !codingShape || codingShape === 'full' || codingShape === 'code' || codingShape === 'solve' || codingShape === 'optimize' || codingShape === 'debug';
   const verificationBlock = (includeVerificationSpec && isCodingAnswerType(plan.answerType) && writesCode)
@@ -2428,6 +2435,6 @@ VOICE: ${voiceLine}
 GROUNDING: ${policyLine}
 
 STRICT RESPONSE TEMPLATE:
-${shapedTemplate ?? diagramTemplate ?? plan.responseTemplate}${renderingDirective}${styleDirective}${lengthDirective}${verificationBlock}
+${shapedTemplate ?? diagramTemplate ?? baseTemplate}${renderingDirective}${styleDirective}${lengthDirective}${verificationBlock}
 </answer_contract>`;
 };

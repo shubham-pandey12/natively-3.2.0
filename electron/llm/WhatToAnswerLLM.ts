@@ -27,7 +27,7 @@ import type { ActiveModeDocumentGroundingInfo } from "../services/ModesManager";
 import type { ModeRetrievalOptions } from "../services/ModeContextRetriever";
 import { isCodeVerificationEnabled } from "./codeVerification/verificationEnabled";
 import type { WhatToAnswerRequestSnapshot } from "./whatToAnswerRequestSnapshot";
-import { withDiagramContract, withDiagramTurnBlock } from "./diagramPromptSignals";
+import { isExplicitDesignOrDiagramRequest, withDiagramContract, withDiagramTurnBlock } from "./diagramPromptSignals";
 import { looksCutOff } from "./repairCap";
 
 // Wall-clock budget for the pre-stream mode-context HYBRID retrieval await.
@@ -327,7 +327,14 @@ ${promptInstruction.trim()}
             // the signature for callers; it is not read here.
             void intentResult;
             if (answerPlan) {
-                intentContextParts.push(formatAnswerPlanForPrompt(answerPlan, isCodeVerificationEnabled(), codingSignals.codingShape));
+                // Key on the question, not on the diagram decision: with diagrams turned
+                // off, an explicit design ask must still get the design template.
+                const formattedPlan = requestSnapshot?.liveBrainWriter
+                    && !requestSnapshot?.diagramTurn?.request?.enabled
+                    && !isExplicitDesignOrDiagramRequest(answerPlan.question)
+                    ? formatAnswerPlanForPrompt(answerPlan, isCodeVerificationEnabled(), codingSignals.codingShape, true)
+                    : formatAnswerPlanForPrompt(answerPlan, isCodeVerificationEnabled(), codingSignals.codingShape);
+                intentContextParts.push(formattedPlan);
             }
             if (instructionContext) {
                 intentContextParts.push(instructionContext);

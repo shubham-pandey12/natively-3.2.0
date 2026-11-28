@@ -300,12 +300,41 @@ export function diagramExampleCount(): number {
 
 export { SYSTEM_DESIGN_ACTION_INSTRUCTION, isVisualActionInstruction };
 
+/**
+ * True only when the interviewer explicitly asks to design a system or to draw,
+ * sketch, or diagram something. Production failure / incident / debugging
+ * scenarios ("what happens if Redis goes down", "how do you handle X") return
+ * false even if a planner classifies them as system_design_answer.
+ */
+const EXPLICIT_DESIGN_REQUEST_RE =
+  /\b(?:(?:design|architect)\s+(?:a|an|the|this|our|me)\b|(?:how\s+(?:would|do|can|could)\s+(?:you|we)\s+design|designing\s+(?:a|an|the))\b|system\s+design\s+(?:for|of|question|round)\b|walk\s+(?:me|us)\s+through\s+(?:the\s+)?(?:architecture|system\s+design|high[- ]level\s+design)\b|high[- ]level\s+design\b)/i;
+const EXPLICIT_DIAGRAM_REQUEST_RE =
+  /\b(?:(?:draw(?!\s+(?:a\s+)?conclusions?\b)|sketch|diagram|whiteboard|visuali[sz]e|illustrate)\b|flow\s*chart|sequence\s+diagram|architecture\s+diagram|er\s+diagram|state\s+diagram|class\s+diagram|entity[- ]relationship\s+diagram|mermaid)\b/i;
+
+// Imperative "Design Twitter" / "let's design WhatsApp" (no article), and
+// "build/architect a ... system/service/platform/app".
+const IMPERATIVE_DESIGN_RE =
+  /(?:^|[.?!]\s+|\b(?:let'?s|can\s+you|could\s+you|would\s+you|please|now|so)\s+)(?:design|architect)\s+(?!(?:patterns?|decisions?|choices?|principles?|docs?|documents?|reviews?|is|was|of)\b)[a-z0-9]/i;
+const BUILD_SYSTEM_RE =
+  /\b(?:design|build|architect)\s+(?:a|an|the|your|our)\s+(?:[\w-]+\s+){0,4}(?:system|service|platform|app|application|backend)\b/i;
+
+export function isExplicitDesignOrDiagramRequest(question: string | null | undefined): boolean {
+  const text = String(question ?? '').trim();
+  if (!text) return false;
+  return EXPLICIT_DESIGN_REQUEST_RE.test(text)
+    || IMPERATIVE_DESIGN_RE.test(text)
+    || BUILD_SYSTEM_RE.test(text)
+    || EXPLICIT_DIAGRAM_REQUEST_RE.test(text);
+}
+
 export interface ResolveDiagramTurnInput {
   question?: string | null;
   /** AnswerPlanner's route for the turn. */
   answerType?: string | null;
   /** V3 classifier types (mixed code + design). */
   questionTypes?: readonly string[] | null;
+  /** Live Brain writer turns only allow diagrams on explicit design/draw asks or action cards. */
+  liveBrainWriter?: boolean;
   /**
    * The design on the table. Pass `session.getActiveDesign()` where the caller
    * holds the session; `undefined` reads the registered provider; `null` means
@@ -373,6 +402,15 @@ export function resolveDiagramTurn(input: ResolveDiagramTurnInput): DiagramTurn 
   try {
     const featureEnabled = input.featureEnabled ?? isSystemDesignDiagramsEnabled();
     if (!featureEnabled) return NO_DIAGRAM_TURN;
+    if (
+      input.liveBrainWriter === true
+      && !isSystemDesignActionInstruction(input.actionInstruction)
+      && !isVisualActionInstruction(input.actionInstruction)
+      && !isExplicitDesignOrDiagramRequest(input.question)
+    ) {
+      if (input.speculative !== true) touchRegisteredActiveDesign(false, false);
+      return NO_DIAGRAM_TURN;
+    }
     if (input.activeDesign === undefined) input = { ...input, activeDesign: getRegisteredActiveDesign() };
     if (input.activeDesign && !activeDesignShareable()) input = { ...input, activeDesign: null };
     let instructions: string | null = null;

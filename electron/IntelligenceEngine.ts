@@ -5245,6 +5245,7 @@ export class IntelligenceEngine extends EventEmitter {
                         actionInstruction: options?.promptInstruction,
                         hasVisualContext: (imagePaths?.length ?? 0) > 0 || Boolean(options?.domContext) || Boolean(options?.screenContext),
                         speculative: isSpeculative,
+                        liveBrainWriter: Boolean(options?.liveBrain || options?.privateDraft),
                     });
                     // A speculative prefetch may be discarded; only a real run
                     // says what the next design was drawn for. If the prefetch
