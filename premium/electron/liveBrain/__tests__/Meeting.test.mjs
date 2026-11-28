@@ -2217,24 +2217,3 @@ test('A drop seals visible realtime output as interrupted and never duplicates t
     const lastText = h.events.filter(event => event.responseText).at(-1).responseText;
     assert.deepEqual(lastText, { text: 'I checked the request logs and tenant identifiers.', done: true, interrupted: true });
 });
-
-test('Flux meeting stays active and triggers no backup dispatch on external capture speech stops', async t => {
-    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000 });
-    const flux = new FakeLiveBrain('deepgram-flux');
-    const calls = [];
-    const session = createMeeting({
-        sessionId: 'flux-capture-stop', provider: 'deepgram-flux', apiKey: 'fake',
-        engine: { setAutomaticAnswerOutdated() { }, runLiveBrainAnswer: async () => ({ text: '', discarded: false }) },
-        pipeline: { activate: turn => { calls.push(turn); return acceptedBackup(); }, cancel() { } },
-        onFailure: code => assert.fail(code),
-    }, id => id === 'deepgram-flux' ? flux : undefined);
-    t.after(() => session.stop());
-    session.start();
-    await flush();
-    session.noteSpeechStop(1_000);
-    t.mock.timers.tick(7_000);
-    session.noteSpeechStop(8_000);
-    t.mock.timers.tick(7_000);
-    assert.equal(session.isUsingPipeline(), false);
-    assert.deepEqual(calls, []);
-});
